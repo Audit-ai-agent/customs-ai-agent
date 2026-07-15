@@ -55,11 +55,14 @@ uv run customs-ai-agent run --scenario happy_path --rag-url http://127.0.0.1:800
 
 ## 계약 갱신 절차
 
-1. Data provider가 새 schema를 기존 버전 수정이 아닌 새 버전으로 release한다.
+1. Data provider가 새 schema를 기존 버전 수정이 아닌 새 버전으로 release하고
+   annotated tag와 full 40-character commit SHA를 확정한다.
 2. provider 경로에서 schema를 byte-for-byte 복사해 consumer snapshot을 갱신한다.
-3. `v1.lock.json`의 version, provider revision, SHA-256을 갱신한다.
+3. `v1.lock.json`의 version, provider release tag, provider revision, SHA-256을 갱신한다.
 4. `uv run pytest tests/test_evidence_contract_lock.py -q`로 hash와 wire example을 검증한다.
-5. Agent/Backend 통합 검증 후 같은 PR에서 pin 변경 이유를 기록한다.
+5. 상위 Contract Gate에서 tag target, provider commit의 schema bytes, consumer snapshot,
+   lock SHA-256이 모두 같은지 검증한다.
+6. Agent/Backend 통합 검증 후 같은 PR에서 pin 변경 이유를 기록한다.
 
 구조와 설계 의도는 [Architecture](docs/ARCHITECTURE.md), 기여 기준은
 [Contributing](CONTRIBUTING.md), 취약점 보고는 [Security](SECURITY.md)를 참고한다.

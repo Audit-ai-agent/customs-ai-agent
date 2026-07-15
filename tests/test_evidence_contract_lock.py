@@ -2,6 +2,7 @@ from __future__ import annotations
 
 import hashlib
 import json
+import re
 from pathlib import Path
 
 from jsonschema import Draft202012Validator, FormatChecker
@@ -31,6 +32,8 @@ def test_provider_owned_contract_snapshot_matches_lock() -> None:
     assert lock["canonical_owner"] == "customs-data-platform"
     assert lock["consumer"] == "customs-ai-agent"
     assert lock["schema_version"] == "1.0"
+    assert re.fullmatch(r"evidence-api-v\d+\.\d+\.\d+", lock["provider_release"])
+    assert re.fullmatch(r"[0-9a-f]{40}", lock["provider_revision"])
     assert schema["$defs"]["RetrieveRequest"]["properties"]["schema_version"] == {
         "const": "1.0"
     }
