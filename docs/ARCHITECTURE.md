@@ -39,7 +39,10 @@ consumer schema snapshot은 회귀 검증 편의를 위한 복사본이며 canon
 
 - Evidence 응답은 schema와 request ID가 일치해야 한다.
 - service unavailable, invalid response, partial/unknown coverage, ambiguous HS는 자동 완료를 막는다.
+- Live RAG의 시점을 생략하면 provider readiness가 공개한
+  `supported_review_as_of`를 사용하며 readiness 실패 시 Mock으로 전환하지 않는다.
 - Finding과 Evidence의 `item_id`, context date, trade type, HS context를 검증한다.
+- HTTP token은 헤더로만 주입하고 URL·오류 메시지에 노출하지 않는다.
 - Mock은 명시적인 테스트 dependency이며 운영 fallback이 아니다.
 - rerun에서 실제 retriever가 없으면 Mock으로 조용히 교체하지 않는다.
 

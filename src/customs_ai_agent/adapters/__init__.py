@@ -1,6 +1,5 @@
 from customs_ai_agent.adapters.llm import ensure_llm_mode_available
 
-__all__ = ["ensure_llm_mode_available"]
 from customs_ai_agent.adapters.retrieval import (
     EmptyRegulationRetriever,
     FailingRegulationRetriever,
@@ -9,6 +8,8 @@ from customs_ai_agent.adapters.retrieval import (
     PartialRegulationRetriever,
     RegulationRetriever,
     RetrievalError,
+    fetch_supported_review_as_of,
+    validate_evidence_base_url,
 )
 
 __all__ = [
@@ -20,4 +21,6 @@ __all__ = [
     "RegulationRetriever",
     "RetrievalError",
     "ensure_llm_mode_available",
+    "fetch_supported_review_as_of",
+    "validate_evidence_base_url",
 ]

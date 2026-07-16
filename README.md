@@ -31,6 +31,17 @@ Mock은 테스트 대역이다. 운영 profile에서는 Mock fallback을 금지�
 Service 주소로 `HttpRegulationRetriever`를 명시적으로 주입해야 한다. 검색 실패·부분 응답·HS 모호성은
 자동 완료하지 않고 `needs_review`로 닫힌다.
 
+CLI에서 `--rag-url`을 명시하면 `EVIDENCE_SERVICE_BASE_URL`보다 우선한다. 둘 중 하나가
+존재하면 Live RAG로 간주하며, URL·readiness·retrieval 실패를 Mock으로 전환하지 않는다.
+`--review-as-of`를 생략한 Live RAG 실행은
+`GET /internal/rag/v1/health/ready`의 `supported_review_as_of`를 가져와 현재 Knowledge
+snapshot과 날짜를 맞춘다. 명시한 `--review-as-of` 값은 자동 탐색보다 우선한다.
+
+HTTP base URL은 `localhost`, `127.0.0.1`, `::1` loopback에서만 허용한다. 외부
+Evidence Service는 HTTPS를 써야 하며 URL credential·query·fragment·path prefix는 거부한다.
+Data 데모에 `DEMO_TOKEN`이 있다면 Agent에 `EVIDENCE_SERVICE_TOKEN`을 주입하고,
+기본 `X-Demo-Token` 헤더를 쓴다. token은 URL·CLI 인자·오류 메시지에 포함하지 않는다.
+
 ## 개발 환경
 
 Python 3.11과 uv를 기준으로 한다.
@@ -48,10 +59,14 @@ CLI 예시:
 ```powershell
 uv run customs-ai-agent list-scenarios
 uv run customs-ai-agent run --scenario happy_path
-uv run customs-ai-agent run --scenario happy_path --rag-url http://127.0.0.1:8001
+uv run customs-ai-agent run --scenario happy_path --rag-url http://127.0.0.1:8010
+uv run customs-ai-agent run --scenario happy_path --rag-url http://127.0.0.1:8010 --review-as-of 2026-07-10
 ```
 
-두 번째 명령은 Mock RAG 회귀 테스트다. 세 번째 명령만 실제 Evidence Service를 호출한다.
+두 번째 명령은 `EVIDENCE_SERVICE_BASE_URL`이 설정되지 않았을 때만 Mock RAG 회귀
+테스트다. 세 번째는 실제 Evidence Service readiness에서 지원 날짜를 읽고, 네 번째는
+사용자가 명시한 날짜로 호출한다. `.env.example`을 `.env`로 복사하면 URL 설정으로 인해
+기본 `run` 명령도 Live RAG를 선택한다.
 
 ## 계약 갱신 절차
 

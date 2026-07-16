@@ -2,9 +2,18 @@ from __future__ import annotations
 
 import argparse
 import json
+import os
+import re
+from datetime import date
 from pathlib import Path
 
-from customs_ai_agent.adapters.retrieval import HttpRegulationRetriever
+from dotenv import load_dotenv
+
+from customs_ai_agent.adapters import ensure_llm_mode_available
+from customs_ai_agent.adapters.retrieval import (
+    HttpRegulationRetriever,
+    fetch_supported_review_as_of,
+)
 from customs_ai_agent.fixtures.scenarios import list_scenarios
 from customs_ai_agent.runner import answer_question, run_review
 from customs_ai_agent.schemas.models import ReviewRunRequest
@@ -16,10 +25,59 @@ def _cmd_list_scenarios() -> int:
     return 0
 
 
+def _configured_rag_url(cli_value: str | None) -> str | None:
+    if cli_value is not None:
+        return cli_value
+    configured = os.getenv("EVIDENCE_SERVICE_BASE_URL")
+    if configured is None:
+        return None
+    if not configured.strip():
+        raise ValueError("EVIDENCE_SERVICE_BASE_URL cannot be blank when configured")
+    return configured
+
+
+def _configured_service_token() -> str | None:
+    configured = os.getenv("EVIDENCE_SERVICE_TOKEN")
+    return configured if configured else None
+
+
+def _parse_review_as_of(value: str) -> date:
+    if not re.fullmatch(r"\d{4}-\d{2}-\d{2}", value):
+        raise argparse.ArgumentTypeError("review date must use YYYY-MM-DD")
+    try:
+        return date.fromisoformat(value)
+    except ValueError as exc:
+        raise argparse.ArgumentTypeError("review date must use YYYY-MM-DD") from exc
+
+
 def _cmd_run(args: argparse.Namespace) -> int:
-    request = ReviewRunRequest(scenario_id=args.scenario, llm_mode=args.llm_mode)
-    rag_url = getattr(args, "rag_url", None)
-    retriever = HttpRegulationRetriever(rag_url) if rag_url else None
+    # Keep the intentionally unavailable LLM mode fail-fast and side-effect free.
+    ensure_llm_mode_available(args.llm_mode)
+    load_dotenv()
+    rag_url = _configured_rag_url(getattr(args, "rag_url", None))
+    review_as_of = getattr(args, "review_as_of", None)
+    retriever = None
+    if rag_url is not None:
+        service_token = _configured_service_token()
+        token_header = os.getenv("EVIDENCE_SERVICE_TOKEN_HEADER", "X-Demo-Token")
+        retriever = HttpRegulationRetriever(
+            rag_url,
+            service_token=service_token,
+            token_header=token_header,
+        )
+        if review_as_of is None:
+            review_as_of = fetch_supported_review_as_of(
+                rag_url,
+                service_token=service_token,
+                token_header=token_header,
+            )
+    request_values = {
+        "scenario_id": args.scenario,
+        "llm_mode": args.llm_mode,
+    }
+    if review_as_of is not None:
+        request_values["review_as_of"] = review_as_of
+    request = ReviewRunRequest.model_validate(request_values)
     state = run_review(request, retriever=retriever)
     payload = json.dumps(state, ensure_ascii=False, indent=2, default=str)
 
@@ -58,10 +116,19 @@ def build_parser() -> argparse.ArgumentParser:
     run_parser.add_argument("--out")
     run_parser.add_argument("--llm-mode", choices=["mock", "llm"], default="mock")
     run_parser.add_argument(
+        "--review-as-of",
+        type=_parse_review_as_of,
+        help=(
+            "Review date in YYYY-MM-DD. For Live RAG, omission uses the date "
+            "advertised by the Evidence Service readiness endpoint."
+        ),
+    )
+    run_parser.add_argument(
         "--rag-url",
         help=(
             "Evidence Service base URL; calls POST /internal/rag/v1/retrieve. "
-            "Omit to use the deterministic mock retriever."
+            "Overrides EVIDENCE_SERVICE_BASE_URL. If neither is configured, uses "
+            "the deterministic mock retriever. A failed live call never falls back."
         ),
     )
 

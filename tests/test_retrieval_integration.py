@@ -1,6 +1,7 @@
 from __future__ import annotations
 
 import json
+from datetime import date
 from urllib.error import URLError
 
 from pydantic import ValidationError
@@ -12,6 +13,8 @@ from customs_ai_agent.adapters.retrieval import (
     HttpRegulationRetriever,
     PartialRegulationRetriever,
     RetrievalError,
+    fetch_supported_review_as_of,
+    validate_evidence_base_url,
 )
 from customs_ai_agent.runner import rerun_review, run_review, run_review_result
 from customs_ai_agent.nodes.compliance import compliance_review
@@ -349,11 +352,11 @@ def test_http_retriever_uses_v1_endpoint_and_retries_once(monkeypatch):
         return _HttpBody(json.dumps(response.model_dump(mode="json")).encode("utf-8"))
 
     monkeypatch.setattr("customs_ai_agent.adapters.retrieval.urlopen", fake_urlopen)
-    actual = HttpRegulationRetriever("http://evidence.local").retrieve(request)
+    actual = HttpRegulationRetriever("https://evidence.local").retrieve(request)
 
     assert len(calls) == 2
     sent_request, timeout = calls[-1]
-    assert sent_request.full_url == "http://evidence.local/internal/rag/v1/retrieve"
+    assert sent_request.full_url == "https://evidence.local/internal/rag/v1/retrieve"
     assert sent_request.get_method() == "POST"
     assert json.loads(sent_request.data)["review_run_id"] == "run-http-1"
     assert timeout == 60.0
@@ -367,7 +370,150 @@ def test_http_retriever_rejects_invalid_response(monkeypatch):
     )
 
     with pytest.raises(RetrievalError):
-        HttpRegulationRetriever("http://evidence.local").retrieve(_http_test_request())
+        HttpRegulationRetriever("https://evidence.local").retrieve(_http_test_request())
+
+
+@pytest.mark.parametrize(
+    ("raw", "normalized"),
+    [
+        ("http://localhost:8010/", "http://localhost:8010"),
+        ("http://127.0.0.1:8010", "http://127.0.0.1:8010"),
+        ("http://[::1]:8010", "http://[::1]:8010"),
+        ("https://evidence.example:8443", "https://evidence.example:8443"),
+    ],
+)
+def test_evidence_base_url_accepts_loopback_http_or_https(raw, normalized):
+    assert validate_evidence_base_url(raw) == normalized
+
+
+@pytest.mark.parametrize(
+    "url",
+    [
+        "http://evidence.example",
+        "file:///tmp/evidence",
+        "https://user:secret@evidence.example",
+        "https://evidence.example?token=secret",
+        "https://evidence.example#fragment",
+        "https://evidence.example/prefix",
+        "https://evidence.example:99999",
+    ],
+)
+def test_evidence_base_url_rejects_unsafe_or_ambiguous_values(url):
+    with pytest.raises(ValueError):
+        validate_evidence_base_url(url)
+
+
+def test_http_retriever_sends_token_only_in_configured_header(monkeypatch):
+    secret = "header-only-secret"
+    response = _http_test_response("request-http-1")
+    captured = {}
+
+    def fake_urlopen(request, timeout):
+        captured["request"] = request
+        captured["timeout"] = timeout
+        return _HttpBody(json.dumps(response.model_dump(mode="json")).encode("utf-8"))
+
+    monkeypatch.setattr("customs_ai_agent.adapters.retrieval.urlopen", fake_urlopen)
+    retriever = HttpRegulationRetriever(
+        "http://127.0.0.1:8010",
+        service_token=secret,
+        token_header="X-Demo-Token",
+    )
+
+    retriever.retrieve(_http_test_request())
+    request = captured["request"]
+    sent_headers = {name.casefold(): value for name, value in request.header_items()}
+    assert sent_headers["x-demo-token"] == secret
+    assert secret not in request.full_url
+    assert secret not in retriever.url
+
+
+@pytest.mark.parametrize(
+    ("token", "header"),
+    [
+        ("secret\r\ninjected: yes", "X-Demo-Token"),
+        ("secret", "X-Demo-Token\r\nInjected"),
+        ("secret", "X-Request-ID"),
+    ],
+)
+def test_http_retriever_rejects_unsafe_token_or_header(token, header):
+    with pytest.raises(ValueError):
+        HttpRegulationRetriever(
+            "http://127.0.0.1:8010",
+            service_token=token,
+            token_header=header,
+        )
+
+
+def test_http_error_does_not_expose_service_token(monkeypatch):
+    secret = "do-not-leak-this-token"
+    monkeypatch.setattr(
+        "customs_ai_agent.adapters.retrieval.urlopen",
+        lambda *_args, **_kwargs: (_ for _ in ()).throw(URLError(secret)),
+    )
+
+    with pytest.raises(RetrievalError) as captured:
+        HttpRegulationRetriever(
+            "http://127.0.0.1:8010",
+            service_token=secret,
+        ).retrieve(_http_test_request())
+
+    assert str(captured.value) == "Evidence Service request failed: network error"
+    assert secret not in str(captured.value)
+
+
+def test_readiness_returns_provider_supported_review_date_and_token(monkeypatch):
+    captured = {}
+
+    def fake_urlopen(request, timeout):
+        captured["request"] = request
+        captured["timeout"] = timeout
+        return _HttpBody(
+            json.dumps(
+                {
+                    "status": "ready",
+                    "knowledge_snapshot_id": "snapshot-1",
+                    "supported_review_as_of": "2026-07-10",
+                }
+            ).encode("utf-8")
+        )
+
+    monkeypatch.setattr("customs_ai_agent.adapters.retrieval.urlopen", fake_urlopen)
+
+    actual = fetch_supported_review_as_of(
+        "http://localhost:8010",
+        service_token="readiness-secret",
+        max_retries=0,
+    )
+    request = captured["request"]
+    sent_headers = {name.casefold(): value for name, value in request.header_items()}
+    assert actual == date(2026, 7, 10)
+    assert request.get_method() == "GET"
+    assert request.full_url == "http://localhost:8010/internal/rag/v1/health/ready"
+    assert sent_headers["x-demo-token"] == "readiness-secret"
+    assert captured["timeout"] == 10.0
+
+
+@pytest.mark.parametrize(
+    "payload",
+    [
+        {"status": "starting", "supported_review_as_of": "2026-07-10"},
+        {"status": "ready"},
+        {"status": "ready", "supported_review_as_of": "not-a-date"},
+        {"status": "ready", "supported_review_as_of": "20260710"},
+    ],
+)
+def test_readiness_rejects_missing_or_invalid_supported_date(monkeypatch, payload):
+    monkeypatch.setattr(
+        "customs_ai_agent.adapters.retrieval.urlopen",
+        lambda *_args, **_kwargs: _HttpBody(json.dumps(payload).encode("utf-8")),
+    )
+
+    with pytest.raises(
+        RetrievalError,
+        match="readiness request failed: invalid contract response",
+    ):
+        fetch_supported_review_as_of("http://localhost:8010", max_retries=0)
 
 
 def test_evidence_valid_to_is_inclusive_contract_boundary():
