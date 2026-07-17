@@ -1,6 +1,21 @@
-from customs_ai_agent.adapters.llm import ensure_llm_mode_available
+from customs_ai_agent.adapters.llm import (
+    AnthropicMessagesTransport,
+    ClaudeDocumentAnalyzer,
+    ClaudeSettings,
+    ClaudeTransportResult,
+    DocumentAnalysis,
+    DocumentAnalyzer,
+    LLMConfigurationError,
+    LLMError,
+    LLMOutputValidationError,
+    LLMProviderError,
+    ModelCallMetadata,
+    analysis_to_extracted_document,
+    build_document_analyzer,
+    ensure_llm_mode_available,
+    validate_grounded_candidate,
+)
 
-__all__ = ["ensure_llm_mode_available"]
 from customs_ai_agent.adapters.retrieval import (
     EmptyRegulationRetriever,
     FailingRegulationRetriever,
@@ -9,6 +24,8 @@ from customs_ai_agent.adapters.retrieval import (
     PartialRegulationRetriever,
     RegulationRetriever,
     RetrievalError,
+    fetch_supported_review_as_of,
+    validate_evidence_base_url,
 )
 
 __all__ = [
@@ -19,5 +36,21 @@ __all__ = [
     "PartialRegulationRetriever",
     "RegulationRetriever",
     "RetrievalError",
+    "AnthropicMessagesTransport",
+    "ClaudeDocumentAnalyzer",
+    "ClaudeSettings",
+    "ClaudeTransportResult",
+    "DocumentAnalysis",
+    "DocumentAnalyzer",
+    "LLMConfigurationError",
+    "LLMError",
+    "LLMOutputValidationError",
+    "LLMProviderError",
+    "ModelCallMetadata",
+    "analysis_to_extracted_document",
+    "build_document_analyzer",
     "ensure_llm_mode_available",
+    "fetch_supported_review_as_of",
+    "validate_grounded_candidate",
+    "validate_evidence_base_url",
 ]

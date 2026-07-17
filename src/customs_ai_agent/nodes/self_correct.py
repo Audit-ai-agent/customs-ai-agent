@@ -28,21 +28,34 @@ def _correct_field(name: str, data: dict[str, Any]) -> bool:
         return False
     data["value"] = corrected
     data["confidence"] = max(float(data.get("confidence") or 0), 0.93)
-    evidence = data.get("evidence") or {}
-    evidence["raw_text"] = corrected
-    evidence["confidence"] = data["confidence"]
-    data["evidence"] = evidence
+    # Evidence describes what was observed in the source and is immutable.
+    # The corrected value is an interpretation, not a replacement source quote.
+    data["value_source"] = "deterministic_ocr_correction"
     return True
 
 
 def _has_low_confidence(state: dict[str, Any]) -> bool:
     for doc in (state.get("extracted_documents") or {}).values():
-        for field_data in (doc.get("fields") or {}).values():
-            if float(field_data.get("confidence") or 0) < 0.75:
+        for name, field_data in (doc.get("fields") or {}).items():
+            value = field_data.get("value")
+            if (
+                name in NUMERIC_FIELDS
+                and float(field_data.get("confidence") or 0) < 0.75
+                and isinstance(value, str)
+                and "O" in value.upper()
+            ):
                 return True
         for item in doc.get("line_items") or []:
-            for key, field_data in item.items():
-                if key != "item_id" and float(field_data.get("confidence") or 0) < 0.75:
+            for name, field_data in item.items():
+                if name == "item_id":
+                    continue
+                value = field_data.get("value")
+                if (
+                    name in NUMERIC_FIELDS
+                    and float(field_data.get("confidence") or 0) < 0.75
+                    and isinstance(value, str)
+                    and "O" in value.upper()
+                ):
                     return True
     return False
 

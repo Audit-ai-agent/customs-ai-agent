@@ -4,11 +4,12 @@ build-backend = "setuptools.build_meta"
 
 [project]
 name = "customs-ai-agent"
-version = "0.1.0"
+version = "0.2.0"
 description = "Evidence-bound customs document review agent workflow"
 readme = "README.md"
 requires-python = ">=3.11"
 dependencies = [
+  "anthropic>=0.117.0",
   "langgraph>=0.2.0",
   "pydantic>=2.7",
   "python-dotenv>=1.0",
@@ -30,8 +31,11 @@ customs-ai-agent = "customs_ai_agent.cli:main"
 [tool.setuptools.packages.find]
 where = ["src"]
 
+[tool.setuptools.package-data]
+customs_ai_agent = ["prompts/*.txt"]
+
 [tool.pytest.ini_options]
-pythonpath = ["src"]
+pythonpath = ["src", "."]
 testpaths = ["tests"]
 addopts = ["--strict-config", "--strict-markers"]
 

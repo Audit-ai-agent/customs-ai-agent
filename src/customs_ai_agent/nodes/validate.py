@@ -61,6 +61,32 @@ def _has_medium_plus(issues: list[dict[str, Any]]) -> bool:
     return any(issue["severity"] in {"medium", "high", "critical"} for issue in issues)
 
 
+def _cap_llm_issue_confidence(
+    state: dict[str, Any],
+    issues: list[dict[str, Any]],
+) -> None:
+    if state.get("llm_mode") != "llm":
+        return
+    documents = state.get("normalized_documents") or {}
+    all_confidences = [
+        float(document.get("extraction_confidence") or 0.0)
+        for document in documents.values()
+    ]
+    for issue in issues:
+        relevant_ids = {
+            issue.get("source_document_id"),
+            issue.get("target_document_id"),
+        }
+        relevant_confidences = [
+            float(documents[document_id].get("extraction_confidence") or 0.0)
+            for document_id in relevant_ids
+            if document_id in documents
+        ]
+        source_confidence = min(relevant_confidences or all_confidences or [0.0])
+        issue["confidence"] = min(float(issue["confidence"]), source_confidence)
+        issue["confidence_basis"] = "source_field_minimum"
+
+
 def validate_cross_documents(state: dict[str, Any]) -> dict[str, Any]:
     issues: list[dict[str, Any]] = []
     bl_id, bl = _first_doc(state, "bill_of_lading")
@@ -239,6 +265,7 @@ def validate_cross_documents(state: dict[str, Any]) -> dict[str, Any]:
                 )
             )
 
+    _cap_llm_issue_confidence(state, issues)
     return {
         "validation_issues": issues,
         "current_stage": "validate_cross_documents",

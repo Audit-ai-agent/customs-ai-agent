@@ -1,10 +1,14 @@
 from __future__ import annotations
 
 import hashlib
+import ipaddress
 import json
+import re
+from datetime import date
 from typing import Any, Protocol, runtime_checkable
 from urllib.error import HTTPError, URLError
-from urllib.request import Request, urlopen
+from urllib.parse import urlsplit, urlunsplit
+from urllib.request import HTTPRedirectHandler, Request, build_opener
 
 from pydantic import ValidationError
 
@@ -25,6 +29,188 @@ from customs_ai_agent.schemas.models import (
 
 class RetrievalError(RuntimeError):
     """The Evidence Service could not return a contract-valid response."""
+
+
+_HEADER_NAME = re.compile(r"^[!#$%&'*+.^_`|~0-9A-Za-z-]+$")
+_ISO_CALENDAR_DATE = re.compile(r"^\d{4}-\d{2}-\d{2}$")
+_RESERVED_HEADERS = {
+    "accept",
+    "connection",
+    "content-length",
+    "content-type",
+    "host",
+    "transfer-encoding",
+    "x-request-id",
+}
+MAX_EVIDENCE_RESPONSE_BYTES = 2 * 1024 * 1024
+
+
+class _NoRedirectHandler(HTTPRedirectHandler):
+    def redirect_request(
+        self,
+        req: Request,
+        fp: Any,
+        code: int,
+        msg: str,
+        headers: Any,
+        newurl: str,
+    ) -> None:
+        # Evidence endpoints are exact-origin contracts. Redirects could
+        # forward document data or authorization headers to another origin.
+        return None
+
+
+_NO_REDIRECT_OPENER = build_opener(_NoRedirectHandler())
+
+
+def urlopen(request: Request, timeout: float):
+    """Open one exact Evidence URL without following redirects."""
+
+    return _NO_REDIRECT_OPENER.open(request, timeout=timeout)
+
+
+def _read_bounded_response(response: Any) -> bytes:
+    payload = response.read(MAX_EVIDENCE_RESPONSE_BYTES + 1)
+    if len(payload) > MAX_EVIDENCE_RESPONSE_BYTES:
+        raise ValueError("Evidence Service response exceeded the byte limit")
+    return payload
+
+
+def _is_loopback_host(hostname: str) -> bool:
+    if hostname.casefold() == "localhost":
+        return True
+    try:
+        return ipaddress.ip_address(hostname).is_loopback
+    except ValueError:
+        return False
+
+
+def validate_evidence_base_url(base_url: str) -> str:
+    """Validate and normalize an Evidence Service origin without resolving DNS.
+
+    Plain HTTP is intentionally limited to an explicit loopback hostname or IP.
+    Network services must use HTTPS. Credentials, query strings, fragments and path
+    prefixes are rejected so secrets cannot be smuggled into a logged request URL.
+    """
+
+    value = base_url.strip()
+    if not value:
+        raise ValueError("Evidence Service base URL is required")
+    if any(character.isspace() for character in value):
+        raise ValueError("Evidence Service base URL cannot contain whitespace")
+    try:
+        parsed = urlsplit(value)
+        port = parsed.port
+    except ValueError as exc:
+        raise ValueError("Evidence Service base URL is invalid") from exc
+    scheme = parsed.scheme.casefold()
+    if scheme not in {"http", "https"}:
+        raise ValueError("Evidence Service base URL must use http or https")
+    if not parsed.hostname:
+        raise ValueError("Evidence Service base URL must include a hostname")
+    if parsed.username is not None or parsed.password is not None:
+        raise ValueError("Evidence Service base URL cannot contain credentials")
+    if parsed.query or parsed.fragment:
+        raise ValueError("Evidence Service base URL cannot contain a query or fragment")
+    if parsed.path not in {"", "/"}:
+        raise ValueError("Evidence Service base URL cannot contain a path prefix")
+    hostname = parsed.hostname.casefold()
+    if scheme == "http" and not _is_loopback_host(hostname):
+        raise ValueError("Plain HTTP Evidence Service URLs are allowed only on loopback")
+    rendered_host = f"[{hostname}]" if ":" in hostname else hostname
+    netloc = f"{rendered_host}:{port}" if port is not None else rendered_host
+    return urlunsplit((scheme, netloc, "", "", ""))
+
+
+def validate_evidence_destination(
+    base_url: str,
+    allowed_origins: set[str] | frozenset[str] | None,
+) -> str:
+    normalized = validate_evidence_base_url(base_url)
+    hostname = urlsplit(normalized).hostname
+    assert hostname is not None
+    if _is_loopback_host(hostname):
+        return normalized
+    normalized_allowed = {
+        validate_evidence_base_url(origin)
+        for origin in (allowed_origins or set())
+    }
+    if normalized not in normalized_allowed:
+        raise ValueError(
+            "External Evidence Service origin is not in the explicit allowlist"
+        )
+    return normalized
+
+
+def _optional_auth_header(
+    service_token: str | None,
+    token_header: str,
+) -> dict[str, str]:
+    if not _HEADER_NAME.fullmatch(token_header):
+        raise ValueError("Evidence Service token header name is invalid")
+    if token_header.casefold() in _RESERVED_HEADERS:
+        raise ValueError("Evidence Service token header cannot override a protocol header")
+    if service_token is None:
+        return {}
+    if not service_token.strip():
+        raise ValueError("Evidence Service token cannot be blank")
+    if "\r" in service_token or "\n" in service_token:
+        raise ValueError("Evidence Service token cannot contain line breaks")
+    return {token_header: service_token}
+
+
+def _safe_failure_reason(exc: Exception) -> str:
+    if isinstance(exc, HTTPError):
+        return f"HTTP status {exc.code}"
+    if isinstance(exc, TimeoutError):
+        return "timeout"
+    if isinstance(exc, URLError):
+        return "network error"
+    return "invalid contract response"
+
+
+def _validate_transport_settings(timeout_seconds: float, max_retries: int) -> None:
+    if timeout_seconds <= 0:
+        raise ValueError("timeout_seconds must be greater than zero")
+    if max_retries < 0:
+        raise ValueError("max_retries cannot be negative")
+
+
+def fetch_supported_review_as_of(
+    base_url: str,
+    *,
+    service_token: str | None = None,
+    token_header: str = "X-Demo-Token",
+    allowed_origins: set[str] | frozenset[str] | None = None,
+    timeout_seconds: float = 10.0,
+    max_retries: int = 1,
+) -> date:
+    """Read the provider-advertised snapshot date through its HTTP readiness contract."""
+
+    normalized_base_url = validate_evidence_destination(base_url, allowed_origins)
+    _validate_transport_settings(timeout_seconds, max_retries)
+    headers = {"Accept": "application/json"}
+    headers.update(_optional_auth_header(service_token, token_header))
+    readiness_url = f"{normalized_base_url}/internal/rag/v1/health/ready"
+    last_error: Exception | None = None
+    for _ in range(max_retries + 1):
+        try:
+            request = Request(readiness_url, headers=headers, method="GET")
+            with urlopen(request, timeout=timeout_seconds) as response:
+                payload = json.loads(_read_bounded_response(response))
+            if not isinstance(payload, dict) or payload.get("status") != "ready":
+                raise ValueError("readiness response did not report ready")
+            raw_date = payload.get("supported_review_as_of")
+            if not isinstance(raw_date, str) or not _ISO_CALENDAR_DATE.fullmatch(raw_date):
+                raise ValueError("readiness response omitted supported_review_as_of")
+            return date.fromisoformat(raw_date)
+        except (HTTPError, URLError, TimeoutError, json.JSONDecodeError, ValueError) as exc:
+            last_error = exc
+    assert last_error is not None
+    reason = _safe_failure_reason(last_error)
+    raise RetrievalError(
+        f"Evidence Service readiness request failed: {reason}"
+    ) from None
 
 
 @runtime_checkable
@@ -243,36 +429,47 @@ class HttpRegulationRetriever:
         self,
         base_url: str,
         *,
+        service_token: str | None = None,
+        token_header: str = "X-Demo-Token",
+        allowed_origins: set[str] | frozenset[str] | None = None,
         timeout_seconds: float = 60.0,
         max_retries: int = 1,
     ) -> None:
-        if not base_url.strip():
-            raise ValueError("base_url is required")
-        self.url = f"{base_url.rstrip('/')}{self.endpoint_path}"
+        normalized_base_url = validate_evidence_destination(
+            base_url,
+            allowed_origins,
+        )
+        _validate_transport_settings(timeout_seconds, max_retries)
+        self.url = f"{normalized_base_url}{self.endpoint_path}"
+        self._auth_header = _optional_auth_header(service_token, token_header)
         self.timeout_seconds = timeout_seconds
         self.max_retries = max_retries
 
     def retrieve(self, request: EvidenceRetrievalRequest) -> EvidenceRetrievalResponse:
         payload = json.dumps(request.model_dump(mode="json"), ensure_ascii=False).encode("utf-8")
-        http_request = Request(
-            self.url,
-            data=payload,
-            headers={
-                "Accept": "application/json",
-                "Content-Type": "application/json; charset=utf-8",
-                "X-Request-ID": request.request_id,
-            },
-            method="POST",
-        )
+        headers = {
+            "Accept": "application/json",
+            "Content-Type": "application/json; charset=utf-8",
+            "X-Request-ID": request.request_id,
+        }
+        headers.update(self._auth_header)
         last_error: Exception | None = None
         for _ in range(self.max_retries + 1):
             try:
+                http_request = Request(
+                    self.url,
+                    data=payload,
+                    headers=headers,
+                    method="POST",
+                )
                 with urlopen(http_request, timeout=self.timeout_seconds) as response:
-                    body = response.read()
+                    body = _read_bounded_response(response)
                 parsed = EvidenceRetrievalResponse.model_validate_json(body)
                 if parsed.request_id != request.request_id:
                     raise RetrievalError("Evidence Service response request_id does not match")
                 return parsed
             except (HTTPError, URLError, TimeoutError, ValidationError, ValueError) as exc:
                 last_error = exc
-        raise RetrievalError(f"Evidence Service request failed: {last_error}") from last_error
+        assert last_error is not None
+        reason = _safe_failure_reason(last_error)
+        raise RetrievalError(f"Evidence Service request failed: {reason}") from None

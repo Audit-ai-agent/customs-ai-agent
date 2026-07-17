@@ -4,7 +4,8 @@ from typing import Literal
 
 from langgraph.graph import END, START, StateGraph
 
-from customs_ai_agent.adapters.retrieval import MockRegulationRetriever, RegulationRetriever
+from customs_ai_agent.adapters.llm import DocumentAnalyzer
+from customs_ai_agent.adapters.retrieval import RegulationRetriever
 from customs_ai_agent.graph.state import ReviewState
 from customs_ai_agent.nodes import (
     classify_documents,
@@ -30,12 +31,17 @@ def _route_after_validation(
     return "retrieve_regulations"
 
 
-def build_review_graph(retriever: RegulationRetriever | None = None):
-    active_retriever = retriever or MockRegulationRetriever()
+def build_review_graph(
+    retriever: RegulationRetriever,
+    analyzer: DocumentAnalyzer | None = None,
+):
     workflow = StateGraph(ReviewState)
 
     workflow.add_node("load_case", load_case)
-    workflow.add_node("classify_documents", classify_documents)
+    workflow.add_node(
+        "classify_documents",
+        lambda state: classify_documents(state, analyzer),
+    )
     workflow.add_node("extract_documents", extract_documents)
     workflow.add_node("normalize_documents", normalize_documents)
     workflow.add_node("pair_documents", pair_documents)
@@ -43,7 +49,7 @@ def build_review_graph(retriever: RegulationRetriever | None = None):
     workflow.add_node("self_correct_extraction", self_correct_extraction)
     workflow.add_node(
         "retrieve_regulations",
-        lambda state: retrieve_regulations(state, active_retriever),
+        lambda state: retrieve_regulations(state, retriever),
     )
     workflow.add_node("compliance_review", compliance_review)
     workflow.add_node("generate_xai_report", generate_xai_report)
