@@ -4,6 +4,7 @@ from datetime import date
 from typing import Any
 
 from customs_ai_agent.adapters.retrieval import RegulationRetriever
+from customs_ai_agent.identifiers import stable_retrieval_request_id
 from customs_ai_agent.nodes.common import audit
 from customs_ai_agent.schemas.models import (
     EvidenceRetrievalRequest,
@@ -124,17 +125,20 @@ def retrieve_regulations(
     state: dict[str, Any],
     retriever: RegulationRetriever,
 ) -> dict[str, Any]:
-    request_id = f"{state['review_run_id']}:retrieve:{int(state.get('retry_count') or 0)}"
+    request_id = stable_retrieval_request_id(
+        str(state["review_run_id"]),
+        int(state.get("retry_count") or 0),
+    )
     try:
         query_items = [
             _query_item(item, state["jurisdiction"]) for item in _invoice_items(state)
         ]
-    except Exception as exc:
+    except Exception:
         return _failed_update(
             state,
             request_id=request_id,
             code="INVALID_RETRIEVAL_QUERY",
-            message=f"Could not build a contract-valid retrieval query: {exc}",
+            message="Could not build a contract-valid retrieval query.",
         )
     if not query_items:
         return _failed_update(
@@ -168,12 +172,12 @@ def retrieve_regulations(
             # Supporting semantic hits are never finding-eligible by themselves.
             query_intent=f"required_{state['trade_type']}_documents_and_law_support",
         )
-    except Exception as exc:
+    except Exception:
         return _failed_update(
             state,
             request_id=request_id,
             code="INVALID_RETRIEVAL_REQUEST",
-            message=f"Could not build a contract-valid retrieval request: {exc}",
+            message="Could not build a contract-valid retrieval request.",
         )
     try:
         raw_response = retriever.retrieve(request)
@@ -182,12 +186,12 @@ def retrieve_regulations(
             if isinstance(raw_response, EvidenceRetrievalResponse)
             else EvidenceRetrievalResponse.model_validate(raw_response)
         )
-    except Exception as exc:
+    except Exception:
         return _failed_update(
             state,
             request_id=request_id,
             code="RETRIEVER_EXCEPTION",
-            message=f"Regulatory retrieval failed: {type(exc).__name__}: {exc}",
+            message="Regulatory retrieval failed.",
             request=request,
         )
 

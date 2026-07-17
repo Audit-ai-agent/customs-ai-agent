@@ -3,11 +3,13 @@ from __future__ import annotations
 import json
 from datetime import date
 from urllib.error import URLError
+from urllib.request import Request
 
 from pydantic import ValidationError
 import pytest
 
 from customs_ai_agent.adapters.retrieval import (
+    MAX_EVIDENCE_RESPONSE_BYTES,
     EmptyRegulationRetriever,
     FailingRegulationRetriever,
     HttpRegulationRetriever,
@@ -16,6 +18,7 @@ from customs_ai_agent.adapters.retrieval import (
     fetch_supported_review_as_of,
     validate_evidence_base_url,
 )
+from customs_ai_agent.adapters.retrieval import _NoRedirectHandler
 from customs_ai_agent.runner import rerun_review, run_review, run_review_result
 from customs_ai_agent.nodes.compliance import compliance_review
 from customs_ai_agent.nodes.retrieve import _context_errors
@@ -80,8 +83,8 @@ class _HttpBody:
     def __exit__(self, *_args):
         return None
 
-    def read(self) -> bytes:
-        return self.payload
+    def read(self, size: int = -1) -> bytes:
+        return self.payload if size < 0 else self.payload[:size]
 
 
 class RequirementRetriever:
@@ -311,6 +314,29 @@ def test_initial_and_rerun_status_sources_are_consistent():
         assert state["requires_human_review"] is (state["final_status"] != "completed")
 
 
+def test_retriever_exception_never_leaks_exception_or_document_canary():
+    canary = "SECRET-DOCUMENT-AND-TOKEN-CANARY"
+
+    class CanaryRetriever:
+        def retrieve(self, _request):
+            raise RuntimeError(canary)
+
+    state = run_review(
+        ReviewRunRequest(scenario_id="happy_path", review_run_id="run-canary"),
+        retriever=CanaryRetriever(),
+    )
+    observable_failure = json.dumps(
+        {
+            "retrieval_errors": state["retrieval_errors"],
+            "audit_trail": state["audit_trail"],
+        }
+    )
+
+    assert canary not in observable_failure
+    assert state["retrieval_errors"][0]["code"] == "RETRIEVER_EXCEPTION"
+    assert state["retrieval_errors"][0]["message"] == "Regulatory retrieval failed."
+
+
 def test_real_retriever_is_not_silently_replaced_by_mock_on_rerun():
     initial = run_review(
         ReviewRunRequest(scenario_id="happy_path", review_run_id="run-real-rerun"),
@@ -352,7 +378,10 @@ def test_http_retriever_uses_v1_endpoint_and_retries_once(monkeypatch):
         return _HttpBody(json.dumps(response.model_dump(mode="json")).encode("utf-8"))
 
     monkeypatch.setattr("customs_ai_agent.adapters.retrieval.urlopen", fake_urlopen)
-    actual = HttpRegulationRetriever("https://evidence.local").retrieve(request)
+    actual = HttpRegulationRetriever(
+        "https://evidence.local",
+        allowed_origins={"https://evidence.local"},
+    ).retrieve(request)
 
     assert len(calls) == 2
     sent_request, timeout = calls[-1]
@@ -370,7 +399,10 @@ def test_http_retriever_rejects_invalid_response(monkeypatch):
     )
 
     with pytest.raises(RetrievalError):
-        HttpRegulationRetriever("https://evidence.local").retrieve(_http_test_request())
+        HttpRegulationRetriever(
+            "https://evidence.local",
+            allowed_origins={"https://evidence.local"},
+        ).retrieve(_http_test_request())
 
 
 @pytest.mark.parametrize(
@@ -401,6 +433,60 @@ def test_evidence_base_url_accepts_loopback_http_or_https(raw, normalized):
 def test_evidence_base_url_rejects_unsafe_or_ambiguous_values(url):
     with pytest.raises(ValueError):
         validate_evidence_base_url(url)
+
+
+def test_external_evidence_client_requires_exact_origin_allowlist():
+    with pytest.raises(ValueError, match="not in the explicit allowlist"):
+        HttpRegulationRetriever("https://evidence.example")
+
+    retriever = HttpRegulationRetriever(
+        "https://evidence.example:8443",
+        allowed_origins={
+            "https://other.example",
+            "https://evidence.example:8443",
+        },
+    )
+
+    assert retriever.url == (
+        "https://evidence.example:8443/internal/rag/v1/retrieve"
+    )
+
+
+def test_evidence_redirect_handler_never_creates_cross_origin_request():
+    original = Request(
+        "https://evidence.example/internal/rag/v1/retrieve",
+        headers={"X-Demo-Token": "must-not-forward"},
+    )
+
+    redirected = _NoRedirectHandler().redirect_request(
+        original,
+        None,
+        302,
+        "Found",
+        {},
+        "https://attacker.example/collect",
+    )
+
+    assert redirected is None
+
+
+def test_oversized_evidence_response_fails_without_exposing_body(monkeypatch):
+    monkeypatch.setattr(
+        "customs_ai_agent.adapters.retrieval.urlopen",
+        lambda *_args, **_kwargs: _HttpBody(
+            b"x" * (MAX_EVIDENCE_RESPONSE_BYTES + 1)
+        ),
+    )
+
+    with pytest.raises(RetrievalError) as exc_info:
+        HttpRegulationRetriever(
+            "http://127.0.0.1:8010",
+            max_retries=0,
+        ).retrieve(_http_test_request())
+
+    assert str(exc_info.value) == (
+        "Evidence Service request failed: invalid contract response"
+    )
 
 
 def test_http_retriever_sends_token_only_in_configured_header(monkeypatch):

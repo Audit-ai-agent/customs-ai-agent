@@ -41,6 +41,9 @@ def _issue_view(issue: dict[str, Any]) -> dict[str, Any]:
         "target_document_id": issue.get("target_document_id"),
         "source_bbox": issue.get("source_bbox"),
         "target_bbox": issue.get("target_bbox"),
+        "confidence": issue.get("confidence"),
+        "confidence_basis": issue.get("confidence_basis"),
+        "needs_regulatory_review": issue.get("needs_regulatory_review", False),
         "recommendation": "Review the source document values and confirm the corrected value before clearance submission.",
     }
 

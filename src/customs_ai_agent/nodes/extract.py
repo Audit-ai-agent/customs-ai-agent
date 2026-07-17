@@ -3,7 +3,15 @@ from __future__ import annotations
 import re
 from typing import Any
 
+from customs_ai_agent.identifiers import stable_line_item_id
+from customs_ai_agent.adapters.llm import (
+    DocumentAnalysis,
+    LLMError,
+    ModelCallMetadata,
+    analysis_to_extracted_document,
+)
 from customs_ai_agent.nodes.common import audit, extract_label, extract_list_label, field
+from customs_ai_agent.schemas.llm import ClaudeDocumentCandidate
 
 
 def _item_lines(text: str) -> list[str]:
@@ -69,7 +77,7 @@ def _extract_invoice(document_id: str, text: str, filename: str) -> dict[str, An
         parsed = _parse_item(raw_item)
         line_items.append(
             {
-                "item_id": f"{document_id}_line_{index}",
+                "item_id": stable_line_item_id(document_id, index),
                 **{
                     name: field(document_id, name, value, 20 + index + offset)
                     for offset, (name, value) in enumerate(parsed.items())
@@ -92,7 +100,7 @@ def _extract_packing(document_id: str, text: str, filename: str) -> dict[str, An
         parsed = _parse_item(raw_item)
         line_items.append(
             {
-                "item_id": f"{document_id}_line_{index}",
+                "item_id": stable_line_item_id(document_id, index),
                 **{
                     name: field(document_id, name, value, 20 + index + offset)
                     for offset, (name, value) in enumerate(parsed.items())
@@ -141,11 +149,47 @@ def _doc(
 
 def extract_documents(state: dict[str, Any]) -> dict[str, Any]:
     extracted: dict[str, dict[str, Any]] = {}
+    model_errors = list(state.get("model_errors") or [])
     by_id = {doc["document_id"]: doc for doc in state.get("documents") or []}
+    llm_mode = state.get("llm_mode") == "llm"
     for document_id, classified in (state.get("classified_documents") or {}).items():
         doc = by_id[document_id]
         doc_type = classified["document_type"]
-        if doc_type == "invoice":
+        stored_analysis = (state.get("model_analyses") or {}).get(document_id)
+        if llm_mode and stored_analysis:
+            analysis = DocumentAnalysis(
+                candidate=ClaudeDocumentCandidate.model_validate(
+                    stored_analysis["candidate"]
+                ),
+                metadata=ModelCallMetadata(**stored_analysis["metadata"]),
+            )
+            try:
+                extracted[document_id] = analysis_to_extracted_document(doc, analysis)
+            except LLMError as exc:
+                extracted[document_id] = _doc(
+                    "unknown", document_id, doc["filename"], {}, []
+                )
+                model_errors.append(
+                    {
+                        "document_id": document_id,
+                        "code": exc.code,
+                        "retryable": exc.retryable,
+                        "provider": "anthropic",
+                        "model_id": analysis.metadata.model_id,
+                        "prompt_id": analysis.metadata.prompt_id,
+                        "prompt_version": analysis.metadata.prompt_version,
+                        "latency_ms": 0,
+                        "provider_request_id": None,
+                        "provider_status_code": None,
+                    }
+                )
+        elif llm_mode:
+            # A provider/schema/grounding failure remains unknown. It never
+            # falls back to the deterministic Mock extractor.
+            extracted[document_id] = _doc(
+                "unknown", document_id, doc["filename"], {}, []
+            )
+        elif doc_type == "invoice":
             extracted[document_id] = _extract_invoice(document_id, doc["content_text"], doc["filename"])
         elif doc_type == "packing_list":
             extracted[document_id] = _extract_packing(document_id, doc["content_text"], doc["filename"])
@@ -158,12 +202,21 @@ def extract_documents(state: dict[str, Any]) -> dict[str, Any]:
 
     return {
         "extracted_documents": extracted,
+        "model_errors": model_errors,
         "current_stage": "extract_documents",
         "audit_trail": audit(
             state,
             "extract_documents",
             "completed",
             "Extracted structured fields from documents.",
-            {"document_count": len(extracted)},
+            {
+                "document_count": len(extracted),
+                "provider": "anthropic" if llm_mode else "rules",
+                "failed_document_count": sum(
+                    doc["extraction_status"] != "completed"
+                    or doc["document_type"] == "unknown"
+                    for doc in extracted.values()
+                ),
+            },
         ),
     }

@@ -47,7 +47,21 @@ class FieldEvidence(BaseModel):
     page: int = Field(ge=1)
     bbox: BBox | None = None
     raw_text: str | None = None
+    text_start: int | None = Field(default=None, ge=0)
+    text_end: int | None = Field(default=None, ge=1)
     confidence: float = Field(ge=0, le=1)
+
+    @model_validator(mode="after")
+    def _valid_text_span(self) -> "FieldEvidence":
+        if (self.text_start is None) != (self.text_end is None):
+            raise ValueError("text_start and text_end must be provided together")
+        if (
+            self.text_start is not None
+            and self.text_end is not None
+            and self.text_end <= self.text_start
+        ):
+            raise ValueError("text_end must be greater than text_start")
+        return self
 
 
 class ExtractedField(BaseModel):
@@ -55,23 +69,39 @@ class ExtractedField(BaseModel):
     value: Any
     normalized_value: Any | None = None
     confidence: float = Field(ge=0, le=1)
+    confidence_basis: Literal[
+        "rule_heuristic", "source_quote_grounded_uncalibrated"
+    ] = "rule_heuristic"
     evidence: FieldEvidence
 
 
 class DocumentInput(BaseModel):
-    document_id: str
-    filename: str
-    content_text: str
+    document_id: str = Field(
+        min_length=1,
+        max_length=128,
+        pattern=r"^[A-Za-z0-9][A-Za-z0-9._:-]*$",
+    )
+    filename: str = Field(min_length=1, max_length=255)
+    content_text: str = Field(min_length=1, max_length=200_000)
     declared_type: DocumentType | None = None
     requirement_document_codes: list[str] = Field(default_factory=list)
 
 
 class ReviewRunRequest(BaseModel):
-    scenario_id: str | None = None
-    case_id: str | None = None
-    documents: list[DocumentInput] | None = None
+    scenario_id: str | None = Field(default=None, min_length=1, max_length=128)
+    case_id: str | None = Field(default=None, min_length=1, max_length=128)
+    documents: list[DocumentInput] | None = Field(
+        default=None,
+        min_length=1,
+        max_length=20,
+    )
     llm_mode: Literal["mock", "llm"] = "mock"
-    review_run_id: str = Field(default_factory=lambda: str(uuid4()), min_length=1)
+    review_run_id: str = Field(
+        default_factory=lambda: str(uuid4()),
+        min_length=1,
+        max_length=128,
+        pattern=r"^[A-Za-z0-9][A-Za-z0-9._:-]*$",
+    )
     review_as_of: date = Field(default_factory=date.today)
     trade_type: TradeType = "import"
     jurisdiction: Literal["KR"] = "KR"
@@ -79,8 +109,14 @@ class ReviewRunRequest(BaseModel):
 
     @model_validator(mode="after")
     def _scenario_or_documents(self) -> "ReviewRunRequest":
-        if not self.scenario_id and not self.documents:
-            raise ValueError("scenario_id or documents is required")
+        if bool(self.scenario_id) == bool(self.documents):
+            raise ValueError("exactly one of scenario_id or documents is required")
+        if self.documents and sum(len(doc.content_text) for doc in self.documents) > 500_000:
+            raise ValueError("combined document text exceeds the per-run safety limit")
+        if self.documents:
+            document_ids = [document.document_id for document in self.documents]
+            if len(document_ids) != len(set(document_ids)):
+                raise ValueError("document_id values must be unique within a review run")
         self.uploaded_requirement_document_codes = sorted(
             {
                 code.strip()
@@ -93,6 +129,35 @@ class ReviewRunRequest(BaseModel):
 
 class WireModel(BaseModel):
     model_config = ConfigDict(extra="forbid")
+
+
+class ModelCallRecord(WireModel):
+    document_id: str = Field(min_length=1, max_length=128)
+    provider: Literal["anthropic"]
+    model_id: str = Field(min_length=1, max_length=128)
+    prompt_id: str = Field(min_length=1, max_length=128)
+    prompt_version: str = Field(min_length=1, max_length=64)
+    request_id: str = Field(min_length=1, max_length=256)
+    message_id: str = Field(min_length=1, max_length=256)
+    stop_reason: str = Field(min_length=1, max_length=64)
+    input_tokens: int = Field(ge=0)
+    output_tokens: int = Field(ge=0)
+    cache_creation_input_tokens: int = Field(ge=0)
+    cache_read_input_tokens: int = Field(ge=0)
+    latency_ms: int = Field(ge=0)
+
+
+class ModelErrorDetail(WireModel):
+    document_id: str = Field(min_length=1, max_length=128)
+    code: str = Field(min_length=1, max_length=128)
+    retryable: bool
+    provider: Literal["anthropic"] | None = None
+    model_id: str | None = Field(default=None, min_length=1, max_length=128)
+    prompt_id: str | None = Field(default=None, min_length=1, max_length=128)
+    prompt_version: str | None = Field(default=None, min_length=1, max_length=64)
+    latency_ms: int = Field(default=0, ge=0)
+    provider_request_id: str | None = Field(default=None, max_length=256)
+    provider_status_code: int | None = Field(default=None, ge=100, le=599)
 
 
 class RetrievalQueryItem(WireModel):
@@ -156,6 +221,9 @@ class ValidationIssue(BaseModel):
     source_bbox: BBox | None = None
     target_bbox: BBox | None = None
     confidence: float = Field(default=0.95, ge=0, le=1)
+    confidence_basis: Literal[
+        "deterministic_rule", "source_field_minimum"
+    ] = "deterministic_rule"
     needs_regulatory_review: bool = False
 
 
@@ -362,6 +430,8 @@ class ReviewRunResult(BaseModel):
     rag_evidence: list[RagEvidence] = Field(default_factory=list)
     report: XaiReport
     audit_trail: list[AuditEvent] = Field(default_factory=list)
+    model_calls: list[ModelCallRecord] = Field(default_factory=list)
+    model_errors: list[ModelErrorDetail] = Field(default_factory=list)
 
 
 class ChatAnswer(BaseModel):

@@ -1,9 +1,14 @@
 from __future__ import annotations
 
 import copy
+from os import PathLike
 from typing import Any
 
-from customs_ai_agent.adapters import ensure_llm_mode_available
+from customs_ai_agent.adapters.llm import (
+    DocumentAnalyzer,
+    LLMConfigurationError,
+    build_document_analyzer,
+)
 from customs_ai_agent.adapters.retrieval import (
     FailingRegulationRetriever,
     MockRegulationRetriever,
@@ -48,6 +53,9 @@ def _build_initial_state(request: ReviewRunRequest) -> dict[str, Any]:
         "documents": documents,
         "document_ids": [],
         "classified_documents": {},
+        "model_analyses": {},
+        "model_calls": [],
+        "model_errors": [],
         "extracted_documents": {},
         "normalized_documents": {},
         "pairing_result": {},
@@ -74,12 +82,29 @@ def _build_initial_state(request: ReviewRunRequest) -> dict[str, Any]:
 def run_review(
     request: ReviewRunRequest | dict[str, Any],
     retriever: RegulationRetriever | None = None,
+    analyzer: DocumentAnalyzer | None = None,
+    env_file: str | PathLike[str] | None = None,
 ) -> dict[str, Any]:
     if isinstance(request, dict):
         request = ReviewRunRequest.model_validate(request)
-    ensure_llm_mode_available(request.llm_mode)
+    if request.llm_mode == "llm":
+        if retriever is None:
+            raise LLMConfigurationError(
+                "explicit_retriever_required",
+                "llm mode requires an explicit RegulationRetriever; implicit Mock RAG is forbidden.",
+            )
+        active_retriever = retriever
+        active_analyzer = analyzer or build_document_analyzer(env_file)
+    else:
+        if analyzer is not None:
+            raise LLMConfigurationError(
+                "analyzer_not_allowed_in_mock_mode",
+                "A document analyzer cannot be injected into mock mode.",
+            )
+        active_retriever = retriever or MockRegulationRetriever()
+        active_analyzer = None
     initial_state = _build_initial_state(request)
-    graph = build_review_graph(retriever)
+    graph = build_review_graph(active_retriever, active_analyzer)
     return graph.invoke(initial_state, config={"recursion_limit": 20})
 
 
@@ -105,14 +130,25 @@ def to_review_run_result(state: dict[str, Any]) -> ReviewRunResult:
         rag_evidence=state.get("rag_evidence") or [],
         report=state["report_json"],
         audit_trail=state.get("audit_trail") or [],
+        model_calls=state.get("model_calls") or [],
+        model_errors=state.get("model_errors") or [],
     )
 
 
 def run_review_result(
     request: ReviewRunRequest | dict[str, Any],
     retriever: RegulationRetriever | None = None,
+    analyzer: DocumentAnalyzer | None = None,
+    env_file: str | PathLike[str] | None = None,
 ) -> ReviewRunResult:
-    return to_review_run_result(run_review(request, retriever=retriever))
+    return to_review_run_result(
+        run_review(
+            request,
+            retriever=retriever,
+            analyzer=analyzer,
+            env_file=env_file,
+        )
+    )
 
 
 def _apply_correction(state: dict[str, Any], correction: UserCorrection) -> None:
@@ -125,9 +161,7 @@ def _apply_correction(state: dict[str, Any], correction: UserCorrection) -> None
         if field_data:
             field_data["value"] = correction.value
             field_data["confidence"] = correction.confidence
-            if field_data.get("evidence"):
-                field_data["evidence"]["raw_text"] = str(correction.value)
-                field_data["evidence"]["confidence"] = correction.confidence
+            field_data["value_source"] = "human_correction"
     elif parts[0] == "line_items" and len(parts) == 3:
         try:
             index = int(parts[1])
@@ -139,9 +173,7 @@ def _apply_correction(state: dict[str, Any], correction: UserCorrection) -> None
             if field_data:
                 field_data["value"] = correction.value
                 field_data["confidence"] = correction.confidence
-                if field_data.get("evidence"):
-                    field_data["evidence"]["raw_text"] = str(correction.value)
-                    field_data["evidence"]["confidence"] = correction.confidence
+                field_data["value_source"] = "human_correction"
 
 
 def _merge(state: dict[str, Any], update: dict[str, Any]) -> dict[str, Any]:

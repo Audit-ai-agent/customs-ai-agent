@@ -8,7 +8,7 @@ from datetime import date
 from typing import Any, Protocol, runtime_checkable
 from urllib.error import HTTPError, URLError
 from urllib.parse import urlsplit, urlunsplit
-from urllib.request import Request, urlopen
+from urllib.request import HTTPRedirectHandler, Request, build_opener
 
 from pydantic import ValidationError
 
@@ -42,6 +42,38 @@ _RESERVED_HEADERS = {
     "transfer-encoding",
     "x-request-id",
 }
+MAX_EVIDENCE_RESPONSE_BYTES = 2 * 1024 * 1024
+
+
+class _NoRedirectHandler(HTTPRedirectHandler):
+    def redirect_request(
+        self,
+        req: Request,
+        fp: Any,
+        code: int,
+        msg: str,
+        headers: Any,
+        newurl: str,
+    ) -> None:
+        # Evidence endpoints are exact-origin contracts. Redirects could
+        # forward document data or authorization headers to another origin.
+        return None
+
+
+_NO_REDIRECT_OPENER = build_opener(_NoRedirectHandler())
+
+
+def urlopen(request: Request, timeout: float):
+    """Open one exact Evidence URL without following redirects."""
+
+    return _NO_REDIRECT_OPENER.open(request, timeout=timeout)
+
+
+def _read_bounded_response(response: Any) -> bytes:
+    payload = response.read(MAX_EVIDENCE_RESPONSE_BYTES + 1)
+    if len(payload) > MAX_EVIDENCE_RESPONSE_BYTES:
+        raise ValueError("Evidence Service response exceeded the byte limit")
+    return payload
 
 
 def _is_loopback_host(hostname: str) -> bool:
@@ -90,6 +122,26 @@ def validate_evidence_base_url(base_url: str) -> str:
     return urlunsplit((scheme, netloc, "", "", ""))
 
 
+def validate_evidence_destination(
+    base_url: str,
+    allowed_origins: set[str] | frozenset[str] | None,
+) -> str:
+    normalized = validate_evidence_base_url(base_url)
+    hostname = urlsplit(normalized).hostname
+    assert hostname is not None
+    if _is_loopback_host(hostname):
+        return normalized
+    normalized_allowed = {
+        validate_evidence_base_url(origin)
+        for origin in (allowed_origins or set())
+    }
+    if normalized not in normalized_allowed:
+        raise ValueError(
+            "External Evidence Service origin is not in the explicit allowlist"
+        )
+    return normalized
+
+
 def _optional_auth_header(
     service_token: str | None,
     token_header: str,
@@ -129,12 +181,13 @@ def fetch_supported_review_as_of(
     *,
     service_token: str | None = None,
     token_header: str = "X-Demo-Token",
+    allowed_origins: set[str] | frozenset[str] | None = None,
     timeout_seconds: float = 10.0,
     max_retries: int = 1,
 ) -> date:
     """Read the provider-advertised snapshot date through its HTTP readiness contract."""
 
-    normalized_base_url = validate_evidence_base_url(base_url)
+    normalized_base_url = validate_evidence_destination(base_url, allowed_origins)
     _validate_transport_settings(timeout_seconds, max_retries)
     headers = {"Accept": "application/json"}
     headers.update(_optional_auth_header(service_token, token_header))
@@ -144,7 +197,7 @@ def fetch_supported_review_as_of(
         try:
             request = Request(readiness_url, headers=headers, method="GET")
             with urlopen(request, timeout=timeout_seconds) as response:
-                payload = json.loads(response.read())
+                payload = json.loads(_read_bounded_response(response))
             if not isinstance(payload, dict) or payload.get("status") != "ready":
                 raise ValueError("readiness response did not report ready")
             raw_date = payload.get("supported_review_as_of")
@@ -378,10 +431,14 @@ class HttpRegulationRetriever:
         *,
         service_token: str | None = None,
         token_header: str = "X-Demo-Token",
+        allowed_origins: set[str] | frozenset[str] | None = None,
         timeout_seconds: float = 60.0,
         max_retries: int = 1,
     ) -> None:
-        normalized_base_url = validate_evidence_base_url(base_url)
+        normalized_base_url = validate_evidence_destination(
+            base_url,
+            allowed_origins,
+        )
         _validate_transport_settings(timeout_seconds, max_retries)
         self.url = f"{normalized_base_url}{self.endpoint_path}"
         self._auth_header = _optional_auth_header(service_token, token_header)
@@ -406,7 +463,7 @@ class HttpRegulationRetriever:
                     method="POST",
                 )
                 with urlopen(http_request, timeout=self.timeout_seconds) as response:
-                    body = response.read()
+                    body = _read_bounded_response(response)
                 parsed = EvidenceRetrievalResponse.model_validate_json(body)
                 if parsed.request_id != request.request_id:
                     raise RetrievalError("Evidence Service response request_id does not match")
