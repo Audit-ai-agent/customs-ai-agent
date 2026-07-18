@@ -4,7 +4,9 @@ from pathlib import Path
 
 import pytest
 
+from customs_ai_agent.evaluation_assets import image_gold_semantic_fingerprint
 from evals import run_claude_vision
+from tools import build_trade_image_adjudicated_gold as reconciliation
 from tools.build_trade_image_adjudicated_gold import (
     DEFAULT_DIAGNOSTIC_SCHEMA_PATH,
     DEFAULT_GOLD_SCHEMA_PATH,
@@ -347,6 +349,46 @@ def test_reconciliation_fails_closed_on_invalid_or_disagreeing_reviews(
 
     with pytest.raises(ReviewReconciliationError, match=message):
         _build(files)
+
+
+def test_known_invalidated_output_hash_cannot_be_rebuilt(
+    monkeypatch,
+    tmp_path,
+):
+    files = _fixture_files(tmp_path)
+    monkeypatch.setattr(
+        reconciliation,
+        "image_gold_invalidation_code",
+        lambda _digest: "adjudicated_gold_invalidated_by_label_error",
+    )
+
+    with pytest.raises(ReviewReconciliationError, match="explicitly invalidated"):
+        _build(files)
+
+
+def test_semantically_invalid_gold_cannot_bypass_with_output_dir_or_gold_id(
+    monkeypatch,
+    tmp_path,
+):
+    files = _fixture_files(tmp_path)
+    original = _build(files)
+    invalid_fingerprint = image_gold_semantic_fingerprint(original["gold"])
+    assert invalid_fingerprint is not None
+
+    def semantic_invalidation(candidate):
+        if image_gold_semantic_fingerprint(candidate) == invalid_fingerprint:
+            return "adjudicated_gold_invalidated_by_label_error"
+        return None
+
+    monkeypatch.setattr(
+        reconciliation,
+        "image_gold_semantic_invalidation_code",
+        semantic_invalidation,
+    )
+    files["output_dir"] = files["artifact_root"] / "different-output-root" / "adjudicated-gold"
+
+    with pytest.raises(ReviewReconciliationError, match="explicitly invalidated"):
+        _build(files, gold_set_id="renamed-gold-set")
 
 
 def test_unreadable_reviews_cannot_create_value_bearing_gold(tmp_path):

@@ -24,6 +24,7 @@ EXPECTED_SCHEMAS = {
     ("backend", "v2", "review-request"),
     ("backend", "v2", "review-result"),
     ("internal", "v1", "ocr-layout-ledger"),
+    ("internal", "v2", "ocr-layout-ledger"),
     ("internal", "v1", "claude-text-candidate"),
     ("internal", "v1", "claude-vision-candidate"),
     ("internal", "v1", "claude-crop-read-candidate"),
@@ -302,6 +303,10 @@ def test_internal_schemas_are_explicitly_non_backend_contracts() -> None:
         Draft202012Validator.check_schema(schema)
         assert schema["$id"].endswith(f"/internal/v1/{kind}.schema.json")
         assert "not a Backend request/result contract" in schema["description"]
+    ocr_v2 = get_schema("internal", "v2", "ocr-layout-ledger")
+    Draft202012Validator.check_schema(ocr_v2)
+    assert ocr_v2["$id"].endswith("/internal/v2/ocr-layout-ledger.schema.json")
+    assert ocr_v2["properties"]["reading_order_policy_id"]["const"] == "worker-emitted-sequence/v1"
 
 
 def test_checkout_backend_contract_copies_match_packaged_resources() -> None:

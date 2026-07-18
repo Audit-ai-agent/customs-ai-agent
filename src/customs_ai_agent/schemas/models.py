@@ -15,6 +15,8 @@ from uuid import uuid4
 from PIL import Image, UnidentifiedImageError
 from pydantic import BaseModel, ConfigDict, Field, field_validator, model_validator
 
+from customs_ai_agent.ocr_reading_order import OCR_READING_ORDER_POLICY_ID
+
 
 DocumentType = Literal[
     "bill_of_lading",
@@ -213,6 +215,7 @@ def stable_ocr_ledger_id(
     provider_id: str,
     engine_id: str,
     engine_version: str,
+    reading_order_policy_id: str = OCR_READING_ORDER_POLICY_ID,
     model_id: str = "unattested-model-set",
     model_assets_lock_sha256: str = "0" * 64,
     pages: list[OcrLayoutPage],
@@ -223,6 +226,7 @@ def stable_ocr_ledger_id(
             "provider_id": provider_id,
             "engine_id": engine_id,
             "engine_version": engine_version,
+            "reading_order_policy_id": reading_order_policy_id,
             "model_id": model_id,
             "model_assets_lock_sha256": model_assets_lock_sha256,
             "pages": [page.model_dump(mode="json") for page in pages],
@@ -239,7 +243,7 @@ class OcrLayoutLedger(BaseModel):
 
     model_config = ConfigDict(extra="forbid")
 
-    schema_version: Literal["1.0"] = "1.0"
+    schema_version: Literal["2.0"] = "2.0"
     ledger_id: str = Field(pattern=r"^ocr_[a-f0-9]{64}$")
     document_id: str = Field(
         min_length=1,
@@ -249,6 +253,7 @@ class OcrLayoutLedger(BaseModel):
     provider_id: str = Field(min_length=1, max_length=128)
     engine_id: str = Field(min_length=1, max_length=128)
     engine_version: str = Field(min_length=1, max_length=128)
+    reading_order_policy_id: Literal["worker-emitted-sequence/v1"] = OCR_READING_ORDER_POLICY_ID
     model_id: str = Field(
         default="unattested-model-set",
         min_length=1,
@@ -273,6 +278,7 @@ class OcrLayoutLedger(BaseModel):
             provider_id=self.provider_id,
             engine_id=self.engine_id,
             engine_version=self.engine_version,
+            reading_order_policy_id=self.reading_order_policy_id,
             model_id=self.model_id,
             model_assets_lock_sha256=self.model_assets_lock_sha256,
             pages=self.pages,
@@ -1618,11 +1624,12 @@ class ReviewLineItemV2(WireModel):
 
 
 class OcrProvenanceV2(WireModel):
-    schema_version: Literal["1.0"]
+    schema_version: Literal["2.0"]
     ledger_id: str = Field(pattern=r"^ocr_[a-f0-9]{64}$")
     provider_id: str = Field(min_length=1, max_length=128)
     engine_id: str = Field(min_length=1, max_length=128)
     engine_version: str = Field(min_length=1, max_length=128)
+    reading_order_policy_id: Literal["worker-emitted-sequence/v1"]
     model_id: str = Field(min_length=1, max_length=256)
     model_assets_lock_sha256: str = Field(pattern=r"^[a-f0-9]{64}$")
 

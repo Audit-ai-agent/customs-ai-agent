@@ -18,13 +18,25 @@ from PIL import Image
 from customs_ai_agent.adapters import build_ocr_layout_provider
 from customs_ai_agent.adapters import ocr as ocr_module
 from customs_ai_agent.adapters.ocr import OcrLayoutProviderError
+from customs_ai_agent import ocr_worker as worker_module
+from customs_ai_agent.ocr_reading_order import (
+    MAX_OCR_SPANS_PER_PAGE,
+    OcrSpanLimitExceededError,
+    preserve_provider_span_order,
+)
 from customs_ai_agent.ocr_worker import (
     _PaddleBackend,
     _confidence,
     _docling_document_to_spans,
     _paddle_result_to_spans,
+    _process_request,
 )
-from customs_ai_agent.schemas.models import ImagePageInput, ImagePageProvenance
+from customs_ai_agent.schemas.models import (
+    ImagePageInput,
+    ImagePageProvenance,
+    OcrLayoutLedger,
+    stable_ocr_ledger_id,
+)
 
 
 def _image_page() -> ImagePageInput:
@@ -59,6 +71,7 @@ def _ok_response(request: dict[str, Any]) -> dict[str, Any]:
             "provider_id": request["provider"],
             "engine_id": "test-engine",
             "engine_version": "1.2.3",
+            "reading_order_policy_id": "worker-emitted-sequence/v1",
             "model_id": "test-model-set",
             "model_assets_lock_sha256": "a" * 64,
             "pages": [
@@ -163,6 +176,7 @@ def test_provider_builds_deterministic_provenance_bound_ledger() -> None:
     assert first.provider_id == "paddle"
     assert first.engine_id == "test-engine"
     assert first.engine_version == "1.2.3"
+    assert first.reading_order_policy_id == "worker-emitted-sequence/v1"
     assert first.pages[0].image_sha256 == page.sha256
     assert first.pages[0].width_px == 100
     assert first.pages[0].height_px == 100
@@ -174,6 +188,457 @@ def test_provider_builds_deterministic_provenance_bound_ledger() -> None:
     assert worker.requests[0]["pages"][0]["data_base64"] == page.data_base64
     assert page.data_base64 not in first.model_dump_json()
     assert worker.closed
+
+
+def test_reading_order_policy_is_hash_bound_in_the_ledger_identity() -> None:
+    ledger = _provider_with_worker(_FakeWorker()).analyze(
+        document_id="invoice-policy-hash",
+        pages=[_image_page()],
+    )
+
+    different_policy_id = stable_ocr_ledger_id(
+        document_id=ledger.document_id,
+        provider_id=ledger.provider_id,
+        engine_id=ledger.engine_id,
+        engine_version=ledger.engine_version,
+        reading_order_policy_id="global-yx/v1",
+        model_id=ledger.model_id,
+        model_assets_lock_sha256=ledger.model_assets_lock_sha256,
+        pages=ledger.pages,
+    )
+
+    assert different_policy_id != ledger.ledger_id
+
+
+@pytest.mark.parametrize("policy", [None, "global-yx/v1", "worker-emitted-sequence/v2"])
+def test_provider_rejects_missing_or_unexpected_worker_order_policy(
+    policy: str | None,
+) -> None:
+    page = _image_page()
+
+    def response_with_policy(request: dict[str, Any]) -> dict[str, Any]:
+        response = _ok_response(request)
+        result = response["result"]
+        if policy is None:
+            result.pop("reading_order_policy_id")
+        else:
+            result["reading_order_policy_id"] = policy
+        return response
+
+    with pytest.raises(OcrLayoutProviderError) as captured:
+        _provider_with_worker(_FakeWorker(response_with_policy)).analyze(
+            document_id="invoice-order-policy",
+            pages=[page],
+        )
+
+    assert captured.value.code == "ocr_worker_result_invalid"
+
+
+def test_worker_success_envelope_emits_the_exact_reading_order_policy() -> None:
+    page = _image_page()
+
+    class Backend:
+        provider_id = "paddle"
+        engine_id = "fixture-engine"
+        engine_version = "1.0"
+        model_id = "fixture-model"
+        model_assets_lock_sha256 = "a" * 64
+
+        def analyze_page(self, **_kwargs: object) -> list[dict[str, Any]]:
+            return [
+                {
+                    "role": "text",
+                    "text": "Invoice",
+                    "bbox": [5, 5, 45, 15],
+                    "confidence": 0.99,
+                }
+            ]
+
+    response, returned_backend = _process_request(
+        {
+            "protocol": "customs-ocr-worker/v1",
+            "request_id": "ocrreq_policy",
+            "provider": "paddle",
+            "document_id": "invoice-policy-worker",
+            "pages": [
+                {
+                    "page_number": page.page_number,
+                    "media_type": page.media_type,
+                    "data_base64": page.data_base64,
+                    "byte_length": page.byte_length,
+                    "sha256": page.sha256,
+                    "width_px": page.width_px,
+                    "height_px": page.height_px,
+                }
+            ],
+        },
+        provider="paddle",
+        backend=cast(Any, Backend()),
+    )
+
+    assert returned_backend is not None
+    assert response["status"] == "ok"
+    assert response["result"]["reading_order_policy_id"] == "worker-emitted-sequence/v1"
+
+
+def test_paddle_converter_preserves_provider_native_sequence() -> None:
+    result = {
+        "res": {
+            "overall_ocr_res": {
+                # This explicit provider sequence intentionally differs from
+                # bbox y/x order. Geometry must not silently replace it.
+                "rec_texts": ["Right 2", "Header", "Left 1", "Footer", "Right 1", "Left 2"],
+                "rec_scores": [0.9] * 6,
+                "rec_boxes": [
+                    [65, 32, 100, 50],
+                    [0, 0, 100, 21],
+                    [0, 20, 35, 38],
+                    [0, 70, 100, 80],
+                    [65, 20, 100, 38],
+                    [0, 32, 35, 50],
+                ],
+            }
+        }
+    }
+
+    spans = _paddle_result_to_spans(
+        result,
+        page_number=1,
+        width_px=100,
+        height_px=100,
+    )
+
+    assert [span["text"] for span in spans] == [
+        "Right 2",
+        "Header",
+        "Left 1",
+        "Footer",
+        "Right 1",
+        "Left 2",
+    ]
+
+
+def test_docling_converter_preserves_provider_native_sequence() -> None:
+    class BoundingBox:
+        coord_origin = "TOPLEFT"
+
+        def __init__(self, left: int, top: int, right: int, bottom: int) -> None:
+            self.l = left
+            self.t = top
+            self.r = right
+            self.b = bottom
+
+    class Provenance:
+        confidence = 0.99
+
+        def __init__(self, bbox: BoundingBox) -> None:
+            self.bbox = bbox
+
+    class TextItem:
+        label = "text"
+
+        def __init__(self, text: str, bbox: BoundingBox, *, heading: bool = False) -> None:
+            self.text = text
+            self.prov = [Provenance(bbox)]
+            self.label = "section_heading" if heading else "text"
+
+    items = [
+        TextItem("Right 2", BoundingBox(65, 32, 100, 50)),
+        TextItem("Left 1", BoundingBox(0, 20, 35, 38)),
+        TextItem("Header", BoundingBox(0, 0, 100, 21), heading=True),
+        TextItem("Right 1", BoundingBox(65, 20, 100, 38)),
+        TextItem("Left 2", BoundingBox(0, 32, 35, 50)),
+    ]
+
+    class Document:
+        def iterate_items(self) -> list[tuple[object, int]]:
+            return [(item, 0) for item in items]
+
+    spans = _docling_document_to_spans(
+        Document(),
+        page_number=1,
+        width_px=100,
+        height_px=100,
+    )
+
+    assert [span["text"] for span in spans] == [
+        "Right 2",
+        "Left 1",
+        "Header",
+        "Right 1",
+        "Left 2",
+    ]
+
+
+def test_adapter_preserves_validated_worker_sequence_and_ledger_schema() -> None:
+    page = _image_page()
+
+    def shuffled_table_response(request: dict[str, Any]) -> dict[str, Any]:
+        response = _ok_response(request)
+        response["result"]["pages"][0]["spans"] = [
+            {
+                "role": "table_cell",
+                "text": "4",
+                "bbox": [60, 40, 90, 60],
+                "confidence": 0.94,
+                "table_key": "table-0",
+                "row_index": 1,
+                "column_index": 1,
+            },
+            {
+                "role": "text",
+                "text": "After table",
+                # Provider boxes may overlap the table edge slightly.
+                "bbox": [5, 59, 55, 75],
+                "confidence": 0.98,
+            },
+            {
+                "role": "table_row",
+                "text": "Widget | 2",
+                "bbox": [10, 20, 90, 40],
+                "confidence": 0.95,
+                "table_key": "table-0",
+                "row_index": 0,
+            },
+            {
+                "role": "table_cell",
+                "text": "Widget",
+                "bbox": [10, 20, 60, 40],
+                "confidence": 0.96,
+                "table_key": "table-0",
+                "row_index": 0,
+                "column_index": 0,
+            },
+            {
+                "role": "table",
+                "text": "Widget | 2 | Bolt | 4",
+                "bbox": [10, 20, 90, 60],
+                "confidence": 0.95,
+                "table_key": "table-0",
+            },
+            {
+                "role": "table_cell",
+                "text": "2",
+                "bbox": [60, 20, 90, 40],
+                "confidence": 0.94,
+                "table_key": "table-0",
+                "row_index": 0,
+                "column_index": 1,
+            },
+            {
+                "role": "text",
+                "text": "Before table",
+                "bbox": [5, 5, 55, 21],
+                "confidence": 0.99,
+            },
+            {
+                "role": "table_cell",
+                "text": "Bolt",
+                "bbox": [10, 40, 60, 60],
+                "confidence": 0.96,
+                "table_key": "table-0",
+                "row_index": 1,
+                "column_index": 0,
+            },
+            {
+                "role": "table_row",
+                "text": "Bolt | 4",
+                "bbox": [10, 40, 90, 60],
+                "confidence": 0.95,
+                "table_key": "table-0",
+                "row_index": 1,
+            },
+        ]
+        return response
+
+    ledger = _provider_with_worker(_FakeWorker(shuffled_table_response)).analyze(
+        document_id="invoice-table-order",
+        pages=[page],
+    )
+    spans = ledger.pages[0].spans
+
+    assert [(span.role, span.text) for span in spans] == [
+        ("table_cell", "4"),
+        ("text", "After table"),
+        ("table_row", "Widget | 2"),
+        ("table_cell", "Widget"),
+        ("table", "Widget | 2 | Bolt | 4"),
+        ("table_cell", "2"),
+        ("text", "Before table"),
+        ("table_cell", "Bolt"),
+        ("table_row", "Bolt | 4"),
+    ]
+    assert [span.reading_order for span in spans] == list(range(len(spans)))
+    assert len({span.table_id for span in spans if span.table_id is not None}) == 1
+    assert OcrLayoutLedger.model_validate(ledger.model_dump(mode="json")) == ledger
+
+
+def test_adapter_does_not_replace_worker_sequence_with_geometry() -> None:
+    page = _image_page()
+
+    def table_band_response(request: dict[str, Any]) -> dict[str, Any]:
+        response = _ok_response(request)
+        response["result"]["pages"][0]["spans"] = [
+            {
+                "role": "text",
+                "text": "Right 2",
+                "bbox": [65, 32, 100, 50],
+                "confidence": 0.9,
+            },
+            {
+                "role": "table_cell",
+                "text": "Widget",
+                "bbox": [0, 49, 50, 70],
+                "confidence": 0.95,
+                "table_key": "table-band",
+                "row_index": 0,
+                "column_index": 0,
+            },
+            {
+                "role": "text",
+                "text": "Left 1",
+                "bbox": [0, 20, 35, 38],
+                "confidence": 0.9,
+            },
+            {
+                "role": "table",
+                "text": "Widget | 2",
+                "bbox": [0, 49, 100, 70],
+                "confidence": 0.95,
+                "table_key": "table-band",
+            },
+            {
+                "role": "text",
+                "text": "Right 1",
+                "bbox": [65, 20, 100, 38],
+                "confidence": 0.9,
+            },
+            {
+                "role": "table_cell",
+                "text": "2",
+                "bbox": [50, 49, 100, 70],
+                "confidence": 0.95,
+                "table_key": "table-band",
+                "row_index": 0,
+                "column_index": 1,
+            },
+            {
+                "role": "text",
+                "text": "Left 2",
+                "bbox": [0, 32, 35, 50],
+                "confidence": 0.9,
+            },
+            {
+                "role": "table_row",
+                "text": "Widget | 2",
+                "bbox": [0, 49, 100, 70],
+                "confidence": 0.95,
+                "table_key": "table-band",
+                "row_index": 0,
+            },
+        ]
+        return response
+
+    ledger = _provider_with_worker(_FakeWorker(table_band_response)).analyze(
+        document_id="invoice-table-band",
+        pages=[page],
+    )
+
+    assert [(span.role, span.text) for span in ledger.pages[0].spans] == [
+        ("text", "Right 2"),
+        ("table_cell", "Widget"),
+        ("text", "Left 1"),
+        ("table", "Widget | 2"),
+        ("text", "Right 1"),
+        ("table_cell", "2"),
+        ("text", "Left 2"),
+        ("table_row", "Widget | 2"),
+    ]
+
+
+def test_adapter_rejects_span_count_before_normalization_or_ordering(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    page = _image_page()
+
+    def oversized_response(request: dict[str, Any]) -> dict[str, Any]:
+        response = _ok_response(request)
+        response["result"]["pages"][0]["spans"] = [
+            {
+                "role": "text",
+                "text": f"span-{index}",
+                "bbox": [1, 1 + index, 20, 2 + index],
+                "confidence": 0.9,
+            }
+            for index in range(3)
+        ]
+        return response
+
+    monkeypatch.setattr(ocr_module, "MAX_OCR_SPANS_PER_PAGE", 2)
+    monkeypatch.setattr(
+        ocr_module,
+        "preserve_provider_span_order",
+        lambda *_args, **_kwargs: pytest.fail("ordering must not run past the span cap"),
+    )
+
+    with pytest.raises(OcrLayoutProviderError) as captured:
+        _provider_with_worker(_FakeWorker(oversized_response)).analyze(
+            document_id="invoice-span-limit",
+            pages=[page],
+        )
+
+    assert captured.value.code == "ocr_span_limit_exceeded"
+
+
+def test_worker_rejects_span_count_before_reading_order(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    result = {
+        "res": {
+            "overall_ocr_res": {
+                "rec_texts": ["one", "two", "three"],
+                "rec_scores": [0.9, 0.9, 0.9],
+                "rec_boxes": [[0, 0, 10, 10], [0, 20, 10, 30], [0, 40, 10, 50]],
+            }
+        }
+    }
+    monkeypatch.setattr(worker_module, "MAX_OCR_SPANS_PER_PAGE", 2)
+    monkeypatch.setattr(
+        worker_module,
+        "preserve_provider_span_order",
+        lambda *_args, **_kwargs: pytest.fail("ordering must not run past the span cap"),
+    )
+
+    with pytest.raises(worker_module._SafeWorkerError) as captured:
+        _paddle_result_to_spans(
+            result,
+            page_number=1,
+            width_px=100,
+            height_px=100,
+        )
+
+    assert captured.value.code == "ocr_span_limit_exceeded"
+
+
+def test_provider_order_accepts_exact_span_boundary_and_rejects_one_more() -> None:
+    spans = [
+        {
+            "role": "text",
+            "text": f"line-{index}",
+            "bbox": [0, index * 2, 10, index * 2 + 1],
+        }
+        for index in range(MAX_OCR_SPANS_PER_PAGE)
+    ]
+
+    ordered = preserve_provider_span_order(spans)
+    assert len(ordered) == MAX_OCR_SPANS_PER_PAGE
+    assert ordered[0]["text"] == "line-0"
+    assert ordered[-1]["text"] == f"line-{MAX_OCR_SPANS_PER_PAGE - 1}"
+
+    with pytest.raises(OcrSpanLimitExceededError):
+        preserve_provider_span_order(
+            [*spans, {"role": "text", "text": "overflow", "bbox": [0, 0, 1, 1]}]
+        )
 
 
 def test_provider_rejects_raw_echo_and_never_leaks_it_in_error() -> None:

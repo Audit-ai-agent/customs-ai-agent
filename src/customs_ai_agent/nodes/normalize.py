@@ -1,7 +1,7 @@
 from __future__ import annotations
 
 import re
-from datetime import datetime
+from datetime import date, datetime
 from decimal import Decimal
 from typing import Any
 
@@ -47,26 +47,65 @@ def normalize_country(value: Any) -> str | None:
 def normalize_hs_code(value: Any) -> str | None:
     if value is None:
         return None
-    digits = re.sub(r"\D", "", str(value))
-    if not digits:
+    text = str(value).strip()
+    if not text:
         return None
-    return digits
+    # Only formatting separators used by legitimate HS/HSK displays may be
+    # removed.  Silently deleting letters or arbitrary punctuation can turn an
+    # untrusted value such as ``ABC731815`` into a different, apparently valid
+    # classification code and send the wrong scope to the Evidence Service.
+    compact = re.sub(r"[ .-]", "", text)
+    if not compact or re.fullmatch(r"[0-9]+", compact) is None:
+        return None
+    return compact
 
 
 def is_valid_hs_code(value: str | None) -> bool:
-    return bool(value and len(value) in {6, 10} and value.isdigit())
+    return bool(
+        isinstance(value, str) and re.fullmatch(r"(?:[0-9]{6}|[0-9]{10})", value) is not None
+    )
+
+
+def is_ambiguous_numeric_date(value: Any) -> bool:
+    if value is None:
+        return False
+    text = str(value).strip()
+    return len(_numeric_day_month_candidates(text)) > 1
+
+
+def _numeric_day_month_candidates(text: str) -> set[date]:
+    match = re.fullmatch(
+        r"([0-9]{1,2})([./-])([0-9]{1,2})\2([0-9]{4})",
+        text,
+    )
+    if match is None:
+        return set()
+    separator = match.group(2)
+    candidates: set[date] = set()
+    for fmt in (f"%m{separator}%d{separator}%Y", f"%d{separator}%m{separator}%Y"):
+        try:
+            candidates.add(datetime.strptime(text, fmt).date())
+        except ValueError:
+            continue
+    return candidates
 
 
 def normalize_date(value: Any) -> str | None:
     if value is None:
         return None
     text = str(value).strip()
-    formats = ["%Y.%m.%d", "%Y-%m-%d", "%m/%d/%Y", "%d/%m/%Y", "%b %d %Y", "%B %d %Y"]
+    formats = ["%Y.%m.%d", "%Y-%m-%d", "%b %d %Y", "%B %d %Y"]
     for fmt in formats:
         try:
             return datetime.strptime(text, fmt).date().isoformat()
         except ValueError:
             continue
+    numeric_candidates = _numeric_day_month_candidates(text)
+    if len(numeric_candidates) == 1:
+        return numeric_candidates.pop().isoformat()
+    # Two distinct valid interpretations are deliberately not resolved using
+    # an implicit locale.  Validation converts this None into a deterministic
+    # DATE_FORMAT_AMBIGUOUS issue and routes the run to HITL.
     return None
 
 

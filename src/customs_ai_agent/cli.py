@@ -609,6 +609,7 @@ def _build_live_retriever(
     retriever_options: dict[str, Any] = {
         "service_token": service_token,
         "token_header": token_header.strip(),
+        "contract_identity_mode": "required",
     }
     if allowed_origins:
         retriever_options["allowed_origins"] = allowed_origins
@@ -954,6 +955,7 @@ def _cmd_run(args: argparse.Namespace) -> int:
         retriever_options: dict[str, Any] = {
             "service_token": service_token,
             "token_header": token_header.strip(),
+            "contract_identity_mode": "required",
         }
         if allowed_origins:
             retriever_options["allowed_origins"] = allowed_origins

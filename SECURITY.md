@@ -54,6 +54,20 @@ container/seccomp, memory/CPU quota 같은 강제 격리는 운영 전 별도 �
 - worker의 stdout만 bounded JSON protocol로 처리하며 원문이 포함될 수 있는 stderr/provider
   exception을 공개 audit에 넣지 않는다.
 - OCR 미설치, timeout, crash, malformed output, provenance mismatch는 fail-closed한다.
+- worker 성공 envelope는 `reading_order_policy_id=worker-emitted-sequence/v1`을 반드시
+  emit한다. Agent adapter는 누락되거나 다른 policy를 거부하고, policy ID·ordered spans를
+  canonical ledger hash에 결박한다. geometry를 이용해 worker 순서를 조용히 바꾸지 않는다.
+- 현재 runtime OCR ledger는 internal/v2, `schema_version=2.0`이다. package의 internal/v1
+  schema는 역사 호환·감사용 리소스일 뿐이다. reading-order policy가 없던 v1 ledger와 이를
+  포함한 checkpoint는 hash가 맞아 보이더라도 현재 runtime provenance로 승격하거나
+  재사용하지 않는다.
+- benchmark Gold text는 `renderer-bbox-yx/v1`에 따라 renderer word bbox의 top-left y/x
+  시각 순서를 사용하고, prediction text는 ledger `reading_order`만 사용한다. bbox geometry로
+  worker/provider prediction 순서를 다시 만들지 않는다. 서로 다른 input image hash에서 얻은
+  과거 v1 CER `22.17%`와 rendered-v2 `17.07%`/`0%`를 전후 개선으로 비교하지 않는다.
+  CI/PL/B/L/C/O 각 1문서 ordering 감사에서 CER가 모두 `0%`였어도 table F1은 `0`이고
+  canonical 60+20이 아니며 durable Artifact Run으로 봉인되지 않은 non-release 진단이므로
+  provider PASS가 아니다.
 - Claude Vision Live evaluator와 제품 `review` CLI는 canonical 60+20 결합 Gate report의 exact
   hash, PASS provider/engine/wheel, provider별 dependency lock과 공통 model-assets lock을 OCR
   provider와 외부 호출 전에 대조한다. locked-only 또는 smoke report는 이 Gate를 통과하지 못한다.
@@ -74,8 +88,11 @@ container/seccomp, memory/CPU quota 같은 강제 격리는 운영 전 별도 �
 - runtime provider가 만든 각 ledger의 provider/engine/version, canonical model-set ID,
   model-assets lock SHA-256도 다시 대조하며, 불일치하면 Claude transport 전에 중단한다.
 - Live evaluator의 bounded prefix/subset 성공은 `DIAGNOSTIC_PASS`일 뿐 release PASS가 아니다.
-  3,000장 계열 평가는 adjudicated 12 Case/36문서 전체, rendered 평가는 locked 60+C/O 20
-  전체의 사전 고정 ID·count·hash가 맞을 때만 release score eligible이다.
+  과거 12 Case/36문서 Gold는 6개 Packing List 라벨에 pixel에 없는 `EE`가 추가돼 exact
+  SHA-256과 semantic fingerprint 모두 `invalidated_by_label_error`다. 따라서 현재 3,000장
+  계열 image 평가에는 release-score-eligible Gold가 없으며, 독립 사람 검수 replacement의
+  exact hash가 pin되기 전 evaluator는 외부 호출 전에 차단된다. rendered 평가는 별도로 locked
+  60+C/O 20 전체의 사전 고정 ID·count·hash가 맞아야 release score eligible이다.
 - Claude에는 검증된 image bytes와 OCR/layout 관측만 전달한다. arbitrary URL, local path, tool,
   DB write 권한을 주지 않는다.
 - structured candidate는 schema, document field allowlist, OCR span, exact text/value,
@@ -109,7 +126,11 @@ container/seccomp, memory/CPU quota 같은 강제 격리는 운영 전 별도 �
   고지받은 사용자의 명시적 승인이 없으면 실행하지 않는다.
 - `.env`에 key가 있다는 사실 자체는 전송 승인이 아니다. TASK-0009의 text 정상·adversarial 및
   공개 runtime Live는 별도의 명시적 사용자 승인 후 실행했으며, 이미지 전송·재실행도 계속
-  명시적인 opt-in과 비용 상한을 요구한다.
+  명시적인 opt-in과 비용 상한을 요구한다. 이 과거 c28 text 실행은 당시 정상 Gold
+  `7cfe2cf8e2b88e55f80398425e6866d52bfa85e0886ec8a4b5862f736e01c7e5`에 대한
+  결과이며, 현재 정상 Gold
+  `1e300058f6d01330e82002d04e1a3238f42aaceeb9dc5716653a2aa1c67634e0`과 post-c28
+  source의 Live PASS를 뜻하지 않는다.
 - Claude Live evaluator는 SDK `max_retries=0`을 강제하고 `--live`, call/input/output token
   budget을 모두 요구한다. 실패한 provider 시도도 call budget에서 제외하지 않는다.
 

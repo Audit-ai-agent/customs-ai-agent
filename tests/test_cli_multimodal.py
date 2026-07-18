@@ -1174,11 +1174,12 @@ def test_v2_result_contains_redacted_extracted_normalized_and_ocr_provenance() -
             "model_id": "claude-sonnet-5",
             "prompt_version": "1.2.0",
             "ocr_layout": {
-                "schema_version": "1.0",
+                "schema_version": "2.0",
                 "ledger_id": ledger_id,
                 "provider_id": "paddle-pp-structure-v3",
                 "engine_id": "paddleocr",
                 "engine_version": "3.7.0",
+                "reading_order_policy_id": "worker-emitted-sequence/v1",
                 "model_id": "test-paddle-model-set",
                 "model_assets_lock_sha256": "a" * 64,
             },
@@ -1209,6 +1210,8 @@ def test_v2_result_contains_redacted_extracted_normalized_and_ocr_provenance() -
 
     assert document["document_id"] == "doc-image"
     assert document["ocr_layout"]["ledger_id"] == ledger_id
+    assert document["ocr_layout"]["schema_version"] == "2.0"
+    assert document["ocr_layout"]["reading_order_policy_id"] == "worker-emitted-sequence/v1"
     assert result_field["value"] == "INV-001"
     assert result_field["normalized_value"] == "INV-001"
     assert result_field["source"]["ocr_span_ids"] == ["span-invoice-no"]
@@ -1353,20 +1356,33 @@ def test_validate_contract_cli_reports_only_contract_identity(
 
 
 @pytest.mark.parametrize(
-    ("scope", "kind", "expected_suffix"),
+    ("scope", "version", "kind", "expected_suffix"),
     [
-        ("internal", "ocr-layout-ledger", "/internal/v1/ocr-layout-ledger.schema.json"),
         (
             "internal",
+            "v1",
+            "ocr-layout-ledger",
+            "/internal/v1/ocr-layout-ledger.schema.json",
+        ),
+        (
+            "internal",
+            "v2",
+            "ocr-layout-ledger",
+            "/internal/v2/ocr-layout-ledger.schema.json",
+        ),
+        (
+            "internal",
+            "v1",
             "claude-vision-candidate",
             "/internal/v1/claude-vision-candidate.schema.json",
         ),
-        ("local", "review-manifest", "/local/v1/review-manifest.schema.json"),
+        ("local", "v1", "review-manifest", "/local/v1/review-manifest.schema.json"),
     ],
 )
 def test_export_schema_cli_exposes_packaged_non_backend_contracts(
     tmp_path: Path,
     scope: str,
+    version: str,
     kind: str,
     expected_suffix: str,
 ) -> None:
@@ -1379,7 +1395,7 @@ def test_export_schema_cli_exposes_packaged_non_backend_contracts(
                 "--scope",
                 scope,
                 "--version",
-                "v1",
+                version,
                 "--kind",
                 kind,
                 "--out",

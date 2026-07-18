@@ -28,6 +28,12 @@ from customs_ai_agent.ocr_identity import (
     OCR_MODEL_ASSETS_LOCK_SHA256,
     OCR_MODEL_SET_IDS,
 )
+from customs_ai_agent.ocr_reading_order import (
+    MAX_OCR_SPANS_PER_PAGE,
+    OCR_READING_ORDER_POLICY_ID,
+    OcrSpanLimitExceededError,
+    preserve_provider_span_order,
+)
 
 _PROTOCOL = "customs-ocr-worker/v1"
 _MAX_REQUEST_BYTES = 32 * 1024 * 1024
@@ -257,7 +263,7 @@ def _paddle_result_to_spans(
                 height_px=height_px,
             )
         )
-    return _sort_spans(spans)
+    return _provider_span_order(spans)
 
 
 def _paddle_tables(root: object) -> list[object]:
@@ -422,7 +428,7 @@ def _docling_document_to_spans(
                 "confidence": _docling_confidence(item),
             }
         )
-    return _sort_spans(spans)
+    return _provider_span_order(spans)
 
 
 def _docling_items(document: object) -> list[object]:
@@ -771,25 +777,13 @@ def _union_bbox(boxes: Sequence[Sequence[float]]) -> list[float]:
     ]
 
 
-def _sort_spans(spans: list[dict[str, Any]]) -> list[dict[str, Any]]:
-    role_order = {
-        "heading": 0,
-        "text": 1,
-        "table": 2,
-        "table_row": 3,
-        "table_cell": 4,
-    }
-    return sorted(
-        spans,
-        key=lambda span: (
-            round(float(span["bbox"][1]), 4),
-            round(float(span["bbox"][0]), 4),
-            role_order.get(str(span["role"]), 9),
-            int(span.get("row_index", -1)),
-            int(span.get("column_index", -1)),
-            str(span["text"]),
-        ),
-    )
+def _provider_span_order(spans: list[dict[str, Any]]) -> list[dict[str, Any]]:
+    if len(spans) > MAX_OCR_SPANS_PER_PAGE:
+        raise _SafeWorkerError("ocr_span_limit_exceeded")
+    try:
+        return preserve_provider_span_order(spans)
+    except OcrSpanLimitExceededError as exc:
+        raise _SafeWorkerError("ocr_span_limit_exceeded") from exc
 
 
 def _version_string(packages: Sequence[str]) -> str:
@@ -911,6 +905,8 @@ def _process_request(
         result_pages: list[dict[str, Any]] = []
         for raw, metadata in validated:
             spans = backend.analyze_page(raw=raw, **metadata)
+            if len(spans) > MAX_OCR_SPANS_PER_PAGE:
+                raise _SafeWorkerError("ocr_span_limit_exceeded")
             result_pages.append(
                 {
                     "page_number": metadata["page_number"],
@@ -924,6 +920,7 @@ def _process_request(
                     "provider_id": backend.provider_id,
                     "engine_id": backend.engine_id,
                     "engine_version": backend.engine_version,
+                    "reading_order_policy_id": OCR_READING_ORDER_POLICY_ID,
                     "model_id": backend.model_id,
                     "model_assets_lock_sha256": backend.model_assets_lock_sha256,
                     "pages": result_pages,

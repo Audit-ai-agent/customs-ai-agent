@@ -170,6 +170,7 @@ def _evidence_options(
         "service_token": token if token else None,
         "token_header": token_header.strip(),
         "allowed_origins": allowed_origins,
+        "contract_identity_mode": "required",
     }
     runtime_options: dict[str, Any] = {
         "evidence_service_token": SecretStr(token) if token else None,

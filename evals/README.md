@@ -81,11 +81,14 @@ uv run python evals/run_evidence_live.py `
 ```
 
 이 경로는 한 workflow가 `needs_review`로 안전하게 닫히는지를 확인해도 항상 nonzero로 종료하고
-report status를 `BLOCKED`로 유지한다. 2026-07-18 TASK-0009 pre-release 진단에서는 readiness가 실패한
-3/58 corpus snapshot에 한 workflow를 실행했고, partial/unknown coverage와 ambiguous HS를
-`needs_review`로 닫아 `fail_closed_policy_passed=true`를 확인했다. 그러나
-`release_readiness_passed=false`이므로 Evidence Live/Release PASS가 아니다. redacted report
-SHA-256은
+report status를 `BLOCKED`로 유지한다. 2026-07-18 TASK-0009의 **runtime identity 강제 전**
+진단에서는 readiness가 실패한 3/58 corpus snapshot에 한 workflow를 실행했고,
+partial/unknown coverage와 ambiguous HS를 `needs_review`로 닫아
+`fail_closed_policy_passed=true`를 확인했다. 그러나 현재 evaluator는
+`contract_identity_mode=required`이고 Data readiness에는 필수 `evidence_contract`가 없다.
+따라서 현재 같은 명령은 retrieval POST 전에 차단되며, 과거 workflow 실행을 현재
+Agent–Data Live E2E로 재사용할 수 없다. 과거에도 `release_readiness_passed=false`였으므로
+Evidence Live/Release PASS가 아니다. 역사 redacted report SHA-256은
 `29277a6d8a9181843f811ae68c8a505b7f31fc97efdb5865f7658e73b937bcae`다.
 
 Evidence consumer snapshot의 고정 SHA-256은
@@ -157,12 +160,20 @@ uv run python evals/run_claude_live.py `
 `EXPLICIT_MOCK_NOT_LIVE_RAG`이며 Agent–Data 통합 증거가 아니다.
 
 위 명령은 재현 예시다. 사용자가 합성 fixture의 Anthropic 전송과 Claude API 사용을 승인한 뒤
-EVAL-0011에서 exhaustive text 정상 64/64, prompt-injection 21/21 exact와 hallucinated 0을
-실제로 확인했다. 공개 `AgentRuntime → Claude → Evidence HTTP`도 Claude 문서 처리 4/4와
-fail-closed 결과를 확인했지만, Data 법령 corpus readiness가 58개 중 3개 loaded 상태라 전체
-판정은 `BLOCKED_DATA_READINESS`, `release_ready=false`다. 따라서 과거
-`NOT_EXECUTED_EXTERNAL_TRANSFER_APPROVAL_REQUIRED` 기록은 EVAL-0011로 대체됐다. evaluator는
-SDK retry를 0으로 강제하고, 실패한 main/crop 시도도 `--max-calls` 예산을 소비한다.
+EVAL-0011의 과거 c28 실행은 정상 Gold
+`7cfe2cf8e2b88e55f80398425e6866d52bfa85e0886ec8a4b5862f736e01c7e5`에서
+64/64, adversarial Gold
+`b4416cbad6df9fba62f2f636c4267a348bf5f11a1d3b78771aee8b16786db661`에서 21/21
+exact와 hallucinated 0을 기록했다. 현재 정상 Gold는 ISO 6346 교정 뒤
+`1e300058f6d01330e82002d04e1a3238f42aaceeb9dc5716653a2aa1c67634e0`으로 바뀌었고
+post-c28 source와 함께 아직 Live 재실행하지 않았다.
+
+같은 과거 공개 `AgentRuntime → Claude → Evidence HTTP`도 Claude 문서 처리 4/4 뒤,
+runtime identity 강제 전 Data endpoint에 POST하여 fail-closed 결과를 확인했다. 현재는 Data
+readiness에 필수 `evidence_contract` identity가 없고 법령 corpus도 58개 중 3개 loaded라
+POST 전에 차단된다. 따라서 성공하는 현재 Agent–Data Live E2E는 없고, 과거 판정도
+`BLOCKED_DATA_READINESS`, `release_ready=false`다. evaluator는 SDK retry를 0으로 강제하고,
+실패한 main/crop 시도도 `--max-calls` 예산을 소비한다.
 
 ## Image Gold 격리와 adjudication Gate
 
@@ -181,10 +192,10 @@ Claude Vision evaluator는 다음 네 증거가 모두 일치하기 전에는 pr
 4. selection/worklist/gate hash와 36개 source image hash에 결박된 별도
    `trade-image-adjudicated-gold/v1` manifest
 
-2026-07-18 기준 12개 Case/36개 image는 서로 다른 두 **독립 AI 시각 reviewer**가 검토했고
-별도 canonical 경로에서 `passed_two_reviewer_adjudication`이 됐다. 이것은 사람 검수
-완료를 뜻하지 않는다. reviewer independence는 서로 다른 ID·파일·attestation으로 구조적으로
-검증했을 뿐 외부에서 독립성을 증명한 것도 아니다.
+2026-07-18에 12개 Case/36개 image를 두 AI 시각 reviewer가 검토했고 당시 도구는
+`passed_two_reviewer_adjudication`으로 판정했다. 후속 source-pixel 재감사에서 6개
+Packing List의 B/L label에 원본 픽셀에 없는 suffix가 확인됐다. 합의한 AI reviewer 두 개는
+정답 독립성을 제공하지 못했으므로 해당 Gold 전체를 영구 무효화했다.
 
 ```text
 _artifacts/datasets/trade_documents_images/source-v1/derived/
@@ -203,9 +214,26 @@ _artifacts/datasets/trade_documents_images/source-v1/derived/
 - reviewer B: `cf1e88964bc69e06085959b09490c491802609a68abb584d8019e7d920ecd38a`
 - worklist: `74b9ba353520dc15834353023ef2c96e7399c655b63c75ff6cc097fa97874c70`
 - gate: `3c03dc8a592cf70551079606676e218fadbc77d5762c1ac70a627f16a24621b2`
-- Gold: `75364e7c07f72633f06735fd1f4f36c719b54498c38eba2f43cb11500aca15c6`
+- 무효화된 Gold:
+  `75364e7c07f72633f06735fd1f4f36c719b54498c38eba2f43cb11500aca15c6`
 - reconciliation report:
   `c9bdd9a8f18a52a44f885e5bcc900308430bec258a85aaa9f68f220d862b9c8b`
+
+위 Gold와 이를 사용한 모든 report는
+`adjudicated_gold_invalidated_by_label_error`이며 정확도·진단·release 점수로 재사용할 수
+없다. runner와 builder는 exact byte hash뿐 아니라 output 경로, `gold_set_id`, JSON formatting,
+reviewer reference를 제외한 source-bound value semantics hash
+`ba07c100b59bcad78b9383f67b21dd0581a284baf64ccbe16c585728cdae7133`도 차단한다.
+독립 사람 검수를 완료한 replacement Gold가 새 exact hash로 발행·승인되기 전에는 canonical
+image Gold가 없다.
+
+Vision evaluator의 기존 code-owned prompt pin은 commit `8fe0058`의 1.2.0 hash
+`531ad80b62016c5bd65ea292ac584f36413dfb230b13cffb5761b6862d1705ba`다.
+commit `c28e72d`에서 runtime prompt를 1.3.0으로 바꾸었고 현재 hash는
+`8d64bfa5673f90e092e56740e732ba07012e566fffec154457b59ca35590f3c8`이지만, 별도 평가
+승인 없이 evaluator pin을 자동 갱신하지 않는다. 따라서 replacement Gold와 prompt 변경을
+각각 승인하기 전까지 `adjudicated_gold_replacement_not_provisioned`와
+`prompt_hash_mismatch`가 fail-closed blocker다.
 
 과거
 `derived/diagnostic-selection/v1/{adjudications.jsonl,gate.json}`은
@@ -221,9 +249,16 @@ HTTP를 확인하는 별도 opt-in 진단기다. raw OCR provider를 공개 `Age
 않는다. `--live`와 `--nonrelease-ocr-diagnostic`을 동시에 요구하고, OCR provider/Python,
 env file, Evidence base URL, review date도 명시해야 한다.
 
+현재 고정 Case 0097이 포함된 Gold가 무효화됐고 replacement hash가 설정되지 않았으므로 이
+진단기는 OCR·Claude·network 생성 전에
+`adjudicated_gold_invalidated_by_label_error` 또는
+`adjudicated_gold_replacement_not_provisioned`로 중단한다.
+
 이 진단기는 OCR release Gate를 우회하거나 Paddle/Docling 중 하나를 release provider로
-선정하지 않는다. 결과 status도 `DIAGNOSTIC_PASS` 또는 `BLOCKED_DATA_READINESS`뿐이며 항상
-`release_ready=false`다. Data readiness 503 이후 실행은
+선정하지 않는다. 결과 status는 `PREFLIGHT_BLOCKED`, `BLOCKED_EVALUATION_ASSET`,
+`DIAGNOSTIC_EXECUTION_FAILED`, `BLOCKED_DATA_READINESS`, `DIAGNOSTIC_PASS`를 구분하며 항상
+`release_ready=false`다. 특히 Gold·source hash 문제를 Data readiness 실패로 기록하지 않는다.
+Data readiness 503 이후 실행은
 `--allow-unready-diagnostic`에서만 허용하고 불완전 Evidence가 자동 완료되지 않는지만
 fail-closed로 확인한다. Report에는 source 값, OCR text, 추출값, 파일 위치, network
 destination, credential, raw provider metadata를 기록하지 않는다.
@@ -256,7 +291,7 @@ $OcrEnvironmentLock = "<SELECTED_PROVIDER_REQUIREMENTS_LOCK>"
 $OcrEnvironmentLockSha256 = "<SELECTED_PROVIDER_REQUIREMENTS_LOCK_SHA256>"
 $OcrModelAssetsLock = "evals\ocr_environments\v1\model-assets.lock.json"
 $OcrModelAssetsLockSha256 = "<MODEL_ASSETS_LOCK_SHA256>"
-uv run python evals/run_claude_vision.py `
+uv run python -m evals.run_claude_vision `
   --live `
   --env-file ..\_secrets\.env `
   --dataset-root "$Dataset\raw" `
@@ -280,11 +315,16 @@ uv run python evals/run_claude_vision.py `
   --max-total-output-tokens 16384
 ```
 
-위 `--max-documents 1` 실행은 비용 제한 진단이며, 모든 metric을 만족해도
-`status=DIAGNOSTIC_PASS`, `release_score_eligible=false`다. 이 evaluator에서 release
-`PASS`가 되려면 `--case-id`와 `--document-id`를 사용하지 않고, two-reviewer Gate가 고정한
-12개 Case의 36개 문서를 `--max-documents 36`으로 정확히 모두 평가해야 한다. Case나 문서가
-하나라도 빠지면 release 점수로 승격되지 않는다.
+위 명령은 향후 독립 사람 검수 replacement Gold와 모든 exact pin이 준비된 뒤 사용할
+비용 제한 진단 예시다. 현재는 replacement Gold가 없고 과거 12 Case/36문서 Gold가
+영구 무효이므로, 문서 수와 관계없이 provider 생성 전에
+`run_claude_vision` report의 `status=FAIL`, failure code
+`BLOCKED_EVALUATION_ASSET`으로 종료한다. 위의 별도 `run_image_runtime_diagnostic`은 같은
+자산 문제를 report `status=BLOCKED_EVALUATION_ASSET`으로 기록한다. 향후
+`--max-documents 1` 실행도 모든 metric을 만족하더라도 `status=DIAGNOSTIC_PASS`,
+`release_score_eligible=false`다. Release 판정의 분모·coverage 조건은 새 사람 검수 Gold와
+sealed holdout protocol에서 별도로 고정해야 하며, 무효화된 과거 12 Case 기준을 재사용하지
+않는다.
 
 `--workflow`는 field Gold만으로 outcome을 점수화하지 못하므로 별도 adjudicated Outcome
 Gold가 생기기 전까지 항상 차단된다.
@@ -391,6 +431,41 @@ Paddle 후보는 Windows CPU 환경에서 native crash 없이 실행 가능한
 Windows native access violation으로 종료돼 release 후보에서 제외했다. 이는 임계치를 낮춘 것이
 아니다. 기준은 critical identifier exact 1.0, CER 0.01 이하, table row/cell F1 0.98 이상,
 bbox F1@IoU 0.5 0.95 이상, crash 0이다.
+
+OCR text metric의 순서 계약은 다음처럼 고정한다.
+
+- Gold text: `renderer-bbox-yx/v1`
+  - renderer `layout.json` word bbox의 top-left y/x
+  - 같은 좌표는 source array index로 tie-break
+- Prediction text: OCR ledger span의 명시적 `reading_order`
+- bbox/polygon: Gold 시각 순서와 bbox·layout metric에 사용하되 prediction 순서를 바꾸지 않음
+
+worker의 성공 envelope는
+`reading_order_policy_id=worker-emitted-sequence/v1`을 emit하고 adapter는 그 exact 값을
+검증한다. policy ID와 ordered spans는 ledger hash에 결박된다. 현재 runtime ledger는
+`schema_version=2.0`과 packaged `internal/v2/ocr-layout-ledger` 계약을 사용한다.
+`internal/v1` schema는 역사 호환·감사용 package resource로만 남기며, policy가 없던 v1
+ledger/checkpoint는 현재 runtime provenance 또는 benchmark 입력으로 재사용하지 않는다.
+
+측정 이력은 입력 identity별로 분리한다.
+
+- 과거 pre-policy internal/v1 1문서 smoke: Paddle CER `22.17%`, table row/cell F1 `0/0`
+- 현재 rendered-v2에서 관찰한 CER `17.07%`와 `0%`: 과거 v1 smoke와 image hash가 다르므로
+  `22.17% → 17.07%/0%` 개선으로 비교 금지
+- 선행 고정 1문서 ordering 실험: prediction XY-cut CER `44.08%`, Paddle native source
+  order CER `0%`
+- 현재 CI/PL/B/L/C/O 각 1문서 unsealed ordering 감사:
+  - worker/source order vs Gold bbox-yx CER: 문서별 `0%`, micro `0%`
+  - renderer array order counterfactual CER: `23.31%`, `19.30%`, `29.58%`, `21.19%`,
+    micro `24%`
+  - OCR line geometry resort counterfactual: micro CER `36.55%`
+  - table row/cell F1: 모든 문서 `0/0`
+
+이 감사는 Gold의 시각 순서와 worker-attested prediction 순서가 선택한 4문서에서 일치하고,
+renderer 배열 또는 prediction geometry resort가 의미 순서를 훼손한다는 것을 확인한
+non-release 개발 진단이다. durable Artifact Run으로 봉인된 권위 있는 평가가 아니며 OCR text
+자체의 전체 corpus 정확도나 Paddle production PASS를 뜻하지 않는다. canonical 60+20이
+아니므로 `selection_status=NO_PROVIDER_PASSED`와 선택 provider 없음 상태를 유지한다.
 
 결합기는 smoke를 release 분모에서 제외하고, 두 report의 Schema·descriptor·dataset·threshold·
 wheel·provider별 dependency lock·공통 model-assets lock·provider engine identity가 모두 같을

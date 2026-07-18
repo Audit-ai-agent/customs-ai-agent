@@ -58,12 +58,17 @@ adjudicator ID·독립성 확인·resolution을 요구한다. 도구는 기존 w
 통과하더라도 `schemas/adjudicated-gold.schema.json`을 만족하고 selection/worklist/gate hash와
 12개 case·36개 source image hash에 결박된 별도 Gold manifest가 있어야 점수화를 시작한다.
 
-## 현재 canonical adjudicated Gold
+## 무효화된 12-Case adjudicated Gold
 
-2026-07-18에 서로 다른 두 **독립 AI 시각 reviewer**가 hash로 고정된 12개 full triplet을
-각각 검토했다. reconciliation은 reviewer ID·파일·독립 검수 attestation과 36개 source image
-hash를 구조적으로 대조했고, 12개 모두 `adjudicated`, `gold_eligible=true`로 판정했다.
-이 증거는 사람 검수 완료를 주장하지 않으며 reviewer independence를 외부에서 증명하지도 않는다.
+2026-07-18에 서로 다른 두 **AI 시각 reviewer**가 hash로 고정된 12개 full triplet을
+각각 검토했고 당시 도구는 12개 모두 `adjudicated`, `gold_eligible=true`로 판정했다.
+후속 source-pixel 재감사에서 6개 Packing List의 B/L label에 원본 픽셀에는 없는 suffix가
+포함된 사실을 확인했다. 두 reviewer의 합의는 정답성을 보장하지 않았으므로 이 Gold 전체와
+이를 사용한 report를 `adjudicated_gold_invalidated_by_label_error`로 영구 무효화한다.
+exact Gold hash뿐 아니라 output 경로, `gold_set_id`, JSON formatting, reviewer reference를
+제외한 source-bound value semantics hash
+`ba07c100b59bcad78b9383f67b21dd0581a284baf64ccbe16c585728cdae7133`도 code-owned
+invalidation으로 고정한다.
 
 최초 `derived/diagnostic-selection/v1` worklist와 Gate는 12개
 `pending_first_review`인 역사적 snapshot으로 그대로 보존한다. 현재 점수화에 사용하는
@@ -86,15 +91,14 @@ _artifacts/datasets/trade_documents_images/source-v1/derived/
 | reviewer B | `cf1e88964bc69e06085959b09490c491802609a68abb584d8019e7d920ecd38a` |
 | canonical worklist | `74b9ba353520dc15834353023ef2c96e7399c655b63c75ff6cc097fa97874c70` |
 | canonical Gate | `3c03dc8a592cf70551079606676e218fadbc77d5762c1ac70a627f16a24621b2` |
-| adjudicated Gold | `75364e7c07f72633f06735fd1f4f36c719b54498c38eba2f43cb11500aca15c6` |
+| 무효화된 adjudicated Gold | `75364e7c07f72633f06735fd1f4f36c719b54498c38eba2f43cb11500aca15c6` |
 | reconciliation report | `c9bdd9a8f18a52a44f885e5bcc900308430bec258a85aaa9f68f220d862b9c8b` |
 
-reconciliation 결과는 source observation 일치 6 Case와 source discrepancy 확인 6 Case다.
-값을 자동 수정하지 않았고, 보이는 관측값과 확인된 source discrepancy를 그대로 보존했다.
-다만 생성자의 결함 주입 의도는 확인되지 않았으므로 source discrepancy를 곧바로 업무 위반이나
-데이터 생성 오류로 해석하지 않는다.
-이 Gold의 허용 범위는 Claude Vision field extraction뿐이다. workflow Outcome, OCR provider
-정확도, 전체 3,000장 대표성 또는 production readiness를 점수화하지 않는다.
+과거 reconciliation의 source observation 일치/불일치 판정과 모든 성능 수치는 release 또는
+diagnostic 점수로 재사용하지 않는다. 원본 이미지는 수정하지 않고, 새 Gold는 서로 독립된
+사람 검수와 resolution을 완료한 뒤 새로운 hash로만 발행한다. 현재 runner와 builder는 위
+무효 Gold를 경로 변경이나 재생성으로 되살릴 수 없도록 exact byte hash와 value semantics
+hash 기준으로 차단한다.
 
 0001·0041·0500의 과거 잘못된 suffix 주장을 무효화한 직접 시각 검수는 별도의 correction
 provenance다. 위 hash-ranked 12 Case adjudication과 같은 표본이 아니며, 그 정정 이력만으로
@@ -110,8 +114,9 @@ source field와 좌표를 평가하므로, 사람이 만든 3,000장 이미지 c
 독립적이다.
 
 - rendered Gold Claude 평가는 합성 renderer 회귀와 field/layout 추출 정확도만 주장한다.
-- 12-triplet adjudicated Gold 평가는 제공된 JPEG template corpus의 독립 AI 시각 검수 범위만
-  주장한다.
+- 과거 12-triplet adjudicated Gold는 파생 라벨 오류로 무효화됐으므로 현재 어떤 점수도
+  주장하지 않는다. 독립 사람 검수 replacement가 별도 exact hash로 승인된 뒤에만 해당 JPEG
+  template corpus의 제한된 field-extraction 평가를 재개할 수 있다.
 - 어느 결과도 OCR provider, 실제 스캔 대표성, RAG, workflow outcome, Backend 저장, 시스템
   release를 자동으로 증명하지 않는다.
 - 두 dataset의 score, 분모, artifact hash, report scope를 합치지 않는다.

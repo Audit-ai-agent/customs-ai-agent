@@ -212,6 +212,7 @@ def test_runtime_config_and_composition_wire_claude_ocr_and_evidence(
         "allowed_origins": frozenset(),
         "timeout_seconds": 12.0,
         "max_retries": 2,
+        "contract_identity_mode": "required",
     }
     assert captured["run_options"] == {
         "retriever": captured["retriever"],
@@ -231,6 +232,45 @@ def test_runtime_config_rejects_raw_ocr_provider_for_service_use() -> None:
             claude_settings=_settings(),
             evidence_base_url="http://127.0.0.1:8010",
             ocr_layout_provider=_FakeOcrProvider(),
+        )
+
+
+def test_runtime_contract_identity_handshake_is_required_by_default(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    captured = _patch_runtime_dependencies(monkeypatch)
+
+    AgentRuntime(
+        RuntimeConfig(
+            claude_settings=_settings(),
+            evidence_base_url="http://127.0.0.1:8010",
+        )
+    )
+
+    assert captured["retriever_options"]["contract_identity_mode"] == "required"
+
+
+def test_service_runtime_rejects_optional_contract_identity_mode() -> None:
+    with pytest.raises(
+        RuntimeConfigurationError,
+        match="evidence_contract_identity_mode_invalid",
+    ):
+        RuntimeConfig(
+            claude_settings=_settings(),
+            evidence_base_url="http://127.0.0.1:8010",
+            evidence_contract_identity_mode="optional",  # type: ignore[arg-type]
+        )
+
+
+def test_runtime_rejects_disabled_or_unknown_contract_identity_mode() -> None:
+    with pytest.raises(
+        RuntimeConfigurationError,
+        match="evidence_contract_identity_mode_invalid",
+    ):
+        RuntimeConfig(
+            claude_settings=_settings(),
+            evidence_base_url="http://127.0.0.1:8010",
+            evidence_contract_identity_mode="disabled",  # type: ignore[arg-type]
         )
 
 

@@ -210,8 +210,9 @@ def _patch_live(
     *,
     readiness: date | Exception = date(2026, 7, 10),
 ) -> None:
-    def ready(*_args: Any, **_kwargs: Any) -> date:
+    def ready(*_args: Any, **kwargs: Any) -> date:
         captured.setdefault("order", []).append("readiness")
+        captured["readiness_options"] = kwargs
         if isinstance(readiness, Exception):
             raise readiness
         return readiness
@@ -276,7 +277,8 @@ def test_explicit_flags_are_required_before_any_preflight_or_call(
     )
 
     assert exit_code == 1
-    assert report["status"] == "BLOCKED_DATA_READINESS"
+    assert report["status"] == "PREFLIGHT_BLOCKED"
+    assert report["phase"] == "PREFLIGHT_BLOCKED"
     assert report["release_ready"] is False
     assert set(report["error_codes"]) == {
         "live_flag_required",
@@ -311,6 +313,7 @@ def test_ready_service_runs_public_runtime_and_stays_nonrelease(
         "provider",
         "diagnostic_review",
     ]
+    assert captured["readiness_options"]["contract_identity_mode"] == "required"
     assert captured["provider"].closed is True
     assert len(captured["request"].documents) == 3
     assert all(document.image_pages for document in captured["request"].documents)
@@ -337,6 +340,31 @@ def test_unready_data_requires_override_before_provider_or_claude(
     assert report["status"] == "BLOCKED_DATA_READINESS"
     assert report["data_readiness_status"] == "UNREADY_503"
     assert report["error_codes"] == ["evidence_readiness_unready_503"]
+
+
+def test_missing_evidence_contract_identity_fails_before_provider_or_claude(
+    monkeypatch: pytest.MonkeyPatch,
+    tmp_path: Path,
+) -> None:
+    _, fixed = _canonical_fixture(monkeypatch, tmp_path)
+    captured: dict[str, Any] = {"order": []}
+    _patch_live(
+        monkeypatch,
+        _result(fixed),
+        captured,
+        readiness=RetrievalError(
+            "Evidence Service readiness request failed: contract identity missing"
+        ),
+    )
+
+    exit_code, report = _evaluate(env_file=_env_file(tmp_path))
+
+    assert exit_code == 1
+    assert captured["order"] == ["readiness"]
+    assert captured["readiness_options"]["contract_identity_mode"] == "required"
+    assert report["status"] == "BLOCKED_DATA_READINESS"
+    assert report["data_readiness_status"] == "FAILED"
+    assert report["error_codes"] == ["evidence_contract_identity_missing"]
 
 
 def test_unready_override_runs_fail_closed_and_never_becomes_release_pass(
@@ -386,6 +414,8 @@ def test_tampered_canonical_image_fails_before_network_or_provider(
     exit_code, report = _evaluate(env_file=_env_file(tmp_path))
 
     assert exit_code == 1
+    assert report["status"] == "BLOCKED_EVALUATION_ASSET"
+    assert report["phase"] == "PREFLIGHT_BLOCKED"
     assert report["error_codes"] == ["fixed_source_image_hash_mismatch"]
 
 
@@ -414,7 +444,39 @@ def test_missing_canonical_tree_never_falls_back_to_root_reference(
     exit_code, report = _evaluate(env_file=_env_file(tmp_path))
 
     assert exit_code == 1
+    assert report["status"] == "BLOCKED_EVALUATION_ASSET"
     assert report["error_codes"] == ["canonical_dataset_or_gold_missing"]
+
+
+def test_explicitly_invalidated_gold_never_reaches_provider_or_network(
+    monkeypatch: pytest.MonkeyPatch,
+    tmp_path: Path,
+) -> None:
+    _canonical_fixture(monkeypatch, tmp_path)
+    observed_hash = _sha256(diagnostic.CANONICAL_GOLD_FILE)
+    monkeypatch.setattr(
+        diagnostic,
+        "image_gold_invalidation_code",
+        lambda digest: (
+            "adjudicated_gold_invalidated_by_label_error" if digest == observed_hash else None
+        ),
+    )
+    monkeypatch.setattr(
+        diagnostic,
+        "fetch_supported_review_as_of",
+        lambda *_args, **_kwargs: pytest.fail("network must not run"),
+    )
+    monkeypatch.setattr(
+        diagnostic,
+        "build_ocr_layout_provider",
+        lambda *_args, **_kwargs: pytest.fail("provider must not run"),
+    )
+
+    exit_code, report = _evaluate(env_file=_env_file(tmp_path))
+
+    assert exit_code == 1
+    assert report["status"] == "BLOCKED_EVALUATION_ASSET"
+    assert report["error_codes"] == ["adjudicated_gold_invalidated_by_label_error"]
 
 
 def test_report_omits_values_locations_destinations_credentials_and_ids(
@@ -468,7 +530,8 @@ def test_provider_failure_is_reduced_to_safe_code(
     serialized = json.dumps(report)
 
     assert exit_code == 1
-    assert report["status"] == "BLOCKED_DATA_READINESS"
+    assert report["status"] == "DIAGNOSTIC_EXECUTION_FAILED"
+    assert report["phase"] == "EXECUTION_BLOCKED"
     assert report["error_codes"] == ["ocr_worker_failed"]
     assert private_detail not in serialized
 
@@ -508,6 +571,7 @@ def test_claude_failure_is_reduced_to_safe_code(
     serialized = json.dumps(report)
 
     assert exit_code == 1
+    assert report["status"] == "DIAGNOSTIC_EXECUTION_FAILED"
     assert report["error_codes"] == ["provider_unavailable"]
     assert private_detail not in serialized
     assert "PRIVATE-PROVIDER-ID" not in serialized

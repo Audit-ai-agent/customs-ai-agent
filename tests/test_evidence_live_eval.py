@@ -100,6 +100,54 @@ def test_without_live_flag_is_preflight_only_and_never_calls_network(
     assert report["contract"]["consumer_matches_pinned_schema"] is True
 
 
+def test_current_data_readiness_without_identity_can_never_be_a_release_pass(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    _clear_evidence_environment(monkeypatch)
+    methods: list[str] = []
+
+    class Response:
+        def __enter__(self):
+            return self
+
+        def __exit__(self, *_args):
+            return None
+
+        def read(self, _size: int = -1) -> bytes:
+            return json.dumps(
+                {
+                    "status": "ready",
+                    "knowledge_snapshot_id": "current-data-snapshot",
+                    "supported_review_as_of": "2026-07-10",
+                    "law_corpus": {"status": "ready"},
+                    "law_index": {"status": "ready"},
+                }
+            ).encode("utf-8")
+
+    def current_data_readiness(request, **_kwargs):
+        methods.append(request.get_method())
+        return Response()
+
+    monkeypatch.setattr(
+        "customs_ai_agent.adapters.retrieval.urlopen",
+        current_data_readiness,
+    )
+    monkeypatch.setattr(
+        run_evidence_live,
+        "run_review",
+        lambda *_args, **_kwargs: pytest.fail("workflow must not run"),
+    )
+
+    exit_code, report = run_evidence_live.evaluate(live=True)
+
+    assert exit_code == 1
+    assert report["status"] == "FAIL"
+    assert report["readiness_status"] == "failed"
+    assert report["failures"] == [{"code": "evidence_readiness_failed"}]
+    assert methods
+    assert set(methods) == {"GET"}
+
+
 def test_complete_http_contract_path_passes_once_and_uses_readiness_date(
     monkeypatch: pytest.MonkeyPatch,
     tmp_path: Path,
@@ -148,6 +196,7 @@ def test_complete_http_contract_path_passes_once_and_uses_readiness_date(
     options = {
         "service_token": "private-live-token",
         "token_header": "X-Private-Test-Token",
+        "contract_identity_mode": "required",
     }
     request = captured["request"]
 

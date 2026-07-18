@@ -2,10 +2,10 @@
   "schema_version": "trade-image-dataset-lock/v1",
   "dataset_id": "trade_documents_images",
   "dataset_version": "source-v1",
-  "lock_revision": 2,
-  "reissued_at": "2026-07-18T18:13:26+09:00",
-  "supersedes_lock_sha256": "e44a7002a4c26cdf9cbbb315be9b0b33c5ed7789540db31a407ace2a464e8458",
-  "reissue_reason": "register restored root source and reconcile bounded adjudicated Gold without changing raw bytes",
+  "lock_revision": 3,
+  "reissued_at": "2026-07-19T00:22:33+09:00",
+  "supersedes_lock_sha256": "678849d0fa3ee8a5f236c244b05184b812eba4a5209591dfa752738eac2a6d3e",
+  "reissue_reason": "invalidate mislabeled bounded image Gold without changing raw bytes",
   "status": "candidate_unverified",
   "synthetic": true,
   "source_storage": {
@@ -76,7 +76,7 @@
     "annotation_provenance": {
       "full_corpus": "manifest_observations_only_candidate_unverified",
       "invalidated_legacy_candidate": "single_reviewer_visual_audit_invalidated_by_label_error",
-      "bounded_sample": "two_independent_ai_visual_reviews_reconciled"
+      "bounded_sample": "two_ai_reviews_reconciled_then_invalidated_by_label_error"
     }
   },
   "ground_truth": {
@@ -91,17 +91,17 @@
     "single_reviewer_candidate_annotations": "evals/trade_documents_images/v1/manifest_partial_gold.json",
     "single_reviewer_candidate_status": "invalidated_by_label_error",
     "release_scoring_allowed": false,
-    "gold_gate_status": "bounded_12_case_gold_passed_full_corpus_candidate_unverified",
+    "gold_gate_status": "bounded_12_case_gold_invalidated_by_label_error",
     "required_independent_review_count": 2,
     "bounded_adjudicated_gold": {
-      "status": "passed_two_reviewer_adjudication",
+      "status": "invalidated_by_label_error",
       "selection_id": "trade-images-hash-ranked-diagnostic-v1",
       "case_count": 12,
       "document_count": 36,
       "reviewer_kind": "independent_ai_visual_review",
       "human_review_completed": false,
-      "release_scoring_allowed_within_scope": true,
-      "scoring_scope": "claude_vision_field_extraction_only",
+      "release_scoring_allowed_within_scope": false,
+      "scoring_scope": "none_invalidated_artifact_audit_only",
       "workspace_relative_path": "_artifacts/datasets/trade_documents_images/source-v1/derived/adjudicated-gold/v1/adjudicated-gold.json",
       "selection_sha256": "8959d3e91affb1c51fbb320cf90cea7349d069cd12b58858d27ea13fb92ba961",
       "reviewer_a_sha256": "847dddfe7c7d59147c11997243293eb11b1e6d4093fa432d6c24ec0aa9fbf290",
@@ -109,7 +109,26 @@
       "worklist_sha256": "74b9ba353520dc15834353023ef2c96e7399c655b63c75ff6cc097fa97874c70",
       "gate_sha256": "3c03dc8a592cf70551079606676e218fadbc77d5762c1ac70a627f16a24621b2",
       "gold_sha256": "75364e7c07f72633f06735fd1f4f36c719b54498c38eba2f43cb11500aca15c6",
-      "reconciliation_report_sha256": "c9bdd9a8f18a52a44f885e5bcc900308430bec258a85aaa9f68f220d862b9c8b"
+      "semantic_fingerprint_sha256": "ba07c100b59bcad78b9383f67b21dd0581a284baf64ccbe16c585728cdae7133",
+      "reconciliation_report_sha256": "c9bdd9a8f18a52a44f885e5bcc900308430bec258a85aaa9f68f220d862b9c8b",
+      "invalidation": {
+        "reason_code": "invalidated_by_label_error",
+        "affected_document_type": "packing_list",
+        "affected_field": "bl_no",
+        "affected_case_ids": [
+          "0097",
+          "0311",
+          "0092",
+          "0591",
+          "0372",
+          "0250"
+        ],
+        "error": "expected labels append EE that is absent from source pixels",
+        "raw_source_modified": false,
+        "replacement_gold_status": "not_available",
+        "replacement_review_requirement": "independent_human_review",
+        "evaluator_policy": "preflight_block_until_replacement_exact_hash_is_pinned"
+      }
     }
   },
   "supported_claims": [
@@ -124,14 +143,25 @@
     "table row or cell accuracy",
     "cross-document issue precision or recall",
     "any score derived from the invalidated case-0500 annotation artifact",
+    "any score derived from the invalidated 12-case Gold exact hash or semantic fingerprint",
     "production scanned-document readiness"
   ],
   "known_source_anomalies": [],
   "known_source_observation_discrepancies": {
-    "scope": "bounded_12_case_adjudicated_sample",
-    "source_matches_manifest_case_count": 6,
-    "source_discrepancy_case_count": 6,
-    "business_defect_status": "ambiguous_not_scored_as_defect",
+    "scope": "bounded_12_case_invalidated_sample",
+    "previously_claimed_source_matches_manifest_case_count": 6,
+    "previously_claimed_source_discrepancy_case_count": 6,
+    "confirmed_source_discrepancy_case_count": 0,
+    "previous_discrepancy_interpretation": "invalidated_by_label_error",
+    "affected_case_ids": [
+      "0097",
+      "0311",
+      "0092",
+      "0591",
+      "0372",
+      "0250"
+    ],
+    "business_defect_status": "not_a_source_defect",
     "automatic_source_correction_performed": false
   },
   "invalidated_annotation_claims": [

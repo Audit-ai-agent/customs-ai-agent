@@ -10,6 +10,7 @@ readme = "README.md"
 requires-python = ">=3.11,<3.12"
 dependencies = [
   "anthropic>=0.117.0,<1",
+  "jsonschema[format]>=4.23,<5",
   "langgraph>=0.2.0,<2",
   "pillow>=11.0,<13",
   "pypdfium2>=5.12,<6",
@@ -37,9 +38,11 @@ where = ["src"]
 [tool.setuptools.package-data]
 customs_ai_agent = ["prompts/*.txt"]
 "customs_ai_agent.contracts" = [
+  "evidence/*.json",
   "schemas/backend/v1/*.json",
   "schemas/backend/v2/*.json",
   "schemas/internal/v1/*.json",
+  "schemas/internal/v2/*.json",
   "schemas/local/v1/*.json",
 ]
 

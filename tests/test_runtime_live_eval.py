@@ -177,6 +177,7 @@ def test_ready_allowlisted_service_runs_public_runtime_after_readiness(
     assert readiness_url == base_url
     assert readiness_options["allowed_origins"] == frozenset({base_url})
     assert readiness_options["service_token"] == "private-evidence-test-secret"
+    assert readiness_options["contract_identity_mode"] == "required"
     assert config_options["evidence_base_url"] == base_url
     assert config_options["env_file"] == env_file
     assert config_options["evidence_allowed_origins"] == frozenset({base_url})

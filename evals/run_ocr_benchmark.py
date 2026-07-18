@@ -3,6 +3,11 @@
 The report deliberately contains hashes, counts, metrics, and safe error codes
 only. It never contains source text, image payloads, filesystem paths, secrets,
 or backend exception messages.
+
+Gold text uses the renderer's versioned top-left bbox ``y/x`` visual order.
+Prediction text uses the OCR ledger's explicit, worker-attested
+``reading_order``. Geometry remains authoritative for Gold visual order and
+bbox matching, but must not silently reorder provider observations.
 """
 
 from __future__ import annotations
@@ -43,11 +48,13 @@ from customs_ai_agent.ocr_freeze import (
     verify_ocr_release_freeze,
 )
 from customs_ai_agent.ocr_identity import OCR_MODEL_SET_IDS
+from customs_ai_agent.ocr_reading_order import OCR_READING_ORDER_POLICY_ID
 from customs_ai_agent.schemas.models import OcrLayoutLedger, OcrLayoutSpan
 
 REPORT_SCHEMA = "ocr-benchmark-report/v2"
 DESCRIPTOR_SCHEMA = "ocr-benchmark-descriptor/v2"
 BENCHMARK_ID = "rendered-trade-documents-ocr-v2"
+GOLD_READING_ORDER_POLICY_ID = "renderer-bbox-yx/v1"
 PROVIDERS: tuple[Literal["paddle", "docling"], ...] = OCR_RELEASE_PROVIDERS
 SAFE_CODE = re.compile(r"^[a-z][a-z0-9_]{0,63}$")
 SHA256 = re.compile(r"^[a-f0-9]{64}$")
@@ -923,6 +930,7 @@ def _gold_words(layout: Mapping[str, Any]) -> list[dict[str, Any]]:
         result.append(
             {
                 "source_index": index,
+                "reading_order": index,
                 "text": text,
                 "bbox": box,
                 "role": role,
@@ -1028,9 +1036,9 @@ def _prediction_leaves(ledger: OcrLayoutLedger) -> list[dict[str, Any]]:
     return sorted(
         (item for item in base if item["text"]),
         key=lambda item: (
+            item["reading_order"],
             round(item["bbox"][1], 3),
             round(item["bbox"][0], 3),
-            item["reading_order"],
         ),
     )
 
@@ -1756,6 +1764,10 @@ def evaluate(
             "locked_triplet_document_count": 60,
             "co_document_count": 20,
             "release_gate_document_count": 80,
+        },
+        "reading_order_contract": {
+            "gold_policy_id": GOLD_READING_ORDER_POLICY_ID,
+            "prediction_policy_id": OCR_READING_ORDER_POLICY_ID,
         },
         "providers": provider_reports,
         "redaction": {

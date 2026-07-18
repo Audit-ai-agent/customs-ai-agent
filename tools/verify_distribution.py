@@ -32,6 +32,7 @@ EXPECTED_REQUIRES_PYTHON: Final = frozenset({">=3.11", "<3.12"})
 EXPECTED_REQUIRES_DIST: Final = frozenset(
     {
         "anthropic<1,>=0.117.0",
+        "jsonschema[format]<5,>=4.23",
         "langgraph<2,>=0.2.0",
         "pillow<13,>=11.0",
         "pypdfium2<6,>=5.12",
@@ -51,6 +52,7 @@ EXPECTED_SCHEMA_RESOURCES: Final = frozenset(
         "schemas/internal/v1/claude-text-candidate.schema.json",
         "schemas/internal/v1/claude-vision-candidate.schema.json",
         "schemas/internal/v1/ocr-layout-ledger.schema.json",
+        "schemas/internal/v2/ocr-layout-ledger.schema.json",
         "schemas/local/v1/review-manifest.schema.json",
     }
 )
@@ -87,6 +89,9 @@ _WHEEL_REQUIRED_PACKAGE_FILES: Final = frozenset(
         "customs_ai_agent/ocr_release_pin.py",
         "customs_ai_agent/pdf_worker.py",
         "customs_ai_agent/runtime.py",
+        "customs_ai_agent/contracts/evidence.py",
+        "customs_ai_agent/contracts/evidence/v1.lock.json",
+        "customs_ai_agent/contracts/evidence/v1.schema.json",
         *{f"customs_ai_agent/prompts/{name}" for name in EXPECTED_PROMPT_RESOURCES},
         *{f"customs_ai_agent/contracts/{name}" for name in EXPECTED_SCHEMA_RESOURCES},
     }
@@ -117,6 +122,7 @@ _SDIST_REQUIRED_FILES: Final = frozenset(
         "evals/run_ocr_benchmark.py",
         "evals/run_release_holdout_validation.py",
         "fixtures/trade_documents_images/v1/dataset.lock.json",
+        "docs/DATA_PROVIDER_HANDOFF.md",
         "docs/SECURITY_GATE.md",
         "docs/OCR_RELEASE_FREEZE.md",
         "security/toolchain.lock.toml",

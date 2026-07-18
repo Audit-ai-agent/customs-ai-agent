@@ -83,7 +83,7 @@ def _clean_documents() -> dict[str, dict[str, Any]]:
                 "consignee": "Foxconn Technology Group",
                 "country_of_origin": "KR",
                 "shipping_marks": "FOXCONN // LOS ANGELES // C/NO. 1-31",
-                "container_numbers": ["HMMU9279352"],
+                "container_numbers": ["HMMU9279350"],
                 "seal_numbers": ["KR-58959"],
                 "packages": "31 Cartons",
                 "total_gross_weight_kg": Decimal("4198.03"),
@@ -129,7 +129,7 @@ def _clean_documents() -> dict[str, dict[str, Any]]:
                 "voyage_no": "V.350E",
                 "port_of_loading": "Gwangyang, South Korea",
                 "port_of_discharge": "Los Angeles, USA",
-                "container_numbers": ["HMMU9279352"],
+                "container_numbers": ["HMMU9279350"],
                 "seal_numbers": ["KR-58959"],
                 "packages": "1x40HQ / 31 Cartons",
                 "gross_weight_kg": Decimal("4198.03"),
@@ -197,6 +197,44 @@ def test_full_clean_trade_rules_pass_and_packing_only_item_stays_ambiguous():
     assert pairing["unmatched_packing_item_status"] == "ambiguous_not_scored"
     assert pairing["line_item_pairing_status"] == ("deterministic_with_unscored_packing_extras")
     assert pairing["line_item_pairing_ambiguities"] == []
+
+
+def test_invalid_iso_6346_check_digit_is_not_hidden_by_cross_document_match():
+    documents = _clean_documents()
+    documents["pl"]["fields"]["container_numbers"] = ["HMMU9279352"]
+    documents["bl"]["fields"]["container_numbers"] = ["HMMU9279352"]
+
+    _pairing, validation = _validate(documents)
+
+    issues = [
+        issue
+        for issue in validation["validation_issues"]
+        if issue["issue_code"] == "CONTAINER_CHECK_DIGIT_INVALID"
+    ]
+    assert len(issues) == 1
+    assert issues[0]["expected_value"] == "HMMU9279350"
+    assert issues[0]["observed_value"] == "HMMU9279352"
+    assert issues[0]["source_document_id"] == "bl"
+    assert issues[0]["target_document_id"] == "pl"
+    assert validation["requires_human_review"] is True
+
+
+def test_non_iso_container_number_is_fail_closed_without_guessing_a_check_digit():
+    documents = _clean_documents()
+    documents["pl"]["fields"]["container_numbers"] = ["HMMX9279350"]
+    documents["bl"]["fields"]["container_numbers"] = ["HMMX9279350"]
+
+    _pairing, validation = _validate(documents)
+
+    issues = [
+        issue
+        for issue in validation["validation_issues"]
+        if issue["issue_code"] == "CONTAINER_NUMBER_FORMAT_INVALID"
+    ]
+    assert len(issues) == 1
+    assert issues[0]["expected_value"] == "U, J, or Z in position 4"
+    assert issues[0]["observed_value"] == "HMMX9279350"
+    assert validation["requires_human_review"] is True
 
 
 def test_pairing_score_threshold_is_fail_closed_and_inclusive(

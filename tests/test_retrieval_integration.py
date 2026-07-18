@@ -1,6 +1,7 @@
 from __future__ import annotations
 
 import json
+from copy import deepcopy
 from datetime import date
 from urllib.error import URLError
 from urllib.request import Request
@@ -15,9 +16,12 @@ from customs_ai_agent.adapters.retrieval import (
     HttpRegulationRetriever,
     PartialRegulationRetriever,
     RetrievalError,
+    fetch_evidence_readiness,
     fetch_supported_review_as_of,
     validate_evidence_base_url,
 )
+from customs_ai_agent.contracts.evidence import load_pinned_evidence_contract_identity
+from customs_ai_agent.contracts.evidence import EvidenceContractLockError
 from customs_ai_agent.adapters.retrieval import _NoRedirectHandler
 from customs_ai_agent.runner import (
     rerun_review,
@@ -37,6 +41,7 @@ from customs_ai_agent.schemas.models import (
     ReviewRunResultV2,
     stable_evidence_id,
 )
+from customs_ai_agent.fixtures.scenarios import SCENARIOS
 
 
 def _http_test_request() -> EvidenceRetrievalRequest:
@@ -78,6 +83,28 @@ def _http_test_response(request_id: str) -> EvidenceRetrievalResponse:
         ],
         errors=[],
     )
+
+
+def _readiness_payload(
+    *,
+    include_identity: bool = True,
+    snapshot_id: str = "snapshot-1",
+) -> dict[str, object]:
+    payload: dict[str, object] = {
+        "status": "ready",
+        "knowledge_snapshot_id": snapshot_id,
+        "supported_review_as_of": "2026-07-10",
+    }
+    if include_identity:
+        identity = load_pinned_evidence_contract_identity()
+        payload["evidence_contract"] = {
+            "contract": identity.contract,
+            "schema_version": identity.schema_version,
+            "provider_release": identity.provider_release,
+            "provider_revision": identity.provider_revision,
+            "schema_sha256": identity.schema_sha256,
+        }
+    return payload
 
 
 class _HttpBody:
@@ -146,6 +173,129 @@ class RequirementRetriever:
             results=results,
             errors=[],
         )
+
+
+class OutOfDateRequirementRetriever(RequirementRetriever):
+    def __init__(self, validity: str) -> None:
+        super().__init__()
+        self.validity = validity
+
+    def retrieve(self, request: EvidenceRetrievalRequest) -> EvidenceRetrievalResponse:
+        payload = super().retrieve(request).model_dump(mode="python")
+        evidence = payload["results"][0]["evidence"][0]
+        if self.validity == "not_yet_valid":
+            evidence["valid_from"] = date(2026, 7, 11)
+        else:
+            evidence["valid_to"] = date(2026, 7, 9)
+        return EvidenceRetrievalResponse.model_validate(payload)
+
+
+class NeverCalledRetriever:
+    def __init__(self) -> None:
+        self.called = False
+
+    def retrieve(self, _request):
+        self.called = True
+        raise AssertionError("Evidence retrieval must not receive an invalid HS code")
+
+
+def _documents_with_replacements(replacements: dict[str, str]):
+    documents = deepcopy(SCENARIOS["happy_path"]["documents"])
+    return [
+        document.model_copy(
+            update={
+                "content_text": replacements.get(
+                    document.document_id,
+                    document.content_text,
+                )
+            }
+        )
+        for document in documents
+    ]
+
+
+def test_contaminated_hs_code_is_a_validation_issue_and_never_reaches_evidence():
+    invoice = next(
+        document.content_text
+        for document in SCENARIOS["happy_path"]["documents"]
+        if document.document_id == "doc_inv"
+    )
+    retriever = NeverCalledRetriever()
+    state = run_review(
+        ReviewRunRequest(
+            case_id="case-invalid-hs-contamination",
+            review_run_id="run-invalid-hs-contamination",
+            documents=_documents_with_replacements(
+                {"doc_inv": invoice.replace("HS: 7318.15", "HS: ABC731815")}
+            ),
+        ),
+        retriever=retriever,
+    )
+
+    assert retriever.called is False
+    assert state["normalized_documents"]["doc_inv"]["line_items"][0]["hs_code"] is None
+    invalid_issues = [
+        issue
+        for issue in state["validation_issues"]
+        if issue["issue_code"] == "HS_CODE_FORMAT_INVALID"
+        and issue["source_document_id"] == "doc_inv"
+    ]
+    assert len(invalid_issues) == 1
+    assert invalid_issues[0]["observed_value"] == "ABC731815"
+    assert state["retrieval_status"] == "failed"
+    assert state["retrieval_request"] == {}
+    assert state["retrieval_errors"] == [
+        {
+            "code": "INVALID_HS_CODE_RETRIEVAL_BLOCKED",
+            "message": (
+                "Regulatory retrieval was not called because invoice items have "
+                f"invalid HS codes: {state['normalized_documents']['doc_inv']['line_items'][0]['item_id']}."
+            ),
+            "retryable": False,
+        }
+    ]
+    assert state["requires_human_review"] is True
+    assert state["final_status"] == "needs_review"
+
+
+def test_ambiguous_numeric_dates_are_not_assumed_to_be_month_first():
+    invoice = next(
+        document.content_text
+        for document in SCENARIOS["happy_path"]["documents"]
+        if document.document_id == "doc_inv"
+    )
+    packing = next(
+        document.content_text
+        for document in SCENARIOS["happy_path"]["documents"]
+        if document.document_id == "doc_pl"
+    )
+    state = run_review(
+        ReviewRunRequest(
+            case_id="case-ambiguous-numeric-dates",
+            review_run_id="run-ambiguous-numeric-dates",
+            documents=_documents_with_replacements(
+                {
+                    "doc_inv": invoice.replace("2026.06.01", "05/06/2025"),
+                    "doc_pl": packing.replace("2026.06.01", "05/06/2025"),
+                }
+            ),
+        )
+    )
+
+    assert state["normalized_documents"]["doc_inv"]["fields"]["invoice_date"] is None
+    assert state["normalized_documents"]["doc_pl"]["fields"]["invoice_date"] is None
+    ambiguous_issues = [
+        issue
+        for issue in state["validation_issues"]
+        if issue["issue_code"] == "DATE_FORMAT_AMBIGUOUS"
+    ]
+    assert {issue["source_document_id"] for issue in ambiguous_issues} == {
+        "doc_inv",
+        "doc_pl",
+    }
+    assert {issue["observed_value"] for issue in ambiguous_issues} == {"05/06/2025"}
+    assert state["requires_human_review"] is True
+    assert state["final_status"] == "needs_review"
 
 
 def _non_requirement_finding_payload(source_type: str, item_id: str) -> dict[str, object]:
@@ -467,6 +617,32 @@ def test_ambiguous_hs_cannot_complete_even_with_complete_coverage():
     assert state["retrieval_status"] == "ok"
     assert state["retrieval_coverage"] == "complete"
     assert state["retrieval_results"][0]["hs_resolution"] == "ambiguous"
+    assert state["final_status"] == "needs_review"
+
+
+@pytest.mark.parametrize(
+    ("validity", "expected_error"),
+    [
+        ("not_yet_valid", "EVIDENCE_NOT_YET_VALID"),
+        ("expired", "EVIDENCE_EXPIRED"),
+    ],
+)
+def test_out_of_date_evidence_cannot_complete(validity, expected_error):
+    state = run_review(
+        ReviewRunRequest(
+            scenario_id="happy_path",
+            review_run_id=f"run-evidence-{validity}",
+            review_as_of="2026-07-10",
+        ),
+        retriever=OutOfDateRequirementRetriever(validity),
+    )
+
+    assert state["retrieval_status"] == "failed"
+    assert state["retrieval_coverage"] == "unknown"
+    assert state["rag_evidence"] == []
+    assert state["regulatory_findings"] == []
+    assert expected_error in {error["code"] for error in state["retrieval_errors"]}
+    assert state["requires_human_review"] is True
     assert state["final_status"] == "needs_review"
 
 
@@ -849,6 +1025,7 @@ def test_http_retriever_uses_v1_endpoint_and_retries_once(monkeypatch):
     actual = HttpRegulationRetriever(
         "https://evidence.local",
         allowed_origins={"https://evidence.local"},
+        contract_identity_mode="disabled",
     ).retrieve(request)
 
     assert len(calls) == 2
@@ -870,7 +1047,129 @@ def test_http_retriever_rejects_invalid_response(monkeypatch):
         HttpRegulationRetriever(
             "https://evidence.local",
             allowed_origins={"https://evidence.local"},
+            contract_identity_mode="disabled",
         ).retrieve(_http_test_request())
+
+
+@pytest.mark.parametrize("nonstandard_value", ["NaN", "Infinity", "-Infinity"])
+def test_http_retriever_rejects_nonstandard_json_numbers(
+    monkeypatch,
+    nonstandard_value,
+):
+    response = RequirementRetriever().retrieve(_http_test_request())
+    payload = response.model_dump(mode="json")
+    payload["results"][0]["evidence"][0]["raw_scores"]["exact_hs"] = float("nan")
+    body = json.dumps(payload, allow_nan=True).replace("NaN", nonstandard_value).encode("utf-8")
+    monkeypatch.setattr(
+        "customs_ai_agent.adapters.retrieval.urlopen",
+        lambda *_args, **_kwargs: _HttpBody(body),
+    )
+
+    with pytest.raises(
+        RetrievalError,
+        match="Evidence Service request failed: invalid contract response",
+    ):
+        HttpRegulationRetriever(
+            "http://localhost:8010",
+            max_retries=0,
+            contract_identity_mode="disabled",
+        ).retrieve(_http_test_request())
+
+
+def test_http_retriever_rejects_duplicate_json_keys(monkeypatch):
+    response = _http_test_response("request-http-1")
+    body = json.dumps(response.model_dump(mode="json")).replace(
+        '"status": "ok"',
+        '"status": "failed", "status": "ok"',
+        1,
+    )
+    monkeypatch.setattr(
+        "customs_ai_agent.adapters.retrieval.urlopen",
+        lambda *_args, **_kwargs: _HttpBody(body.encode("utf-8")),
+    )
+
+    with pytest.raises(
+        RetrievalError,
+        match="Evidence Service request failed: invalid contract response",
+    ):
+        HttpRegulationRetriever(
+            "http://localhost:8010",
+            max_retries=0,
+            contract_identity_mode="disabled",
+        ).retrieve(_http_test_request())
+
+
+def test_pinned_provider_schema_rejects_response_looser_pydantic_model_accepts(
+    monkeypatch,
+):
+    payload = {
+        "schema_version": "1.0",
+        "request_id": "request-http-1",
+        "status": "failed",
+        "knowledge_snapshot_id": None,
+        "results": [],
+        "errors": [
+            {
+                "code": "x" * 129,
+                "message": "bounded safe error",
+                "retryable": False,
+            }
+        ],
+    }
+    # This regression demonstrates why the provider-owned packaged schema is
+    # authoritative at HTTP boundaries even while internal models stay
+    # backward compatible with released Agent result schemas.
+    EvidenceRetrievalResponse.model_validate(payload)
+    monkeypatch.setattr(
+        "customs_ai_agent.adapters.retrieval.urlopen",
+        lambda *_args, **_kwargs: _HttpBody(json.dumps(payload).encode("utf-8")),
+    )
+
+    with pytest.raises(
+        RetrievalError,
+        match="Evidence Service request failed: invalid contract response",
+    ):
+        HttpRegulationRetriever(
+            "http://localhost:8010",
+            max_retries=0,
+            contract_identity_mode="disabled",
+        ).retrieve(_http_test_request())
+
+
+def test_http_retriever_rejects_schema_invalid_constructed_request_before_network(
+    monkeypatch,
+):
+    monkeypatch.setattr(
+        "customs_ai_agent.adapters.retrieval.urlopen",
+        lambda *_args, **_kwargs: pytest.fail("schema-invalid request must not reach HTTP"),
+    )
+    request = _http_test_request().model_copy(update={"request_id": "x" * 129})
+
+    with pytest.raises(
+        RetrievalError,
+        match="request does not satisfy the pinned contract",
+    ):
+        HttpRegulationRetriever(
+            "http://localhost:8010",
+            contract_identity_mode="disabled",
+        ).retrieve(request)
+
+
+def test_consumer_contract_bundle_failure_stops_before_network(monkeypatch):
+    monkeypatch.setattr(
+        "customs_ai_agent.adapters.retrieval.urlopen",
+        lambda *_args, **_kwargs: pytest.fail("invalid consumer bundle must not reach HTTP"),
+    )
+    monkeypatch.setattr(
+        "customs_ai_agent.adapters.retrieval.load_pinned_evidence_contract_identity",
+        lambda: (_ for _ in ()).throw(EvidenceContractLockError("private detail")),
+    )
+
+    with pytest.raises(
+        RetrievalError,
+        match="consumer contract bundle is invalid",
+    ):
+        HttpRegulationRetriever("http://localhost:8010")
 
 
 @pytest.mark.parametrize(
@@ -918,6 +1217,12 @@ def test_external_evidence_client_requires_exact_origin_allowlist():
     assert retriever.url == ("https://evidence.example:8443/internal/rag/v1/retrieve")
 
 
+def test_http_retriever_defaults_to_required_contract_identity_handshake():
+    retriever = HttpRegulationRetriever("http://localhost:8010")
+
+    assert retriever.contract_identity_mode == "required"
+
+
 def test_evidence_redirect_handler_never_creates_cross_origin_request():
     original = Request(
         "https://evidence.example/internal/rag/v1/retrieve",
@@ -946,6 +1251,7 @@ def test_oversized_evidence_response_fails_without_exposing_body(monkeypatch):
         HttpRegulationRetriever(
             "http://127.0.0.1:8010",
             max_retries=0,
+            contract_identity_mode="disabled",
         ).retrieve(_http_test_request())
 
     assert str(exc_info.value) == ("Evidence Service request failed: invalid contract response")
@@ -966,6 +1272,7 @@ def test_http_retriever_sends_token_only_in_configured_header(monkeypatch):
         "http://127.0.0.1:8010",
         service_token=secret,
         token_header="X-Demo-Token",
+        contract_identity_mode="disabled",
     )
 
     retriever.retrieve(_http_test_request())
@@ -1004,6 +1311,7 @@ def test_http_error_does_not_expose_service_token(monkeypatch):
         HttpRegulationRetriever(
             "http://127.0.0.1:8010",
             service_token=secret,
+            contract_identity_mode="disabled",
         ).retrieve(_http_test_request())
 
     assert str(captured.value) == "Evidence Service request failed: network error"
@@ -1032,6 +1340,7 @@ def test_readiness_returns_provider_supported_review_date_and_token(monkeypatch)
         "http://localhost:8010",
         service_token="readiness-secret",
         max_retries=0,
+        contract_identity_mode="optional",
     )
     request = captured["request"]
     sent_headers = {name.casefold(): value for name, value in request.header_items()}
@@ -1040,6 +1349,201 @@ def test_readiness_returns_provider_supported_review_date_and_token(monkeypatch)
     assert request.full_url == "http://localhost:8010/internal/rag/v1/health/ready"
     assert sent_headers["x-demo-token"] == "readiness-secret"
     assert captured["timeout"] == 10.0
+
+
+def test_required_readiness_verifies_exact_pinned_contract_identity(monkeypatch):
+    monkeypatch.setattr(
+        "customs_ai_agent.adapters.retrieval.urlopen",
+        lambda *_args, **_kwargs: _HttpBody(json.dumps(_readiness_payload()).encode("utf-8")),
+    )
+
+    readiness = fetch_evidence_readiness(
+        "http://localhost:8010",
+        max_retries=0,
+        contract_identity_mode="required",
+    )
+    expected = load_pinned_evidence_contract_identity()
+
+    assert readiness.knowledge_snapshot_id == "snapshot-1"
+    assert readiness.supported_review_as_of == date(2026, 7, 10)
+    assert readiness.contract_identity == expected
+
+
+def test_optional_readiness_allows_missing_identity_only_for_explicit_compatibility(
+    monkeypatch,
+):
+    monkeypatch.setattr(
+        "customs_ai_agent.adapters.retrieval.urlopen",
+        lambda *_args, **_kwargs: _HttpBody(
+            json.dumps(_readiness_payload(include_identity=False)).encode("utf-8")
+        ),
+    )
+
+    readiness = fetch_evidence_readiness(
+        "http://localhost:8010",
+        max_retries=0,
+        contract_identity_mode="optional",
+    )
+
+    assert readiness.contract_identity is None
+    assert readiness.supported_review_as_of == date(2026, 7, 10)
+
+
+def test_required_readiness_rejects_provider_that_omits_contract_identity(monkeypatch):
+    monkeypatch.setattr(
+        "customs_ai_agent.adapters.retrieval.urlopen",
+        lambda *_args, **_kwargs: _HttpBody(
+            json.dumps(_readiness_payload(include_identity=False)).encode("utf-8")
+        ),
+    )
+
+    with pytest.raises(
+        RetrievalError,
+        match="readiness request failed: contract identity missing",
+    ):
+        fetch_evidence_readiness(
+            "http://localhost:8010",
+            max_retries=0,
+            contract_identity_mode="required",
+        )
+
+
+@pytest.mark.parametrize(
+    ("field", "mismatch"),
+    [
+        ("provider_release", "evidence-api-v1.0.1"),
+        ("provider_revision", "b" * 40),
+        ("schema_sha256", "b" * 64),
+    ],
+)
+def test_readiness_rejects_well_formed_contract_identity_mismatch(
+    monkeypatch,
+    field,
+    mismatch,
+):
+    payload = _readiness_payload()
+    identity = dict(payload["evidence_contract"])
+    identity[field] = mismatch
+    payload["evidence_contract"] = identity
+    monkeypatch.setattr(
+        "customs_ai_agent.adapters.retrieval.urlopen",
+        lambda *_args, **_kwargs: _HttpBody(json.dumps(payload).encode("utf-8")),
+    )
+
+    with pytest.raises(
+        RetrievalError,
+        match="readiness request failed: contract identity mismatch",
+    ):
+        fetch_evidence_readiness(
+            "http://localhost:8010",
+            max_retries=0,
+            contract_identity_mode="required",
+        )
+
+
+def test_required_http_retrieval_attests_before_every_post(monkeypatch):
+    response = _http_test_response("request-http-1")
+    methods = []
+
+    def fake_urlopen(request, timeout):
+        assert timeout == 60.0
+        methods.append(request.get_method())
+        payload = (
+            _readiness_payload(snapshot_id="snapshot-http-v1")
+            if request.get_method() == "GET"
+            else response.model_dump(mode="json")
+        )
+        return _HttpBody(json.dumps(payload).encode("utf-8"))
+
+    monkeypatch.setattr("customs_ai_agent.adapters.retrieval.urlopen", fake_urlopen)
+    retriever = HttpRegulationRetriever(
+        "http://localhost:8010",
+        max_retries=0,
+        contract_identity_mode="required",
+    )
+
+    assert retriever.retrieve(_http_test_request()) == response
+    assert retriever.retrieve(_http_test_request()) == response
+    assert methods == ["GET", "POST", "GET", "POST"]
+
+
+def test_required_http_retrieval_rejects_snapshot_changed_after_readiness(monkeypatch):
+    response = _http_test_response("request-http-1")
+    methods = []
+
+    def fake_urlopen(request, timeout):
+        assert timeout == 60.0
+        methods.append(request.get_method())
+        payload = (
+            _readiness_payload(snapshot_id="readiness-snapshot")
+            if request.get_method() == "GET"
+            else response.model_dump(mode="json")
+        )
+        return _HttpBody(json.dumps(payload).encode("utf-8"))
+
+    monkeypatch.setattr("customs_ai_agent.adapters.retrieval.urlopen", fake_urlopen)
+
+    with pytest.raises(RetrievalError, match="snapshot does not match readiness"):
+        HttpRegulationRetriever(
+            "http://localhost:8010",
+            max_retries=0,
+        ).retrieve(_http_test_request())
+
+    assert methods == ["GET", "POST"]
+
+
+def test_required_http_retrieval_rejects_unsupported_as_of_before_post(monkeypatch):
+    methods = []
+
+    def fake_urlopen(request, timeout):
+        assert timeout == 60.0
+        methods.append(request.get_method())
+        return _HttpBody(json.dumps(_readiness_payload()).encode("utf-8"))
+
+    monkeypatch.setattr("customs_ai_agent.adapters.retrieval.urlopen", fake_urlopen)
+    retriever = HttpRegulationRetriever(
+        "http://localhost:8010",
+        max_retries=0,
+        contract_identity_mode="required",
+    )
+    request = _http_test_request().model_copy(update={"review_as_of": date(2026, 7, 11)})
+
+    with pytest.raises(RetrievalError, match="does not support the requested review_as_of"):
+        retriever.retrieve(request)
+
+    assert methods == ["GET"]
+
+
+def test_missing_runtime_contract_identity_fails_closed_without_retrieval_post(monkeypatch):
+    methods = []
+
+    def fake_urlopen(request, timeout):
+        assert timeout == 60.0
+        methods.append(request.get_method())
+        return _HttpBody(json.dumps(_readiness_payload(include_identity=False)).encode("utf-8"))
+
+    monkeypatch.setattr("customs_ai_agent.adapters.retrieval.urlopen", fake_urlopen)
+    retriever = HttpRegulationRetriever(
+        "http://localhost:8010",
+        max_retries=0,
+        contract_identity_mode="required",
+    )
+    state = run_review(
+        ReviewRunRequest(
+            scenario_id="happy_path",
+            review_run_id="run-missing-runtime-contract-identity",
+            review_as_of="2026-07-10",
+        ),
+        retriever=retriever,
+    )
+
+    assert methods == ["GET"]
+    assert state["retrieval_status"] == "failed"
+    assert state["retrieval_coverage"] == "unknown"
+    assert state["knowledge_snapshot_id"] is None
+    assert state["rag_evidence"] == []
+    assert state["requires_human_review"] is True
+    assert state["final_status"] == "needs_review"
 
 
 @pytest.mark.parametrize(

@@ -178,6 +178,7 @@ def _retriever_options(env_file: Path | None) -> dict[str, Any]:
     return {
         "service_token": token if token else None,
         "token_header": token_header.strip(),
+        "contract_identity_mode": "required",
     }
 
 

@@ -19,6 +19,10 @@ from pathlib import Path, PurePosixPath
 from typing import Any
 
 from jsonschema import Draft202012Validator
+from customs_ai_agent.evaluation_assets import (
+    image_gold_invalidation_code,
+    image_gold_semantic_invalidation_code,
+)
 
 try:
     from tools.build_trade_image_diagnostic_selection import (
@@ -831,6 +835,13 @@ def build_reconciliation_bundle(
     _validate_schema(gold, gold_schema, label="adjudicated Gold")
     gold_bytes = _json_bytes(gold)
     gold_sha256 = _sha256_bytes(gold_bytes)
+    invalidated_gold_code = image_gold_invalidation_code(
+        gold_sha256
+    ) or image_gold_semantic_invalidation_code(gold)
+    if invalidated_gold_code is not None:
+        raise ReviewReconciliationError(
+            f"reconciled Gold is explicitly invalidated: {invalidated_gold_code}"
+        )
 
     input_reviews = []
     for source in review_sources:

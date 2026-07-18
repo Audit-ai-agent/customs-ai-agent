@@ -54,7 +54,7 @@ def _candidate_for(document_id):
                 _field("voyage_no", "PS2607"),
                 _field("port_of_loading", "OSLO"),
                 _field("port_of_discharge", "BUSAN"),
-                _field("container_numbers", "MSKU1234567"),
+                _field("container_numbers", "MSKU1234565"),
                 _field("seal_numbers", "SL12345"),
                 _field("packages", "100 CTNS"),
                 _field("gross_weight_kg", "1200 KG"),
@@ -126,7 +126,7 @@ def _candidate_for(document_id):
                 _field("port_of_discharge", "BUSAN"),
                 _field("country_of_origin", "Norway"),
                 _field("shipping_marks", "BOE-KFI-001"),
-                _field("container_numbers", "MSKU1234567"),
+                _field("container_numbers", "MSKU1234565"),
                 _field("seal_numbers", "SL12345"),
                 _field("packages", "100 CTNS"),
                 _field(

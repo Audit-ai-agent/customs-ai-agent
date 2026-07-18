@@ -16,6 +16,12 @@ from uuid import uuid4
 
 from pydantic import ValidationError
 
+from customs_ai_agent.ocr_reading_order import (
+    MAX_OCR_SPANS_PER_PAGE,
+    OCR_READING_ORDER_POLICY_ID,
+    OcrSpanLimitExceededError,
+    preserve_provider_span_order,
+)
 from customs_ai_agent.schemas.models import (
     BBox,
     ImagePageInput,
@@ -514,17 +520,29 @@ def _ledger_from_worker_result(
     provider_id = result.get("provider_id")
     engine_id = result.get("engine_id")
     engine_version = result.get("engine_version")
+    reading_order_policy_id = result.get("reading_order_policy_id")
     model_id = result.get("model_id")
     model_assets_lock_sha256 = result.get("model_assets_lock_sha256")
     raw_pages = result.get("pages")
     if (
-        provider_id != provider
+        set(result)
+        != {
+            "provider_id",
+            "engine_id",
+            "engine_version",
+            "reading_order_policy_id",
+            "model_id",
+            "model_assets_lock_sha256",
+            "pages",
+        }
+        or provider_id != provider
         or not isinstance(engine_id, str)
         or not engine_id
         or len(engine_id) > 128
         or not isinstance(engine_version, str)
         or not engine_version
         or len(engine_version) > 128
+        or reading_order_policy_id != OCR_READING_ORDER_POLICY_ID
         or not isinstance(model_id, str)
         or not model_id
         or len(model_id) > 256
@@ -594,6 +612,7 @@ def _ledger_from_worker_result(
             provider_id=provider_id,
             engine_id=engine_id,
             engine_version=engine_version,
+            reading_order_policy_id=reading_order_policy_id,
             model_id=model_id,
             model_assets_lock_sha256=model_assets_lock_sha256,
             pages=ledger_pages,
@@ -604,6 +623,7 @@ def _ledger_from_worker_result(
             provider_id=provider_id,
             engine_id=engine_id,
             engine_version=engine_version,
+            reading_order_policy_id=reading_order_policy_id,
             model_id=model_id,
             model_assets_lock_sha256=model_assets_lock_sha256,
             pages=ledger_pages,
@@ -630,6 +650,11 @@ def _normalize_worker_spans(
     page: ImagePageInput,
     raw_spans: list[Any],
 ) -> list[OcrLayoutSpan]:
+    if len(raw_spans) > MAX_OCR_SPANS_PER_PAGE:
+        raise OcrLayoutProviderError(
+            "ocr_span_limit_exceeded",
+            "The OCR worker exceeded the per-page observation limit.",
+        )
     normalized: list[dict[str, Any]] = []
     for source_index, raw_span in enumerate(raw_spans):
         if not isinstance(raw_span, dict):
@@ -690,17 +715,13 @@ def _normalize_worker_spans(
             }
         )
 
-    normalized.sort(
-        key=lambda item: (
-            round(item["bbox"][1], 4),
-            round(item["bbox"][0], 4),
-            _ROLE_ORDER[item["role"]],
-            item["row_index"] if item["row_index"] is not None else -1,
-            item["column_index"] if item["column_index"] is not None else -1,
-            item["text"],
-            item["source_index"],
-        )
-    )
+    try:
+        normalized = preserve_provider_span_order(normalized)
+    except OcrSpanLimitExceededError as exc:
+        raise OcrLayoutProviderError(
+            "ocr_span_limit_exceeded",
+            "The OCR worker exceeded the per-page observation limit.",
+        ) from exc
     table_ids = _stable_table_ids(
         document_id=document_id,
         provider_id=provider_id,

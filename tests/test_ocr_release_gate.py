@@ -14,6 +14,7 @@ from customs_ai_agent.ocr_release import (
     OcrReleaseGateAttestationError,
     load_ocr_release_gate_attestation,
 )
+from customs_ai_agent.ocr_reading_order import OCR_READING_ORDER_POLICY_ID
 from evals.combine_ocr_release_gate import (
     OcrReleaseGateError,
     _combine_invalidated_v2_diagnostic,
@@ -23,6 +24,7 @@ from evals.combine_ocr_release_gate import (
 from evals.release_holdout_protocol import RELEASE_INVALIDATION_CODE
 from evals.run_ocr_benchmark import (
     BENCHMARK_ID,
+    GOLD_READING_ORDER_POLICY_ID,
     LOCKED_THRESHOLDS,
     BenchmarkDocument,
     gold_document_metric_denominators,
@@ -358,6 +360,10 @@ def _report(
             "locked_triplet_document_count": 60,
             "co_document_count": 20,
             "release_gate_document_count": 80,
+        },
+        "reading_order_contract": {
+            "gold_policy_id": GOLD_READING_ORDER_POLICY_ID,
+            "prediction_policy_id": OCR_READING_ORDER_POLICY_ID,
         },
         "providers": providers,
         "redaction": REDACTION,

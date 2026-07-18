@@ -6,6 +6,7 @@ from typing import Any
 from customs_ai_agent.adapters.retrieval import RegulationRetriever
 from customs_ai_agent.identifiers import stable_retrieval_request_id
 from customs_ai_agent.nodes.common import audit
+from customs_ai_agent.nodes.normalize import is_valid_hs_code
 from customs_ai_agent.schemas.models import (
     EvidenceRetrievalRequest,
     EvidenceRetrievalResponse,
@@ -236,8 +237,13 @@ def _failed_update(
     code: str,
     message: str,
     request: EvidenceRetrievalRequest | None = None,
+    retryable: bool = True,
 ) -> dict[str, Any]:
-    error = RetrievalErrorDetail(code=code, message=message, retryable=True).model_dump(mode="json")
+    error = RetrievalErrorDetail(
+        code=code,
+        message=message,
+        retryable=retryable,
+    ).model_dump(mode="json")
     return {
         "retrieval_request_id": request_id,
         "retrieval_request": request.model_dump(mode="json") if request else {},
@@ -267,8 +273,34 @@ def retrieve_regulations(
         str(state["review_run_id"]),
         int(state.get("retry_count") or 0),
     )
+    invoice_items = _invoice_items(state)
+    invalid_hs_item_ids = sorted(
+        str(item.get("item_id") or "unknown")
+        for item in invoice_items
+        if (
+            (
+                item.get("hs_code") is not None
+                or (
+                    (item.get("raw_fields") or {}).get("hs_code") is not None
+                    and str((item.get("raw_fields") or {}).get("hs_code")).strip()
+                )
+            )
+            and not is_valid_hs_code(item.get("hs_code"))
+        )
+    )
+    if invalid_hs_item_ids:
+        return _failed_update(
+            state,
+            request_id=request_id,
+            code="INVALID_HS_CODE_RETRIEVAL_BLOCKED",
+            message=(
+                "Regulatory retrieval was not called because invoice items have "
+                f"invalid HS codes: {', '.join(invalid_hs_item_ids)}."
+            ),
+            retryable=False,
+        )
     try:
-        query_items = [_query_item(item, state["jurisdiction"]) for item in _invoice_items(state)]
+        query_items = [_query_item(item, state["jurisdiction"]) for item in invoice_items]
     except Exception:
         return _failed_update(
             state,

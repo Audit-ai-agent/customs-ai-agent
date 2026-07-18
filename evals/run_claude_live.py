@@ -33,7 +33,7 @@ from customs_ai_agent.schemas.models import ReviewRunRequest
 
 EXPECTED_GOLD_SHA256_BY_ID = {
     "claude-text-synthetic-v1": (
-        "7cfe2cf8e2b88e55f80398425e6866d52bfa85e0886ec8a4b5862f736e01c7e5"
+        "1e300058f6d01330e82002d04e1a3238f42aaceeb9dc5716653a2aa1c67634e0"
     ),
     "claude-text-adversarial-v1": (
         "b4416cbad6df9fba62f2f636c4267a348bf5f11a1d3b78771aee8b16786db661"

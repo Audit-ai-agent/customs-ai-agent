@@ -50,6 +50,11 @@ _RESOURCE_PATHS: dict[SchemaKey, str] = {
     ): "schemas/internal/v1/ocr-layout-ledger.schema.json",
     (
         "internal",
+        "v2",
+        "ocr-layout-ledger",
+    ): "schemas/internal/v2/ocr-layout-ledger.schema.json",
+    (
+        "internal",
         "v1",
         "claude-text-candidate",
     ): "schemas/internal/v1/claude-text-candidate.schema.json",
@@ -344,7 +349,7 @@ def _backend_result_schema(version: SchemaVersion) -> dict[str, Any]:
     return schema
 
 
-def _internal_schema(kind: SchemaKind) -> dict[str, Any]:
+def _internal_schema(version: SchemaVersion, kind: SchemaKind) -> dict[str, Any]:
     models: dict[SchemaKind, type[BaseModel]] = {
         "ocr-layout-ledger": OcrLayoutLedger,
         "claude-text-candidate": ClaudeDocumentCandidate,
@@ -356,9 +361,19 @@ def _internal_schema(kind: SchemaKind) -> dict[str, Any]:
     except KeyError:
         raise ContractSchemaError(f"unsupported internal schema kind: {kind}") from None
     schema = copy.deepcopy(model.model_json_schema(mode="validation"))
+    if kind == "ocr-layout-ledger" and version == "v1":
+        properties = schema.get("properties")
+        if not isinstance(properties, dict):
+            raise ContractSchemaError("generated OCR ledger schema has no properties")
+        properties.pop("reading_order_policy_id", None)
+        schema_version = properties.get("schema_version")
+        if not isinstance(schema_version, dict):
+            raise ContractSchemaError("generated OCR ledger schema has no version")
+        schema_version["const"] = "1.0"
+        schema_version["default"] = "1.0"
     schema["$schema"] = "https://json-schema.org/draft/2020-12/schema"
-    schema["$id"] = f"https://schemas.customs.local/agent/internal/v1/{kind}.schema.json"
-    schema["title"] = f"Customs AI Agent internal V1 {kind}"
+    schema["$id"] = f"https://schemas.customs.local/agent/internal/{version}/{kind}.schema.json"
+    schema["title"] = f"Customs AI Agent internal {version.upper()} {kind}"
     schema["description"] = (
         "Agent-internal model/OCR boundary. This is not a Backend request/result contract."
     )
@@ -389,8 +404,10 @@ def generate_schema(
         return _backend_request_schema(version)
     if scope == "backend" and kind == "review-result":
         return _backend_result_schema(version)
-    if scope == "internal" and version == "v1":
-        return _internal_schema(kind)
+    if scope == "internal" and (
+        version == "v1" or (version == "v2" and kind == "ocr-layout-ledger")
+    ):
+        return _internal_schema(version, kind)
     if scope == "local" and version == "v1" and kind == "review-manifest":
         return _local_manifest_schema()
     raise ContractSchemaError(f"unsupported schema generation: {scope}/{version}/{kind}")

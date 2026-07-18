@@ -1,9 +1,11 @@
-"""Fail-closed Claude Vision evaluation over adjudicated synthetic image Gold.
+"""Fail-closed Claude Vision evaluation over trusted synthetic image Gold.
 
-The historical case-0500 single-review artifact is invalidated and can never
-produce a score. A provider client is created only after the deterministic
-12-triplet selection, two-reviewer worklist, derived Gold Gate, and an
-adjudicated Gold manifest all agree.
+Both the historical case-0500 artifact and the former 12-triplet AI-reviewed
+Gold are invalidated and can never produce a score. No replacement Gold hash is
+currently approved, so the evaluator stops before OCR, Claude, or Evidence
+clients are created. A future run is possible only after independently
+human-reviewed replacement Gold, its Gate, the prompt, and every pinned hash
+agree.
 """
 
 from __future__ import annotations
@@ -32,6 +34,10 @@ from customs_ai_agent.adapters.llm import (
     LLMError,
 )
 from customs_ai_agent.adapters.retrieval import MockRegulationRetriever
+from customs_ai_agent.evaluation_assets import (
+    image_gold_invalidation_code,
+    image_gold_semantic_invalidation_code,
+)
 from customs_ai_agent.ocr_identity import (
     OCR_MODEL_ASSETS_LOCK_SHA256,
     OCR_MODEL_SET_IDS,
@@ -89,7 +95,7 @@ DEFAULT_LOCK_PATH = (
 EXPECTED_INVALIDATED_ANNOTATION_SHA256 = (
     "ac86a6e248492db92e5bfa635dfbdff3b74adf8cb454bf0da7faabc77cfa33dd"
 )
-EXPECTED_DATASET_LOCK_SHA256 = "678849d0fa3ee8a5f236c244b05184b812eba4a5209591dfa752738eac2a6d3e"
+EXPECTED_DATASET_LOCK_SHA256 = "2177c598d1b0111cbf7dbf0a7a25c46041a523b6b3923b9ecee71d3c64141edc"
 EXPECTED_SELECTION_SHA256 = "8959d3e91affb1c51fbb320cf90cea7349d069cd12b58858d27ea13fb92ba961"
 EXPECTED_ADJUDICATED_GOLD_SCHEMA_SHA256 = (
     "6d6695c72cda5302b762d338fc97792b5dca48e4eb75fe55a1798362e86f9066"
@@ -101,7 +107,14 @@ ALLOWED_ADJUDICATION_CONCLUSIONS = {
     "unreadable_or_insufficient",
 }
 EXPECTED_VISION_SCHEMA_SHA256 = "0bb62c5b592ceb1147d31fa5e8e3a508d7b60f877f0ee8a8cb413de75ead3e8f"
+# This is the existing 1.2.0 evaluator prompt pin from 8fe0058. Commit c28e72d
+# intentionally changed the runtime prompt to 1.3.0, whose current hash is
+# different. Do not silently bless that change here: a new evaluator prompt
+# pin requires explicit evaluation-owner approval and fresh trusted Gold.
 EXPECTED_VISION_PROMPT_SHA256 = "531ad80b62016c5bd65ea292ac584f36413dfb230b13cffb5761b6862d1705ba"
+# No independently trusted replacement image Gold exists. Any adjudicated
+# manifest remains ineligible until its exact reviewed bytes are pinned here.
+EXPECTED_ADJUDICATED_GOLD_SHA256: str | None = None
 MAX_CROP_CALLS_PER_RUN = 6
 ProviderName = Literal["paddle", "docling"]
 ProviderFactory = Callable[[ProviderName, Path], OcrLayoutProvider]
@@ -458,6 +471,17 @@ def _preflight(
     lock_sha256 = _sha256_or_none(lock_path)
     schema_sha256 = _vision_schema_sha256()
     prompt_sha256 = _vision_prompt_sha256()
+    invalidated_gold_code = image_gold_invalidation_code(gold_sha256)
+    if invalidated_gold_code is not None:
+        failures.append(invalidated_gold_code)
+    semantic_invalidation_code = image_gold_semantic_invalidation_code(gold)
+    if semantic_invalidation_code is not None:
+        failures.append(semantic_invalidation_code)
+    if gold.get("schema_version") == "trade-image-adjudicated-gold/v1":
+        if EXPECTED_ADJUDICATED_GOLD_SHA256 is None:
+            failures.append("adjudicated_gold_replacement_not_provisioned")
+        elif gold_sha256 != EXPECTED_ADJUDICATED_GOLD_SHA256:
+            failures.append("adjudicated_gold_hash_mismatch")
     if (
         gold.get("schema_version") == "trade-image-invalidated-candidate-annotations/v1"
         and gold_sha256 != EXPECTED_INVALIDATED_ANNOTATION_SHA256
@@ -466,9 +490,15 @@ def _preflight(
     if lock_sha256 != EXPECTED_DATASET_LOCK_SHA256:
         failures.append("dataset_lock_hash_mismatch")
     ground_truth = dataset_lock.get("ground_truth", {})
+    bounded_gold = ground_truth.get("bounded_adjudicated_gold", {})
     if (
         ground_truth.get("single_reviewer_candidate_status") != "invalidated_by_label_error"
         or ground_truth.get("release_scoring_allowed") is not False
+        or not isinstance(bounded_gold, dict)
+        or bounded_gold.get("status") != "invalidated_by_label_error"
+        or bounded_gold.get("release_scoring_allowed_within_scope") is not False
+        or bounded_gold.get("semantic_fingerprint_sha256")
+        != "ba07c100b59bcad78b9383f67b21dd0581a284baf64ccbe16c585728cdae7133"
     ):
         failures.append("dataset_lock_invalidation_provenance_missing")
     if _sha256_or_none(selection_path) != EXPECTED_SELECTION_SHA256:
@@ -598,7 +628,7 @@ def _safe_preflight_report(
 ) -> dict[str, Any]:
     return {
         "schema_version": "claude-vision-evaluation-report/v1",
-        "scope": "ADJUDICATED_IMAGE_GOLD_REQUIRED_INVALIDATED_0500_BLOCKED",
+        "scope": "TRUSTED_REPLACEMENT_GOLD_REQUIRED_HISTORICAL_GOLD_BLOCKED",
         "status": "FAIL",
         "release_score_eligible": False,
         "provider_called": False,
@@ -609,8 +639,21 @@ def _safe_preflight_report(
         },
         "cost_budget": {"configured_max_retries": 0},
         "legacy_case_0500_provenance": "invalidated_by_label_error",
+        "historical_adjudicated_gold_provenance": "invalidated_by_label_error",
+        "replacement_gold_status": "not_available",
         "failures": [{"document_id": "preflight", "code": code} for code in failures],
         "gold_manifest_sha256": _sha256_or_none(gold_path),
+        "gold_manifest_invalidation_code": (
+            image_gold_invalidation_code(_sha256_or_none(gold_path))
+            or image_gold_semantic_invalidation_code(
+                _read_json_object(
+                    gold_path,
+                    failure_code="gold_manifest_missing_or_invalid",
+                    failures=[],
+                )
+            )
+        ),
+        "expected_adjudicated_gold_sha256": EXPECTED_ADJUDICATED_GOLD_SHA256,
         "expected_invalidated_annotation_sha256": (EXPECTED_INVALIDATED_ANNOTATION_SHA256),
         "dataset_lock_sha256": _sha256_or_none(lock_path),
         "expected_dataset_lock_sha256": EXPECTED_DATASET_LOCK_SHA256,
@@ -1312,8 +1355,9 @@ def evaluate(
 def _parse_args() -> argparse.Namespace:
     parser = argparse.ArgumentParser(
         description=(
-            "Run Claude Vision only with 12-case two-reviewer adjudicated Gold. "
-            "The historical case-0500 artifact is always blocked."
+            "Run Claude Vision only with independently human-reviewed replacement "
+            "Gold whose exact hash is approved. Current historical image Gold "
+            "artifacts are always blocked before provider creation."
         ),
     )
     parser.add_argument("--env-file", required=True, type=Path)

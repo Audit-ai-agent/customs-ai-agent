@@ -99,15 +99,25 @@ CPU/memory quota를 적용한 OS-level sandbox는 아니며 운영 전 별도 �
 OCR/layout provider는 Claude와 독립적으로 다음 immutable ledger를 만든다.
 
 ```text
+schema_version=2.0
 ledger_id
 document_id
 provider_id / engine_id / engine_version
+reading_order_policy_id=worker-emitted-sequence/v1
 page_number / image_sha256 / width / height
 span_id / reading_order / role / text / bbox / confidence
 ```
 
-`ledger_id`는 canonical ledger 내용의 SHA-256으로 계산한다. Agent는 ledger의 document ID,
-page 순서, page image hash와 크기를 현재 입력 이미지와 다시 대조한다.
+OCR worker는 native provider sequence를 성공 envelope에 담고
+`reading_order_policy_id=worker-emitted-sequence/v1`을 명시한다. edge adapter는 이 exact
+policy와 연속된 span order를 검증할 뿐 geometry로 순서를 재구성하지 않는다. `ledger_id`는
+policy ID와 ordered spans를 포함한 canonical ledger 내용의 SHA-256으로 계산한다. Agent는
+ledger의 document ID, page 순서, page image hash와 크기를 현재 입력 이미지와 다시 대조한다.
+
+현재 runtime 계약은 `internal/v2/ocr-layout-ledger`, `schema_version=2.0`이다.
+`internal/v1/ocr-layout-ledger`는 package 소비자의 역사 호환과 감사를 위해 남긴 immutable
+resource이며 current runtime fallback이 아니다. reading-order policy가 없던 v1 ledger 또는
+그 ledger를 저장한 checkpoint는 현재 provenance로 재사용할 수 없다.
 
 Claude vision은 업무 필드 후보와 그 후보가 참조하는 OCR span/bbox를 반환한다. 다음 조건 중 하나가
 깨지면 후보를 사용하지 않는다.
@@ -136,6 +146,21 @@ conflict audit에 남긴다. 이 경우 다른 grounded 값은 보존하지만 r
 
 `paddle`과 `docling`은 격리된 subprocess provider다. `ledger` provider는 사전에 고정한 관측을
 사용하는 재현 평가용이다. ledger PASS는 OCR 엔진 품질 PASS가 아니다.
+
+OCR benchmark의 text contract도 provenance 계약과 분리하지 않는다. Gold 문자열은
+`renderer-bbox-yx/v1`에 따라 renderer word bbox의 top-left y/x와 source-index tie-break로
+시각 순서를 만들고, prediction 문자열은 ledger의 worker-attested `reading_order`를 사용한다.
+bbox는 Gold 시각 순서와 bbox/layout metric에 권한이 있지만 prediction 순서를 다시 만들지
+않는다.
+
+현재 CI/PL/B/L/C/O 각 1문서의 unsealed non-release ordering 감사에서 worker/source order와 Gold
+bbox-yx order의 CER는 문서별 모두 `0%`였다. renderer array order를 Gold로 쓴
+counterfactual은 `23.31%`, `19.30%`, `29.58%`, `21.19%`와 micro `24%`, prediction을
+OCR line geometry로 다시 정렬한 counterfactual은 micro `36.55%`였다. 표 row/cell F1은
+모든 문서 `0/0`이다. 이는 durable Artifact Run으로 봉인되지 않은 순서 계약 개발 감사이지
+전체 OCR production benchmark가 아니다.
+과거 pre-policy v1 smoke의 `22.17%`와 별도 rendered-v2에서 관찰한 `17.07%`/`0%` CER도
+입력 image hash가 달라 전후 개선 수치로 비교하지 않는다.
 
 활성 OCR provider는 코드 존재나 smoke가 아니라 canonical descriptor의 locked 60문서와
 C/O 20문서가 모두 고정 threshold를 통과한 뒤에만 선택한다. 과거 4문서 lightweight benchmark와
@@ -169,9 +194,12 @@ benchmark report의 문서별 latency에서 p95를 결합기가 다시 계산하
 wheel/environment/model/engine identity drift, 동일 provider의 sample 간 disk identity drift,
 세 지표 전체 동률은 모두 자동 선택 없이 fail-closed한다.
 
-비용 제한 Live subset은 성공해도 `DIAGNOSTIC_PASS`로만 기록한다. 3,000장 계열은 two-reviewer
-Gate가 고정한 12 Case/36문서 전체, rendered 계열은 locked 60+C/O regression 20 전체를 exact
-ID·count·hash로 평가한 경우에만 extraction release `PASS`가 가능하다.
+비용 제한 Live subset은 성공해도 `DIAGNOSTIC_PASS`로만 기록한다. 과거 two-reviewer
+12 Case/36문서 Gold는 후속 pixel 감사에서 라벨 오류가 확인돼 exact hash와 semantic
+fingerprint 모두 무효화됐다. 따라서 현재 3,000장 계열에는 scoreable Gold가 없고, 독립 사람
+검수 replacement의 exact hash가 pin되기 전에는 extraction release `PASS`가 불가능하다.
+rendered 계열은 이와 별도로 locked 60+C/O regression 20 전체를 exact ID·count·hash로 평가해야
+한다.
 
 wheel은 결합 report의 hash, caller가 명시한 expected hash, OCR Python의 PEP 610 metadata에서
 읽은 installed-wheel hash의 3-way 일치와 설치 `RECORD`/console executable 무결성을 요구한다.
@@ -205,6 +233,13 @@ Claude의 exact grounding은 “해당 문자열/좌표가 존재했다”는 �
 필드에 연결한 정확도까지 운영 수준으로 보정됐다는 증거는 아니다. 현재 정책이 성공 LLM run도
 사람 검토 대상으로 보내는 이유다.
 
+컨테이너 번호는 B/L과 Packing List가 서로 같은지만 비교하지 않는다. ISO 6346의 lexical
+form과 check digit도 결정론적으로 검증하며, 같은 잘못된 번호가 두 문서에 반복돼도
+`CONTAINER_NUMBER_FORMAT_INVALID` 또는 `CONTAINER_CHECK_DIGIT_INVALID`로 검토가 필요하다.
+반면 컨테이너별 실제 적재 용적, 복합 결제조건, Packing List 추가 품목처럼 업무 계약·작성
+의도를 알아야 하는 항목은 임의 임계값으로 위반을 확정하지 않고 `ambiguous` 또는
+`needs_review`로 유지한다.
+
 controlled-defect 결정론적 평가는 `trade-document-evaluation-assets/v3` manifest와
 `deterministic-validation-evaluation-report/v4` report를 사용한다. evaluator는
 dataset-lock, opaque evaluation-v2 provenance bytes, controlled-defect와 manifest의 canonical
@@ -226,9 +261,32 @@ Agent가 PostgreSQL/Qdrant/Neo4j에 직접 연결하거나 Data repo 모듈을 i
 Evidence response는 request ID, item ID, review date, trade type, HS context, coverage, snapshot,
 citation metadata를 검증한다.
 
+모든 HTTP retrieval은 readiness의 `evidence_contract`가 packaged consumer lock의 provider
+release, provider revision, schema SHA-256과 모두 같은지 먼저 확인한다. HTTP retriever의
+기본 모드는 `required`이므로 서비스 Runtime, CLI와 evaluation runner에 동일하게 적용되며
+identity가 없으면 POST를 보내지 않는다. 전환기 `optional`은 명시적인 비릴리스 진단 전용이고,
+서비스용 `AgentRuntime`에서는 거절된다. identity가 광고된 경우에는 optional 진단도 똑같이
+exact match를 요구한다. 요청 `review_as_of`도 readiness의
+`supported_review_as_of`와 같아야 한다. POST 응답의 snapshot은 바로 앞 readiness snapshot과
+같아야 하며 rollout 불일치는 결과를 폐기한다. 현재 Data readiness는 identity를 아직 광고하지
+않으므로 HTTP release 경로는 Data 변경 전까지 fail-closed다.
+
+현재 provider의 정확한 handoff 조건과 GET–POST build attestation 제안은
+[`DATA_PROVIDER_HANDOFF.md`](DATA_PROVIDER_HANDOFF.md)에 기록한다. frozen v1 response body를
+Agent가 독자적으로 확장하거나 Data build identity를 추정하지 않는다.
+
+Agent wheel은 consumer lock과 그 lock의 SHA-256에 정확히 대응하는 provider JSON Schema
+snapshot을 함께 포함한다. 모든 HTTP request/response 원문은 Pydantic 변환과 별도로 이
+packaged schema를 통과해야 한다. 내부 모델이 provider 제약보다 느슨해도 실제 HTTP 경계에서는
+provider 계약 밖의 값을 수락하지 않는다. network JSON decoder는 표준 JSON에 없는
+`NaN`·`Infinity`와 의미가 모호한 duplicate object key도 schema/Pydantic 이전에 거부한다.
+
 다음 상태는 Mock으로 fallback하지 않고 자동 완료를 막는다.
 
 - service/readiness/network 실패
+- Evidence provider release/revision/schema SHA 누락 또는 불일치
+- readiness가 지원하지 않는 review_as_of
+- readiness와 retrieval response의 knowledge snapshot 불일치
 - schema 또는 request/item ID 불일치
 - partial/unknown coverage
 - ambiguous/invalid/missing HS resolution
@@ -311,16 +369,26 @@ evaluator의 자동 context가 아니다. 재사용하려면 active Investigatio
 6. System: Agent → Evidence API → 공개 result와 fail-closed 상태
 
 Mock, ledger, Claude-only, RAG-only 결과를 전체 서비스 E2E로 승격해 보고하지 않는다.
-사용자 승인 뒤 수행한 exhaustive Claude text normal/adversarial 평가와 공개 AgentRuntime의
-Claude 4문서 실행은 통과했다. 그러나 같은 runtime의 actual Evidence HTTP 검색은 Data
-readiness 불완전으로 `partial`, 최종 `needs_review`와 `BLOCKED_DATA_READINESS`다. 따라서
-Agent의 실제 Claude 실행 성공은 확인했지만 Data live 또는 전체 서비스 Release PASS는 아니다.
+사용자 승인 뒤 수행한 과거 c28 Claude text normal/adversarial 평가는 당시 정상 Gold
+`7cfe2cf8e2b88e55f80398425e6866d52bfa85e0886ec8a4b5862f736e01c7e5`와 adversarial Gold
+`b4416cbad6df9fba62f2f636c4267a348bf5f11a1d3b78771aee8b16786db661`에서 각각
+64/64와 21/21을 기록했다. ISO 6346 교정 뒤 현재 정상 Gold는
+`1e300058f6d01330e82002d04e1a3238f42aaceeb9dc5716653a2aa1c67634e0`이며 post-c28
+source와 함께 아직 Live 재실행하지 않았다.
 
-고정된 합성 CI/PL/B/L 이미지 triplet의 비릴리스 진단에서도 PaddleOCR ledger 3개와 Claude
-Vision 본문 호출 3회, crop 재판독 2회가 모델 오류 없이 끝났다. OCR과 완전히 결속되지 않은
-9개 후보는 conflict로 격리됐고 세 문서는 모두 extraction `completed`가 됐다. 다만 Evidence
-corpus 미완성으로 최종 상태는 계속 `needs_review`이며, 이 진단은 OCR provider 선택이나 image
-release PASS를 의미하지 않는다.
+같은 과거 공개 AgentRuntime은 Claude 4문서 처리를 끝낸 뒤 runtime identity 강제 전 Evidence
+endpoint에 POST해 `partial`, 최종 `needs_review`, `BLOCKED_DATA_READINESS`를 기록했다. 현재
+Data readiness에는 필수 `evidence_contract` identity가 없고 corpus도 3/58이므로 Agent는
+POST 전에 차단한다. 따라서 현재 성공하는 Data Live 또는 전체 서비스 Release E2E는 없다.
+
+과거 c28의 고정 합성 CI/PL/B/L 이미지 triplet 비릴리스 진단도 PaddleOCR와 Claude 호출이
+실행됐다는 역사 증거일 뿐이다. 그 실행을 판정한 12-Case image Gold는 후속 pixel 감사에서
+무효화됐으므로 conflict 수, extraction 상태, 정확도 또는 성능을 현재 근거로 재사용하지 않는다.
+현재 `run_claude_vision`은 report `status=FAIL`, failure code
+`BLOCKED_EVALUATION_ASSET`으로, `run_image_runtime_diagnostic`은 report
+`status=BLOCKED_EVALUATION_ASSET`으로 OCR·Claude·Data 호출 전에 중단한다. 별도의 1문서
+OCR smoke에서도 Paddle과 Docling 모두 기준을 통과하지 못해 선택된 production provider가
+없다.
 
 pre-freeze offline 테스트 수, pre-commit wheel hash와 smoke report는 구현 이력일 뿐 최종
 release 증거가 아니다. exact commit을 정한 뒤 생성한 JUnit, clean wheel install, 60+20 OCR

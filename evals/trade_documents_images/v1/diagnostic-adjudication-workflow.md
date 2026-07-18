@@ -58,14 +58,19 @@ _artifacts/datasets/trade_documents_images/source-v1/derived/
     reconciliation-report.json
 ```
 
-canonical Gate는 12개 모두 `adjudicated`, `gold_eligible=true`,
-`passed_two_reviewer_adjudication`이다. reviewer A/B annotation SHA-256은 각각
+당시 Gate는 12개 모두 `adjudicated`, `gold_eligible=true`,
+`passed_two_reviewer_adjudication`으로 계산됐다. reviewer A/B annotation SHA-256은 각각
 `847dddfe7c7d59147c11997243293eb11b1e6d4093fa432d6c24ec0aa9fbf290`,
 `cf1e88964bc69e06085959b09490c491802609a68abb584d8019e7d920ecd38a`다.
 Gate와 Gold SHA-256은 각각
 `3c03dc8a592cf70551079606676e218fadbc77d5762c1ac70a627f16a24621b2`,
 `75364e7c07f72633f06735fd1f4f36c719b54498c38eba2f43cb11500aca15c6`다.
 
-이 결과는 사람 검수 완료를 주장하지 않는다. reviewer independence는 distinct ID·file·
-attestation으로 구조적으로 확인됐지만 외부 독립성 증명은 아니다. 또한 이 Gold는 Claude Vision
-field extraction 전용이며 OCR 품질, workflow Outcome 또는 전체 dataset 대표성을 증명하지 않는다.
+후속 source-pixel 재감사에서 6개 Packing List label 오류가 확인되어 위 Gold hash는
+`adjudicated_gold_invalidated_by_label_error`로 영구 무효화됐다. 경로를 바꾸거나 같은
+review 입력으로 재생성해도 runner와 builder가 exact byte hash와 source-bound value
+semantics hash
+`ba07c100b59bcad78b9383f67b21dd0581a284baf64ccbe16c585728cdae7133` 기준으로 차단한다.
+`gold_set_id`, JSON formatting, output/reference 경로를 바꾸는 것은 우회가 아니다. 독립 사람
+검수를 완료한 새 Gold가 새 exact hash로 발행·승인되기 전에는 canonical adjudicated Gold가
+없다.

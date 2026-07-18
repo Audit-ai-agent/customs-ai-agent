@@ -36,6 +36,7 @@ METADATA = (
     f"Version: {EXPECTED_VERSION}\n"
     "Requires-Python: <3.12,>=3.11\n"
     "Requires-Dist: anthropic<1,>=0.117.0\n"
+    "Requires-Dist: jsonschema[format]<5,>=4.23\n"
     "Requires-Dist: langgraph<2,>=0.2.0\n"
     "Requires-Dist: pillow<13,>=11.0\n"
     "Requires-Dist: pydantic<3,>=2.7\n"
@@ -51,12 +52,14 @@ def _write_wheel(
     *,
     metadata: bytes = METADATA,
     extra_files: dict[str, bytes] | None = None,
+    excluded_files: set[str] | None = None,
 ) -> None:
     payloads: dict[str, bytes] = {
         name: (
             b"{}\n" if name.endswith(".json") else b"prompt\n" if name.endswith(".txt") else b"\n"
         )
         for name in _WHEEL_REQUIRED_PACKAGE_FILES
+        if name not in (excluded_files or set())
     }
     payloads.update(
         {
@@ -200,6 +203,7 @@ def test_project_metadata_limits_runtime_to_python_311_and_next_major_versions()
     assert project["requires-python"] == ">=3.11,<3.12"
     assert set(project["dependencies"]) == {
         "anthropic>=0.117.0,<1",
+        "jsonschema[format]>=4.23,<5",
         "langgraph>=0.2.0,<2",
         "pillow>=11.0,<13",
         "pypdfium2>=5.12,<6",
@@ -216,6 +220,7 @@ def test_project_metadata_limits_runtime_to_python_311_and_next_major_versions()
         for requirement in locked_project["metadata"]["requires-dist"]
     } == {
         ("anthropic", ">=0.117.0,<1"),
+        ("jsonschema", ">=4.23,<5"),
         ("langgraph", ">=0.2.0,<2"),
         ("pillow", ">=11.0,<13"),
         ("pypdfium2", ">=5.12,<6"),
@@ -250,6 +255,18 @@ def test_public_runtime_facade_is_a_required_wheel_payload() -> None:
     assert "customs_ai_agent/runtime.py" in _WHEEL_REQUIRED_PACKAGE_FILES
 
 
+def test_evidence_contract_runtime_files_are_required_wheel_payloads() -> None:
+    required_evidence_files = {
+        "customs_ai_agent/contracts/evidence.py",
+        "customs_ai_agent/contracts/evidence/v1.lock.json",
+        "customs_ai_agent/contracts/evidence/v1.schema.json",
+    }
+
+    assert required_evidence_files.issubset(_WHEEL_REQUIRED_PACKAGE_FILES)
+    for package_name in required_evidence_files:
+        assert (ROOT / "src" / package_name).is_file()
+
+
 def test_distribution_verifier_accepts_bounded_wheel_and_sdist(tmp_path: Path) -> None:
     wheel = tmp_path / "customs_ai_agent-0.3.0-py3-none-any.whl"
     sdist = tmp_path / "customs_ai_agent-0.3.0.tar.gz"
@@ -263,6 +280,28 @@ def test_distribution_verifier_accepts_bounded_wheel_and_sdist(tmp_path: Path) -
     assert int(wheel_result["member_count"]) > 0
     assert len(sdist_result["sha256"]) == 64
     assert int(sdist_result["member_count"]) > 0
+
+
+@pytest.mark.parametrize(
+    "missing_file",
+    [
+        "customs_ai_agent/contracts/evidence.py",
+        "customs_ai_agent/contracts/evidence/v1.lock.json",
+        "customs_ai_agent/contracts/evidence/v1.schema.json",
+    ],
+)
+def test_distribution_verifier_rejects_missing_evidence_contract_runtime_file(
+    tmp_path: Path,
+    missing_file: str,
+) -> None:
+    wheel = tmp_path / "customs_ai_agent-0.3.0-py3-none-any.whl"
+    _write_wheel(wheel, excluded_files={missing_file})
+
+    with pytest.raises(
+        DistributionVerificationError,
+        match="missing a required runtime file or package resource",
+    ):
+        verify_wheel(wheel)
 
 
 def test_uv_hashless_direct_url_requires_exact_wheel_and_installed_record(
@@ -431,6 +470,23 @@ def test_distribution_verifier_rejects_unbounded_runtime_dependency(
     metadata = METADATA.replace(
         b"Requires-Dist: anthropic<1,>=0.117.0",
         b"Requires-Dist: anthropic>=0.117.0",
+    )
+    _write_wheel(wheel, metadata=metadata)
+
+    with pytest.raises(
+        DistributionVerificationError,
+        match="runtime dependency set",
+    ):
+        verify_wheel(wheel)
+
+
+def test_distribution_verifier_rejects_missing_jsonschema_runtime_dependency(
+    tmp_path: Path,
+) -> None:
+    wheel = tmp_path / "customs_ai_agent-0.3.0-py3-none-any.whl"
+    metadata = METADATA.replace(
+        b"Requires-Dist: jsonschema[format]<5,>=4.23\n",
+        b"",
     )
     _write_wheel(wheel, metadata=metadata)
 

@@ -2079,6 +2079,7 @@ def _vision_analysis_to_extracted_document(
             "provider_id": ledger.provider_id,
             "engine_id": ledger.engine_id,
             "engine_version": ledger.engine_version,
+            "reading_order_policy_id": ledger.reading_order_policy_id,
             "model_id": ledger.model_id,
             "model_assets_lock_sha256": ledger.model_assets_lock_sha256,
         },

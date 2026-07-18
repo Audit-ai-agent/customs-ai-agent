@@ -19,9 +19,12 @@ severity·최종 승인 상태를 자유 생성하는 구조가 아니다.
 PASS했다는 뜻이 아니다.
 
 - LangGraph 기반 분류 → 추출 → 정규화 → pairing → 검증 → 검색 → compliance → report 흐름
+- CI/PL/B/L/C/O 교차검증과 ISO 6346 컨테이너 형식·check digit의 결정론적 fail-closed 검증
 - Claude text/vision structured output adapter
 - 이미지 hash·byte·dimension·page 수·provenance 검증
 - 독립 OCR/layout 원장과 Claude field candidate의 span/bbox grounding
+- worker가 소유한 `worker-emitted-sequence/v1` reading order와 이를 hash-bound하는
+  internal OCR ledger v2
 - PDF를 제한된 page 수와 DPI로 rasterize하는 로컬 adapter
 - Paddle/Docling 격리 실행 provider 경계와 고정 ledger 평가 provider
 - invalidated v2 결합 경로의 non-release 격리와 향후 v3 wheel 3-way
@@ -37,19 +40,38 @@ TASK-0009의 pre-freeze 상태는 다음과 같다.
   역사적 스냅샷이다. 최종 exact commit의 검증 수치나 release 증거가 아니다.
 - pre-commit wheel, clean-install 결과, 1문서 또는 과거 4문서 OCR smoke도 모두
   진단 이력이다. 최종 wheel이나 OCR provider 선택 근거로 사용할 수 없다.
-- 12 Case/36 image field Gold는 서로 다른 두 독립 AI 시각 reviewer의 adjudication Gate를
-  통과했지만, 사람 검수 완료를 뜻하지 않는다.
+- 과거 12 Case/36 image field Gold는 두 AI reviewer의 adjudication을 거쳤지만, 이후 6개
+  Packing List B/L 라벨에 실제 pixel에는 없는 `EE`가 추가된 오류가 확인됐다. exact
+  SHA-256 `75364e7c07f72633f06735fd1f4f36c719b54498c38eba2f43cb11500aca15c6`과
+  semantic fingerprint
+  `ba07c100b59bcad78b9383f67b21dd0581a284baf64ccbe16c585728cdae7133`은 모두
+  `invalidated_by_label_error`이며 점수 또는 release 근거로 사용할 수 없다.
+- 현재 canonical/scoreable image Gold는 없다. 독립 사람 검수로 만든 replacement Gold의 exact
+  hash가 코드에 명시적으로 pin되기 전에는 evaluator가 evaluation-asset preflight에서
+  OCR·Claude·Evidence 호출 전에 차단된다.
 - controlled-defect 평가는 고정 manifest/report V3 경계에서 별도 sub-Gate로 검증한다. 이
   결과만으로 OCR·Claude·Evidence 또는 release 전체가 PASS한 것은 아니다.
-- Claude text Live는 exhaustive 정상 Gold 64/64와 문서 내 prompt-injection Gold 21/21
-  exact match, wrong/missing/hallucinated 0으로 통과했다. 공개 `AgentRuntime`의 실제
-  Claude 4문서 실행도 model error 0으로 통과했다.
-- 고정 합성 CI/PL/B/L 이미지 triplet의 비릴리스 실제 진단은 PaddleOCR ledger 3개,
-  Claude Vision 본문 3회와 crop 재판독 2회, model error 0으로 실행됐다. 세 문서는 extraction을
-  완료했고 OCR과 완전히 결속되지 않은 9개 후보는 자동 확정하지 않고 conflict로 격리했다.
-- 같은 공개 runtime의 Evidence HTTP 단계는 Data corpus readiness 실패로 `partial`이며 최종
-  결과는 `needs_review`, 전체 판정은 `BLOCKED_DATA_READINESS`다. 이는 Agent 실행 성공과
-  Data release 준비도 실패를 분리한 결과이며 Evidence Release PASS가 아니다.
+- 2026-07-18의 과거 Claude text Live는 당시 정상 Gold SHA-256
+  `7cfe2cf8e2b88e55f80398425e6866d52bfa85e0886ec8a4b5862f736e01c7e5`에서
+  64/64, adversarial Gold SHA-256
+  `b4416cbad6df9fba62f2f636c4267a348bf5f11a1d3b78771aee8b16786db661`에서 21/21
+  exact match와 wrong/missing/hallucinated 0을 기록했다. 이후 ISO 6346에 맞는 컨테이너
+  번호로 정상 Gold를 수정해 현재 SHA-256은
+  `1e300058f6d01330e82002d04e1a3238f42aaceeb9dc5716653a2aa1c67634e0`이다. 이 현재
+  Gold와 post-c28 source 조합은 아직 Claude Live로 재실행하지 않았으므로 과거 64/64를
+  현재 PASS로 재사용하지 않는다.
+- 과거 고정 합성 CI/PL/B/L 이미지 진단의 실행 로그는 구현 진단 이력으로만 보존한다. 그 결과를
+  판정한 image Gold가 위 라벨 오류로 무효화됐으므로 정확도·성능·release 증거로 재사용할 수
+  없다. 현재 `run_claude_vision` 재실행 report는 `status=FAIL`, failure code
+  `BLOCKED_EVALUATION_ASSET`이고, `run_image_runtime_diagnostic` report status는
+  `BLOCKED_EVALUATION_ASSET`이다. 두 runner 모두 OCR·Claude·Data 단계에 진입하지 않는다.
+- 별도의 과거 공개 runtime Evidence HTTP 진단은 runtime identity 강제 전 Data corpus
+  readiness 실패 상태에서 POST를 실행해 `partial`, 최종 `needs_review`,
+  `BLOCKED_DATA_READINESS`를 기록했다. 현재 Agent는 readiness의 필수
+  `evidence_contract` identity를 요구하지만 Data Provider가 이를 제공하지 않고 corpus도
+  58개 중 3개만 적재돼 있다. 따라서 현재 Evidence POST는 0건이고 성공하는
+  Agent–Data Live E2E는 없다. 과거 진단은 현재 image evaluation PASS 또는 Evidence Release
+  PASS가 아니다.
 - OCR provider는 exact-commit wheel로 canonical locked 60 CI/PL/B/L와 C/O 20을 모두
   검증하기 전까지 선택하지 않는다.
 - OCR release pin은 descriptor SHA와 C0 authorization commit SHA 모두 `None`이다. 향후
@@ -58,10 +80,23 @@ TASK-0009의 pre-freeze 상태는 다음과 같다.
 - 이 Task는 Backend·Frontend와 Data Platform source를 변경하지 않는다. Data는 pinned
   Evidence HTTP API의 소비자 경계에서만 관찰한다.
 
-실제 Claude text/image 진단에서 발견한 runtime 경계 수정까지 포함한 후보 source state는
-전체 611개 test와 skip 0을 통과했다. exact commit SHA, wheel/sdist hash와 clean-install 결과는
-코드 freeze 뒤 생성한 실행 Artifact가 권위 있는 근거다. evaluation-v3 60+20 OCR 두 report와
-결합 판정은 아직 pending이다. 그 값은
+과거 c28 exact commit의 611-test·package·Live 결과 뒤에도 Gold 무효화, Evidence identity,
+HS/date/ISO 6346과 OCR ordering 보완이 추가됐다. 따라서 현재 post-c28 후보 source의 최종
+test 수, exact commit SHA, wheel/sdist hash와 clean-install 결과는 코드 freeze 뒤 새 실행
+Artifact로 다시 확정해야 한다. OCR benchmark의 Gold text order는
+`renderer-bbox-yx/v1`, prediction order는 worker-attested
+`worker-emitted-sequence/v1`이다. 과거 pre-policy internal/v1 1문서 smoke의 Paddle CER
+`22.17%`와 별도 rendered-v2에서 관찰한 `17.07%`/`0%` CER은 입력 image hash가 달라
+전후 성능 비교에 사용할 수 없다.
+
+현재 CI/PL/B/L/C/O 각 1문서에 대한 unsealed non-release ordering 감사에서는 worker/source order와 Gold
+bbox-yx order의 CER가 문서별 모두 `0%`였다. 반면 renderer 배열 순서를 Gold로 사용한
+counterfactual CER는 각각 `23.31%`, `19.30%`, `29.58%`, `21.19%`, micro `24%`였고,
+prediction을 OCR line geometry로 다시 정렬하면 micro CER `36.55%`였다. 이는 ordering 계약을
+선택한 근거이지 OCR 인식 품질의 production benchmark가 아니다. table row/cell F1은 여전히
+`0/0`이다. 이 4문서 관찰은 durable Artifact Run으로 봉인되지 않은 개발 진단이며,
+production 기준을 통과한 provider는 없다. evaluation-v3 60+20 OCR 두 report와
+결합 판정도 pending이다. 최종 값은
 `_artifacts/runs/<RUN-ID>/`에 봉인하고 `_engineering`의 Task/Evaluation 기록에서 commit과 함께
 승인한다. 이 README의 과거 숫자나 이름에 `latest` 의미를 부여하지 않는다.
 
@@ -352,9 +387,22 @@ result_schema_sha256 = schema_sha256("backend", "v2", "review-result")
 ```
 
 `get_schema()`가 반환한 dict는 호출자용 복사본이며 package resource를 변경하지 않는다.
-`verify_packaged_schemas()`는 wheel에 포함된 9개 JSON Schema가 현재 Pydantic 원본과 어긋나면
+`verify_packaged_schemas()`는 wheel에 등록된 10개 JSON Schema가 현재 Pydantic 원본과 어긋나면
 실패한다. `contracts/agent/v1|v2/`는 코드 리뷰용 checkout 사본이며 wheel의 `backend` resource와
 의미상 동일해야 한다.
+
+현재 OCR runtime ledger는 `schema_version=2.0`,
+`internal/v2/ocr-layout-ledger.schema.json`이다. OCR worker의 성공 envelope가
+`reading_order_policy_id=worker-emitted-sequence/v1`을 emit하고 Agent adapter가 이 exact 값을
+검증한다. 이 policy ID와 ordered spans는 canonical `ledger_id` hash 재료에 포함되므로 순서
+정책을 바꾸고 같은 ledger identity를 재사용할 수 없다. `internal/v1` OCR ledger schema는
+역사 호환·감사용 package resource로만 유지한다. policy가 없던 v1 ledger 또는 그 ledger가
+들어 있는 checkpoint를 현재 runtime provenance로 재사용하지 않는다.
+
+OCR benchmark는 Gold에 `renderer-bbox-yx/v1`을 사용한다. 즉 renderer word bbox의 top-left
+y/x와 source index tie-break로 시각 순서를 만들고, prediction에는 ledger `reading_order`를
+사용한다. bbox geometry는 Gold 시각 순서와 bbox metric에만 권한이 있으며 worker/provider
+prediction 순서를 다시 정렬하지 않는다.
 
 Backend는 wheel commit, package version, schema scope/version/kind와 SHA-256을 함께 고정한다.
 Breaking change는 기존 V1/V2를 덮어쓰지 않고 다음 버전으로 추가한다. Backend용 공개 실행

@@ -48,6 +48,10 @@ from customs_ai_agent.contracts import (
     schema_sha256,
     verify_packaged_schemas,
 )
+from customs_ai_agent.evaluation_assets import (
+    image_gold_invalidation_code,
+    image_gold_semantic_invalidation_code,
+)
 from customs_ai_agent.prompts import (
     DOCUMENT_CROP_RECONCILIATION_PROMPT_ID,
     DOCUMENT_CROP_RECONCILIATION_PROMPT_VERSION,
@@ -69,9 +73,19 @@ from customs_ai_agent.schemas.models import (
 
 
 ProviderName = Literal["paddle", "docling"]
+DiagnosticStatus = Literal[
+    "PREFLIGHT_BLOCKED",
+    "BLOCKED_EVALUATION_ASSET",
+    "BLOCKED_DATA_READINESS",
+    "DIAGNOSTIC_EXECUTION_FAILED",
+    "DIAGNOSTIC_PASS",
+]
 REPORT_SCHEMA_VERSION = "image-runtime-nonrelease-diagnostic/v1"
 DIAGNOSTIC_SCOPE = "NONRELEASE_IMAGE_AGENT_SERVICE_DIAGNOSTIC"
-EXPECTED_GOLD_SHA256 = "75364e7c07f72633f06735fd1f4f36c719b54498c38eba2f43cb11500aca15c6"
+# No replacement Gold is trusted yet. Tests may pin a synthetic fixture, but
+# the workspace runner remains blocked until a newly adjudicated artifact is
+# explicitly reviewed and pinned here.
+EXPECTED_GOLD_SHA256: str | None = None
 EXPECTED_GOLD_SET_ID = "trade-images-adjudicated-gold-source-v1"
 EXPECTED_SELECTION_ID = "trade-images-hash-ranked-diagnostic-v1"
 FIXED_CASE_ID = "0097"
@@ -203,6 +217,7 @@ def _base_report(
     provider: ProviderName,
     contracts: Mapping[str, str | None] | None = None,
     failures: Iterable[str] = (),
+    status: DiagnosticStatus = "PREFLIGHT_BLOCKED",
     phase: str = "PREFLIGHT_BLOCKED",
     readiness_status: str = "NOT_ATTEMPTED",
     diagnostic_execution_passed: bool = False,
@@ -210,9 +225,10 @@ def _base_report(
     return {
         "report_schema_version": REPORT_SCHEMA_VERSION,
         "scope": DIAGNOSTIC_SCOPE,
-        # This intentionally has only two values. All preflight/execution
-        # failures remain blocked and can never be mistaken for release PASS.
-        "status": "BLOCKED_DATA_READINESS",
+        # Evaluation assets, generic preflight, runtime execution, and Data
+        # readiness are separate blocker classes. Every non-PASS value remains
+        # non-release and must not be interpreted as a release decision.
+        "status": status,
         "phase": phase,
         "release_ready": False,
         "release_decision_eligible": False,
@@ -288,12 +304,20 @@ def _read_gold_and_validate_sources() -> list[Path]:
     ):
         raise ImageRuntimeDiagnosticError("canonical_dataset_or_gold_invalid")
     try:
-        if _sha256_file(resolved_gold) != EXPECTED_GOLD_SHA256:
-            raise ImageRuntimeDiagnosticError("adjudicated_gold_hash_mismatch")
+        observed_gold_sha256 = _sha256_file(resolved_gold)
         raw_gold = resolved_gold.read_bytes()
         if len(raw_gold) > 2 * 1024 * 1024:
             raise ImageRuntimeDiagnosticError("adjudicated_gold_invalid")
         gold = json.loads(raw_gold)
+        invalidation = image_gold_invalidation_code(
+            observed_gold_sha256
+        ) or image_gold_semantic_invalidation_code(gold)
+        if invalidation is not None:
+            raise ImageRuntimeDiagnosticError(invalidation)
+        if EXPECTED_GOLD_SHA256 is None:
+            raise ImageRuntimeDiagnosticError("adjudicated_gold_replacement_not_provisioned")
+        if observed_gold_sha256 != EXPECTED_GOLD_SHA256:
+            raise ImageRuntimeDiagnosticError("adjudicated_gold_hash_mismatch")
     except ImageRuntimeDiagnosticError:
         raise
     except (OSError, UnicodeDecodeError, json.JSONDecodeError):
@@ -406,7 +430,23 @@ def _read_evidence_settings(
 def _readiness_failure_code(exc: Exception) -> str:
     if isinstance(exc, RetrievalError) and "HTTP status 503" in str(exc):
         return "evidence_readiness_unready_503"
+    if isinstance(exc, RetrievalError) and "contract identity missing" in str(exc):
+        return "evidence_contract_identity_missing"
+    if isinstance(exc, RetrievalError) and "contract identity mismatch" in str(exc):
+        return "evidence_contract_identity_mismatch"
     return "evidence_readiness_failed"
+
+
+def _preflight_status(code: str) -> DiagnosticStatus:
+    evaluation_asset_prefixes = (
+        "adjudicated_gold_",
+        "canonical_dataset_",
+        "fixed_adjudicated_",
+        "fixed_source_image_",
+    )
+    if code.startswith(evaluation_asset_prefixes):
+        return "BLOCKED_EVALUATION_ASSET"
+    return "PREFLIGHT_BLOCKED"
 
 
 def _runtime_failure_code(exc: Exception) -> str:
@@ -694,6 +734,7 @@ def evaluate(
             provider=provider,
             contracts=contracts,
             failures=[exc.code],
+            status=_preflight_status(exc.code),
         )
     except (LLMError, OSError, ValueError) as exc:
         code = (
@@ -719,6 +760,7 @@ def evaluate(
             service_token=token_value,
             token_header=token_header,
             allowed_origins=allowed_origins,
+            contract_identity_mode="required",
         )
         if supported_date != review_date:
             raise ImageRuntimeDiagnosticError("review_date_not_supported")
@@ -727,6 +769,7 @@ def evaluate(
             provider=provider,
             contracts=contracts,
             failures=[exc.code],
+            status="BLOCKED_DATA_READINESS",
             readiness_status="READY_DATE_MISMATCH",
         )
         report["ocr"]["python_executable_sha256"] = python_sha256
@@ -738,6 +781,7 @@ def evaluate(
                 provider=provider,
                 contracts=contracts,
                 failures=[code],
+                status="BLOCKED_DATA_READINESS",
                 readiness_status=(
                     "UNREADY_503" if code == "evidence_readiness_unready_503" else "FAILED"
                 ),
@@ -786,6 +830,7 @@ def evaluate(
             provider=provider,
             contracts=contracts,
             failures=[code],
+            status="DIAGNOSTIC_EXECUTION_FAILED",
             phase="EXECUTION_BLOCKED",
             readiness_status=readiness_status,
         )
@@ -813,6 +858,11 @@ def evaluate(
         provider=provider,
         contracts=contracts,
         failures=[*execution_failures, *observed_error_codes],
+        status=(
+            "BLOCKED_DATA_READINESS"
+            if readiness_status != "READY" or incomplete_data
+            else "DIAGNOSTIC_EXECUTION_FAILED"
+        ),
         phase=(
             "DATA_READINESS_BLOCKED"
             if readiness_status != "READY" or incomplete_data

@@ -269,7 +269,10 @@ def test_invalidated_case_0500_is_never_scored_or_sent_to_provider(
     assert report["status"] == "FAIL"
     assert report["provider_called"] is False
     assert report["release_score_eligible"] is False
+    assert report["scope"] == "TRUSTED_REPLACEMENT_GOLD_REQUIRED_HISTORICAL_GOLD_BLOCKED"
     assert report["legacy_case_0500_provenance"] == "invalidated_by_label_error"
+    assert report["historical_adjudicated_gold_provenance"] == ("invalidated_by_label_error")
+    assert report["replacement_gold_status"] == "not_available"
     assert {
         "legacy_case_0500_invalidated_by_label_error",
         "adjudicated_gold_manifest_required",
@@ -470,6 +473,69 @@ def test_tampered_vision_prompt_hash_fails_before_provider_setup(
     assert exit_code == 1
     assert report["status"] == "FAIL"
     assert "prompt_hash_mismatch" in _failure_codes(report)
+
+
+def test_runtime_vision_prompt_change_remains_unapproved_and_fail_closed():
+    assert run_claude_vision.EXPECTED_VISION_PROMPT_SHA256 == (
+        "531ad80b62016c5bd65ea292ac584f36413dfb230b13cffb5761b6862d1705ba"
+    )
+    assert run_claude_vision._vision_prompt_sha256() == (
+        "8d64bfa5673f90e092e56740e732ba07012e566fffec154457b59ca35590f3c8"
+    )
+    assert (
+        run_claude_vision._vision_prompt_sha256() != run_claude_vision.EXPECTED_VISION_PROMPT_SHA256
+    )
+
+
+def test_unpinned_replacement_blocks_adjudicated_gold_after_reserialization(
+    monkeypatch,
+    tmp_path,
+):
+    worklist_path, gate_path = _pending_adjudication_evidence(tmp_path)
+    monkeypatch.setattr(
+        run_claude_vision,
+        "EXPECTED_ADJUDICATED_GOLD_SHA256",
+        None,
+    )
+    monkeypatch.setattr(
+        run_claude_vision.ClaudeDocumentAnalyzer,
+        "from_settings",
+        _forbid_analyzer_creation,
+    )
+    gold = {
+        "schema_version": "trade-image-adjudicated-gold/v1",
+        "gold_set_id": "untrusted-candidate",
+        "cases": [],
+    }
+    gold_paths = [
+        tmp_path / "compact-gold.json",
+        tmp_path / "pretty-gold.json",
+    ]
+    gold_paths[0].write_text(
+        json.dumps(gold, sort_keys=True, separators=(",", ":")),
+        encoding="utf-8",
+    )
+    gold_paths[1].write_text(
+        json.dumps(gold, indent=4, sort_keys=False) + "\n",
+        encoding="utf-8",
+    )
+    assert _sha256(gold_paths[0]) != _sha256(gold_paths[1])
+
+    reports = []
+    for gold_path in gold_paths:
+        exit_code, report = run_claude_vision.evaluate(
+            env_file=tmp_path / "unused.env",
+            dataset_root=tmp_path / "missing-dataset",
+            gold_path=gold_path,
+            worklist_path=worklist_path,
+            gate_path=gate_path,
+        )
+        assert exit_code == 1
+        assert report["provider_called"] is False
+        assert "adjudicated_gold_replacement_not_provisioned" in _failure_codes(report)
+        reports.append(report)
+
+    assert reports[0]["gold_manifest_sha256"] != reports[1]["gold_manifest_sha256"]
 
 
 def test_workflow_flag_is_blocked_without_separate_outcome_gold(

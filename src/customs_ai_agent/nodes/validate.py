@@ -5,10 +5,53 @@ from decimal import Decimal
 from typing import Any
 
 from customs_ai_agent.nodes.common import audit, normalize_text
-from customs_ai_agent.nodes.normalize import is_valid_hs_code
+from customs_ai_agent.nodes.normalize import (
+    is_ambiguous_numeric_date,
+    is_valid_hs_code,
+    normalize_hs_code,
+)
 from customs_ai_agent.policies.severity import SEVERITY_POLICY
 from customs_ai_agent.policies.case_profile import required_document_types
 from customs_ai_agent.schemas.models import BBox, ValidationIssue
+
+
+_ISO_6346_LETTER_VALUES = {
+    letter: value
+    for letter, value in zip(
+        "ABCDEFGHIJKLMNOPQRSTUVWXYZ",
+        (
+            10,
+            12,
+            13,
+            14,
+            15,
+            16,
+            17,
+            18,
+            19,
+            20,
+            21,
+            23,
+            24,
+            25,
+            26,
+            27,
+            28,
+            29,
+            30,
+            31,
+            32,
+            34,
+            35,
+            36,
+            37,
+            38,
+        ),
+        strict=True,
+    )
+}
+_ISO_6346_CONTAINER_PATTERN = re.compile(r"^[A-Z]{3}[UJZ]\d{7}$")
+_CONTAINER_IDENTIFIER_PATTERN = re.compile(r"^[A-Z]{4}\d{7}$")
 
 
 def _unique_doc(
@@ -111,6 +154,95 @@ def _rounding_tolerance(*raw_values: Any) -> Decimal:
 def _normalized_collection(value: Any) -> tuple[str, ...]:
     values = value if isinstance(value, (list, tuple, set)) else [value]
     return tuple(sorted(normalized for item in values if (normalized := normalize_text(item))))
+
+
+def _container_identifiers(value: Any) -> tuple[tuple[str, str], ...]:
+    values = value if isinstance(value, (list, tuple, set)) else [value]
+    identifiers: list[tuple[str, str]] = []
+    for item in values:
+        if item is None:
+            continue
+        observed = str(item).strip()
+        if not observed:
+            continue
+        normalized = re.sub(r"[\s-]+", "", observed).upper()
+        identifiers.append((observed, normalized))
+    return tuple(identifiers)
+
+
+def _iso_6346_expected_check_digit(identifier: str) -> int:
+    total = 0
+    for index, character in enumerate(identifier[:10]):
+        value = _ISO_6346_LETTER_VALUES[character] if character.isalpha() else int(character)
+        total += value * (2**index)
+    return (total % 11) % 10
+
+
+def _validate_container_identifiers(
+    issues: list[dict[str, Any]],
+    *,
+    bill_of_lading_id: str | None,
+    bill_of_lading: dict[str, Any] | None,
+    packing_list_id: str | None,
+    packing_list: dict[str, Any] | None,
+) -> None:
+    occurrences: dict[str, list[tuple[str, str, dict[str, Any]]]] = {}
+    for document_id, document in (
+        (bill_of_lading_id, bill_of_lading),
+        (packing_list_id, packing_list),
+    ):
+        if document_id is None or document is None:
+            continue
+        for observed, normalized in _container_identifiers(_field(document, "container_numbers")):
+            occurrences.setdefault(normalized, []).append((observed, document_id, document))
+
+    for normalized, references in sorted(occurrences.items()):
+        source_observed, source_id, source_document = references[0]
+        target_id = references[1][1] if len(references) > 1 else None
+        target_document = references[1][2] if len(references) > 1 else None
+        if not _CONTAINER_IDENTIFIER_PATTERN.fullmatch(normalized):
+            issues.append(
+                _issue(
+                    "CONTAINER_NUMBER_FORMAT_INVALID",
+                    "Container number does not match the ISO 6346 lexical form.",
+                    "3 owner letters + U/J/Z + 6 serial digits + 1 check digit",
+                    source_observed,
+                    source_id,
+                    target_id,
+                    _bbox(source_document, "container_numbers"),
+                    _bbox(target_document, "container_numbers"),
+                )
+            )
+            continue
+        if not _ISO_6346_CONTAINER_PATTERN.fullmatch(normalized):
+            issues.append(
+                _issue(
+                    "CONTAINER_NUMBER_FORMAT_INVALID",
+                    "Container equipment category is not valid for an ISO 6346 identifier.",
+                    "U, J, or Z in position 4",
+                    source_observed,
+                    source_id,
+                    target_id,
+                    _bbox(source_document, "container_numbers"),
+                    _bbox(target_document, "container_numbers"),
+                )
+            )
+            continue
+        expected_digit = _iso_6346_expected_check_digit(normalized)
+        if int(normalized[-1]) == expected_digit:
+            continue
+        issues.append(
+            _issue(
+                "CONTAINER_CHECK_DIGIT_INVALID",
+                "Container number has an invalid ISO 6346 check digit.",
+                f"{normalized[:10]}{expected_digit}",
+                source_observed,
+                source_id,
+                target_id,
+                _bbox(source_document, "container_numbers"),
+                _bbox(target_document, "container_numbers"),
+            )
+        )
 
 
 def _same_value(left: Any, right: Any) -> bool:
@@ -319,6 +451,27 @@ def validate_cross_documents(state: dict[str, Any]) -> dict[str, Any]:
     invoice_id, invoice, _ = selected["invoice"]
     packing_id, packing, _ = selected["packing_list"]
     co_id, co, _ = selected["certificate_of_origin"]
+
+    for document_id, document in (state.get("normalized_documents") or {}).items():
+        for field_name in (
+            "departure_date",
+            "invoice_date",
+            "issue_date",
+            "on_board_date",
+        ):
+            raw_date = _raw_field(document, field_name)
+            if is_ambiguous_numeric_date(raw_date):
+                issues.append(
+                    _issue(
+                        "DATE_FORMAT_AMBIGUOUS",
+                        "Numeric date has two valid day/month interpretations.",
+                        "ISO year-first, named-month, or an unambiguous numeric date",
+                        raw_date,
+                        document_id,
+                        None,
+                        _bbox(document, field_name),
+                    )
+                )
 
     if invoice:
         total = invoice.get("fields", {}).get("total_amount")
@@ -567,6 +720,13 @@ def validate_cross_documents(state: dict[str, Any]) -> dict[str, Any]:
             )
 
     if bl and packing:
+        _validate_container_identifiers(
+            issues,
+            bill_of_lading_id=bl_id,
+            bill_of_lading=bl,
+            packing_list_id=packing_id,
+            packing_list=packing,
+        )
         bl_weight = bl.get("fields", {}).get("gross_weight_kg")
         packing_total_weight = packing.get("fields", {}).get("total_gross_weight_kg")
         packing_weights = [
@@ -835,30 +995,63 @@ def validate_cross_documents(state: dict[str, Any]) -> dict[str, Any]:
     if invoice:
         for item in invoice.get("line_items") or []:
             hs_code = item.get("hs_code")
+            raw_hs_code = (item.get("raw_fields") or {}).get("hs_code")
             if not hs_code:
-                issues.append(
-                    _issue(
-                        "HS_CODE_MISSING",
-                        "Invoice line item is missing an HS code.",
-                        "HS code present",
-                        None,
-                        invoice_id,
-                        invoice_id,
+                if raw_hs_code is not None and str(raw_hs_code).strip():
+                    issues.append(
+                        _issue(
+                            "HS_CODE_FORMAT_INVALID",
+                            "Invoice line item has an invalid HS code format.",
+                            "6 or 10 ASCII digits with only space, dot or hyphen separators",
+                            raw_hs_code,
+                            invoice_id,
+                            invoice_id,
+                        )
                     )
-                )
+                else:
+                    issues.append(
+                        _issue(
+                            "HS_CODE_MISSING",
+                            "Invoice line item is missing an HS code.",
+                            "HS code present",
+                            None,
+                            invoice_id,
+                            invoice_id,
+                        )
+                    )
             elif not is_valid_hs_code(hs_code):
                 issues.append(
                     _issue(
                         "HS_CODE_FORMAT_INVALID",
                         "Invoice line item has an invalid HS code format.",
-                        "6 or 10 digits",
-                        hs_code,
+                        "6 or 10 ASCII digits with only space, dot or hyphen separators",
+                        raw_hs_code if raw_hs_code is not None else hs_code,
                         invoice_id,
                         invoice_id,
                     )
                 )
 
     if invoice and co:
+        raw_co_hs_codes = _raw_field(co, "hs_codes")
+        if isinstance(raw_co_hs_codes, list):
+            for raw_hs_code in raw_co_hs_codes:
+                if (
+                    raw_hs_code is not None
+                    and str(raw_hs_code).strip()
+                    and not is_valid_hs_code(normalize_hs_code(raw_hs_code))
+                ):
+                    issues.append(
+                        _issue(
+                            "HS_CODE_FORMAT_INVALID",
+                            "Certificate of origin has an invalid HS code format.",
+                            "6 or 10 ASCII digits with only space, dot or hyphen separators",
+                            raw_hs_code,
+                            co_id,
+                            co_id,
+                            _bbox(co, "hs_codes"),
+                            _bbox(co, "hs_codes"),
+                        )
+                    )
         invoice_origins = {
             item.get("origin_country")
             for item in invoice.get("line_items") or []

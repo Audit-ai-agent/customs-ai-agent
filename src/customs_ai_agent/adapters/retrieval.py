@@ -4,14 +4,23 @@ import hashlib
 import ipaddress
 import json
 import re
+from dataclasses import dataclass
 from datetime import date
-from typing import Any, Protocol, runtime_checkable
+from typing import Any, Literal, Protocol, runtime_checkable
 from urllib.error import HTTPError, URLError
 from urllib.parse import urlsplit, urlunsplit
 from urllib.request import HTTPRedirectHandler, Request, build_opener
 
 from pydantic import ValidationError
 
+from customs_ai_agent.contracts.evidence import (
+    EvidenceContractIdentity,
+    EvidenceContractLockError,
+    EvidenceContractPayloadError,
+    load_pinned_evidence_contract_identity,
+    load_pinned_evidence_schema,
+    validate_pinned_evidence_payload,
+)
 from customs_ai_agent.fixtures.knowledge import KNOWLEDGE_BASE
 from customs_ai_agent.schemas.models import (
     Coverage,
@@ -29,6 +38,22 @@ from customs_ai_agent.schemas.models import (
 
 class RetrievalError(RuntimeError):
     """The Evidence Service could not return a contract-valid response."""
+
+
+EvidenceContractIdentityMode = Literal["disabled", "optional", "required"]
+
+
+@dataclass(frozen=True, slots=True)
+class EvidenceReadiness:
+    knowledge_snapshot_id: str
+    supported_review_as_of: date
+    contract_identity: EvidenceContractIdentity | None
+
+
+class _ReadinessValidationError(ValueError):
+    def __init__(self, safe_reason: str) -> None:
+        super().__init__(safe_reason)
+        self.safe_reason = safe_reason
 
 
 _HEADER_NAME = re.compile(r"^[!#$%&'*+.^_`|~0-9A-Za-z-]+$")
@@ -74,6 +99,27 @@ def _read_bounded_response(response: Any) -> bytes:
     if len(payload) > MAX_EVIDENCE_RESPONSE_BYTES:
         raise ValueError("Evidence Service response exceeded the byte limit")
     return payload
+
+
+def _reject_nonstandard_json_constant(_value: str) -> None:
+    raise ValueError("Evidence Service response contains a non-standard JSON number")
+
+
+def _reject_duplicate_json_keys(pairs: list[tuple[str, Any]]) -> dict[str, Any]:
+    payload: dict[str, Any] = {}
+    for key, value in pairs:
+        if key in payload:
+            raise ValueError("Evidence Service response contains a duplicate JSON key")
+        payload[key] = value
+    return payload
+
+
+def _load_strict_json(payload: bytes) -> Any:
+    return json.loads(
+        payload,
+        parse_constant=_reject_nonstandard_json_constant,
+        object_pairs_hook=_reject_duplicate_json_keys,
+    )
 
 
 def _is_loopback_host(hostname: str) -> bool:
@@ -158,6 +204,8 @@ def _optional_auth_header(
 
 
 def _safe_failure_reason(exc: Exception) -> str:
+    if isinstance(exc, _ReadinessValidationError):
+        return exc.safe_reason
     if isinstance(exc, HTTPError):
         return f"HTTP status {exc.code}"
     if isinstance(exc, TimeoutError):
@@ -174,7 +222,53 @@ def _validate_transport_settings(timeout_seconds: float, max_retries: int) -> No
         raise ValueError("max_retries cannot be negative")
 
 
-def fetch_supported_review_as_of(
+def _validate_contract_identity_mode(mode: object) -> EvidenceContractIdentityMode:
+    if mode not in {"disabled", "optional", "required"}:
+        raise ValueError("Evidence contract identity mode is invalid")
+    return mode
+
+
+def _parse_evidence_readiness(
+    payload: object,
+    *,
+    contract_identity_mode: EvidenceContractIdentityMode,
+    expected_identity: EvidenceContractIdentity | None,
+) -> EvidenceReadiness:
+    if not isinstance(payload, dict) or payload.get("status") != "ready":
+        raise _ReadinessValidationError("invalid contract response")
+    snapshot_id = payload.get("knowledge_snapshot_id")
+    if not isinstance(snapshot_id, str) or not snapshot_id.strip():
+        raise _ReadinessValidationError("invalid contract response")
+    raw_date = payload.get("supported_review_as_of")
+    if not isinstance(raw_date, str) or not _ISO_CALENDAR_DATE.fullmatch(raw_date):
+        raise _ReadinessValidationError("invalid contract response")
+    try:
+        supported_date = date.fromisoformat(raw_date)
+    except ValueError:
+        raise _ReadinessValidationError("invalid contract response") from None
+
+    identity: EvidenceContractIdentity | None = None
+    if contract_identity_mode != "disabled":
+        raw_identity = payload.get("evidence_contract")
+        if raw_identity is None:
+            if contract_identity_mode == "required":
+                raise _ReadinessValidationError("contract identity missing")
+        else:
+            try:
+                identity = EvidenceContractIdentity.from_mapping(raw_identity)
+            except ValueError:
+                raise _ReadinessValidationError("invalid contract response") from None
+            if expected_identity is None or identity != expected_identity:
+                raise _ReadinessValidationError("contract identity mismatch")
+
+    return EvidenceReadiness(
+        knowledge_snapshot_id=snapshot_id.strip(),
+        supported_review_as_of=supported_date,
+        contract_identity=identity,
+    )
+
+
+def fetch_evidence_readiness(
     base_url: str,
     *,
     service_token: str | None = None,
@@ -182,11 +276,20 @@ def fetch_supported_review_as_of(
     allowed_origins: set[str] | frozenset[str] | None = None,
     timeout_seconds: float = 10.0,
     max_retries: int = 1,
-) -> date:
-    """Read the provider-advertised snapshot date through its HTTP readiness contract."""
+    contract_identity_mode: EvidenceContractIdentityMode = "required",
+) -> EvidenceReadiness:
+    """Read and optionally attest the provider's Evidence readiness identity."""
 
     normalized_base_url = validate_evidence_destination(base_url, allowed_origins)
     _validate_transport_settings(timeout_seconds, max_retries)
+    identity_mode = _validate_contract_identity_mode(contract_identity_mode)
+    expected_identity: EvidenceContractIdentity | None = None
+    if identity_mode != "disabled":
+        try:
+            expected_identity = load_pinned_evidence_contract_identity()
+            load_pinned_evidence_schema()
+        except EvidenceContractLockError:
+            raise RetrievalError("Evidence consumer contract bundle is invalid") from None
     headers = {"Accept": "application/json"}
     headers.update(_optional_auth_header(service_token, token_header))
     readiness_url = f"{normalized_base_url}/internal/rag/v1/health/ready"
@@ -200,19 +303,47 @@ def fetch_supported_review_as_of(
                 method="GET",
             )
             with urlopen(request, timeout=timeout_seconds) as response:
-                payload = json.loads(_read_bounded_response(response))
-            if not isinstance(payload, dict) or payload.get("status") != "ready":
-                raise ValueError("readiness response did not report ready")
-            raw_date = payload.get("supported_review_as_of")
-            if not isinstance(raw_date, str) or not _ISO_CALENDAR_DATE.fullmatch(raw_date):
-                raise ValueError("readiness response omitted supported_review_as_of")
-            return date.fromisoformat(raw_date)
-        except (HTTPError, URLError, TimeoutError, json.JSONDecodeError, ValueError) as exc:
+                payload = _load_strict_json(_read_bounded_response(response))
+            return _parse_evidence_readiness(
+                payload,
+                contract_identity_mode=identity_mode,
+                expected_identity=expected_identity,
+            )
+        except (
+            HTTPError,
+            URLError,
+            TimeoutError,
+            json.JSONDecodeError,
+            ValueError,
+        ) as exc:
             last_error = exc
     if last_error is None:
         raise RetrievalError("Evidence Service readiness request failed: internal state") from None
     reason = _safe_failure_reason(last_error)
     raise RetrievalError(f"Evidence Service readiness request failed: {reason}") from None
+
+
+def fetch_supported_review_as_of(
+    base_url: str,
+    *,
+    service_token: str | None = None,
+    token_header: str = "X-Demo-Token",  # noqa: S107 - header name, not a credential
+    allowed_origins: set[str] | frozenset[str] | None = None,
+    timeout_seconds: float = 10.0,
+    max_retries: int = 1,
+    contract_identity_mode: EvidenceContractIdentityMode = "required",
+) -> date:
+    """Return the provider-supported date after the configured readiness check."""
+
+    return fetch_evidence_readiness(
+        base_url,
+        service_token=service_token,
+        token_header=token_header,
+        allowed_origins=allowed_origins,
+        timeout_seconds=timeout_seconds,
+        max_retries=max_retries,
+        contract_identity_mode=contract_identity_mode,
+    ).supported_review_as_of
 
 
 @runtime_checkable
@@ -436,19 +567,64 @@ class HttpRegulationRetriever:
         allowed_origins: set[str] | frozenset[str] | None = None,
         timeout_seconds: float = 60.0,
         max_retries: int = 1,
+        contract_identity_mode: EvidenceContractIdentityMode = "required",
     ) -> None:
         normalized_base_url = validate_evidence_destination(
             base_url,
             allowed_origins,
         )
         _validate_transport_settings(timeout_seconds, max_retries)
+        identity_mode = _validate_contract_identity_mode(contract_identity_mode)
+        try:
+            load_pinned_evidence_contract_identity()
+            load_pinned_evidence_schema()
+        except EvidenceContractLockError:
+            raise RetrievalError("Evidence consumer contract bundle is invalid") from None
+        self._base_url = normalized_base_url
         self.url = f"{normalized_base_url}{self.endpoint_path}"
+        self._service_token = service_token
+        self._token_header = token_header
+        self._allowed_origins = allowed_origins
         self._auth_header = _optional_auth_header(service_token, token_header)
         self.timeout_seconds = timeout_seconds
         self.max_retries = max_retries
+        self.contract_identity_mode = identity_mode
+
+    def _ensure_readiness(
+        self,
+        request: EvidenceRetrievalRequest,
+    ) -> EvidenceReadiness | None:
+        if self.contract_identity_mode == "disabled":
+            return None
+        # Re-attest every retrieval. A long-lived AgentRuntime must not keep
+        # trusting an identity observed before a provider restart or rollout.
+        readiness = fetch_evidence_readiness(
+            self._base_url,
+            service_token=self._service_token,
+            token_header=self._token_header,
+            allowed_origins=self._allowed_origins,
+            timeout_seconds=self.timeout_seconds,
+            max_retries=self.max_retries,
+            contract_identity_mode=self.contract_identity_mode,
+        )
+        if request.review_as_of != readiness.supported_review_as_of:
+            raise RetrievalError(
+                "Evidence Service readiness does not support the requested review_as_of"
+            )
+        return readiness
 
     def retrieve(self, request: EvidenceRetrievalRequest) -> EvidenceRetrievalResponse:
-        payload = json.dumps(request.model_dump(mode="json"), ensure_ascii=False).encode("utf-8")
+        request_payload = request.model_dump(mode="json")
+        try:
+            validate_pinned_evidence_payload(request_payload)
+        except (EvidenceContractLockError, EvidenceContractPayloadError):
+            raise RetrievalError("Evidence request does not satisfy the pinned contract") from None
+        readiness = self._ensure_readiness(request)
+        payload = json.dumps(
+            request_payload,
+            ensure_ascii=False,
+            allow_nan=False,
+        ).encode("utf-8")
         headers = {
             "Accept": "application/json",
             "Content-Type": "application/json; charset=utf-8",
@@ -470,11 +646,28 @@ class HttpRegulationRetriever:
                     timeout=self.timeout_seconds,
                 ) as response:
                     body = _read_bounded_response(response)
-                parsed = EvidenceRetrievalResponse.model_validate_json(body)
+                response_payload = _load_strict_json(body)
+                validate_pinned_evidence_payload(response_payload)
+                parsed = EvidenceRetrievalResponse.model_validate(response_payload)
                 if parsed.request_id != request.request_id:
                     raise RetrievalError("Evidence Service response request_id does not match")
+                if (
+                    readiness is not None
+                    and parsed.knowledge_snapshot_id != readiness.knowledge_snapshot_id
+                ):
+                    raise RetrievalError(
+                        "Evidence Service response snapshot does not match readiness"
+                    )
                 return parsed
-            except (HTTPError, URLError, TimeoutError, ValidationError, ValueError) as exc:
+            except (
+                HTTPError,
+                URLError,
+                TimeoutError,
+                ValidationError,
+                EvidenceContractPayloadError,
+                json.JSONDecodeError,
+                ValueError,
+            ) as exc:
                 last_error = exc
         if last_error is None:
             raise RetrievalError("Evidence Service request failed: internal state") from None

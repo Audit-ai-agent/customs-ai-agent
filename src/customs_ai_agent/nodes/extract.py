@@ -358,6 +358,7 @@ def extract_documents(
                             "provider_id",
                             "engine_id",
                             "engine_version",
+                            "reading_order_policy_id",
                             "model_id",
                             "model_assets_lock_sha256",
                         )

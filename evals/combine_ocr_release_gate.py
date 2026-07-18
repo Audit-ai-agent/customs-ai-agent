@@ -24,9 +24,11 @@ from customs_ai_agent.ocr_release import (
     OCR_RELEASE_REPORT_SCHEMA,
     OCR_RELEASE_SAMPLE_DOCUMENT_COUNTS,
 )
+from customs_ai_agent.ocr_reading_order import OCR_READING_ORDER_POLICY_ID
 from evals.run_ocr_benchmark import (
     BENCHMARK_ID,
     BenchmarkDocument,
+    GOLD_READING_ORDER_POLICY_ID,
     LOCKED_THRESHOLDS,
     OcrBenchmarkError,
     PROVIDERS,
@@ -69,6 +71,7 @@ REPORT_KEYS = frozenset(
         "thresholds",
         "document_count",
         "coverage",
+        "reading_order_contract",
         "providers",
         "redaction",
     }
@@ -731,6 +734,11 @@ def _validate_report(
         or report.get("sample") != sample
         or report.get("thresholds") != LOCKED_THRESHOLDS
         or report.get("document_count") != expected_document_count
+        or report.get("reading_order_contract")
+        != {
+            "gold_policy_id": GOLD_READING_ORDER_POLICY_ID,
+            "prediction_policy_id": OCR_READING_ORDER_POLICY_ID,
+        }
         or report.get("redaction") != REDACTION
         or len(expected_documents) != expected_document_count
     ):

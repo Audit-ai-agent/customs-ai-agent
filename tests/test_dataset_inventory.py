@@ -235,7 +235,7 @@ def test_invalidated_suffix_annotations_cannot_reenter_partial_gold():
     assert dataset_lock["known_source_anomalies"] == []
     assert (
         dataset_lock["ground_truth"]["gold_gate_status"]
-        == "bounded_12_case_gold_passed_full_corpus_candidate_unverified"
+        == "bounded_12_case_gold_invalidated_by_label_error"
     )
     assert (
         dataset_lock["ground_truth"]["single_reviewer_candidate_status"]
@@ -261,7 +261,7 @@ def test_restored_source_registration_is_canonical_only_and_scope_limited():
         ).read_text(encoding="utf-8")
     )
 
-    assert dataset_lock["lock_revision"] == 2
+    assert dataset_lock["lock_revision"] == 3
     storage = dataset_lock["source_storage"]
     assert (
         storage["canonical_workspace_relative_path"]
@@ -313,16 +313,29 @@ def test_restored_source_registration_is_canonical_only_and_scope_limited():
     assert ground_truth["referenced_master_present"] is False
     assert ground_truth["full_field_gold_available"] is False
     bounded_gold = ground_truth["bounded_adjudicated_gold"]
-    assert bounded_gold["status"] == "passed_two_reviewer_adjudication"
+    assert bounded_gold["status"] == "invalidated_by_label_error"
     assert bounded_gold["case_count"] == 12
     assert bounded_gold["document_count"] == 36
     assert bounded_gold["reviewer_kind"] == "independent_ai_visual_review"
     assert bounded_gold["human_review_completed"] is False
-    assert bounded_gold["release_scoring_allowed_within_scope"] is True
-    assert bounded_gold["scoring_scope"] == "claude_vision_field_extraction_only"
+    assert bounded_gold["release_scoring_allowed_within_scope"] is False
+    assert bounded_gold["scoring_scope"] == "none_invalidated_artifact_audit_only"
+    assert bounded_gold["invalidation"] == {
+        "reason_code": "invalidated_by_label_error",
+        "affected_document_type": "packing_list",
+        "affected_field": "bl_no",
+        "affected_case_ids": ["0097", "0311", "0092", "0591", "0372", "0250"],
+        "error": "expected labels append EE that is absent from source pixels",
+        "raw_source_modified": False,
+        "replacement_gold_status": "not_available",
+        "replacement_review_requirement": "independent_human_review",
+        "evaluator_policy": ("preflight_block_until_replacement_exact_hash_is_pinned"),
+    }
 
     discrepancies = dataset_lock["known_source_observation_discrepancies"]
-    assert discrepancies["source_matches_manifest_case_count"] == 6
-    assert discrepancies["source_discrepancy_case_count"] == 6
-    assert discrepancies["business_defect_status"] == "ambiguous_not_scored_as_defect"
+    assert discrepancies["previously_claimed_source_matches_manifest_case_count"] == 6
+    assert discrepancies["previously_claimed_source_discrepancy_case_count"] == 6
+    assert discrepancies["confirmed_source_discrepancy_case_count"] == 0
+    assert discrepancies["previous_discrepancy_interpretation"] == ("invalidated_by_label_error")
+    assert discrepancies["business_defect_status"] == "not_a_source_defect"
     assert discrepancies["automatic_source_correction_performed"] is False

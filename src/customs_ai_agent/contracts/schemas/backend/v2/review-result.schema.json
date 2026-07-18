@@ -949,8 +949,13 @@
           "title": "Provider Id",
           "type": "string"
         },
+        "reading_order_policy_id": {
+          "const": "worker-emitted-sequence/v1",
+          "title": "Reading Order Policy Id",
+          "type": "string"
+        },
         "schema_version": {
-          "const": "1.0",
+          "const": "2.0",
           "title": "Schema Version",
           "type": "string"
         }
@@ -961,6 +966,7 @@
         "provider_id",
         "engine_id",
         "engine_version",
+        "reading_order_policy_id",
         "model_id",
         "model_assets_lock_sha256"
       ],

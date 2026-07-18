@@ -2,7 +2,7 @@ from __future__ import annotations
 
 from dataclasses import dataclass, field
 from os import PathLike
-from typing import Any
+from typing import Any, Literal
 
 from pydantic import SecretStr, ValidationError
 
@@ -89,6 +89,10 @@ class RuntimeConfig:
     evidence_allowed_origins: frozenset[str] = field(default_factory=frozenset)
     evidence_timeout_seconds: float = 60.0
     evidence_max_retries: int = 1
+    # The service-facing runtime never permits the non-release compatibility
+    # mode. Evaluation-only callers may compose HttpRegulationRetriever
+    # directly with an explicit optional mode, outside AgentRuntime.
+    evidence_contract_identity_mode: Literal["required"] = "required"
 
     def __post_init__(self) -> None:
         if not isinstance(self.claude_settings, ClaudeSettings):
@@ -153,6 +157,11 @@ class RuntimeConfig:
                 "evidence_retries_invalid",
                 "Evidence retries must be between zero and three.",
             )
+        if self.evidence_contract_identity_mode != "required":
+            raise RuntimeConfigurationError(
+                "evidence_contract_identity_mode_invalid",
+                "Service Runtime requires Evidence contract identity verification.",
+            )
         if not isinstance(self.evidence_base_url, str):
             raise RuntimeConfigurationError(
                 "evidence_base_url_invalid",
@@ -183,6 +192,7 @@ class RuntimeConfig:
         evidence_allowed_origins: frozenset[str] = frozenset(),
         evidence_timeout_seconds: float = 60.0,
         evidence_max_retries: int = 1,
+        evidence_contract_identity_mode: Literal["required"] = "required",
     ) -> RuntimeConfig:
         """Load only allowlisted Claude settings; Evidence settings stay explicit."""
 
@@ -195,6 +205,7 @@ class RuntimeConfig:
             evidence_allowed_origins=evidence_allowed_origins,
             evidence_timeout_seconds=evidence_timeout_seconds,
             evidence_max_retries=evidence_max_retries,
+            evidence_contract_identity_mode=evidence_contract_identity_mode,
         )
 
 
@@ -324,6 +335,7 @@ class AgentRuntime:
                 allowed_origins=config.evidence_allowed_origins,
                 timeout_seconds=config.evidence_timeout_seconds,
                 max_retries=config.evidence_max_retries,
+                contract_identity_mode=config.evidence_contract_identity_mode,
             )
             analyzer = ClaudeDocumentAnalyzer.from_settings(
                 config.claude_settings,

@@ -26,14 +26,18 @@ from customs_ai_agent.ocr_identity import (
     OCR_MODEL_ASSETS_LOCK_SHA256,
     OCR_MODEL_SET_IDS,
 )
+from customs_ai_agent.ocr_reading_order import OCR_READING_ORDER_POLICY_ID
 from evals.run_ocr_benchmark import (
     CANONICAL_ENVIRONMENT_LOCK_SHA256,
     CANONICAL_MODEL_ASSETS_LOCK_SHA256,
     CANONICAL_SPLITS_SHA256,
+    GOLD_READING_ORDER_POLICY_ID,
     LOCKED_THRESHOLDS,
     OcrBenchmarkError,
     PROVIDER_ENGINE_IDS,
     _installed_agent_wheel_sha256,
+    _gold_text,
+    _predicted_text,
     evaluate,
     load_benchmark,
     score_document,
@@ -290,6 +294,70 @@ def _perfect_ledger(
         model_assets_lock_sha256=OCR_MODEL_ASSETS_LOCK_SHA256,
         pages=[page],
     )
+
+
+def test_cer_uses_gold_visual_order_and_worker_attested_prediction_order() -> None:
+    image_sha256 = "1" * 64
+    layout = {
+        "words": [
+            {
+                "word_id": "word-00001",
+                "text": "RIGHT",
+                "role": "field_value",
+                "bbox_claude_input_px": [100, 10, 150, 20],
+            },
+            {
+                "word_id": "word-00002",
+                "text": "LEFT",
+                "role": "field_value",
+                "bbox_claude_input_px": [10, 10, 50, 20],
+            },
+        ]
+    }
+    page = OcrLayoutPage(
+        page_number=1,
+        image_sha256=image_sha256,
+        width_px=200,
+        height_px=100,
+        spans=[
+            _span(
+                span_id="span-left",
+                reading_order=0,
+                role="text",
+                text="LEFT",
+                bbox=(10, 10, 50, 20),
+            ),
+            _span(
+                span_id="span-right",
+                reading_order=1,
+                role="text",
+                text="RIGHT",
+                bbox=(100, 10, 150, 20),
+            ),
+        ],
+    )
+    ledger = OcrLayoutLedger(
+        ledger_id=stable_ocr_ledger_id(
+            document_id="reading-order-fixture",
+            provider_id="paddle",
+            engine_id=PROVIDER_ENGINE_IDS["paddle"],
+            engine_version="1.0",
+            model_id=OCR_MODEL_SET_IDS["paddle"],
+            model_assets_lock_sha256=OCR_MODEL_ASSETS_LOCK_SHA256,
+            pages=[page],
+        ),
+        document_id="reading-order-fixture",
+        provider_id="paddle",
+        engine_id=PROVIDER_ENGINE_IDS["paddle"],
+        engine_version="1.0",
+        model_id=OCR_MODEL_SET_IDS["paddle"],
+        model_assets_lock_sha256=OCR_MODEL_ASSETS_LOCK_SHA256,
+        pages=[page],
+    )
+
+    assert GOLD_READING_ORDER_POLICY_ID == "renderer-bbox-yx/v1"
+    assert _gold_text(layout) == "LEFT RIGHT"
+    assert _predicted_text(ledger) == "LEFT RIGHT"
 
 
 def _write_fixture(tmp_path: Path) -> tuple[Path, Path, str]:
@@ -696,6 +764,10 @@ def test_only_passing_provider_is_selected(
     assert report["status"] == "PASS"
     assert report["selected_provider"] == "paddle"
     assert report["selection_status"] == "SELECTED_ONLY_PASSING_PROVIDER"
+    assert report["reading_order_contract"] == {
+        "gold_policy_id": GOLD_READING_ORDER_POLICY_ID,
+        "prediction_policy_id": OCR_READING_ORDER_POLICY_ID,
+    }
     assert report["providers"][0]["status"] == "PASS"
     assert report["providers"][1]["status"] == "FAIL"
     assert report["providers"][0]["installed_agent_wheel_sha256"] == "b" * 64

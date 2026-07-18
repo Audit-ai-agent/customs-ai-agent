@@ -100,7 +100,11 @@ def test_run_cli_injects_http_retriever_and_preserves_retrieval_output(monkeypat
     assert exit_code == 0
     assert captured == {
         "url": "http://localhost:8010",
-        "options": {"service_token": None, "token_header": "X-Demo-Token"},
+        "options": {
+            "service_token": None,
+            "token_header": "X-Demo-Token",
+            "contract_identity_mode": "required",
+        },
         "retriever": sentinel,
     }
     assert written["retrieval_status"] == "ok"
@@ -145,6 +149,7 @@ def test_run_cli_uses_env_url_token_and_provider_review_date(monkeypatch):
     options = {
         "service_token": "local-test-secret",
         "token_header": "X-Demo-Token",
+        "contract_identity_mode": "required",
     }
     assert captured == {
         "retriever": ("http://127.0.0.1:8010", options),
@@ -373,6 +378,7 @@ def test_single_explicit_env_file_configures_evidence_without_global_mutation(
     options = {
         "service_token": "file-only-token",
         "token_header": "X-Local-Token",
+        "contract_identity_mode": "required",
     }
     assert captured == {
         "retriever": ("http://127.0.0.1:8010", options),
