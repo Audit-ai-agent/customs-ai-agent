@@ -119,9 +119,20 @@ Claude vision은 업무 필드 후보와 그 후보가 참조하는 OCR span/bbo
 - bbox가 원장과 page bounds에 일치
 - line item occurrence/reading order의 결정론적 mapping
 
+Claude Sonnet 5 transport는 structured output 요청에 `thinking: disabled`를 명시한다. Sonnet 5는
+해당 값을 생략하면 adaptive thinking을 기본 활성화하고 thinking과 JSON이 같은 `max_tokens`
+예산을 사용한다. 이 단계는 법률 추론이 아니라 OCR 원장에 대한 제한된 전사·필드 매핑이므로,
+불필요한 thinking으로 JSON이 잘리는 것을 방지하고 출력 예산을 재현 가능하게 유지한다.
+sampling parameter는 설정하지 않는다.
+
 제한된 crop reread는 이미 검증된 page의 bounded crop에만 사용할 수 있다. crop은 새로운
 source-of-truth가 아니며 전체 run budget을 넘기지 않는다. 끝까지 ground할 수 없는 값은
 HITL 대상으로 남긴다.
+
+분류 근거가 독립 OCR과 결속되지 않으면 문서 전체를 실패시킨다. 반면 개별 필드나 line-item row의
+결속만 실패하면 해당 값 또는 row만 제거하고, 원문 대신 candidate/OCR SHA-256과 OCR span ID를
+conflict audit에 남긴다. 이 경우 다른 grounded 값은 보존하지만 run은 반드시 `needs_review`로
+전환된다.
 
 `paddle`과 `docling`은 격리된 subprocess provider다. `ledger` provider는 사전에 고정한 관측을
 사용하는 재현 평가용이다. ledger PASS는 OCR 엔진 품질 PASS가 아니다.
@@ -304,6 +315,12 @@ Mock, ledger, Claude-only, RAG-only 결과를 전체 서비스 E2E로 승격해 
 Claude 4문서 실행은 통과했다. 그러나 같은 runtime의 actual Evidence HTTP 검색은 Data
 readiness 불완전으로 `partial`, 최종 `needs_review`와 `BLOCKED_DATA_READINESS`다. 따라서
 Agent의 실제 Claude 실행 성공은 확인했지만 Data live 또는 전체 서비스 Release PASS는 아니다.
+
+고정된 합성 CI/PL/B/L 이미지 triplet의 비릴리스 진단에서도 PaddleOCR ledger 3개와 Claude
+Vision 본문 호출 3회, crop 재판독 2회가 모델 오류 없이 끝났다. OCR과 완전히 결속되지 않은
+9개 후보는 conflict로 격리됐고 세 문서는 모두 extraction `completed`가 됐다. 다만 Evidence
+corpus 미완성으로 최종 상태는 계속 `needs_review`이며, 이 진단은 OCR provider 선택이나 image
+release PASS를 의미하지 않는다.
 
 pre-freeze offline 테스트 수, pre-commit wheel hash와 smoke report는 구현 이력일 뿐 최종
 release 증거가 아니다. exact commit을 정한 뒤 생성한 JUnit, clean wheel install, 60+20 OCR

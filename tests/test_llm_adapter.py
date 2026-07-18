@@ -578,7 +578,7 @@ def test_wire_identifiers_reject_header_unsafe_characters(overrides):
         ReviewRunRequest.model_validate(values)
 
 
-def test_sdk_transport_maps_response_and_omits_sampling_and_manual_thinking():
+def test_sdk_transport_maps_response_disables_thinking_and_omits_sampling():
     class FakeMessages:
         def __init__(self):
             self.kwargs = None
@@ -608,7 +608,8 @@ def test_sdk_transport_maps_response_and_omits_sampling_and_manual_thinking():
     assert result.input_tokens == 10
     assert result.output_tokens == 20
     assert messages.kwargs["output_config"]["format"]["type"] == "json_schema"
-    for forbidden in ("temperature", "top_p", "top_k", "thinking", "tools"):
+    assert messages.kwargs["thinking"] == {"type": "disabled"}
+    for forbidden in ("temperature", "top_p", "top_k", "tools"):
         assert forbidden not in messages.kwargs
 
 

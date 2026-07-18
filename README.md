@@ -44,6 +44,9 @@ TASK-0009의 pre-freeze 상태는 다음과 같다.
 - Claude text Live는 exhaustive 정상 Gold 64/64와 문서 내 prompt-injection Gold 21/21
   exact match, wrong/missing/hallucinated 0으로 통과했다. 공개 `AgentRuntime`의 실제
   Claude 4문서 실행도 model error 0으로 통과했다.
+- 고정 합성 CI/PL/B/L 이미지 triplet의 비릴리스 실제 진단은 PaddleOCR ledger 3개,
+  Claude Vision 본문 3회와 crop 재판독 2회, model error 0으로 실행됐다. 세 문서는 extraction을
+  완료했고 OCR과 완전히 결속되지 않은 9개 후보는 자동 확정하지 않고 conflict로 격리했다.
 - 같은 공개 runtime의 Evidence HTTP 단계는 Data corpus readiness 실패로 `partial`이며 최종
   결과는 `needs_review`, 전체 판정은 `BLOCKED_DATA_READINESS`다. 이는 Agent 실행 성공과
   Data release 준비도 실패를 분리한 결과이며 Evidence Release PASS가 아니다.
@@ -55,9 +58,10 @@ TASK-0009의 pre-freeze 상태는 다음과 같다.
 - 이 Task는 Backend·Frontend와 Data Platform source를 변경하지 않는다. Data는 pinned
   Evidence HTTP API의 소비자 경계에서만 관찰한다.
 
-짧은 workspace basetemp에서 최신 dirty tree의 전체 611개 test와 skip 0을 확인했지만 아직
-exact clean commit의 CI 결과는 아니다. exact commit SHA, wheel/sdist hash와 clean-install 결과,
-evaluation-v3 60+20 OCR 두 report와 결합 판정은 아직 pending이다. 그 값은 코드 freeze 뒤
+실제 Claude text/image 진단에서 발견한 runtime 경계 수정까지 포함한 후보 source state는
+전체 611개 test와 skip 0을 통과했다. exact commit SHA, wheel/sdist hash와 clean-install 결과는
+코드 freeze 뒤 생성한 실행 Artifact가 권위 있는 근거다. evaluation-v3 60+20 OCR 두 report와
+결합 판정은 아직 pending이다. 그 값은
 `_artifacts/runs/<RUN-ID>/`에 봉인하고 `_engineering`의 Task/Evaluation 기록에서 commit과 함께
 승인한다. 이 README의 과거 숫자나 이름에 `latest` 의미를 부여하지 않는다.
 

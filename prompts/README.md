@@ -7,7 +7,7 @@ V1 text-only wire 경로와 V2 multimodal wire 경로는 분리하며, vision pr
 | 경로 | prompt ID | version | output |
 |---|---|---:|---|
 | `document_analysis_v1.txt` | `customs_document_analysis` | `1.2.0` | `ClaudeDocumentCandidate` |
-| `document_vision_analysis_v1.txt` | `customs_document_vision_analysis` | `1.2.0` | `ClaudeVisionDocumentCandidate` |
+| `document_vision_analysis_v1.txt` | `customs_document_vision_analysis` | `1.3.0` | `ClaudeVisionDocumentCandidate` |
 | 코드 소유 crop reconciliation prompt | `customs_document_crop_reconciliation` | `1.0.0` | `ClaudeCropReadCandidate` |
 
 공통 경계:
@@ -27,8 +27,10 @@ Prompt 변경은 version bump와 synthetic gold/fake transport/grounding 회귀�
 
 TASK-0009에서는 사용자의 명시적 승인 후 합성 text 정상·prompt-injection Gold와 공개
 `AgentRuntime → Claude → Evidence HTTP` Live를 실행했다. 해당 실행은 text 추출과 fail-closed
-통합 경로만 입증하며, 이미지 Live와 OCR release provider 선정은 별도 Gate다. fake transport
-PASS나 prompt package 포함 검사도 실제 Claude 품질 PASS를 대체하지 않는다. 최종 prompt
+통합 경로를 입증했다. 고정 합성 이미지 triplet의 비릴리스 PaddleOCR → Claude Vision →
+Evidence 진단도 model error 0으로 실행됐지만, OCR release provider 선정은 별도 Gate다.
+Sonnet 5 structured extraction은 adaptive thinking을 명시적으로 끄고 JSON 출력 예산을 보존한다.
+fake transport PASS나 prompt package 포함 검사도 실제 Claude 품질 PASS를 대체하지 않는다. 최종 prompt
 resource hash와 사용 model/schema는 exact-commit wheel과 함께
 `_artifacts/runs/<RUN-ID>/`에 봉인하고 `_engineering` 평가 기록에서 승인한다. pre-commit
 wheel이나 smoke의 prompt hash에 `latest` 의미를 부여하지 않는다.

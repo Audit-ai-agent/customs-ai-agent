@@ -1167,7 +1167,7 @@ def test_analyzer_places_images_before_metadata_and_uses_vision_contract():
     assert content[0]["source"]["data"] not in metadata_text
     assert metadata["independent_ocr_layout_ledger"]["provider_id"] == ("fake-independent-ocr")
     assert analysis.metadata.prompt_id == "customs_document_vision_analysis"
-    assert analysis.metadata.prompt_version == "1.2.0"
+    assert analysis.metadata.prompt_version == "1.3.0"
     assert (
         analysis.metadata.prompt_sha256
         == hashlib.sha256(request["system_prompt"].encode("utf-8")).hexdigest()
@@ -1718,10 +1718,6 @@ def test_workflow_preserves_unresolved_crop_conflict_without_raw_crop_bytes():
             "vision_page_not_supplied",
         ),
         (
-            lambda payload: payload["fields"][0].update({"value": "HALLUCINATED"}),
-            "candidate_value_not_grounded",
-        ),
-        (
             lambda payload: payload["fields"][0].update({"name": "severity"}),
             "field_not_allowed",
         ),
@@ -1754,6 +1750,23 @@ def test_invalid_vision_grounding_fails_closed(mutate, error_code):
     assert exc_info.value.code == error_code
 
 
+def test_value_not_present_in_model_source_is_dropped_as_a_binding_conflict():
+    trusted_payload = _vision_payload()
+    candidate_payload = copy.deepcopy(trusted_payload)
+    candidate_payload["fields"][0]["value"] = "HALLUCINATED"
+
+    analysis, _, document = _analyze_image(
+        candidate_payload,
+        ocr_provider=FakeOcrLayoutProvider(trusted_payload),
+    )
+    extracted = analysis_to_extracted_document(document, analysis)
+
+    assert "invoice_no" not in extracted["fields"]
+    assert extracted["fields"]["total_amount"]["value"] == "12000"
+    assert analysis.model_conflicts[0]["field_path"] == "fields.invoice_no"
+    assert analysis.model_conflicts[0]["status"] == "crop_schema_error"
+
+
 def test_classification_requires_decisive_type_label_from_selected_ocr():
     payload = _vision_payload()
     evidence = payload["classification_evidence"]
@@ -1766,7 +1779,7 @@ def test_classification_requires_decisive_type_label_from_selected_ocr():
     assert exc_info.value.code == "classification_label_not_grounded"
 
 
-def test_row_source_text_must_bind_to_selected_independent_ocr():
+def test_unbound_row_is_removed_and_preserved_as_a_hashed_conflict():
     trusted_payload = _vision_payload()
     candidate_payload = copy.deepcopy(trusted_payload)
     line_items = candidate_payload["line_items"]
@@ -1777,13 +1790,18 @@ def test_row_source_text_must_bind_to_selected_independent_ocr():
     assert isinstance(row_evidence, dict)
     row_evidence["source_text"] = "1 FORGED ROW 731815 10 KG 12000"
 
-    with pytest.raises(LLMOutputValidationError) as exc_info:
-        _analyze_image(
-            candidate_payload,
-            ocr_provider=FakeOcrLayoutProvider(trusted_payload),
-        )
+    analysis, _, document = _analyze_image(
+        candidate_payload,
+        ocr_provider=FakeOcrLayoutProvider(trusted_payload),
+    )
+    extracted = analysis_to_extracted_document(document, analysis)
+    conflict = analysis.model_conflicts[0]
 
-    assert exc_info.value.code == "vision_source_text_not_in_ocr"
+    assert extracted["line_items"] == []
+    assert conflict["field_path"] == "line_items.0.__row__"
+    assert conflict["status"] == "crop_not_eligible"
+    assert conflict["crop_attempted"] is False
+    assert "FORGED ROW" not in json.dumps(conflict)
 
 
 class _FailingOcrLayoutProvider:
@@ -1846,13 +1864,9 @@ def test_image_schema_or_grounding_failure_is_a_serializable_failed_v2_document(
     if failure_kind == "schema":
         candidate_payload["unexpected_provider_field"] = True
     else:
-        line_items = candidate_payload["line_items"]
-        assert isinstance(line_items, list)
-        row = line_items[0]
-        assert isinstance(row, dict)
-        row_evidence = row["row_evidence"]
-        assert isinstance(row_evidence, dict)
-        row_evidence["source_text"] = "FORGED ROW"
+        classification_evidence = candidate_payload["classification_evidence"]
+        assert isinstance(classification_evidence, dict)
+        classification_evidence["source_text"] = "FORGED CLASSIFICATION"
     analyzer = ClaudeDocumentAnalyzer(
         FakeVisionTransport(candidate_payload),
         ClaudeSettings(api_key=SecretStr("unit-test-key")),

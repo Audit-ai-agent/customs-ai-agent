@@ -36,6 +36,7 @@ from customs_ai_agent.contracts import (
     schema_sha256,
     verify_packaged_schemas,
 )
+from customs_ai_agent.fixtures.scenarios import get_scenario
 from customs_ai_agent.prompts import (
     DOCUMENT_ANALYSIS_PROMPT_ID,
     DOCUMENT_ANALYSIS_PROMPT_VERSION,
@@ -410,6 +411,28 @@ def _runtime_failure_code(exc: Exception) -> str:
     return "agent_runtime_execution_failed"
 
 
+def _explicit_service_request(*, review_as_of: date) -> ReviewRunRequestV2:
+    """Expand the fixed evaluation fixture before crossing the service boundary.
+
+    ``AgentRuntime`` deliberately rejects fixture identifiers because a service
+    caller must bind every review to an explicit case and document set.  This
+    evaluator may use a package-owned synthetic fixture, but it must convert the
+    fixture to the same explicit request shape a Backend caller would send.
+    """
+
+    try:
+        scenario = get_scenario(SCENARIO_ID)
+        return ReviewRunRequestV2(
+            case_id=str(scenario["case_id"]),
+            documents=scenario["documents"],
+            llm_mode="llm",
+            review_run_id="runtime-live-eval-v1",
+            review_as_of=review_as_of,
+        )
+    except (KeyError, TypeError, ValueError):
+        raise RuntimeLiveEvaluationError("service_fixture_invalid") from None
+
+
 def evaluate(
     *,
     env_file: Path,
@@ -492,14 +515,7 @@ def evaluate(
             **runtime_options,
         )
         runtime = AgentRuntime(config)
-        result = runtime.review(
-            ReviewRunRequestV2(
-                scenario_id=SCENARIO_ID,
-                llm_mode="llm",
-                review_run_id="runtime-live-eval-v1",
-                review_as_of=review_as_of,
-            )
-        )
+        result = runtime.review(_explicit_service_request(review_as_of=review_as_of))
         if not isinstance(result, ReviewRunResultV2):
             raise RuntimeLiveEvaluationError("runtime_result_contract_invalid")
     except Exception as exc:

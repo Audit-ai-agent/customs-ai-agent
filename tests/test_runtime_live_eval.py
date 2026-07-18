@@ -185,7 +185,10 @@ def test_ready_allowlisted_service_runs_public_runtime_after_readiness(
         == "private-evidence-test-secret"
     )
     assert isinstance(request, ReviewRunRequestV2)
-    assert request.scenario_id == run_runtime_live.SCENARIO_ID
+    assert request.scenario_id is None
+    assert request.case_id == "case_evidence_live_exact_hsk10"
+    assert request.documents is not None
+    assert len(request.documents) == run_runtime_live.EXPECTED_DOCUMENT_COUNT
     assert request.llm_mode == "llm"
     assert request.review_as_of == date(2026, 7, 10)
 
@@ -226,6 +229,10 @@ def test_unready_503_diagnostic_executes_agent_and_stays_non_release(
     assert report["errors"] == [{"code": "evidence_readiness_incomplete"}]
     assert captured["order"] == ["readiness", "runtime_config", "agent_runtime"]
     request = captured["request"]
+    assert request.scenario_id is None
+    assert request.case_id == "case_evidence_live_exact_hsk10"
+    assert request.documents is not None
+    assert len(request.documents) == run_runtime_live.EXPECTED_DOCUMENT_COUNT
     assert request.review_as_of == date(2026, 7, 10)
     assert request.llm_mode == "llm"
 

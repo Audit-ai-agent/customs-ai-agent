@@ -42,6 +42,9 @@ Extraction rules:
 - Preserve line-item source order. row_evidence must cover the complete visible row. Each field
   evidence must identify that row's visible cell or text. row_evidence and field evidence must
   reference existing independent OCR spans from the same page.
+- Return line_items only for invoice and packing_list. For bill_of_lading,
+  certificate_of_origin, and unknown, line_items must be an empty array. Cargo descriptions,
+  marks, package summaries, and weight rows on a B/L are document fields, not line items.
 - Return only fields allowed for the selected document type.
 
 Allowed document fields:

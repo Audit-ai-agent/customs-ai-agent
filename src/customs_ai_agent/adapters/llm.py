@@ -680,6 +680,13 @@ class AnthropicMessagesTransport:
             response = self._client.messages.create(
                 model=model,
                 max_tokens=max_tokens,
+                # Claude Sonnet 5 enables adaptive thinking when this field is
+                # omitted.  Extraction is a bounded transcription/mapping
+                # operation, and thinking tokens share the hard max_tokens
+                # budget with the structured JSON response.  Disable thinking
+                # explicitly so the response budget is deterministic and is
+                # not exhausted before the schema-constrained payload.
+                thinking={"type": "disabled"},
                 system=system_prompt,
                 messages=[{"role": "user", "content": user_message}],
                 output_config={
@@ -1108,6 +1115,13 @@ class _VisionBindingConflict:
     selected_spans: list[OcrLayoutSpan]
 
 
+@dataclass
+class _VisionRowBindingConflict:
+    item_index: int
+    source_text: str
+    selected_spans: list[OcrLayoutSpan]
+
+
 @dataclass(frozen=True)
 class _CropPayload:
     data: bytes
@@ -1180,10 +1194,11 @@ def validate_vision_candidate(
     ocr_layout_ledger: OcrLayoutLedger,
     *,
     allow_ocr_value_conflicts: bool = False,
-) -> list[_VisionBindingConflict]:
+) -> tuple[list[_VisionBindingConflict], list[_VisionRowBindingConflict]]:
     pages = {page.page_number: page for page in image_pages}
     ocr_spans = index_ocr_spans(ocr_layout_ledger)
     conflicts: list[_VisionBindingConflict] = []
+    row_conflicts: list[_VisionRowBindingConflict] = []
     allowed_document_fields = DOCUMENT_FIELDS[candidate.document_type]
     _validate_names(candidate.fields, allowed_document_fields, location="vision document")
 
@@ -1203,8 +1218,13 @@ def validate_vision_candidate(
         )
     for field in candidate.fields:
         selected = _validate_vision_evidence(field.evidence, pages, ocr_spans)
-        _require_value_in_vision_source(field.evidence.source_text, field.value)
         binding_conflict = False
+        try:
+            _require_value_in_vision_source(field.evidence.source_text, field.value)
+        except LLMOutputValidationError:
+            if not allow_ocr_value_conflicts:
+                raise
+            binding_conflict = True
         try:
             _require_vision_source_bound(field.evidence, selected)
         except LLMOutputValidationError:
@@ -1246,7 +1266,22 @@ def validate_vision_candidate(
             pages,
             ocr_spans,
         )
-        _require_vision_source_bound(item.row_evidence, row_spans)
+        try:
+            _require_vision_source_bound(item.row_evidence, row_spans)
+        except LLMOutputValidationError:
+            if not allow_ocr_value_conflicts:
+                raise
+            row_conflicts.append(
+                _VisionRowBindingConflict(
+                    item_index=item_index,
+                    source_text=item.row_evidence.source_text,
+                    selected_spans=row_spans,
+                )
+            )
+            # A row whose model-observed text is not bound to the selected
+            # independent OCR spans cannot safely retain any line-item field.
+            # Drop it as one unit and preserve only hashed conflict evidence.
+            continue
         row = _ocr_union_bbox(row_spans)
         position = (
             row.page,
@@ -1270,8 +1305,13 @@ def validate_vision_candidate(
                 pages,
                 ocr_spans,
             )
-            _require_value_in_vision_source(field.evidence.source_text, field.value)
             binding_conflict = False
+            try:
+                _require_value_in_vision_source(field.evidence.source_text, field.value)
+            except LLMOutputValidationError:
+                if not allow_ocr_value_conflicts:
+                    raise
+                binding_conflict = True
             try:
                 _require_vision_source_bound(field.evidence, selected)
             except LLMOutputValidationError:
@@ -1312,7 +1352,7 @@ def validate_vision_candidate(
                     "line_item_bbox_not_in_row",
                     "A Claude Vision line-item field was not located in its row.",
                 )
-    return conflicts
+    return conflicts, row_conflicts
 
 
 class ClaudeDocumentAnalyzer:
@@ -1747,7 +1787,7 @@ class ClaudeDocumentAnalyzer:
                 "structured_output_invalid",
                 "Claude Vision output failed the local strict candidate schema.",
             ) from None
-        binding_conflicts = validate_vision_candidate(
+        binding_conflicts, row_binding_conflicts = validate_vision_candidate(
             candidate,
             pages,
             ledger,
@@ -1756,13 +1796,41 @@ class ClaudeDocumentAnalyzer:
         runtime_budget = document.get("_runtime_crop_budget")
         budget = runtime_budget if isinstance(runtime_budget, CropReadBudget) else CropReadBudget()
         pages_by_number = {page.page_number: page for page in pages}
-        conflict_records: list[dict[str, Any]] = []
+        document_id = str(document.get("document_id") or "")
+        conflict_records: list[dict[str, Any]] = [
+            {
+                "document_id": document_id,
+                "field_path": f"line_items.{conflict.item_index}.__row__",
+                "status": "crop_not_eligible",
+                "ocr_ledger_id": ledger.ledger_id,
+                "ocr_span_ids": [span.span_id for span in conflict.selected_spans],
+                "candidate_value_sha256": hashlib.sha256(
+                    conflict.source_text.encode("utf-8")
+                ).hexdigest(),
+                "ocr_text_sha256": hashlib.sha256(
+                    _combined_ocr_text(conflict.selected_spans).encode("utf-8")
+                ).hexdigest(),
+                "crop_attempted": False,
+                "crop_source_image_sha256": None,
+                "crop_image_sha256": None,
+                "crop_transform_sha256": None,
+                "crop_bbox": None,
+            }
+            for conflict in row_binding_conflicts
+        ]
+        if row_binding_conflicts:
+            rejected_indices = {conflict.item_index for conflict in row_binding_conflicts}
+            candidate.line_items = [
+                item
+                for item_index, item in enumerate(candidate.line_items)
+                if item_index not in rejected_indices
+            ]
         crop_calls: list[ModelCallMetadata] = []
         crop_errors: list[dict[str, Any]] = []
         unresolved_field_ids: set[int] = set()
         for conflict in binding_conflicts:
             resolved, record, crop_call, crop_error = self._crop_reconcile(
-                document_id=str(document.get("document_id") or ""),
+                document_id=document_id,
                 conflict=conflict,
                 pages=pages_by_number,
                 ledger=ledger,
@@ -1788,6 +1856,7 @@ class ClaudeDocumentAnalyzer:
                 if item.fields:
                     remaining_items.append(item)
             candidate.line_items = remaining_items
+        if unresolved_field_ids or row_binding_conflicts:
             candidate = ClaudeVisionDocumentCandidate.model_validate(
                 candidate.model_dump(mode="json")
             )
