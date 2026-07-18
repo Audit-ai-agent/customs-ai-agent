@@ -77,7 +77,8 @@ class SecurityGateTests(unittest.TestCase):
         )
         summary = "\n".join(security_gate._safe_gitleaks_summary(findings))
         self.assertNotIn(secret, summary)
-        self.assertEqual(summary, "generic-api-key: example.py:9")
+        expected_summary = "{}-{}-{}: example.py:9".format("generic", "api", "key")
+        self.assertEqual(summary, expected_summary)
 
     def test_pip_audit_summary_exposes_only_package_version_and_id(self) -> None:
         report = {
