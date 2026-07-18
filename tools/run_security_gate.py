@@ -13,6 +13,7 @@ import os
 import re
 import subprocess
 import sys
+import tempfile
 import tomllib
 from pathlib import Path
 from typing import Any
@@ -185,8 +186,19 @@ def run_secret_scan(*, gitleaks: Path, scope: str) -> None:
                 raise SecurityGateError("redacted Gitleaks report cleanup failed") from None
 
 
-def _verify_python_module_version(module: str, expected: str, label: str) -> None:
-    completed = _run([sys.executable, "-m", module, "--version"], timeout_seconds=30)
+def _verify_python_module_version(
+    module: str,
+    expected: str,
+    label: str,
+    *,
+    cwd: Path = REPO_ROOT,
+    isolated_utf8: bool = False,
+) -> None:
+    argv = [sys.executable]
+    if isolated_utf8:
+        argv.extend(["-I", "-X", "utf8"])
+    argv.extend(["-m", module, "--version"])
+    completed = _run(argv, cwd=cwd, timeout_seconds=30)
     try:
         output = (completed.stdout + completed.stderr).decode("utf-8", errors="strict")
     except UnicodeDecodeError as exc:
@@ -236,26 +248,43 @@ def run_dependency_audit(*, requirements: Path) -> None:
     toolchain = _read_toolchain()
     expected_version = str(toolchain["pip_audit"]["version"])
     service = str(toolchain["pip_audit"]["vulnerability_service"])
-    _verify_python_module_version("pip_audit", expected_version, "pip-audit")
     resolved_requirements = _resolved_executable(requirements, label="requirements export")
-    completed = _run(
-        [
-            sys.executable,
-            "-m",
+    # Keep pip-audit and any Python subprocess it starts away from the source
+    # checkout. On Windows, a checkout path that is not representable by the
+    # active legacy code page can make Python fail while importing ``site``
+    # before pip-audit emits JSON. An empty private temporary directory also
+    # prevents project-local files from influencing the audit environment.
+    with tempfile.TemporaryDirectory(prefix="customs-ai-agent-pip-audit-") as audit_dir:
+        audit_cwd = Path(audit_dir)
+        _verify_python_module_version(
             "pip_audit",
-            "--strict",
-            "--disable-pip",
-            "--require-hashes",
-            "--progress-spinner",
-            "off",
-            "--format",
-            "json",
-            "--vulnerability-service",
-            service,
-            "--requirement",
-            str(resolved_requirements),
-        ]
-    )
+            expected_version,
+            "pip-audit",
+            cwd=audit_cwd,
+            isolated_utf8=True,
+        )
+        completed = _run(
+            [
+                sys.executable,
+                "-I",
+                "-X",
+                "utf8",
+                "-m",
+                "pip_audit",
+                "--strict",
+                "--disable-pip",
+                "--require-hashes",
+                "--progress-spinner",
+                "off",
+                "--format",
+                "json",
+                "--vulnerability-service",
+                service,
+                "--requirement",
+                str(resolved_requirements),
+            ],
+            cwd=audit_cwd,
+        )
     report = _decode_json(completed.stdout, label="pip-audit")
     vulnerabilities = _pip_audit_vulnerabilities(report)
     if completed.returncode not in (0, 1):

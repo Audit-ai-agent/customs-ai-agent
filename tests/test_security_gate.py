@@ -38,6 +38,8 @@ class SecurityGateTests(unittest.TestCase):
         self.assertIn(toolchain["gitleaks"]["linux_x64_url"], workflow)
         self.assertIn(toolchain["gitleaks"]["linux_x64_sha256"], workflow)
         self.assertIn(f"pip-audit=={toolchain['pip_audit']['version']}", workflow)
+        self.assertIn("uv run --isolated --no-project", workflow)
+        self.assertIn("python -I -X utf8", workflow)
         self.assertIn("fetch-depth: 0", workflow)
         self.assertNotIn("security-events: write", workflow)
         self.assertNotIn("id-token: write", workflow)
@@ -94,6 +96,53 @@ class SecurityGateTests(unittest.TestCase):
             security_gate._pip_audit_vulnerabilities(report),
             [("demo", "1.0", "PYSEC-0000")],
         )
+
+    def test_dependency_audit_runs_from_private_utf8_temporary_directory(self) -> None:
+        report = json.dumps(
+            {"dependencies": [{"name": "demo", "version": "1.0", "vulns": []}]}
+        ).encode()
+        version = CompletedProcess([], 0, stdout=b"pip-audit 2.9.0\n", stderr=b"")
+        completed = CompletedProcess([], 0, stdout=report, stderr=b"")
+        private_audit_cwd = ROOT / ".private-pip-audit-cwd"
+        with (
+            patch.object(
+                security_gate,
+                "_read_toolchain",
+                return_value={
+                    "pip_audit": {
+                        "version": "2.9.0",
+                        "vulnerability_service": "pypi",
+                    }
+                },
+            ),
+            patch.object(
+                security_gate,
+                "_resolved_executable",
+                return_value=ROOT / "uv.lock",
+            ),
+            patch.object(security_gate.tempfile, "TemporaryDirectory") as temp_directory,
+            patch.object(
+                security_gate,
+                "_run",
+                side_effect=[version, completed],
+            ) as run,
+        ):
+            temp_directory.return_value.__enter__.return_value = str(private_audit_cwd)
+            security_gate.run_dependency_audit(requirements=ROOT / "uv.lock")
+
+        version_argv = run.call_args_list[0].args[0]
+        audit_argv = run.call_args_list[1].args[0]
+        self.assertEqual(
+            version_argv,
+            [sys.executable, "-I", "-X", "utf8", "-m", "pip_audit", "--version"],
+        )
+        self.assertEqual(
+            audit_argv[:6],
+            [sys.executable, "-I", "-X", "utf8", "-m", "pip_audit"],
+        )
+        self.assertEqual(run.call_args_list[0].kwargs["cwd"], private_audit_cwd)
+        self.assertEqual(run.call_args_list[1].kwargs["cwd"], private_audit_cwd)
+        temp_directory.assert_called_once_with(prefix="customs-ai-agent-pip-audit-")
 
     def test_invalid_reports_fail_closed(self) -> None:
         with self.assertRaises(security_gate.SecurityGateError):

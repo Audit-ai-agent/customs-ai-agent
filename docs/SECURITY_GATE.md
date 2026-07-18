@@ -34,7 +34,7 @@ $GITLEAKS = "..\..\..\_artifacts\tools\gitleaks\v8.30.1\bin\gitleaks.exe"
 New-Item -ItemType Directory -Force dist/security | Out-Null
 & $UV export --locked --all-groups --no-emit-project --no-emit-local --no-sources `
   --format requirements.txt --output-file dist/security/locked-requirements.txt
-& $UV run --no-project --with "pip-audit==2.9.0" python `
+& $UV run --isolated --no-project --with "pip-audit==2.9.0" python -I -X utf8 `
   tools/run_security_gate.py dependencies `
   --requirements dist/security/locked-requirements.txt
 
@@ -54,6 +54,14 @@ Dependency Gate는 PyPI advisory service를 조회하므로 네트워크가 필�
 격리된 감사 도구 자체의 전이 dependency는 `pip-audit==2.9.0` 설치 시점에 해석된다. 이것이 현재
 알려진 재현성 한계다. 운영 release 전에는 감사 도구 전용 hash lock 또는 검증된 container digest로
 이 경계도 고정해야 한다.
+
+호출자는 `uv run --isolated`와 `python -I -X utf8`을 사용하고, wrapper는 version 확인과 실제
+`pip-audit`을 모두 source checkout이 아닌 동일한 비어 있는 전용 temporary directory에서
+동일한 isolated UTF-8 Python 모드로 실행한다. 이는 Windows의 legacy code page로 표현할 수
+없는 저장소 경로에서 외부 감사 환경이나 자식 Python이 `site` import 전에 종료되는 문제를
+막고, 동시에 project-local 파일이 version 확인 또는 감사 환경에 영향을 주지 못하게 한다.
+temporary directory 생성·version 확인·감사 실행·JSON 파싱 중 하나라도 실패하면 Gate는
+성공으로 간주하지 않는다.
 
 Ruff `S`는 Bandit 계열 보안 규칙의 정적 검사로, 동적 taint 분석이나 악성 PDF/image fuzzing을
 대체하지 않는다. `# noqa: S...`는 검증된 interpreter 경로·고정 argv·`shell=False`, 사전 URL

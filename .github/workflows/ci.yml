@@ -55,7 +55,8 @@ jobs:
             --output-file dist/security/locked-requirements.txt
       - name: Dependency vulnerability audit
         run: >-
-          uv run --no-project --with "pip-audit==2.9.0" python
+          uv run --isolated --no-project --with "pip-audit==2.9.0"
+          python -I -X utf8
           tools/run_security_gate.py dependencies
           --requirements dist/security/locked-requirements.txt
       - name: Install locked development environment for SAST
