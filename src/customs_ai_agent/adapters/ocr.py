@@ -34,7 +34,7 @@ from customs_ai_agent.schemas.models import (
 
 OcrProviderName = Literal["paddle", "docling"]
 
-_WORKER_PROTOCOL: Final = "customs-ocr-worker/v1"
+_WORKER_PROTOCOL: Final = "customs-ocr-worker/v2"
 _DEFAULT_TIMEOUT_SECONDS: Final = 180.0
 _MAX_WORKER_REQUEST_BYTES: Final = 32 * 1024 * 1024
 _MAX_WORKER_RESPONSE_BYTES: Final = 8 * 1024 * 1024

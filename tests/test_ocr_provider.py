@@ -64,7 +64,7 @@ def _image_page() -> ImagePageInput:
 
 def _ok_response(request: dict[str, Any]) -> dict[str, Any]:
     return {
-        "protocol": "customs-ocr-worker/v1",
+        "protocol": "customs-ocr-worker/v2",
         "request_id": request["request_id"],
         "status": "ok",
         "result": {
@@ -256,7 +256,7 @@ def test_worker_success_envelope_emits_the_exact_reading_order_policy() -> None:
 
     response, returned_backend = _process_request(
         {
-            "protocol": "customs-ocr-worker/v1",
+            "protocol": "customs-ocr-worker/v2",
             "request_id": "ocrreq_policy",
             "provider": "paddle",
             "document_id": "invoice-policy-worker",
@@ -279,6 +279,24 @@ def test_worker_success_envelope_emits_the_exact_reading_order_policy() -> None:
     assert returned_backend is not None
     assert response["status"] == "ok"
     assert response["result"]["reading_order_policy_id"] == "worker-emitted-sequence/v1"
+
+
+def test_provider_rejects_pre_reading_order_worker_protocol() -> None:
+    page = _image_page()
+
+    def legacy_response(request: dict[str, Any]) -> dict[str, Any]:
+        response = _ok_response(request)
+        response["protocol"] = "customs-ocr-worker/v1"
+        return response
+
+    worker = _FakeWorker(legacy_response)
+    provider = _provider_with_worker(worker)
+
+    with pytest.raises(OcrLayoutProviderError) as captured:
+        provider.analyze(document_id="invoice-legacy-protocol", pages=[page])
+
+    assert captured.value.code == "ocr_worker_response_malformed"
+    assert worker.closed
 
 
 def test_paddle_converter_preserves_provider_native_sequence() -> None:
@@ -669,7 +687,7 @@ def test_provider_fail_closed_for_malformed_and_backend_error_envelopes() -> Non
 
     def failed(request: dict[str, Any]) -> dict[str, Any]:
         return {
-            "protocol": "customs-ocr-worker/v1",
+            "protocol": "customs-ocr-worker/v2",
             "request_id": request["request_id"],
             "status": "error",
             "error": {
@@ -757,7 +775,7 @@ def test_jsonl_client_reuses_one_persistent_process(
         return (
             json.dumps(
                 {
-                    "protocol": "customs-ocr-worker/v1",
+                    "protocol": "customs-ocr-worker/v2",
                     "request_id": request["request_id"],
                     "status": "ok",
                     "result": {},

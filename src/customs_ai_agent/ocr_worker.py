@@ -35,7 +35,7 @@ from customs_ai_agent.ocr_reading_order import (
     preserve_provider_span_order,
 )
 
-_PROTOCOL = "customs-ocr-worker/v1"
+_PROTOCOL = "customs-ocr-worker/v2"
 _MAX_REQUEST_BYTES = 32 * 1024 * 1024
 _MEDIA_FORMATS = {
     "image/jpeg": "JPEG",
