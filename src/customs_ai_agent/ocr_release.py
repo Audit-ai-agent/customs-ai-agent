@@ -185,11 +185,14 @@ import csv
 import hashlib
 import importlib.machinery
 import importlib.metadata
+import importlib.util
 import io
 import json
+import marshal
 import os
 import re
 import sys
+import types
 from pathlib import Path, PurePosixPath
 from urllib.parse import unquote, urlsplit
 
@@ -198,6 +201,7 @@ SHA256 = re.compile(r"^[a-fA-F0-9]{64}$")
 MAX_RECORD_BYTES = 2 * 1024 * 1024
 MAX_MEMBER_BYTES = 8 * 1024 * 1024
 MAX_TOTAL_BYTES = 32 * 1024 * 1024
+MAX_WHEEL_BYTES = 64 * 1024 * 1024
 
 
 def emit_error(code):
@@ -246,6 +250,166 @@ def resolve_record_target(base, executable_dir, raw_name):
     if not resolved.is_file() or resolved.is_symlink():
         emit_error("agent_record_mismatch")
     return path.as_posix(), resolved
+
+
+def local_wheel_path(url):
+    parsed = urlsplit(url)
+    if parsed.scheme.lower() != "file":
+        return None
+    if (
+        parsed.netloc.lower() not in {"", "localhost"}
+        or parsed.query
+        or parsed.fragment
+    ):
+        emit_error("agent_direct_url_invalid")
+    raw_path = unquote(parsed.path)
+    if (
+        not raw_path
+        or "\\" in raw_path
+        or any(ord(character) < 32 or ord(character) == 127 for character in raw_path)
+    ):
+        emit_error("agent_direct_url_invalid")
+    if os.name == "nt":
+        if re.match(r"^/[A-Za-z]:/", raw_path) is None:
+            emit_error("agent_direct_url_invalid")
+        raw_path = raw_path[1:]
+    elif not raw_path.startswith("/") or raw_path.startswith("//"):
+        emit_error("agent_direct_url_invalid")
+    candidate = Path(raw_path)
+    if not candidate.is_absolute():
+        emit_error("agent_direct_url_invalid")
+    return candidate
+
+
+def local_wheel_sha256(url):
+    candidate = local_wheel_path(url)
+    if candidate is None:
+        return None
+    try:
+        if candidate.is_symlink():
+            emit_error("agent_direct_url_invalid")
+        resolved = candidate.resolve(strict=True)
+        size = resolved.stat().st_size
+    except OSError:
+        emit_error("agent_wheel_hash_unavailable")
+    if (
+        not resolved.is_file()
+        or resolved.is_symlink()
+        or size < 1
+        or size > MAX_WHEEL_BYTES
+        or not resolved.name.lower().endswith(".whl")
+    ):
+        emit_error("agent_direct_url_invalid")
+    digest = hashlib.sha256()
+    try:
+        with resolved.open("rb") as wheel:
+            while chunk := wheel.read(1024 * 1024):
+                digest.update(chunk)
+    except OSError:
+        emit_error("agent_wheel_hash_unavailable")
+    return digest.hexdigest()
+
+
+def verify_cached_bytecode(candidate, package_root, base, recorded):
+    try:
+        resolved = candidate.resolve(strict=True)
+        relative = resolved.relative_to(package_root)
+    except (OSError, ValueError):
+        emit_error("agent_untracked_executable")
+    if (
+        len(relative.parts) < 2
+        or relative.parts[-2] != "__pycache__"
+        or not resolved.is_file()
+        or resolved.is_symlink()
+    ):
+        emit_error("agent_untracked_executable")
+
+    cache_tag = sys.implementation.cache_tag
+    if not isinstance(cache_tag, str) or not cache_tag:
+        emit_error("agent_untracked_executable")
+    variants = (
+        (f".{cache_tag}.pyc", 0),
+        (f".{cache_tag}.opt-1.pyc", 1),
+        (f".{cache_tag}.opt-2.pyc", 2),
+    )
+    matched = next(
+        (
+            (suffix, optimization)
+            for suffix, optimization in variants
+            if resolved.name.endswith(suffix)
+        ),
+        None,
+    )
+    if matched is None:
+        emit_error("agent_untracked_executable")
+    suffix, optimization = matched
+    module_name = resolved.name[: -len(suffix)]
+    if not module_name or not module_name.isidentifier():
+        emit_error("agent_untracked_executable")
+
+    source = resolved.parent.parent / f"{module_name}.py"
+    try:
+        if source.is_symlink():
+            emit_error("agent_untracked_executable")
+        source = source.resolve(strict=True)
+        source.relative_to(package_root)
+        canonical_source = source.relative_to(base).as_posix()
+    except (OSError, ValueError):
+        emit_error("agent_untracked_executable")
+    if (
+        not source.is_file()
+        or canonical_source.casefold() not in recorded
+    ):
+        emit_error("agent_untracked_executable")
+
+    try:
+        payload = resolved.read_bytes()
+        source_payload = source.read_bytes()
+        source_stat = source.stat()
+    except OSError:
+        emit_error("agent_untracked_executable")
+    if (
+        len(payload) <= 16
+        or len(payload) > MAX_MEMBER_BYTES
+        or len(source_payload) > MAX_MEMBER_BYTES
+        or payload[:4] != importlib.util.MAGIC_NUMBER
+    ):
+        emit_error("agent_untracked_executable")
+
+    flags = int.from_bytes(payload[4:8], "little")
+    if flags == 0:
+        expected_header = (
+            (int(source_stat.st_mtime) & 0xFFFFFFFF).to_bytes(4, "little")
+            + (len(source_payload) & 0xFFFFFFFF).to_bytes(4, "little")
+        )
+    elif flags == 3:
+        expected_header = importlib.util.source_hash(source_payload)
+    else:
+        emit_error("agent_untracked_executable")
+    if payload[8:16] != expected_header:
+        emit_error("agent_untracked_executable")
+
+    try:
+        marshalled = io.BytesIO(payload[16:])
+        observed_code = marshal.load(marshalled)
+        if marshalled.read(1):
+            emit_error("agent_untracked_executable")
+        if (
+            not isinstance(observed_code, types.CodeType)
+            or Path(observed_code.co_filename).resolve(strict=True) != source
+        ):
+            emit_error("agent_untracked_executable")
+        expected_code = compile(
+            source_payload,
+            observed_code.co_filename,
+            "exec",
+            dont_inherit=True,
+            optimize=optimization,
+        )
+    except (EOFError, OSError, TypeError, ValueError):
+        emit_error("agent_untracked_executable")
+    if observed_code != expected_code:
+        emit_error("agent_untracked_executable")
 
 
 try:
@@ -329,17 +493,17 @@ try:
     package_root.relative_to(base)
     if not package_root.is_dir():
         emit_error("agent_distribution_unavailable")
-    executable_suffixes = tuple(
+    recorded_executable_suffixes = tuple(
         sorted(
             {
                 *importlib.machinery.SOURCE_SUFFIXES,
-                *importlib.machinery.BYTECODE_SUFFIXES,
                 *importlib.machinery.EXTENSION_SUFFIXES,
             },
             key=len,
             reverse=True,
         )
     )
+    bytecode_suffixes = tuple(importlib.machinery.BYTECODE_SUFFIXES)
     executable_count = 0
     for current_root, directory_names, file_names in os.walk(
         package_root,
@@ -354,13 +518,16 @@ try:
             candidate = current / file_name
             if candidate.is_symlink():
                 emit_error("agent_untracked_executable")
-            if not file_name.endswith(executable_suffixes):
+            if file_name.endswith(bytecode_suffixes):
+                verify_cached_bytecode(candidate, package_root, base, recorded)
+                continue
+            if not file_name.endswith(recorded_executable_suffixes):
                 continue
             executable_count += 1
             canonical = candidate.resolve(strict=True).relative_to(base).as_posix()
             if canonical.casefold() not in recorded:
                 emit_error("agent_untracked_executable")
-    for suffix in executable_suffixes:
+    for suffix in (*recorded_executable_suffixes, *bytecode_suffixes):
         candidate = base / f"customs_ai_agent{suffix}"
         if candidate.exists() and candidate.resolve(strict=True).relative_to(base).as_posix().casefold() not in recorded:
             emit_error("agent_untracked_executable")
@@ -384,8 +551,10 @@ try:
     url = direct_url.get("url")
     if not isinstance(url, str):
         emit_error("agent_direct_url_invalid")
-    if not unquote(urlsplit(url).path).lower().endswith(".whl"):
+    parsed_url = urlsplit(url)
+    if not unquote(parsed_url.path).lower().endswith(".whl"):
         emit_error("agent_source_install_rejected")
+    local_wheel_path(url)
 
     archive_info = direct_url.get("archive_info")
     if not isinstance(archive_info, dict):
@@ -403,6 +572,10 @@ try:
         if not isinstance(legacy_hash, str) or not legacy_hash.lower().startswith("sha256="):
             emit_error("agent_direct_url_invalid")
         candidates.append(legacy_hash.split("=", 1)[1])
+    if not candidates:
+        local_digest = local_wheel_sha256(url)
+        if local_digest is not None:
+            candidates.append(local_digest)
     if not candidates:
         emit_error("agent_wheel_hash_unavailable")
     if not all(isinstance(value, str) and SHA256.fullmatch(value) for value in candidates):
@@ -1080,6 +1253,8 @@ def _attestation_environment() -> dict[str, str]:
         "LC_ALL",
         "PATH",
         "PATHEXT",
+        "PROCESSOR_ARCHITECTURE",
+        "PROCESSOR_ARCHITEW6432",
         "SYSTEMROOT",
         "TEMP",
         "TMP",

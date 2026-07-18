@@ -40,6 +40,20 @@ _PADDLE_ENGINE = "PP-StructureV3:customs-paddle-layout-table-v4"
 _DOCLING_ENGINE = "DocumentConverter:default-image-pipeline-offline-v2"
 
 
+def test_attestation_environment_preserves_architecture_for_lock_markers(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    monkeypatch.setenv("PROCESSOR_ARCHITECTURE", "AMD64")
+    monkeypatch.setenv("PROCESSOR_ARCHITEW6432", "AMD64")
+    monkeypatch.setenv("ANTHROPIC_API_KEY", "must-not-cross-attestation-boundary")
+
+    environment = release._attestation_environment()
+
+    assert environment["PROCESSOR_ARCHITECTURE"] == "AMD64"
+    assert environment["PROCESSOR_ARCHITEW6432"] == "AMD64"
+    assert "ANTHROPIC_API_KEY" not in environment
+
+
 def _normalized_requirement_name(value: str) -> str:
     match = re.match(r"^([A-Za-z0-9_.-]+)", value.strip())
     assert match is not None

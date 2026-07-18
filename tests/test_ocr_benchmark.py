@@ -3,6 +3,8 @@ from __future__ import annotations
 import base64
 import hashlib
 import json
+import marshal
+import py_compile
 import subprocess
 import sys
 from pathlib import Path
@@ -611,7 +613,9 @@ def _write_synthetic_wheel_install(tmp_path: Path) -> tuple[Path, Path]:
         "customs_ai_agent-0.3.0.dist-info/direct_url.json": json.dumps(
             {
                 "archive_info": {"hashes": {"sha256": "a" * 64}},
-                "url": "file:///release/customs_ai_agent-0.3.0-py3-none-any.whl",
+                "url": (tmp_path / "release" / "customs_ai_agent-0.3.0-py3-none-any.whl")
+                .resolve()
+                .as_uri(),
             },
             sort_keys=True,
         ).encode("utf-8"),
@@ -633,6 +637,23 @@ def _write_synthetic_wheel_install(tmp_path: Path) -> tuple[Path, Path]:
     record_path = site_packages / record_relative
     record_path.write_bytes(record_payload)
     return site_packages, record_path
+
+
+def _replace_synthetic_record_payload(
+    site_packages: Path,
+    relative_name: str,
+    payload: bytes,
+) -> Path:
+    target = site_packages / Path(relative_name)
+    target.write_bytes(payload)
+    record_path = site_packages / "customs_ai_agent-0.3.0.dist-info" / "RECORD"
+    replacement = f"{relative_name},sha256={_record_digest(payload)},{len(payload)}"
+    lines = [
+        replacement if line.startswith(f"{relative_name},") else line
+        for line in record_path.read_text(encoding="utf-8").splitlines()
+    ]
+    record_path.write_text("\n".join(lines) + "\n", encoding="utf-8")
+    return record_path
 
 
 def _run_wheel_attestation_script(site_packages: Path) -> dict[str, Any]:
@@ -1133,6 +1154,233 @@ def test_wheel_attestation_script_verifies_exact_record_inventory(
         "installed_agent_wheel_sha256": "a" * 64,
         "installed_agent_record_sha256": hashlib.sha256(record_path.read_bytes()).hexdigest(),
         "verified_executable_file_count": 2,
+    }
+
+
+@pytest.mark.parametrize(
+    ("invalidation_mode", "optimization"),
+    [
+        (py_compile.PycInvalidationMode.TIMESTAMP, 0),
+        (py_compile.PycInvalidationMode.CHECKED_HASH, 0),
+        (py_compile.PycInvalidationMode.CHECKED_HASH, 1),
+        (py_compile.PycInvalidationMode.CHECKED_HASH, 2),
+    ],
+)
+def test_wheel_attestation_script_accepts_source_equivalent_cached_bytecode(
+    tmp_path: Path,
+    invalidation_mode: py_compile.PycInvalidationMode,
+    optimization: int,
+) -> None:
+    site_packages, record_path = _write_synthetic_wheel_install(tmp_path)
+    source = site_packages / "customs_ai_agent" / "module.py"
+    py_compile.compile(
+        str(source),
+        doraise=True,
+        invalidation_mode=invalidation_mode,
+        optimize=optimization,
+    )
+
+    payload = _run_wheel_attestation_script(site_packages)
+
+    assert payload == {
+        "schema_version": "customs-ai-agent-wheel-attestation/v1",
+        "status": "ok",
+        "installed_agent_wheel_sha256": "a" * 64,
+        "installed_agent_record_sha256": hashlib.sha256(record_path.read_bytes()).hexdigest(),
+        "verified_executable_file_count": 2,
+    }
+
+
+def test_wheel_attestation_script_rejects_unchecked_hash_cached_bytecode(
+    tmp_path: Path,
+) -> None:
+    site_packages, _ = _write_synthetic_wheel_install(tmp_path)
+    source = site_packages / "customs_ai_agent" / "module.py"
+    py_compile.compile(
+        str(source),
+        doraise=True,
+        invalidation_mode=py_compile.PycInvalidationMode.UNCHECKED_HASH,
+    )
+
+    payload = _run_wheel_attestation_script(site_packages)
+
+    assert payload == {
+        "schema_version": "customs-ai-agent-wheel-attestation/v1",
+        "status": "error",
+        "error_code": "agent_untracked_executable",
+    }
+
+
+@pytest.mark.parametrize("mutation", ["magic", "header", "trailing"])
+def test_wheel_attestation_script_rejects_invalid_cached_bytecode_envelope(
+    tmp_path: Path,
+    mutation: str,
+) -> None:
+    site_packages, _ = _write_synthetic_wheel_install(tmp_path)
+    source = site_packages / "customs_ai_agent" / "module.py"
+    pyc_path = Path(py_compile.compile(str(source), doraise=True))
+    observed = bytearray(pyc_path.read_bytes())
+    if mutation == "magic":
+        observed[0] ^= 0x01
+    elif mutation == "header":
+        observed[8] ^= 0x01
+    else:
+        observed.extend(b"trailing")
+    pyc_path.write_bytes(observed)
+
+    payload = _run_wheel_attestation_script(site_packages)
+
+    assert payload == {
+        "schema_version": "customs-ai-agent-wheel-attestation/v1",
+        "status": "error",
+        "error_code": "agent_untracked_executable",
+    }
+
+
+def test_wheel_attestation_script_rejects_modified_cached_bytecode(
+    tmp_path: Path,
+) -> None:
+    site_packages, _ = _write_synthetic_wheel_install(tmp_path)
+    source = site_packages / "customs_ai_agent" / "module.py"
+    pyc_path = Path(py_compile.compile(str(source), doraise=True))
+    observed = pyc_path.read_bytes()
+    replacement = compile(
+        b"VALUE = 2\n",
+        str(source.resolve()),
+        "exec",
+        dont_inherit=True,
+        optimize=0,
+    )
+    pyc_path.write_bytes(observed[:16] + marshal.dumps(replacement))
+
+    payload = _run_wheel_attestation_script(site_packages)
+
+    assert payload == {
+        "schema_version": "customs-ai-agent-wheel-attestation/v1",
+        "status": "error",
+        "error_code": "agent_untracked_executable",
+    }
+
+
+def test_wheel_attestation_script_rejects_sourceless_cached_bytecode(
+    tmp_path: Path,
+) -> None:
+    site_packages, _ = _write_synthetic_wheel_install(tmp_path)
+    source = site_packages / "customs_ai_agent" / "module.py"
+    pyc_path = Path(py_compile.compile(str(source), doraise=True))
+    source.unlink()
+
+    payload = _run_wheel_attestation_script(site_packages)
+
+    assert pyc_path.exists()
+    assert payload == {
+        "schema_version": "customs-ai-agent-wheel-attestation/v1",
+        "status": "error",
+        "error_code": "agent_record_mismatch",
+    }
+
+
+def test_wheel_attestation_script_rejects_unrecorded_sourceless_cached_bytecode(
+    tmp_path: Path,
+) -> None:
+    site_packages, _ = _write_synthetic_wheel_install(tmp_path)
+    source = site_packages / "customs_ai_agent" / "rogue.py"
+    source.write_text("VALUE = 'rogue'\n", encoding="utf-8")
+    pyc_path = Path(py_compile.compile(str(source), doraise=True))
+    source.unlink()
+
+    payload = _run_wheel_attestation_script(site_packages)
+
+    assert pyc_path.exists()
+    assert payload == {
+        "schema_version": "customs-ai-agent-wheel-attestation/v1",
+        "status": "error",
+        "error_code": "agent_untracked_executable",
+    }
+
+
+def test_wheel_attestation_script_rejects_foreign_cache_tag(
+    tmp_path: Path,
+) -> None:
+    site_packages, _ = _write_synthetic_wheel_install(tmp_path)
+    source = site_packages / "customs_ai_agent" / "module.py"
+    pyc_path = Path(py_compile.compile(str(source), doraise=True))
+    foreign = pyc_path.with_name(pyc_path.name.replace("cpython-311", "cpython-310"))
+    pyc_path.rename(foreign)
+
+    payload = _run_wheel_attestation_script(site_packages)
+
+    assert payload == {
+        "schema_version": "customs-ai-agent-wheel-attestation/v1",
+        "status": "error",
+        "error_code": "agent_untracked_executable",
+    }
+
+
+def test_wheel_attestation_script_hashes_local_wheel_when_installer_omits_hash(
+    tmp_path: Path,
+) -> None:
+    site_packages, _ = _write_synthetic_wheel_install(tmp_path)
+    wheel_path = tmp_path / "customs_ai_agent-0.3.0-py3-none-any.whl"
+    wheel_payload = b"synthetic wheel bytes"
+    wheel_path.write_bytes(wheel_payload)
+    direct_url_payload = json.dumps(
+        {
+            "archive_info": {},
+            "url": wheel_path.resolve().as_uri(),
+        },
+        sort_keys=True,
+    ).encode("utf-8")
+    record_path = _replace_synthetic_record_payload(
+        site_packages,
+        "customs_ai_agent-0.3.0.dist-info/direct_url.json",
+        direct_url_payload,
+    )
+
+    payload = _run_wheel_attestation_script(site_packages)
+
+    assert payload == {
+        "schema_version": "customs-ai-agent-wheel-attestation/v1",
+        "status": "ok",
+        "installed_agent_wheel_sha256": hashlib.sha256(wheel_payload).hexdigest(),
+        "installed_agent_record_sha256": hashlib.sha256(record_path.read_bytes()).hexdigest(),
+        "verified_executable_file_count": 2,
+    }
+
+
+@pytest.mark.parametrize(
+    "url",
+    [
+        "file:relative/customs_ai_agent-0.3.0-py3-none-any.whl",
+        "file:////server/share/customs_ai_agent-0.3.0-py3-none-any.whl",
+        "file://server/share/customs_ai_agent-0.3.0-py3-none-any.whl",
+        "file:///%5C%5C%3F%5CC:%5Ccustoms_ai_agent-0.3.0-py3-none-any.whl",
+    ],
+)
+def test_wheel_attestation_script_rejects_nonlocal_or_relative_file_uri(
+    tmp_path: Path,
+    url: str,
+) -> None:
+    site_packages, _ = _write_synthetic_wheel_install(tmp_path)
+    direct_url_payload = json.dumps(
+        {
+            "archive_info": {"hashes": {"sha256": "a" * 64}},
+            "url": url,
+        },
+        sort_keys=True,
+    ).encode("utf-8")
+    _replace_synthetic_record_payload(
+        site_packages,
+        "customs_ai_agent-0.3.0.dist-info/direct_url.json",
+        direct_url_payload,
+    )
+
+    payload = _run_wheel_attestation_script(site_packages)
+
+    assert payload == {
+        "schema_version": "customs-ai-agent-wheel-attestation/v1",
+        "status": "error",
+        "error_code": "agent_direct_url_invalid",
     }
 
 
