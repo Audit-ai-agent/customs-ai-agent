@@ -1,0 +1,165 @@
+{
+  "$defs": {
+    "ClaudePixelBBox": {
+      "additionalProperties": false,
+      "description": "Absolute half-open pixel coordinates in the original, unresized page.",
+      "properties": {
+        "page": {
+          "title": "Page",
+          "type": "integer"
+        },
+        "x1": {
+          "title": "X1",
+          "type": "integer"
+        },
+        "x2": {
+          "title": "X2",
+          "type": "integer"
+        },
+        "y1": {
+          "title": "Y1",
+          "type": "integer"
+        },
+        "y2": {
+          "title": "Y2",
+          "type": "integer"
+        }
+      },
+      "required": [
+        "page",
+        "x1",
+        "y1",
+        "x2",
+        "y2"
+      ],
+      "title": "ClaudePixelBBox",
+      "type": "object"
+    },
+    "ClaudeVisionEvidence": {
+      "additionalProperties": false,
+      "description": "Claude's mapping of a field to independent OCR/layout observations.\n\n`source_text` and `model_observed_bbox` remain unverified model\nobservations. Only `ocr_span_ids` can become field provenance after local\nreconciliation with the independently produced OCR ledger.",
+      "properties": {
+        "model_observed_bbox": {
+          "$ref": "#/$defs/ClaudePixelBBox"
+        },
+        "ocr_span_ids": {
+          "items": {
+            "type": "string"
+          },
+          "title": "Ocr Span Ids",
+          "type": "array"
+        },
+        "source_text": {
+          "title": "Source Text",
+          "type": "string"
+        }
+      },
+      "required": [
+        "source_text",
+        "model_observed_bbox",
+        "ocr_span_ids"
+      ],
+      "title": "ClaudeVisionEvidence",
+      "type": "object"
+    },
+    "ClaudeVisionFieldCandidate": {
+      "additionalProperties": false,
+      "properties": {
+        "evidence": {
+          "$ref": "#/$defs/ClaudeVisionEvidence"
+        },
+        "name": {
+          "title": "Name",
+          "type": "string"
+        },
+        "value": {
+          "title": "Value",
+          "type": "string"
+        }
+      },
+      "required": [
+        "name",
+        "value",
+        "evidence"
+      ],
+      "title": "ClaudeVisionFieldCandidate",
+      "type": "object"
+    },
+    "ClaudeVisionLineItemCandidate": {
+      "additionalProperties": false,
+      "properties": {
+        "fields": {
+          "items": {
+            "$ref": "#/$defs/ClaudeVisionFieldCandidate"
+          },
+          "title": "Fields",
+          "type": "array"
+        },
+        "row_evidence": {
+          "$ref": "#/$defs/ClaudeVisionEvidence"
+        }
+      },
+      "required": [
+        "row_evidence",
+        "fields"
+      ],
+      "title": "ClaudeVisionLineItemCandidate",
+      "type": "object"
+    }
+  },
+  "$id": "https://schemas.customs.local/agent/internal/v1/claude-vision-candidate.schema.json",
+  "$schema": "https://json-schema.org/draft/2020-12/schema",
+  "additionalProperties": false,
+  "description": "Agent-internal model/OCR boundary. This is not a Backend request/result contract.",
+  "properties": {
+    "classification_evidence": {
+      "anyOf": [
+        {
+          "$ref": "#/$defs/ClaudeVisionEvidence"
+        },
+        {
+          "type": "null"
+        }
+      ]
+    },
+    "document_type": {
+      "enum": [
+        "bill_of_lading",
+        "invoice",
+        "packing_list",
+        "certificate_of_origin",
+        "unknown"
+      ],
+      "title": "Document Type",
+      "type": "string"
+    },
+    "fields": {
+      "items": {
+        "$ref": "#/$defs/ClaudeVisionFieldCandidate"
+      },
+      "title": "Fields",
+      "type": "array"
+    },
+    "line_items": {
+      "items": {
+        "$ref": "#/$defs/ClaudeVisionLineItemCandidate"
+      },
+      "title": "Line Items",
+      "type": "array"
+    },
+    "schema_version": {
+      "const": "1.0",
+      "title": "Schema Version",
+      "type": "string"
+    }
+  },
+  "required": [
+    "schema_version",
+    "document_type",
+    "classification_evidence",
+    "fields",
+    "line_items"
+  ],
+  "title": "Customs AI Agent internal V1 claude-vision-candidate",
+  "type": "object"
+}

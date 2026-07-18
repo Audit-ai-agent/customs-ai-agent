@@ -4,6 +4,7 @@ from customs_ai_agent.nodes.extract import extract_documents
 from customs_ai_agent.nodes.load import load_case
 from customs_ai_agent.nodes.normalize import normalize_documents
 from customs_ai_agent.nodes.pair import pair_documents
+from customs_ai_agent.nodes.redact import redact_sensitive_inputs
 from customs_ai_agent.nodes.report import generate_xai_report
 from customs_ai_agent.nodes.retrieve import retrieve_regulations
 from customs_ai_agent.nodes.route import route_to_human_or_complete
@@ -18,6 +19,7 @@ __all__ = [
     "load_case",
     "normalize_documents",
     "pair_documents",
+    "redact_sensitive_inputs",
     "retrieve_regulations",
     "route_to_human_or_complete",
     "self_correct_extraction",

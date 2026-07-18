@@ -1,0 +1,114 @@
+{
+  "$id": "https://example.invalid/customs-ai-agent/trade-document-adjudication-event-v1.schema.json",
+  "$schema": "https://json-schema.org/draft/2020-12/schema",
+  "additionalProperties": false,
+  "properties": {
+    "schema_version": {
+      "const": "trade-document-adjudication-event/v1"
+    },
+    "event_id": {
+      "pattern": "^[A-Za-z0-9][A-Za-z0-9._:-]{0,255}$",
+      "type": "string"
+    },
+    "dataset_id": {
+      "minLength": 1,
+      "type": "string"
+    },
+    "dataset_version": {
+      "minLength": 1,
+      "type": "string"
+    },
+    "anomaly_id": {
+      "minLength": 1,
+      "type": "string"
+    },
+    "previous_state": {
+      "enum": [
+        "confirmed_normal",
+        "confirmed_intentional_defect",
+        "confirmed_generator_error",
+        "ambiguous",
+        "coverage_gap",
+        "not_applicable"
+      ]
+    },
+    "new_state": {
+      "enum": [
+        "confirmed_normal",
+        "confirmed_intentional_defect",
+        "confirmed_generator_error",
+        "ambiguous",
+        "coverage_gap",
+        "not_applicable"
+      ]
+    },
+    "evidence": {
+      "additionalProperties": false,
+      "properties": {
+        "kind": {
+          "enum": [
+            "dataset_author_confirmation",
+            "controlled_generator_manifest",
+            "two_reviewer_consensus",
+            "source_correction_record",
+            "business_rule_authority"
+          ]
+        },
+        "reference": {
+          "minLength": 1,
+          "type": "string"
+        },
+        "sha256": {
+          "pattern": "^[0-9a-f]{64}$",
+          "type": "string"
+        }
+      },
+      "required": [
+        "kind",
+        "reference"
+      ],
+      "type": "object"
+    },
+    "adjudicator_id": {
+      "pattern": "^[A-Za-z0-9][A-Za-z0-9._:-]{0,127}$",
+      "type": "string"
+    },
+    "adjudicated_at_utc": {
+      "format": "date-time",
+      "pattern": "Z$",
+      "type": "string"
+    },
+    "explanation": {
+      "minLength": 1,
+      "maxLength": 4000,
+      "type": "string"
+    },
+    "previous_event_sha256": {
+      "anyOf": [
+        {
+          "pattern": "^[0-9a-f]{64}$",
+          "type": "string"
+        },
+        {
+          "type": "null"
+        }
+      ]
+    }
+  },
+  "required": [
+    "schema_version",
+    "event_id",
+    "dataset_id",
+    "dataset_version",
+    "anomaly_id",
+    "previous_state",
+    "new_state",
+    "evidence",
+    "adjudicator_id",
+    "adjudicated_at_utc",
+    "explanation",
+    "previous_event_sha256"
+  ],
+  "title": "Append-only trade document adjudication event",
+  "type": "object"
+}

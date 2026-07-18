@@ -4,7 +4,7 @@ from typing import Any
 
 from customs_ai_agent.nodes.common import audit
 from customs_ai_agent.policies.evidence import enforce_evidence_gate
-from customs_ai_agent.schemas.models import RegulatoryFinding
+from customs_ai_agent.schemas.models import RagEvidence, RegulatoryFinding
 
 
 def _uploaded_requirement_codes(state: dict[str, Any]) -> set[str]:
@@ -19,22 +19,52 @@ def _uploaded_requirement_codes(state: dict[str, Any]) -> set[str]:
     return codes
 
 
+def _validated_evidence(evidence: Any) -> RagEvidence | None:
+    try:
+        return RagEvidence.model_validate(evidence)
+    except Exception:
+        return None
+
+
 def compliance_review(state: dict[str, Any]) -> dict[str, Any]:
-    available_ids = {item["evidence_id"] for item in state.get("rag_evidence") or []}
+    raw_evidence = state.get("rag_evidence") or []
     uploaded = _uploaded_requirement_codes(state)
     findings: list[dict[str, Any]] = []
     requires_human = state.get("requires_human_review", False)
     rejected = 0
 
+    retrieval_context_is_verified = (
+        state.get("retrieval_status") == "ok"
+        and state.get("retrieval_coverage") == "complete"
+        and bool(state.get("knowledge_snapshot_id"))
+    )
+    qualified_evidence: list[dict[str, Any]] = []
+    if raw_evidence and not retrieval_context_is_verified:
+        rejected += len(raw_evidence)
+        requires_human = True
+    else:
+        for evidence in raw_evidence:
+            parsed = _validated_evidence(evidence)
+            if parsed is None:
+                rejected += 1
+                requires_human = True
+                continue
+            if parsed.eligibility != "finding":
+                continue
+            if parsed.source_type != "customs_requirement":
+                rejected += 1
+                requires_human = True
+                continue
+            qualified_evidence.append(parsed.model_dump(mode="json"))
+
+    available_ids = {item["evidence_id"] for item in qualified_evidence}
     grouped: dict[tuple[str, str], list[dict[str, Any]]] = {}
-    for evidence in state.get("rag_evidence") or []:
+    for evidence in qualified_evidence:
         required_code = evidence.get("required_document_code")
         required_name = evidence.get("required_document_name")
         item_id = evidence.get("item_id")
-        if not required_code:
-            continue
         if (
-            evidence.get("eligibility") != "finding"
+            not required_code
             or not required_name
             or not item_id
             or not evidence.get("source_record_id")
@@ -57,9 +87,7 @@ def compliance_review(state: dict[str, Any]) -> dict[str, Any]:
             requires_human = True
             rejected += 1
             continue
-        scores = [
-            item["score"] for item in evidence_group if item.get("score") is not None
-        ]
+        scores = [item["score"] for item in evidence_group if item.get("score") is not None]
         confidence = max(scores) if scores else 0.95
         finding = RegulatoryFinding(
             finding_code="REQUIRED_CERT_MISSING",
@@ -70,9 +98,7 @@ def compliance_review(state: dict[str, Any]) -> dict[str, Any]:
             required_document_name=required_name,
             evidence_ids=sorted({item["evidence_id"] for item in evidence_group}),
             confidence=confidence,
-            confidence_basis=(
-                "retrieval_score" if scores else "structured_requirement_policy"
-            ),
+            confidence_basis=("retrieval_score" if scores else "structured_requirement_policy"),
         )
         if enforce_evidence_gate(finding, available_ids):
             findings.append(finding.model_dump(mode="json"))

@@ -1,0 +1,58 @@
+{
+  "$id": "https://example.invalid/customs-ai-agent/sealed-release-holdout-bundle-manifest-v1.schema.json",
+  "$schema": "https://json-schema.org/draft/2020-12/schema",
+  "additionalProperties": false,
+  "properties": {
+    "schema_version": {
+      "const": "sealed-release-holdout-bundle-manifest/v1"
+    },
+    "dataset_id": {
+      "const": "trade_document_triplets"
+    },
+    "dataset_version": {
+      "const": "source-v1"
+    },
+    "evaluation_version": {
+      "const": "evaluation-v3"
+    },
+    "bundle_sha256": {
+      "pattern": "^[0-9a-f]{64}$",
+      "type": "string"
+    },
+    "bundle_byte_size": {
+      "minimum": 1,
+      "type": "integer"
+    },
+    "case_count": {
+      "minimum": 1,
+      "type": "integer"
+    },
+    "selection_provenance": {
+      "const": "human_supplied_external_sealed_unseen"
+    },
+    "public_disclosure": {
+      "const": "bundle_count_and_sha256_only"
+    },
+    "deterministic_seed_used": {
+      "const": false
+    },
+    "ordinary_tooling_pre_access": {
+      "const": false
+    }
+  },
+  "required": [
+    "schema_version",
+    "dataset_id",
+    "dataset_version",
+    "evaluation_version",
+    "bundle_sha256",
+    "bundle_byte_size",
+    "case_count",
+    "selection_provenance",
+    "public_disclosure",
+    "deterministic_seed_used",
+    "ordinary_tooling_pre_access"
+  ],
+  "title": "Public metadata for a human-supplied sealed unseen release holdout",
+  "type": "object"
+}

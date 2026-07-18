@@ -20,6 +20,10 @@ NUMERIC_FIELDS = {
 def _correct_field(name: str, data: dict[str, Any]) -> bool:
     if name not in NUMERIC_FIELDS:
         return False
+    if (data.get("evidence") or {}).get("source_modality") == "image":
+        # A second, independent OCR/crop-read has not corroborated the VLM
+        # transcription. Do not silently rewrite image-derived evidence.
+        return False
     value = data.get("value")
     if not isinstance(value, str) or "O" not in value.upper():
         return False
@@ -40,6 +44,7 @@ def _has_low_confidence(state: dict[str, Any]) -> bool:
             value = field_data.get("value")
             if (
                 name in NUMERIC_FIELDS
+                and (field_data.get("evidence") or {}).get("source_modality") != "image"
                 and float(field_data.get("confidence") or 0) < 0.75
                 and isinstance(value, str)
                 and "O" in value.upper()
@@ -52,6 +57,7 @@ def _has_low_confidence(state: dict[str, Any]) -> bool:
                 value = field_data.get("value")
                 if (
                     name in NUMERIC_FIELDS
+                    and (field_data.get("evidence") or {}).get("source_modality") != "image"
                     and float(field_data.get("confidence") or 0) < 0.75
                     and isinstance(value, str)
                     and "O" in value.upper()
@@ -80,8 +86,12 @@ def self_correct_extraction(state: dict[str, Any]) -> dict[str, Any]:
                         changed += 1
             confidences = [value["confidence"] for value in doc.get("fields", {}).values()]
             for item in doc.get("line_items") or []:
-                confidences.extend(value["confidence"] for key, value in item.items() if key != "item_id")
-            doc["extraction_confidence"] = round(sum(confidences) / len(confidences), 4) if confidences else 0.0
+                confidences.extend(
+                    value["confidence"] for key, value in item.items() if key != "item_id"
+                )
+            doc["extraction_confidence"] = (
+                round(sum(confidences) / len(confidences), 4) if confidences else 0.0
+            )
 
     return {
         "extracted_documents": extracted,

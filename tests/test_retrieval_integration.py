@@ -19,15 +19,22 @@ from customs_ai_agent.adapters.retrieval import (
     validate_evidence_base_url,
 )
 from customs_ai_agent.adapters.retrieval import _NoRedirectHandler
-from customs_ai_agent.runner import rerun_review, run_review, run_review_result
+from customs_ai_agent.runner import (
+    rerun_review,
+    run_review,
+    run_review_result,
+    to_review_run_result_v2,
+)
 from customs_ai_agent.nodes.compliance import compliance_review
-from customs_ai_agent.nodes.retrieve import _context_errors
+from customs_ai_agent.nodes.retrieve import _context_errors, _hs_result_matches_query
 from customs_ai_agent.schemas.models import (
     EvidenceRetrievalRequest,
     EvidenceRetrievalResponse,
     RagEvidence,
     RetrievalItemResult,
+    RetrievalQueryItem,
     ReviewRunRequest,
+    ReviewRunResultV2,
     stable_evidence_id,
 )
 
@@ -141,6 +148,96 @@ class RequirementRetriever:
         )
 
 
+def _non_requirement_finding_payload(source_type: str, item_id: str) -> dict[str, object]:
+    source_record_id = f"malicious-{source_type}-finding"
+    version_hash = "c" * 64
+    return {
+        "evidence_id": stable_evidence_id(source_record_id, version_hash),
+        "source_record_id": source_record_id,
+        "source_type": source_type,
+        "item_id": item_id,
+        "title": "Unstructured semantic hit",
+        "text": "This is not a structured customs requirement record.",
+        "law_id": "untrusted-law-label",
+        "law_name": "Untrusted legal label",
+        "article_no": "untrusted-article",
+        "source_uri": f"https://example.test/{source_type}/malicious",
+        "valid_from": date(2026, 1, 1),
+        "version_hash": version_hash,
+        "matched_hs_code": "7318151000",
+        "trade_type": "import",
+        "required_document_code": "UNTRUSTED-CERT",
+        "required_document_name": "Untrusted certificate",
+        "agencies": ["Untrusted Agency"],
+        "retrieval_methods": ["dense"],
+        "eligibility": "finding",
+        "score": 0.99,
+        "raw_scores": {"dense": 0.99},
+    }
+
+
+class ConstructedNonRequirementFindingRetriever:
+    """Simulate a provider bypassing Pydantic validators with model_construct."""
+
+    def __init__(self, source_type: str) -> None:
+        self.source_type = source_type
+
+    def retrieve(self, request: EvidenceRetrievalRequest) -> EvidenceRetrievalResponse:
+        results = []
+        for item in request.items:
+            evidence = RagEvidence.model_construct(
+                **_non_requirement_finding_payload(self.source_type, item.item_id)
+            )
+            results.append(
+                RetrievalItemResult.model_construct(
+                    item_id=item.item_id,
+                    hs_resolution="unique_descendant",
+                    resolved_hsk10="7318151000",
+                    candidate_hsk10s=["7318151000"],
+                    coverage="complete",
+                    requirements_found=False,
+                    evidence=[evidence],
+                    errors=[],
+                )
+            )
+        return EvidenceRetrievalResponse.model_construct(
+            schema_version="1.0",
+            request_id=request.request_id,
+            status="ok",
+            knowledge_snapshot_id="malicious-snapshot",
+            results=results,
+            errors=[],
+        )
+
+
+class ConstructedRequirementsFlagMismatchRetriever(RequirementRetriever):
+    """Simulate a validated requirement whose result-level flag was tampered with."""
+
+    def retrieve(self, request: EvidenceRetrievalRequest) -> EvidenceRetrievalResponse:
+        valid_response = super().retrieve(request)
+        tampered_results = [
+            RetrievalItemResult.model_construct(
+                item_id=result.item_id,
+                hs_resolution=result.hs_resolution,
+                resolved_hsk10=result.resolved_hsk10,
+                candidate_hsk10s=result.candidate_hsk10s,
+                coverage=result.coverage,
+                requirements_found=False,
+                evidence=result.evidence,
+                errors=result.errors,
+            )
+            for result in valid_response.results
+        ]
+        return EvidenceRetrievalResponse.model_construct(
+            schema_version="1.0",
+            request_id=request.request_id,
+            status="ok",
+            knowledge_snapshot_id="tampered-snapshot",
+            results=tampered_results,
+            errors=[],
+        )
+
+
 class AmbiguousCompleteRetriever:
     def retrieve(self, request: EvidenceRetrievalRequest) -> EvidenceRetrievalResponse:
         return EvidenceRetrievalResponse(
@@ -160,6 +257,53 @@ class AmbiguousCompleteRetriever:
                 )
                 for item in request.items
             ],
+            errors=[],
+        )
+
+
+class CompleteNegativeHsRetriever:
+    def __init__(
+        self,
+        *,
+        hs_resolution: object,
+        resolved_hsk10: object,
+        candidate_hsk10s: object,
+        response_status: object = "ok",
+        constructed: bool,
+    ) -> None:
+        self.hs_resolution = hs_resolution
+        self.resolved_hsk10 = resolved_hsk10
+        self.candidate_hsk10s = candidate_hsk10s
+        self.response_status = response_status
+        self.constructed = constructed
+
+    def retrieve(self, request: EvidenceRetrievalRequest) -> EvidenceRetrievalResponse:
+        result_values = {
+            "item_id": request.items[0].item_id,
+            "hs_resolution": self.hs_resolution,
+            "resolved_hsk10": self.resolved_hsk10,
+            "candidate_hsk10s": self.candidate_hsk10s,
+            "coverage": "complete",
+            "requirements_found": False,
+            "evidence": [],
+            "errors": [],
+        }
+        if not self.constructed:
+            result = RetrievalItemResult.model_validate(result_values)
+            return EvidenceRetrievalResponse(
+                request_id=request.request_id,
+                status="ok",
+                knowledge_snapshot_id="wrong-hs-negative-snapshot",
+                results=[result],
+                errors=[],
+            )
+        result = RetrievalItemResult.model_construct(**result_values)
+        return EvidenceRetrievalResponse.model_construct(
+            schema_version="1.0",
+            request_id=request.request_id,
+            status=self.response_status,
+            knowledge_snapshot_id="constructed-wrong-hs-negative-snapshot",
+            results=[result],
             errors=[],
         )
 
@@ -187,6 +331,133 @@ def test_unverified_or_failed_retrieval_is_fail_closed(
     assert state["report_json"]["overall_status"] == state["final_status"]
 
 
+@pytest.mark.parametrize("source_type", ["notice", "hsk_entry"])
+def test_non_requirement_evidence_cannot_claim_finding_eligibility(source_type):
+    with pytest.raises(
+        ValidationError,
+        match="finding eligibility is reserved for structured customs requirements",
+    ):
+        RagEvidence.model_validate(_non_requirement_finding_payload(source_type, "item-1"))
+
+
+@pytest.mark.parametrize(
+    ("field_name", "invalid_value"),
+    [
+        ("title", " "),
+        ("text", " "),
+        ("law_id", ""),
+        ("law_name", " "),
+        ("valid_from", None),
+        ("matched_hs_code", ""),
+        ("required_document_code", ""),
+        ("required_document_name", " "),
+        ("agencies", [""]),
+        ("retrieval_methods", []),
+    ],
+)
+def test_requirement_finding_rejects_blank_or_missing_provenance(field_name, invalid_value):
+    response = RequirementRetriever().retrieve(_http_test_request())
+    payload = response.results[0].evidence[0].model_dump(mode="python")
+    payload[field_name] = invalid_value
+
+    with pytest.raises(
+        ValidationError,
+        match="finding customs requirement requires source, law, date, matched HS",
+    ):
+        RagEvidence.model_validate(payload)
+
+
+@pytest.mark.parametrize("source_uri", [" ", "not-a-uri", "https://"])
+def test_evidence_rejects_non_absolute_source_uri(source_uri):
+    response = RequirementRetriever().retrieve(_http_test_request())
+    payload = response.results[0].evidence[0].model_dump(mode="python")
+    payload["source_uri"] = source_uri
+
+    with pytest.raises(ValidationError, match="source_uri must be an absolute URI"):
+        RagEvidence.model_validate(payload)
+
+
+def test_requirement_finding_rejects_blank_source_record_id():
+    response = RequirementRetriever().retrieve(_http_test_request())
+    payload = response.results[0].evidence[0].model_dump(mode="python")
+    payload["source_record_id"] = " "
+    payload["evidence_id"] = stable_evidence_id(" ", payload["version_hash"])
+
+    with pytest.raises(
+        ValidationError,
+        match="finding customs requirement requires source, law, date, matched HS",
+    ):
+        RagEvidence.model_validate(payload)
+
+
+@pytest.mark.parametrize("source_type", ["notice", "hsk_entry"])
+def test_constructed_non_requirement_finding_response_is_fail_closed(source_type):
+    state = run_review(
+        ReviewRunRequest(
+            scenario_id="happy_path",
+            review_run_id=f"run-malicious-{source_type}",
+            review_as_of="2026-07-10",
+            trade_type="import",
+            jurisdiction="KR",
+        ),
+        retriever=ConstructedNonRequirementFindingRetriever(source_type),
+    )
+
+    assert state["retrieval_status"] == "failed"
+    assert state["retrieval_coverage"] == "unknown"
+    assert state["rag_evidence"] == []
+    assert state["regulatory_findings"] == []
+    assert state["requires_human_review"] is True
+    assert state["final_status"] == "needs_review"
+    assert "EVIDENCE_FINDING_SOURCE_NOT_STRUCTURED" in {
+        error["code"] for error in state["retrieval_errors"]
+    }
+
+
+def test_constructed_requirements_found_mismatch_is_fail_closed():
+    state = run_review(
+        ReviewRunRequest(
+            scenario_id="happy_path",
+            review_run_id="run-tampered-requirements-flag",
+            review_as_of=date(2026, 7, 10),
+            trade_type="import",
+            jurisdiction="KR",
+        ),
+        retriever=ConstructedRequirementsFlagMismatchRetriever(),
+    )
+
+    assert state["retrieval_status"] == "failed"
+    assert state["retrieval_coverage"] == "unknown"
+    assert state["rag_evidence"] == []
+    assert state["regulatory_findings"] == []
+    assert state["requires_human_review"] is True
+    assert state["final_status"] == "needs_review"
+    assert "EVIDENCE_REQUIREMENTS_FOUND_MISMATCH" in {
+        error["code"] for error in state["retrieval_errors"]
+    }
+
+
+@pytest.mark.parametrize("source_type", ["notice", "hsk_entry"])
+def test_compliance_defense_rejects_unstructured_high_finding(source_type):
+    update = compliance_review(
+        {
+            "retrieval_status": "ok",
+            "retrieval_coverage": "complete",
+            "knowledge_snapshot_id": "malicious-snapshot",
+            "rag_evidence": [_non_requirement_finding_payload(source_type, "item-1")],
+            "normalized_documents": {},
+            "uploaded_requirement_document_codes": [],
+            "documents": [],
+            "requires_human_review": False,
+            "audit_trail": [],
+        }
+    )
+
+    assert update["regulatory_findings"] == []
+    assert update["requires_human_review"] is True
+    assert update["audit_trail"][-1]["metadata"]["rejected_or_low_evidence"] == 1
+
+
 def test_ambiguous_hs_cannot_complete_even_with_complete_coverage():
     state = run_review(
         ReviewRunRequest(scenario_id="happy_path", review_run_id="run-ambiguous"),
@@ -196,6 +467,117 @@ def test_ambiguous_hs_cannot_complete_even_with_complete_coverage():
     assert state["retrieval_status"] == "ok"
     assert state["retrieval_coverage"] == "complete"
     assert state["retrieval_results"][0]["hs_resolution"] == "ambiguous"
+    assert state["final_status"] == "needs_review"
+
+
+@pytest.mark.parametrize(
+    ("requested_hs", "resolution", "resolved_hsk10", "expected"),
+    [
+        ("7318151000", "exact", "7318151000", True),
+        ("7318151000", "exact", "7318159000", False),
+        ("731815", "unique_descendant", "7318151000", True),
+        ("731815", "unique_descendant", "9999999999", False),
+        ("731815", "exact", "7318151000", False),
+        ("7318151000", "unique_descendant", "7318151000", False),
+    ],
+)
+def test_hs_result_binding_matches_only_exact_or_true_descendant(
+    requested_hs,
+    resolution,
+    resolved_hsk10,
+    expected,
+):
+    query = RetrievalQueryItem(
+        item_id="item-hs-binding",
+        description="Machine screw",
+        hs_code=requested_hs,
+        origin_country="NO",
+        destination_country="KR",
+    )
+    result = RetrievalItemResult(
+        item_id=query.item_id,
+        hs_resolution=resolution,
+        resolved_hsk10=resolved_hsk10,
+        candidate_hsk10s=[resolved_hsk10],
+        coverage="complete",
+        requirements_found=False,
+        evidence=[],
+        errors=[],
+    )
+
+    assert _hs_result_matches_query(query, result) is expected
+
+
+def test_mismatched_complete_negative_hs_cannot_complete():
+    state = run_review(
+        ReviewRunRequest(
+            scenario_id="happy_path",
+            review_run_id="run-mismatched-complete-negative-hs",
+        ),
+        retriever=CompleteNegativeHsRetriever(
+            hs_resolution="unique_descendant",
+            resolved_hsk10="9999999999",
+            candidate_hsk10s=["9999999999"],
+            constructed=False,
+        ),
+    )
+
+    assert state["retrieval_status"] == "failed"
+    assert state["retrieval_coverage"] == "unknown"
+    assert state["retrieval_results"] == []
+    assert state["rag_evidence"] == []
+    assert state["retrieval_errors"][0]["code"] == "HS_RESULT_MISMATCH"
+    assert state["requires_human_review"] is True
+    assert state["final_status"] == "needs_review"
+
+
+@pytest.mark.parametrize(
+    ("hs_resolution", "resolved_hsk10", "candidate_hsk10s", "response_status"),
+    [
+        ("exact", "", [], "ok"),
+        ("exact", None, [], "ok"),
+        ("exact", 7_318_151_000, [], "ok"),
+        ("", "7318151000", ["7318151000"], "ok"),
+        (["exact"], "7318151000", ["7318151000"], "ok"),
+        ("unique_descendant", "7318151000", "7318151000", "ok"),
+        ("unique_descendant", "7318151000", ["7318151000"], []),
+        (
+            "unique_descendant",
+            "7318151000",
+            ["7318151000", "7318152000"],
+            "ok",
+        ),
+    ],
+)
+def test_constructed_malformed_hs_result_is_fail_closed(
+    hs_resolution,
+    resolved_hsk10,
+    candidate_hsk10s,
+    response_status,
+):
+    state = run_review(
+        ReviewRunRequest(
+            scenario_id="happy_path",
+            review_run_id="run-constructed-malformed-hs",
+        ),
+        retriever=CompleteNegativeHsRetriever(
+            hs_resolution=hs_resolution,
+            resolved_hsk10=resolved_hsk10,
+            candidate_hsk10s=candidate_hsk10s,
+            response_status=response_status,
+            constructed=True,
+        ),
+    )
+
+    assert state["retrieval_status"] == "failed"
+    assert state["retrieval_coverage"] == "unknown"
+    assert state["retrieval_results"] == []
+    assert state["rag_evidence"] == []
+    assert state["retrieval_errors"][0]["code"] in {
+        "HS_RESULT_MISMATCH",
+        "INVALID_RETRIEVAL_RESPONSE",
+    }
+    assert state["requires_human_review"] is True
     assert state["final_status"] == "needs_review"
 
 
@@ -225,33 +607,114 @@ def test_required_document_finding_is_item_and_evidence_bound():
     assert state["final_status"] == "needs_review"
 
 
+@pytest.mark.parametrize("tampering", ["missing_evidence", "cross_item"])
+def test_v2_regulatory_finding_cannot_detach_from_its_item_evidence(tampering):
+    state = run_review(
+        ReviewRunRequest(
+            scenario_id="happy_path",
+            review_run_id="run-v2-finding-binding",
+            review_as_of="2026-07-10",
+            trade_type="import",
+            jurisdiction="KR",
+        ),
+        retriever=RequirementRetriever(),
+    )
+    payload = to_review_run_result_v2(state).model_dump(mode="json")
+    ReviewRunResultV2.model_validate(payload)
+
+    if tampering == "missing_evidence":
+        replacement = ["ev_" + "f" * 64]
+        payload["regulatory_findings"][0]["evidence_ids"] = replacement
+        payload["report"]["regulatory_findings"][0]["evidence_ids"] = replacement
+    else:
+        payload["regulatory_findings"][0]["item_id"] = "different-item"
+        payload["report"]["regulatory_findings"][0]["item_id"] = "different-item"
+
+    with pytest.raises(
+        ValidationError,
+        match="finding-eligible Evidence|public line-item HS source",
+    ):
+        ReviewRunResultV2.model_validate(payload)
+
+
+def test_v2_regulatory_finding_cannot_forge_an_item_detached_from_document_source():
+    state = run_review(
+        ReviewRunRequest(
+            scenario_id="happy_path",
+            review_run_id="run-v2-forged-item-source",
+            review_as_of="2026-07-10",
+            trade_type="import",
+            jurisdiction="KR",
+        ),
+        retriever=RequirementRetriever(),
+    )
+    payload = to_review_run_result_v2(state).model_dump(mode="json")
+    forged_item_id = "forged-item-not-in-document"
+
+    for item in payload["retrieval_request"]["items"]:
+        item["item_id"] = forged_item_id
+    for result in payload["retrieval_results"]:
+        result["item_id"] = forged_item_id
+        for evidence in result["evidence"]:
+            evidence["item_id"] = forged_item_id
+    for evidence in payload["rag_evidence"]:
+        evidence["item_id"] = forged_item_id
+    for evidence in payload["report"]["rag_evidence"]:
+        evidence["item_id"] = forged_item_id
+    for finding in payload["regulatory_findings"]:
+        finding["item_id"] = forged_item_id
+    for finding in payload["report"]["regulatory_findings"]:
+        finding["item_id"] = forged_item_id
+
+    with pytest.raises(ValidationError, match="public line-item HS source"):
+        ReviewRunResultV2.model_validate(payload)
+
+
 def test_same_document_multi_agency_finding_cites_all_evidence():
     evidence = []
     for index, agency in enumerate(("Agency A", "Agency B"), start=1):
-        evidence.append({
-            "evidence_id": f"ev-{index}",
-            "source_record_id": f"record-{index}",
-            "source_uri": f"https://example.test/{index}",
-            "version_hash": str(index) * 64,
-            "source_type": "customs_requirement",
-            "item_id": "item-1",
-            "eligibility": "finding",
-            "required_document_code": "DOC-CITES",
-            "required_document_name": "CITES permit",
-            "agencies": [agency],
-            "score": None,
-        })
-    update = compliance_review({
-        "rag_evidence": evidence,
-        "normalized_documents": {},
-        "uploaded_requirement_document_codes": [],
-        "documents": [],
-        "requires_human_review": False,
-        "audit_trail": [],
-    })
+        source_record_id = f"record-{index}"
+        version_hash = str(index) * 64
+        evidence.append(
+            RagEvidence(
+                evidence_id=stable_evidence_id(source_record_id, version_hash),
+                source_record_id=source_record_id,
+                source_type="customs_requirement",
+                item_id="item-1",
+                title=f"CITES requirement from {agency}",
+                text="A CITES permit is required.",
+                law_id="law-cites",
+                law_name="CITES Implementation Act",
+                article_no="12",
+                source_uri=f"https://example.test/{index}",
+                valid_from="2026-01-01",
+                version_hash=version_hash,
+                matched_hs_code="7318151000",
+                trade_type="import",
+                required_document_code="DOC-CITES",
+                required_document_name="CITES permit",
+                agencies=[agency],
+                retrieval_methods=["exact_hs"],
+                eligibility="finding",
+                score=None,
+            ).model_dump(mode="json")
+        )
+    update = compliance_review(
+        {
+            "retrieval_status": "ok",
+            "retrieval_coverage": "complete",
+            "knowledge_snapshot_id": "snapshot-test-v1",
+            "rag_evidence": evidence,
+            "normalized_documents": {},
+            "uploaded_requirement_document_codes": [],
+            "documents": [],
+            "requires_human_review": False,
+            "audit_trail": [],
+        }
+    )
     assert len(update["regulatory_findings"]) == 1
     finding = update["regulatory_findings"][0]
-    assert finding["evidence_ids"] == ["ev-1", "ev-2"]
+    assert finding["evidence_ids"] == sorted(item["evidence_id"] for item in evidence)
     assert finding["confidence"] == 0.95
     assert finding["confidence_basis"] == "structured_requirement_policy"
 
@@ -290,11 +753,16 @@ def test_response_rejects_cross_item_evidence_link():
                     item_id="item-2",
                     title="Requirement",
                     text="Requirement text",
+                    law_id="law-test",
+                    law_name="Test Import Act",
                     source_uri="https://example.test/1",
+                    valid_from="2026-01-01",
                     version_hash=version_hash,
+                    matched_hs_code="7318151000",
                     trade_type="import",
                     required_document_code="doc-code",
                     required_document_name="Document",
+                    agencies=["Test Customs Agency"],
                     retrieval_methods=["exact_hs"],
                     eligibility="finding",
                 )
@@ -447,9 +915,7 @@ def test_external_evidence_client_requires_exact_origin_allowlist():
         },
     )
 
-    assert retriever.url == (
-        "https://evidence.example:8443/internal/rag/v1/retrieve"
-    )
+    assert retriever.url == ("https://evidence.example:8443/internal/rag/v1/retrieve")
 
 
 def test_evidence_redirect_handler_never_creates_cross_origin_request():
@@ -473,9 +939,7 @@ def test_evidence_redirect_handler_never_creates_cross_origin_request():
 def test_oversized_evidence_response_fails_without_exposing_body(monkeypatch):
     monkeypatch.setattr(
         "customs_ai_agent.adapters.retrieval.urlopen",
-        lambda *_args, **_kwargs: _HttpBody(
-            b"x" * (MAX_EVIDENCE_RESPONSE_BYTES + 1)
-        ),
+        lambda *_args, **_kwargs: _HttpBody(b"x" * (MAX_EVIDENCE_RESPONSE_BYTES + 1)),
     )
 
     with pytest.raises(RetrievalError) as exc_info:
@@ -484,9 +948,7 @@ def test_oversized_evidence_response_fails_without_exposing_body(monkeypatch):
             max_retries=0,
         ).retrieve(_http_test_request())
 
-    assert str(exc_info.value) == (
-        "Evidence Service request failed: invalid contract response"
-    )
+    assert str(exc_info.value) == ("Evidence Service request failed: invalid contract response")
 
 
 def test_http_retriever_sends_token_only_in_configured_header(monkeypatch):

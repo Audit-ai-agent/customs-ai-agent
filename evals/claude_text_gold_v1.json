@@ -15,7 +15,9 @@
         "container_numbers": "MSKU1234567",
         "seal_numbers": "SL12345",
         "packages": "100 CTNS",
-        "gross_weight_kg": "1200 KG"
+        "gross_weight_kg": "1200 KG",
+        "measurement_cbm": "20 CBM",
+        "freight_prepaid": "Y"
       },
       "line_items": []
     },
@@ -28,7 +30,15 @@
         "buyer": "Korea Foods Import Inc.",
         "incoterms": "CIF",
         "currency": "USD",
-        "total_amount": "12000"
+        "total_amount": "12000",
+        "departure_date": "2026.06.15",
+        "vessel": "PACIFIC STAR",
+        "voyage_no": "PS2607",
+        "port_of_loading": "OSLO",
+        "port_of_discharge": "BUSAN",
+        "country_of_origin": "Norway",
+        "shipping_marks": "BOE-KFI-001",
+        "packages": "100 CTNS"
       },
       "line_items": [
         {
@@ -48,7 +58,20 @@
         "seller": "Blue Ocean Export Co.",
         "buyer": "Korea Foods Import Inc.",
         "container_numbers": "MSKU1234567",
-        "packages": "100 CTNS"
+        "packages": "100 CTNS",
+        "invoice_no": "INV-2026-001",
+        "invoice_date": "2026.06.01",
+        "bl_no": "BL-2026-001",
+        "departure_date": "2026.06.15",
+        "vessel": "PACIFIC STAR",
+        "voyage_no": "PS2607",
+        "port_of_loading": "OSLO",
+        "port_of_discharge": "BUSAN",
+        "country_of_origin": "Norway",
+        "shipping_marks": "BOE-KFI-001",
+        "seal_numbers": "SL12345",
+        "total_gross_weight_kg": "1200 KG",
+        "total_measurement_cbm": "20 CBM"
       },
       "line_items": [
         {

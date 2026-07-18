@@ -128,17 +128,15 @@ def validate_evidence_destination(
 ) -> str:
     normalized = validate_evidence_base_url(base_url)
     hostname = urlsplit(normalized).hostname
-    assert hostname is not None
+    if hostname is None:
+        raise ValueError("Evidence Service base URL must include a host")
     if _is_loopback_host(hostname):
         return normalized
     normalized_allowed = {
-        validate_evidence_base_url(origin)
-        for origin in (allowed_origins or set())
+        validate_evidence_base_url(origin) for origin in (allowed_origins or set())
     }
     if normalized not in normalized_allowed:
-        raise ValueError(
-            "External Evidence Service origin is not in the explicit allowlist"
-        )
+        raise ValueError("External Evidence Service origin is not in the explicit allowlist")
     return normalized
 
 
@@ -180,7 +178,7 @@ def fetch_supported_review_as_of(
     base_url: str,
     *,
     service_token: str | None = None,
-    token_header: str = "X-Demo-Token",
+    token_header: str = "X-Demo-Token",  # noqa: S107 - header name, not a credential
     allowed_origins: set[str] | frozenset[str] | None = None,
     timeout_seconds: float = 10.0,
     max_retries: int = 1,
@@ -195,7 +193,12 @@ def fetch_supported_review_as_of(
     last_error: Exception | None = None
     for _ in range(max_retries + 1):
         try:
-            request = Request(readiness_url, headers=headers, method="GET")
+            # validate_evidence_destination already restricted scheme/origin.
+            request = Request(  # noqa: S310
+                readiness_url,
+                headers=headers,
+                method="GET",
+            )
             with urlopen(request, timeout=timeout_seconds) as response:
                 payload = json.loads(_read_bounded_response(response))
             if not isinstance(payload, dict) or payload.get("status") != "ready":
@@ -206,11 +209,10 @@ def fetch_supported_review_as_of(
             return date.fromisoformat(raw_date)
         except (HTTPError, URLError, TimeoutError, json.JSONDecodeError, ValueError) as exc:
             last_error = exc
-    assert last_error is not None
+    if last_error is None:
+        raise RetrievalError("Evidence Service readiness request failed: internal state") from None
     reason = _safe_failure_reason(last_error)
-    raise RetrievalError(
-        f"Evidence Service readiness request failed: {reason}"
-    ) from None
+    raise RetrievalError(f"Evidence Service readiness request failed: {reason}") from None
 
 
 @runtime_checkable
@@ -280,9 +282,7 @@ class MockRegulationRetriever:
             for entry in matches:
                 required_code = entry.get("required_document")
                 score = float(entry["score"])
-                version_hash = hashlib.sha256(
-                    entry["version_hash"].encode("utf-8")
-                ).hexdigest()
+                version_hash = hashlib.sha256(entry["version_hash"].encode("utf-8")).hexdigest()
                 evidence_id = stable_evidence_id(entry["chunk_id"], version_hash)
                 evidence.append(
                     RagEvidence(
@@ -311,9 +311,9 @@ class MockRegulationRetriever:
                         ),
                         agencies=[],
                         retrieval_methods=["exact_hs"],
-                        eligibility=(
-                            "finding" if required_code and score >= 0.75 else "supporting"
-                        ),
+                        # Fixture HSK/notice hits may support an explanation, but only
+                        # structured customs_requirement records can create findings.
+                        eligibility="supporting",
                         score=score,
                         raw_scores={"mock": score},
                     )
@@ -324,13 +324,15 @@ class MockRegulationRetriever:
                 and evidence_item.eligibility == "finding"
                 for evidence_item in evidence
             )
-            complete = resolution in {"exact", "unique_descendant"} and bool(matches) and all(
-                evidence_item.eligibility != "blocked" and (evidence_item.score or 0) >= 0.75
-                for evidence_item in evidence
+            complete = (
+                resolution in {"exact", "unique_descendant"}
+                and bool(matches)
+                and all(
+                    evidence_item.eligibility != "blocked" and (evidence_item.score or 0) >= 0.75
+                    for evidence_item in evidence
+                )
             )
-            coverage: Coverage = (
-                "complete" if complete else ("partial" if matches else "unknown")
-            )
+            coverage: Coverage = "complete" if complete else ("partial" if matches else "unknown")
             errors = []
             if coverage != "complete":
                 errors.append(
@@ -430,7 +432,7 @@ class HttpRegulationRetriever:
         base_url: str,
         *,
         service_token: str | None = None,
-        token_header: str = "X-Demo-Token",
+        token_header: str = "X-Demo-Token",  # noqa: S107 - header name, not a credential
         allowed_origins: set[str] | frozenset[str] | None = None,
         timeout_seconds: float = 60.0,
         max_retries: int = 1,
@@ -456,13 +458,17 @@ class HttpRegulationRetriever:
         last_error: Exception | None = None
         for _ in range(self.max_retries + 1):
             try:
-                http_request = Request(
+                # Constructor validation restricted this URL's scheme/origin.
+                http_request = Request(  # noqa: S310
                     self.url,
                     data=payload,
                     headers=headers,
                     method="POST",
                 )
-                with urlopen(http_request, timeout=self.timeout_seconds) as response:
+                with urlopen(
+                    http_request,
+                    timeout=self.timeout_seconds,
+                ) as response:
                     body = _read_bounded_response(response)
                 parsed = EvidenceRetrievalResponse.model_validate_json(body)
                 if parsed.request_id != request.request_id:
@@ -470,6 +476,7 @@ class HttpRegulationRetriever:
                 return parsed
             except (HTTPError, URLError, TimeoutError, ValidationError, ValueError) as exc:
                 last_error = exc
-        assert last_error is not None
+        if last_error is None:
+            raise RetrievalError("Evidence Service request failed: internal state") from None
         reason = _safe_failure_reason(last_error)
         raise RetrievalError(f"Evidence Service request failed: {reason}") from None

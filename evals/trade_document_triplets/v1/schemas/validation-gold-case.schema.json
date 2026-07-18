@@ -1,0 +1,58 @@
+{
+  "$id": "https://example.invalid/customs-ai-agent/trade-document-validation-gold-case-v1.schema.json",
+  "$schema": "https://json-schema.org/draft/2020-12/schema",
+  "additionalProperties": false,
+  "properties": {
+    "schema_version": {
+      "const": "trade-document-validation-gold-case/v1"
+    },
+    "dataset_id": {
+      "const": "trade_document_triplets"
+    },
+    "dataset_version": {
+      "const": "source-v1"
+    },
+    "case_id": {
+      "pattern": "^trade-triplet-[0-9]{4}$",
+      "type": "string"
+    },
+    "source_case_sha256": {
+      "pattern": "^[0-9a-f]{64}$",
+      "type": "string"
+    },
+    "adjudication_ids": {
+      "items": {
+        "minLength": 1,
+        "type": "string"
+      },
+      "type": "array",
+      "uniqueItems": true
+    },
+    "state_counts": {
+      "additionalProperties": {
+        "minimum": 0,
+        "type": "integer"
+      },
+      "type": "object"
+    },
+    "scored_observation_count": {
+      "const": 0
+    },
+    "expected_case_outcome": {
+      "const": "needs_review"
+    }
+  },
+  "required": [
+    "schema_version",
+    "dataset_id",
+    "dataset_version",
+    "case_id",
+    "source_case_sha256",
+    "adjudication_ids",
+    "state_counts",
+    "scored_observation_count",
+    "expected_case_outcome"
+  ],
+  "title": "Validation gold case index",
+  "type": "object"
+}

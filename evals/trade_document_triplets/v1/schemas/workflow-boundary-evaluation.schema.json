@@ -1,0 +1,98 @@
+{
+  "$id": "https://example.invalid/customs-ai-agent/trade-document-workflow-boundary-descriptor-v1.schema.json",
+  "$schema": "https://json-schema.org/draft/2020-12/schema",
+  "additionalProperties": false,
+  "properties": {
+    "schema_version": {
+      "const": "trade-document-workflow-boundary-descriptor/v1"
+    },
+    "descriptor_id": {
+      "const": "trade-document-workflow-boundaries/evaluation-v2"
+    },
+    "dataset_id": {
+      "const": "trade_document_triplets"
+    },
+    "dataset_version": {
+      "const": "source-v1"
+    },
+    "evaluation_version": {
+      "const": "evaluation-v2"
+    },
+    "scenarios": {
+      "items": {
+        "additionalProperties": false,
+        "properties": {
+          "operator_id": {
+            "minLength": 1,
+            "type": "string"
+          },
+          "boundary": {
+            "enum": [
+              "document_set",
+              "ocr_claude_reconciliation",
+              "evidence_service"
+            ]
+          },
+          "expected_outcome": {
+            "enum": [
+              "needs_review",
+              "blocked"
+            ]
+          },
+          "forbidden_outcomes": {
+            "contains": {
+              "const": "completed"
+            },
+            "items": {
+              "enum": [
+                "completed",
+                "needs_review",
+                "blocked"
+              ]
+            },
+            "minItems": 1,
+            "type": "array",
+            "uniqueItems": true
+          },
+          "expected_issue_codes": {
+            "items": {
+              "minLength": 1,
+              "type": "string"
+            },
+            "type": "array",
+            "uniqueItems": true
+          },
+          "expected_blocker_codes": {
+            "items": {
+              "minLength": 1,
+              "type": "string"
+            },
+            "type": "array",
+            "uniqueItems": true
+          }
+        },
+        "required": [
+          "operator_id",
+          "boundary",
+          "expected_outcome",
+          "forbidden_outcomes",
+          "expected_issue_codes",
+          "expected_blocker_codes"
+        ],
+        "type": "object"
+      },
+      "minItems": 1,
+      "type": "array"
+    }
+  },
+  "required": [
+    "schema_version",
+    "descriptor_id",
+    "dataset_id",
+    "dataset_version",
+    "evaluation_version",
+    "scenarios"
+  ],
+  "title": "Workflow boundary fail-closed evaluation descriptor",
+  "type": "object"
+}

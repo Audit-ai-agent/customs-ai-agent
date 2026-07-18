@@ -2,6 +2,7 @@
 
 - Status: Accepted
 - Date: 2026-07-17
+- Scope: Historical `0.2.x` text-candidate baseline; `0.3.x` adds a stricter vision/OCR boundary
 
 ## Context
 
@@ -10,7 +11,8 @@ whole workflow with an LLM would allow a non-deterministic model to invent legal
 or completion status. Merely placing a Claude call before the old rules would also leave schema,
 grounding, provenance, fallback, and mixed Mock/Live execution undefined.
 
-The current request contract contains text, not PDF/image bytes or OCR/layout blocks.
+At the time of this decision, the current request contract contained text, not PDF/image bytes or
+OCR/layout blocks.
 
 ## Decision
 
@@ -53,5 +55,26 @@ sent.
 - Model call audit is limited to safe model/prompt/request/message/usage/latency metadata; failures
   keep safe codes and bounded provider metadata, never exception bodies.
 - Package version is raised to `0.2.0` so Backend cannot confuse this wheel with Mock-only `0.1.0`.
-- PDF/image OCR, layout provenance, real bbox, Backend pinning, and full system release remain
-  separate work and must not be inferred from the synthetic text evaluation.
+- For the `0.2.x` baseline, PDF/image OCR, layout provenance, real bbox, Backend pinning, and full
+  system release remained separate work and could not be inferred from the synthetic text
+  evaluation.
+
+## Successor implementation status
+
+TASK-0009 targets a `0.3.0` release candidate. It preserves the V1 text-only request/result wire
+contract and this decision's authority boundary while adding a separate V2 image/PDF contract,
+independent OCR/layout ledgers, Claude Vision candidates and bounded crop reconciliation. Claude
+still cannot create legal Evidence, findings, severity or final outcome.
+
+This historical ADR does not claim that the new image path has passed release evaluation. A
+provider can be selected only by an exact-commit-wheel run of the canonical locked 60-document
+CI/PL/B/L and 20-document C/O benchmark plus the hardened combiner. Pre-freeze test counts, wheel
+hashes and smoke reports are diagnostic history, not final release evidence.
+
+User-approved text Claude Live and the public `AgentRuntime -> Claude -> Evidence HTTP` path have
+been executed successfully. The actual Data corpus remains `BLOCKED` at 3 of 58 expected law
+records, so integration closes as `needs_review`; the image release path also remains blocked until
+an OCR provider passes and is frozen by the release Gate. TASK-0009 does not change Backend,
+Frontend or Data Platform source. Backend framework selection remains deferred, and legacy files
+in `project/_engineering/archive` remain `reference-only` unless separately promoted and
+revalidated.

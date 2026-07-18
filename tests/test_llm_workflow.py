@@ -17,7 +17,10 @@ def _metadata(document_id):
         provider="anthropic",
         model_id="claude-sonnet-5",
         prompt_id="customs_document_analysis",
-        prompt_version="1.1.0",
+        prompt_version="1.2.0",
+        output_schema_id="customs_claude_document_candidate",
+        output_schema_version="1.0",
+        output_schema_sha256="a" * 64,
         request_id=f"req_{document_id}",
         message_id=f"msg_{document_id}",
         stop_reason="end_turn",
@@ -47,9 +50,16 @@ def _candidate_for(document_id):
                 _field("bl_no", "BL-2026-001"),
                 _field("shipper", "Blue Ocean Export Co."),
                 _field("consignee", "Korea Foods Import Inc."),
+                _field("vessel", "PACIFIC STAR"),
+                _field("voyage_no", "PS2607"),
+                _field("port_of_loading", "OSLO"),
+                _field("port_of_discharge", "BUSAN"),
                 _field("container_numbers", "MSKU1234567"),
+                _field("seal_numbers", "SL12345"),
                 _field("packages", "100 CTNS"),
                 _field("gross_weight_kg", "1200 KG"),
+                _field("measurement_cbm", "20 CBM"),
+                _field("freight_prepaid", "Y"),
             ],
             "line_items": [],
         }
@@ -70,6 +80,14 @@ def _candidate_for(document_id):
                 _field("incoterms", "CIF"),
                 _field("currency", "USD"),
                 _field("total_amount", "12000", "TOTAL AMOUNT: 12000"),
+                _field("departure_date", "2026.06.15"),
+                _field("vessel", "PACIFIC STAR"),
+                _field("voyage_no", "PS2607"),
+                _field("port_of_loading", "OSLO"),
+                _field("port_of_discharge", "BUSAN"),
+                _field("country_of_origin", "Norway"),
+                _field("shipping_marks", "BOE-KFI-001"),
+                _field("packages", "100 CTNS"),
             ],
             "line_items": [
                 {
@@ -96,10 +114,27 @@ def _candidate_for(document_id):
             "classification_source_quote": "PACKING LIST",
             "fields": [
                 _field("packing_no", "PL-2026-001"),
+                _field("invoice_no", "INV-2026-001"),
+                _field("invoice_date", "2026.06.01"),
+                _field("bl_no", "BL-2026-001"),
                 _field("seller", "Blue Ocean Export Co."),
                 _field("buyer", "Korea Foods Import Inc."),
+                _field("departure_date", "2026.06.15"),
+                _field("vessel", "PACIFIC STAR"),
+                _field("voyage_no", "PS2607"),
+                _field("port_of_loading", "OSLO"),
+                _field("port_of_discharge", "BUSAN"),
+                _field("country_of_origin", "Norway"),
+                _field("shipping_marks", "BOE-KFI-001"),
                 _field("container_numbers", "MSKU1234567"),
+                _field("seal_numbers", "SL12345"),
                 _field("packages", "100 CTNS"),
+                _field(
+                    "total_gross_weight_kg",
+                    "1200 KG",
+                    "TOTAL GROSS WEIGHT: 1200 KG",
+                ),
+                _field("total_measurement_cbm", "20 CBM"),
             ],
             "line_items": [
                 {
@@ -171,9 +206,7 @@ def test_llm_workflow_calls_analyzer_once_per_document_and_preserves_policy():
     assert evidence["bbox"] is None
     assert evidence["raw_text"] == "INV-2026-001"
     assert (
-        state["extracted_documents"]["doc_inv"]["fields"]["invoice_no"][
-            "confidence_basis"
-        ]
+        state["extracted_documents"]["doc_inv"]["fields"]["invoice_no"]["confidence_basis"]
         == "source_quote_grounded_uncalibrated"
     )
     assert all(
@@ -212,18 +245,13 @@ def test_provider_failure_never_falls_back_to_rule_extraction():
     assert state["classified_documents"]["doc_inv"]["document_type"] == "unknown"
     assert state["extracted_documents"]["doc_inv"]["fields"] == {}
     assert analyzer.calls == ["doc_bl", "doc_inv"]
-    assert [
-        (item["document_id"], item["code"])
-        for item in state["model_errors"]
-    ] == [
+    assert [(item["document_id"], item["code"]) for item in state["model_errors"]] == [
         ("doc_inv", "provider_unavailable"),
         ("doc_pl", "provider_not_attempted_after_failure"),
         ("doc_co", "provider_not_attempted_after_failure"),
     ]
     assert all(item["provider"] == "anthropic" for item in state["model_errors"])
-    assert all(
-        item["prompt_version"] == "1.1.0" for item in state["model_errors"]
-    )
+    assert all(item["prompt_version"] == "1.2.0" for item in state["model_errors"])
     assert state["retrieval_status"] == "failed"
     assert state["final_status"] == "needs_review"
 
@@ -251,8 +279,7 @@ def test_invalid_injected_analysis_fails_closed_during_mapping():
 
     assert state["extracted_documents"]["doc_inv"]["document_type"] == "unknown"
     assert any(
-        item["document_id"] == "doc_inv"
-        and item["code"] == "source_quote_ambiguous"
+        item["document_id"] == "doc_inv" and item["code"] == "source_quote_ambiguous"
         for item in state["model_errors"]
     )
     assert state["final_status"] == "needs_review"
@@ -265,9 +292,7 @@ def test_incomplete_but_grounded_candidate_has_deterministic_blocker():
             if document["document_id"] != "doc_bl":
                 return analysis
             payload = analysis.candidate.model_dump(mode="json")
-            payload["fields"] = [
-                field for field in payload["fields"] if field["name"] == "bl_no"
-            ]
+            payload["fields"] = [field for field in payload["fields"] if field["name"] == "bl_no"]
             return DocumentAnalysis(
                 candidate=ClaudeDocumentCandidate.model_validate(payload),
                 metadata=analysis.metadata,
@@ -309,9 +334,7 @@ def test_uncalibrated_llm_critical_issue_cannot_autonomously_block_case():
         analyzer=SemanticallyWrongAnalyzer(),
     )
     origin_issue = next(
-        issue
-        for issue in state["validation_issues"]
-        if issue["issue_code"] == "ORIGIN_MISMATCH"
+        issue for issue in state["validation_issues"] if issue["issue_code"] == "ORIGIN_MISMATCH"
     )
 
     assert origin_issue["severity"] == "critical"
@@ -330,9 +353,7 @@ def test_uncalibrated_llm_critical_issue_cannot_autonomously_block_case():
 
 
 def test_deterministic_self_correction_preserves_observed_source_quote():
-    state = run_review(
-        ReviewRunRequest(scenario_id="low_confidence_self_correction")
-    )
+    state = run_review(ReviewRunRequest(scenario_id="low_confidence_self_correction"))
     field = state["extracted_documents"]["doc_bl"]["fields"]["gross_weight_kg"]
 
     assert field["value"] == "1200 KG"
@@ -342,9 +363,9 @@ def test_deterministic_self_correction_preserves_observed_source_quote():
 
 def test_human_correction_preserves_original_source_quote():
     state = run_review(ReviewRunRequest(scenario_id="invoice_total_mismatch"))
-    before = state["extracted_documents"]["doc_inv"]["fields"]["total_amount"][
-        "evidence"
-    ]["raw_text"]
+    before = state["extracted_documents"]["doc_inv"]["fields"]["total_amount"]["evidence"][
+        "raw_text"
+    ]
 
     corrected = rerun_review(
         state,

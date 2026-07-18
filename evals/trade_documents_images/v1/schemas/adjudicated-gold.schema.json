@@ -1,0 +1,147 @@
+{
+  "$id": "https://example.invalid/customs-ai-agent/trade-image-adjudicated-gold-v1.schema.json",
+  "$schema": "https://json-schema.org/draft/2020-12/schema",
+  "additionalProperties": false,
+  "properties": {
+    "schema_version": {
+      "const": "trade-image-adjudicated-gold/v1"
+    },
+    "gold_set_id": {
+      "minLength": 1,
+      "type": "string"
+    },
+    "selection_id": {
+      "const": "trade-images-hash-ranked-diagnostic-v1"
+    },
+    "selection_sha256": {
+      "pattern": "^[0-9a-f]{64}$",
+      "type": "string"
+    },
+    "adjudication_worklist_sha256": {
+      "pattern": "^[0-9a-f]{64}$",
+      "type": "string"
+    },
+    "adjudication_gate_sha256": {
+      "pattern": "^[0-9a-f]{64}$",
+      "type": "string"
+    },
+    "gold_eligible": {
+      "const": true
+    },
+    "release_scoring_scope": {
+      "const": "claude_vision_field_extraction_only"
+    },
+    "cases": {
+      "items": {
+        "additionalProperties": false,
+        "properties": {
+          "case_id": {
+            "pattern": "^[0-9]{4}$",
+            "type": "string"
+          },
+          "triplet_fingerprint_sha256": {
+            "pattern": "^[0-9a-f]{64}$",
+            "type": "string"
+          },
+          "gold_eligible": {
+            "const": true
+          },
+          "adjudication_status": {
+            "const": "adjudicated"
+          },
+          "annotation_references": {
+            "items": {
+              "minLength": 1,
+              "type": "string"
+            },
+            "minItems": 2,
+            "type": "array",
+            "uniqueItems": true
+          },
+          "documents": {
+            "items": {
+              "additionalProperties": false,
+              "properties": {
+                "document_id": {
+                  "minLength": 1,
+                  "type": "string"
+                },
+                "source_document_type": {
+                  "enum": [
+                    "commercial_invoice",
+                    "packing_list",
+                    "bill_of_lading"
+                  ]
+                },
+                "relative_path": {
+                  "minLength": 1,
+                  "type": "string"
+                },
+                "source_image_sha256": {
+                  "pattern": "^[0-9a-f]{64}$",
+                  "type": "string"
+                },
+                "expected_document_type": {
+                  "enum": [
+                    "invoice",
+                    "packing_list",
+                    "bill_of_lading"
+                  ]
+                },
+                "expected_fields": {
+                  "additionalProperties": {
+                    "type": "string"
+                  },
+                  "minProperties": 1,
+                  "type": "object"
+                },
+                "expected_line_item_count": {
+                  "minimum": 0,
+                  "type": "integer"
+                }
+              },
+              "required": [
+                "document_id",
+                "source_document_type",
+                "relative_path",
+                "source_image_sha256",
+                "expected_document_type",
+                "expected_fields",
+                "expected_line_item_count"
+              ],
+              "type": "object"
+            },
+            "maxItems": 3,
+            "minItems": 3,
+            "type": "array"
+          }
+        },
+        "required": [
+          "case_id",
+          "triplet_fingerprint_sha256",
+          "gold_eligible",
+          "adjudication_status",
+          "annotation_references",
+          "documents"
+        ],
+        "type": "object"
+      },
+      "maxItems": 12,
+      "minItems": 12,
+      "type": "array"
+    }
+  },
+  "required": [
+    "schema_version",
+    "gold_set_id",
+    "selection_id",
+    "selection_sha256",
+    "adjudication_worklist_sha256",
+    "adjudication_gate_sha256",
+    "gold_eligible",
+    "release_scoring_scope",
+    "cases"
+  ],
+  "title": "Adjudicated trade-image Gold",
+  "type": "object"
+}

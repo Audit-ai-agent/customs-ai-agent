@@ -16,6 +16,7 @@ class ReviewState(TypedDict, total=False):
     model_analyses: dict[str, dict[str, Any]]
     model_calls: list[dict[str, Any]]
     model_errors: list[dict[str, Any]]
+    model_conflicts: list[dict[str, Any]]
     extracted_documents: dict[str, dict[str, Any]]
     normalized_documents: dict[str, dict[str, Any]]
     pairing_result: dict[str, Any]
@@ -36,3 +37,4 @@ class ReviewState(TypedDict, total=False):
     final_status: str | None
     audit_trail: list[dict[str, Any]]
     llm_mode: str
+    sensitive_inputs_redacted: bool

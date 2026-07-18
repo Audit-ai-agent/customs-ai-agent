@@ -23,7 +23,7 @@ def _document_summary(state: dict[str, Any]) -> list[dict[str, Any]]:
             {
                 "document_id": doc["document_id"],
                 "document_type": doc["document_type"],
-                "filename": doc["filename"],
+                "extraction_status": doc.get("extraction_status", "failed"),
                 "extraction_confidence": doc.get("extraction_confidence", 0.0),
             }
         )

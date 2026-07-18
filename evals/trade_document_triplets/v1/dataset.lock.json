@@ -1,0 +1,46 @@
+{
+  "artifact_relative_path": "_artifacts/datasets/trade_document_triplets/source-v1",
+  "dataset_id": "trade_document_triplets",
+  "dataset_version": "source-v1",
+  "descriptor_contains_business_values": false,
+  "defect_intent_status": "unknown",
+  "expected_registration": {
+    "case_count": 100,
+    "document_count": 300,
+    "pairing_basis": "shared_zero_based_array_index",
+    "raw_total_bytes": 347619,
+    "source_explicit_case_id": false,
+    "split_counts": {
+      "development": 60,
+      "locked_test": 20,
+      "validation": 20
+    }
+  },
+  "raw_files": [
+    {
+      "byte_size": 95351,
+      "document_type": "commercial_invoice",
+      "filename": "CI_100_Final.json",
+      "record_count": 100,
+      "sha256": "6a4a43768402d7378c9f55ea8135437cd1a403b68dc2f1a04e600a22609df472"
+    },
+    {
+      "byte_size": 111284,
+      "document_type": "packing_list",
+      "filename": "PL_100_Final.json",
+      "record_count": 100,
+      "sha256": "31fed773233bac0beadf4bb7e024b5c0fc9b049b54d9b9353883c5fed1bb735f"
+    },
+    {
+      "byte_size": 140984,
+      "document_type": "bill_of_lading",
+      "filename": "BL_100_Final.json",
+      "record_count": 100,
+      "sha256": "99feb8ce01b0cff6a84a223439dc4d12a98cdeb6ddaf447f44a31d298340b3ae"
+    }
+  ],
+  "registration_tool": "tools/register_trade_document_triplets.py",
+  "raw_dataset_contains_business_values": true,
+  "schema_version": "trade-document-triplets-dataset-lock/v1",
+  "value_bearing_artifacts_committable": false
+}

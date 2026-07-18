@@ -1,0 +1,73 @@
+{
+  "$id": "https://example.invalid/customs-ai-agent/release-holdout-authorization-v1.schema.json",
+  "$schema": "https://json-schema.org/draft/2020-12/schema",
+  "$comment": "Historical evaluation-v2 contract. It cannot authorize release evidence.",
+  "additionalProperties": false,
+  "properties": {
+    "schema_version": {
+      "const": "release-holdout-authorization/v1"
+    },
+    "authorization_id": {
+      "pattern": "^[A-Za-z0-9][A-Za-z0-9._:-]{0,127}$",
+      "type": "string"
+    },
+    "purpose": {
+      "const": "one_time_release_holdout_evaluation"
+    },
+    "authorized_run_id": {
+      "pattern": "^[A-Za-z0-9][A-Za-z0-9._:+-]{0,255}$",
+      "type": "string"
+    },
+    "repository_commit_sha": {
+      "pattern": "^[0-9a-f]{40}$",
+      "type": "string"
+    },
+    "dataset_lock_sha256": {
+      "pattern": "^[0-9a-f]{64}$",
+      "type": "string"
+    },
+    "evaluation_splits_sha256": {
+      "pattern": "^[0-9a-f]{64}$",
+      "type": "string"
+    },
+    "approved_by": {
+      "minLength": 1,
+      "maxLength": 128,
+      "type": "string"
+    },
+    "approved_at_utc": {
+      "format": "date-time",
+      "pattern": "Z$",
+      "type": "string"
+    },
+    "expires_at_utc": {
+      "format": "date-time",
+      "pattern": "Z$",
+      "type": "string"
+    },
+    "one_time": {
+      "const": true
+    },
+    "external_transfer_authorized": {
+      "const": false
+    }
+  },
+  "required": [
+    "schema_version",
+    "authorization_id",
+    "purpose",
+    "authorized_run_id",
+    "repository_commit_sha",
+    "dataset_lock_sha256",
+    "evaluation_splits_sha256",
+    "approved_by",
+    "approved_at_utc",
+    "expires_at_utc",
+    "one_time",
+    "external_transfer_authorized"
+  ],
+  "deprecated": true,
+  "description": "Reference-only authorization shape from invalidated evaluation-v2.",
+  "title": "Historical invalidated evaluation-v2 authorization",
+  "type": "object"
+}

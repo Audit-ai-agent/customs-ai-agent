@@ -60,7 +60,15 @@ def confidence_for_value(value: Any) -> float:
     return 0.94
 
 
-def field(document_id: str, name: str, value: Any, index: int) -> dict[str, Any]:
+def field(
+    document_id: str,
+    name: str,
+    value: Any,
+    index: int,
+    *,
+    text_start: int | None = None,
+    text_end: int | None = None,
+) -> dict[str, Any]:
     confidence = confidence_for_value(value)
     extracted = ExtractedField(
         name=name,
@@ -71,6 +79,8 @@ def field(document_id: str, name: str, value: Any, index: int) -> dict[str, Any]
             page=1,
             bbox=make_bbox(index),
             raw_text=None if value is None else str(value),
+            text_start=text_start,
+            text_end=text_end,
             confidence=confidence,
         ),
     )

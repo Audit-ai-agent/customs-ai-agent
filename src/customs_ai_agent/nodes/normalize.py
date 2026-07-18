@@ -18,9 +18,12 @@ COUNTRIES = {
     "KR": "KR",
     "KOREA": "KR",
     "SOUTH KOREA": "KR",
+    "REPUBLIC OF KOREA": "KR",
+    "KOREA, REPUBLIC OF": "KR",
     "US": "US",
     "USA": "US",
     "UNITED STATES": "US",
+    "UNITED STATES OF AMERICA": "US",
 }
 
 
@@ -105,15 +108,29 @@ def _evidence(field_data: dict[str, Any] | None) -> dict[str, Any] | None:
 
 
 def _normalize_field(name: str, value: Any) -> Any:
-    if name in {"gross_weight_kg"}:
+    if name in {
+        "gross_weight_kg",
+        "net_weight_kg",
+        "total_net_weight_kg",
+        "total_gross_weight_kg",
+    }:
         return parse_weight_kg(value)
-    if name in {"total_amount"}:
+    if name in {
+        "total_amount",
+        "measurement_cbm",
+        "total_measurement_cbm",
+    }:
         return parse_decimal(value)
     if name in {"currency"}:
         return normalize_currency(value)
-    if name in {"invoice_date", "issue_date"}:
+    if name in {
+        "departure_date",
+        "invoice_date",
+        "issue_date",
+        "on_board_date",
+    }:
         return normalize_date(value)
-    if name in {"origin_country"}:
+    if name in {"origin_country", "country_of_origin"}:
         return normalize_country(value)
     if name in {"hs_codes"} and isinstance(value, list):
         return [normalize_hs_code(item) for item in value if normalize_hs_code(item)]
@@ -121,17 +138,22 @@ def _normalize_field(name: str, value: Any) -> Any:
 
 
 def _normalize_line_item(item: dict[str, Any]) -> dict[str, Any]:
-    normalized: dict[str, Any] = {"item_id": item["item_id"], "field_evidence": {}}
+    normalized: dict[str, Any] = {
+        "item_id": item["item_id"],
+        "field_evidence": {},
+        "raw_fields": {},
+    }
     for key, value in item.items():
         if key == "item_id":
             continue
         raw_value = _value(value)
+        normalized["raw_fields"][key] = raw_value
         normalized["field_evidence"][key] = _evidence(value)
         if key == "quantity":
             quantity, unit = parse_quantity(raw_value)
             normalized["quantity"] = quantity
             normalized["unit"] = unit
-        elif key in {"unit_price", "amount"}:
+        elif key in {"unit_price", "amount", "measurement_cbm"}:
             normalized[key] = parse_decimal(raw_value)
         elif key in {"net_weight_kg", "gross_weight_kg"}:
             normalized[key] = parse_weight_kg(raw_value)

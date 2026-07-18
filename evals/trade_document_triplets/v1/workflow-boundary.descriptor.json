@@ -1,0 +1,87 @@
+{
+  "dataset_id": "trade_document_triplets",
+  "dataset_version": "source-v1",
+  "descriptor_id": "trade-document-workflow-boundaries/evaluation-v2",
+  "evaluation_version": "evaluation-v2",
+  "scenarios": [
+    {
+      "boundary": "document_set",
+      "expected_blocker_codes": [
+        "required_document_missing:bill_of_lading"
+      ],
+      "expected_issue_codes": [
+        "REQUIRED_DOCUMENT_MISSING"
+      ],
+      "expected_outcome": "needs_review",
+      "forbidden_outcomes": [
+        "completed"
+      ],
+      "operator_id": "required_document_missing"
+    },
+    {
+      "boundary": "document_set",
+      "expected_blocker_codes": [
+        "human_review_flag"
+      ],
+      "expected_issue_codes": [
+        "DUPLICATE_DOCUMENT_TYPE"
+      ],
+      "expected_outcome": "needs_review",
+      "forbidden_outcomes": [
+        "completed"
+      ],
+      "operator_id": "duplicate_document_type"
+    },
+    {
+      "boundary": "ocr_claude_reconciliation",
+      "expected_blocker_codes": [
+        "doc_inv:extraction_failed"
+      ],
+      "expected_issue_codes": [],
+      "expected_outcome": "needs_review",
+      "forbidden_outcomes": [
+        "completed"
+      ],
+      "operator_id": "ocr_conflict_unresolved"
+    },
+    {
+      "boundary": "evidence_service",
+      "expected_blocker_codes": [
+        "retrieval_coverage_not_complete",
+        "retrieval_status_not_ok"
+      ],
+      "expected_issue_codes": [],
+      "expected_outcome": "needs_review",
+      "forbidden_outcomes": [
+        "completed"
+      ],
+      "operator_id": "evidence_partial"
+    },
+    {
+      "boundary": "evidence_service",
+      "expected_blocker_codes": [
+        "retrieval_errors_present",
+        "retrieval_status_not_ok"
+      ],
+      "expected_issue_codes": [],
+      "expected_outcome": "needs_review",
+      "forbidden_outcomes": [
+        "completed"
+      ],
+      "operator_id": "evidence_failed"
+    },
+    {
+      "boundary": "evidence_service",
+      "expected_blocker_codes": [
+        "invoice-item-1:hs_not_resolved"
+      ],
+      "expected_issue_codes": [],
+      "expected_outcome": "needs_review",
+      "forbidden_outcomes": [
+        "completed"
+      ],
+      "operator_id": "evidence_ambiguous"
+    }
+  ],
+  "schema_version": "trade-document-workflow-boundary-descriptor/v1"
+}

@@ -34,9 +34,7 @@ def test_provider_owned_contract_snapshot_matches_lock() -> None:
     assert lock["schema_version"] == "1.0"
     assert re.fullmatch(r"evidence-api-v\d+\.\d+\.\d+", lock["provider_release"])
     assert re.fullmatch(r"[0-9a-f]{40}", lock["provider_revision"])
-    assert schema["$defs"]["RetrieveRequest"]["properties"]["schema_version"] == {
-        "const": "1.0"
-    }
+    assert schema["$defs"]["RetrieveRequest"]["properties"]["schema_version"] == {"const": "1.0"}
 
 
 def test_agent_wire_examples_validate_against_locked_provider_schema() -> None:

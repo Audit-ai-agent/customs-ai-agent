@@ -1,0 +1,243 @@
+{
+  "$id": "https://example.invalid/customs-ai-agent/trade-document-adjudication-v1.schema.json",
+  "$schema": "https://json-schema.org/draft/2020-12/schema",
+  "additionalProperties": false,
+  "allOf": [
+    {
+      "if": {
+        "properties": {
+          "state": {
+            "enum": [
+              "confirmed_generator_error",
+              "ambiguous",
+              "coverage_gap",
+              "not_applicable"
+            ]
+          }
+        }
+      },
+      "then": {
+        "properties": {
+          "scoring_eligible": {
+            "const": false
+          }
+        }
+      }
+    },
+    {
+      "if": {
+        "properties": {
+          "state": {
+            "enum": [
+              "confirmed_normal",
+              "confirmed_intentional_defect"
+            ]
+          }
+        }
+      },
+      "then": {
+        "properties": {
+          "scoring_eligible": {
+            "const": true
+          }
+        },
+        "required": [
+          "adjudication_evidence"
+        ]
+      }
+    },
+    {
+      "if": {
+        "properties": {
+          "state": {
+            "const": "confirmed_intentional_defect"
+          }
+        }
+      },
+      "then": {
+        "properties": {
+          "adjudication_evidence": {
+            "minItems": 1
+          },
+          "expected_findings": {
+            "minItems": 1
+          },
+          "intent_status": {
+            "const": "confirmed"
+          }
+        }
+      }
+    },
+    {
+      "if": {
+        "properties": {
+          "state": {
+            "const": "confirmed_normal"
+          }
+        }
+      },
+      "then": {
+        "properties": {
+          "adjudication_evidence": {
+            "minItems": 1
+          },
+          "expected_findings": {
+            "maxItems": 0
+          },
+          "intent_status": {
+            "const": "confirmed"
+          }
+        }
+      }
+    },
+    {
+      "if": {
+        "properties": {
+          "scope": {
+            "const": "case"
+          }
+        }
+      },
+      "then": {
+        "required": [
+          "case_id"
+        ]
+      }
+    }
+  ],
+  "properties": {
+    "schema_version": {
+      "const": "trade-document-adjudication/v1"
+    },
+    "adjudication_id": {
+      "minLength": 1,
+      "type": "string"
+    },
+    "dataset_id": {
+      "minLength": 1,
+      "type": "string"
+    },
+    "dataset_version": {
+      "minLength": 1,
+      "type": "string"
+    },
+    "scope": {
+      "enum": [
+        "case",
+        "dataset"
+      ]
+    },
+    "case_id": {
+      "minLength": 1,
+      "type": "string"
+    },
+    "rule_id": {
+      "minLength": 1,
+      "type": "string"
+    },
+    "state": {
+      "enum": [
+        "confirmed_normal",
+        "confirmed_intentional_defect",
+        "confirmed_generator_error",
+        "ambiguous",
+        "coverage_gap",
+        "not_applicable"
+      ]
+    },
+    "scoring_eligible": {
+      "type": "boolean"
+    },
+    "intent_status": {
+      "enum": [
+        "unknown",
+        "confirmed",
+        "not_applicable"
+      ]
+    },
+    "observed_condition": {
+      "minLength": 1,
+      "type": "string"
+    },
+    "expected_agent_behavior": {
+      "minLength": 1,
+      "type": "string"
+    },
+    "expected_outcome": {
+      "enum": [
+        "completed",
+        "needs_review",
+        "blocked",
+        "not_scored"
+      ]
+    },
+    "expected_findings": {
+      "items": {
+        "minLength": 1,
+        "type": "string"
+      },
+      "type": "array",
+      "uniqueItems": true
+    },
+    "evidence": {
+      "type": "object"
+    },
+    "possible_interpretations": {
+      "items": {
+        "minLength": 1,
+        "type": "string"
+      },
+      "type": "array"
+    },
+    "adjudication_evidence": {
+      "items": {
+        "additionalProperties": false,
+        "properties": {
+          "kind": {
+            "enum": [
+              "dataset_author_confirmation",
+              "controlled_generator_manifest",
+              "two_reviewer_consensus",
+              "source_correction_record",
+              "business_rule_authority"
+            ]
+          },
+          "reference": {
+            "minLength": 1,
+            "type": "string"
+          },
+          "sha256": {
+            "pattern": "^[0-9a-f]{64}$",
+            "type": "string"
+          }
+        },
+        "required": [
+          "kind",
+          "reference"
+        ],
+        "type": "object"
+      },
+      "type": "array"
+    }
+  },
+  "required": [
+    "schema_version",
+    "adjudication_id",
+    "dataset_id",
+    "dataset_version",
+    "scope",
+    "rule_id",
+    "state",
+    "scoring_eligible",
+    "intent_status",
+    "observed_condition",
+    "expected_agent_behavior",
+    "expected_outcome",
+    "expected_findings",
+    "evidence",
+    "possible_interpretations",
+    "adjudication_evidence"
+  ],
+  "title": "Trade document validation adjudication",
+  "type": "object"
+}
