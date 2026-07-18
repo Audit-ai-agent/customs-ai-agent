@@ -75,10 +75,13 @@ The user-approved c28 text Claude Live run is retained as historical evidence: i
 against normal Gold SHA-256
 `7cfe2cf8e2b88e55f80398425e6866d52bfa85e0886ec8a4b5862f736e01c7e5` and 21/21
 against adversarial Gold
-`b4416cbad6df9fba62f2f636c4267a348bf5f11a1d3b78771aee8b16786db661`. It is not the
-result for the ISO-6346-corrected current normal Gold
-`1e300058f6d01330e82002d04e1a3238f42aaceeb9dc5716653a2aa1c67634e0`, which has not
-yet been rerun with the post-c28 source.
+`b4416cbad6df9fba62f2f636c4267a348bf5f11a1d3b78771aee8b16786db661`. A later
+exact-commit diagnostic against the ISO-6346-corrected normal Gold
+`1e300058f6d01330e82002d04e1a3238f42aaceeb9dc5716653a2aa1c67634e0` and the same
+adversarial Gold scored 64/64 and 21/21 with zero wrong, missing, or hallucinated fields.
+That result remains synthetic text-only diagnostic evidence, not an OCR, image, Evidence, or
+release PASS. Its exact commit and checksums are owned by the external Artifact manifest rather
+than copied into this ADR.
 
 The public c28 `AgentRuntime -> Claude -> Evidence HTTP` execution also predates mandatory runtime
 contract identity. The current Agent requires `evidence_contract` in readiness, while the current

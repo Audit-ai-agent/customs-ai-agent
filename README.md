@@ -57,14 +57,16 @@ TASK-0009의 pre-freeze 상태는 다음과 같다.
   `b4416cbad6df9fba62f2f636c4267a348bf5f11a1d3b78771aee8b16786db661`에서 21/21
   exact match와 wrong/missing/hallucinated 0을 기록했다. 이후 ISO 6346에 맞는 컨테이너
   번호로 정상 Gold를 수정해 현재 SHA-256은
-  `1e300058f6d01330e82002d04e1a3238f42aaceeb9dc5716653a2aa1c67634e0`이다. 이 현재
-  Gold와 post-c28 source 조합은 아직 Claude Live로 재실행하지 않았으므로 과거 64/64를
-  현재 PASS로 재사용하지 않는다.
+  `1e300058f6d01330e82002d04e1a3238f42aaceeb9dc5716653a2aa1c67634e0`이다. 현재 Gold로
+  별도 exact-commit Claude text 진단을 다시 수행해 normal 64/64, adversarial 21/21과
+  wrong/missing/hallucinated 0을 확인했다. 이 결과는 합성 text-only 진단이며 OCR·이미지·
+  Evidence Release PASS가 아니다. 실행 SHA와 보고서 checksum은 source 문서에 자기참조로
+  고정하지 않고 외부 Harness의 Evaluation·Artifact manifest를 권위 있는 근거로 사용한다.
 - 과거 고정 합성 CI/PL/B/L 이미지 진단의 실행 로그는 구현 진단 이력으로만 보존한다. 그 결과를
   판정한 image Gold가 위 라벨 오류로 무효화됐으므로 정확도·성능·release 증거로 재사용할 수
-  없다. 현재 `run_claude_vision` 재실행 report는 `status=FAIL`, failure code
-  `BLOCKED_EVALUATION_ASSET`이고, `run_image_runtime_diagnostic` report status는
-  `BLOCKED_EVALUATION_ASSET`이다. 두 runner 모두 OCR·Claude·Data 단계에 진입하지 않는다.
+  없다. 현재 evaluator는 legacy Gold 무효화, replacement Gold 부재, release lock 불일치를
+  오류 코드로 남기고 provider 호출 전에 fail-closed한다. 구체적인 실행 상태와 오류 코드 역시
+  외부 Artifact manifest를 따른다.
 - 별도의 과거 공개 runtime Evidence HTTP 진단은 runtime identity 강제 전 Data corpus
   readiness 실패 상태에서 POST를 실행해 `partial`, 최종 `needs_review`,
   `BLOCKED_DATA_READINESS`를 기록했다. 현재 Agent는 readiness의 필수
@@ -81,15 +83,47 @@ TASK-0009의 pre-freeze 상태는 다음과 같다.
   Evidence HTTP API의 소비자 경계에서만 관찰한다.
 
 과거 c28 exact commit의 611-test·package·Live 결과 뒤에도 Gold 무효화, Evidence identity,
-HS/date/ISO 6346과 OCR ordering 보완이 추가됐다. 따라서 현재 post-c28 후보 source의 최종
-test 수, exact commit SHA, wheel/sdist hash와 clean-install 결과는 코드 freeze 뒤 새 실행
-Artifact로 다시 확정해야 한다. OCR benchmark의 Gold text order는
+HS/date/ISO 6346과 OCR ordering 보완이 추가됐다. 보완된 후보는 exact-commit Fast·Contract·
+local secret scan, JUnit, Claude text 진단, wheel/sdist build와 fresh install로 다시 검증한다.
+변동 가능한 test 수, commit SHA, 배포물 hash와 Gate 결과는 이 source 문서에 복제하지 않고
+`_artifacts/runs/<RUN-ID>` 및 개인 Harness Evaluation에서만 확정한다. OCR benchmark의 Gold text order는
 `renderer-bbox-yx/v1`, prediction order는 worker-attested
 `worker-emitted-sequence/v1`이다. 과거 pre-policy internal/v1 1문서 smoke의 Paddle CER
 `22.17%`와 별도 rendered-v2에서 관찰한 `17.07%`/`0%` CER은 입력 image hash가 달라
 전후 성능 비교에 사용할 수 없다.
 
-현재 CI/PL/B/L/C/O 각 1문서에 대한 unsealed non-release ordering 감사에서는 worker/source order와 Gold
+Paddle engine behavior `customs-paddle-layout-table-v4`는 provider의 실제 table object가
+없을 때 page pixel과 같은 실행에서 나온 OCR token으로 generic ruled table을 복구한다.
+Otsu 기준의 서로 다른 두 threshold·line coverage에서 topology가 같고, 연속 수평·수직선,
+네 모서리, 실제 변을 공유하는 connected component, 행별 동일 column signature와 최소
+`2행×2열`을 모두 만족해야 한다. 각 token은 bbox 면적의 `0.7`을 초과해 정확히 한 cell에만
+귀속되고 모든 cell에 text/confidence 근거가 있어야 한다. Paddle layout 후보가 있으면 복구한
+table 면적의 절반을 초과해 겹쳐야 하며, 후보가 표의 끝을 잘라도 page geometry가 전체 경계를
+소유한다. 후보가 전혀 없는 경우에도 위의 강한 구조·token 조건은 사용할 수 있지만 결과는
+품목표라는 의미를 부여하지 않은 generic table observation이다. page 구조가 승인되지 않으면
+bounded image crop에서 같은 ruled 검증 후 strict PP table object 검증으로 내려간다.
+Gold/template 좌표, 문서 유형, header keyword는 런타임 입력이 아니다. empty cell, 모호한
+token, 불안정 topology, 구조·좌표 오류는 fail-closed한다.
+
+Paddle text bbox는 `PP-OCRv5_mobile_det`의 provider-native detection 결과를 그대로 사용한다.
+text detection polygon의 확장 비율인 `text_det_unclip_ratio=0.75`는 engine behavior에
+고정하지만, page raster의 색·corner·edge를 다시 분할해 좌표를 사후 생성하거나 축소하지 않는다.
+따라서 일반 text span bbox의 출처는 detector output 하나이며, 표 선·좁은 glyph·색상
+foreground를 text 후처리가 잘못 지워 false grounding을 만드는 경로가 없다. 앞 문단의
+generic ruled-grid table/row/cell geometry는 이 text bbox와 달리 worker가 page pixel에서
+파생하며 algorithm revision·page·crop hash에 결박한다. table token grounding에는 같은
+provider-native text token bbox를 사용한다. provider-neutral adapter는 table당 하나의 root,
+연속 row anchor, 범위 안의 row/cell, 물리 row 순서·비중첩, 논리 span 비중첩, cell이 주장한
+모든 row band의 실제 수직 범위, 물리 bbox 비중첩과 완전한 직사각형 cell graph를 다시
+검증한다. Docling cell은 cell-level bbox가 없으면 table 전체 bbox를 대신 복제하지 않고
+fail-closed한다. Docling worker는 preflight에서 hash 검증한 Hugging Face cache만 사용하도록
+`HF_HUB_OFFLINE=1`과 `TRANSFORMERS_OFFLINE=1`을 강제하며 부모 프로세스의 완화된 값을
+덮어쓴다. 이 정책은 `default-image-pipeline-offline-v2` engine ID에 결박된다. engine ID와
+model-assets lock이 변경됐으므로 이 경로는 canonical 60+20 benchmark를 새 exact wheel에서
+다시 통과하기 전까지 release provider로 승인되지 않는다.
+
+현재 v4 적용 전 CI/PL/B/L/C/O 각 1문서에 대한 unsealed non-release
+ordering 감사에서는 worker/source order와 Gold
 bbox-yx order의 CER가 문서별 모두 `0%`였다. 반면 renderer 배열 순서를 Gold로 사용한
 counterfactual CER는 각각 `23.31%`, `19.30%`, `29.58%`, `21.19%`, micro `24%`였고,
 prediction을 OCR line geometry로 다시 정렬하면 micro CER `36.55%`였다. 이는 ordering 계약을
@@ -255,7 +289,10 @@ uv run customs-ai-agent review `
 ```
 
 Docling provider를 검증할 때는 `--ocr-provider docling`과
-`docling.requirements.lock.txt`를 사용한다. OCR 의존성은 Agent 프로세스에 섞지 않고 별도 Python
+`docling.requirements.lock.txt`를 사용한다. release preflight는 exact Hugging Face
+revision/tree와 cache inventory를 먼저 검증하고 isolated worker는 hub와 Transformers를
+항상 offline으로 실행한다. 필요한 snapshot이 없거나 ref/tree가 lock과 다르면 다운로드로
+복구하지 않고 실패한다. OCR 의존성은 Agent 프로세스에 섞지 않고 별도 Python
 환경에서 실행한다. image/PDF 입력에는 암묵적 provider가 없으며, 실제 provider에서는 위 release
 인자를 하나라도 생략하면 입력 파일 처리·OCR provider 생성·Claude 설정 확인 전에 실패한다.
 위 예시는 실행 형태이며 Paddle을 기본 provider로 채택했다는 뜻이 아니다. 실제 사용은

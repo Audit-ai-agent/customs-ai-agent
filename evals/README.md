@@ -58,6 +58,26 @@ uv run python evals/run_evidence_live.py `
 retrieval, workflow를 호출하지 않는다. Live에서도 최대 한 case와 한 Agent retrieval workflow만
 실행한다.
 
+report v2는 서로 다른 실행 단위를 혼동하지 않도록 다음 계수를 분리한다.
+
+- `agent_workflow_count`: `run_review`를 호출한 합성 case 수다. HTTP POST 수가 아니다.
+- `readiness_get_count`: Evidence adapter의 `urlopen` 경계에서 관찰한 readiness GET 시도 수다.
+- `retrieval_post_count`: 같은 경계에서 관찰한 retrieval POST 시도 수다.
+- `other_http_count`: 위 두 endpoint가 아닌 예기치 않은 HTTP 시도 수다.
+
+HTTP 계수의 단위는 `adapter_urlopen_attempt_including_retries`다. 즉 실패 후 retry도 각각
+계수한다. `other_http_count`가 0이 아니면 evaluator는
+`unexpected_evidence_http_attempt`로 반드시 FAIL하며 정상 업무 결과만으로 이를 상쇄할 수 없다.
+readiness가 `ready`인 Live PASS는 현재 retry budget에서 readiness GET `2..4`, retrieval
+POST `1..2`를 모두 만족해야 한다. 이 범위를 벗어나면 각각
+`evidence_readiness_http_count_invalid`, `evidence_retrieval_http_count_invalid`로 FAIL한다.
+따라서 retriever/readiness/workflow를 stub으로 바꿔 업무 state만 정상처럼 만든 `0 GET /
+0 POST` 실행은 Live HTTP 증거가 될 수 없다.
+`--allow-unready-diagnostic`에서 외부 readiness와 workflow 내부 required retriever의 재검사가
+모두 실패하면 `agent_workflow_count=1`, `readiness_get_count>0`이어도
+`retrieval_post_count=0`이다. 이는 workflow가 fail-closed 정책까지 실행되었다는 뜻이지,
+Evidence retrieval API가 호출되었다는 뜻이 아니다.
+
 판정 기준:
 
 - status `ok`, coverage `complete`, snapshot 존재, 모든 item result 존재, HS가
@@ -164,9 +184,11 @@ EVAL-0011의 과거 c28 실행은 정상 Gold
 `7cfe2cf8e2b88e55f80398425e6866d52bfa85e0886ec8a4b5862f736e01c7e5`에서
 64/64, adversarial Gold
 `b4416cbad6df9fba62f2f636c4267a348bf5f11a1d3b78771aee8b16786db661`에서 21/21
-exact와 hallucinated 0을 기록했다. 현재 정상 Gold는 ISO 6346 교정 뒤
-`1e300058f6d01330e82002d04e1a3238f42aaceeb9dc5716653a2aa1c67634e0`으로 바뀌었고
-post-c28 source와 함께 아직 Live 재실행하지 않았다.
+exact와 hallucinated 0을 기록했다. ISO 6346 교정 뒤 정상 Gold
+`1e300058f6d01330e82002d04e1a3238f42aaceeb9dc5716653a2aa1c67634e0`과 post-c28
+source를 결박한 후속 exact-commit 진단도 normal 64/64, adversarial 21/21,
+wrong/missing/hallucinated 0을 확인했다. 이는 합성 text-only 진단이며 release PASS가 아니다.
+정확한 실행 SHA와 checksum은 외부 Artifact manifest에서만 판정한다.
 
 같은 과거 공개 `AgentRuntime → Claude → Evidence HTTP`도 Claude 문서 처리 4/4 뒤,
 runtime identity 강제 전 Data endpoint에 POST하여 fail-closed 결과를 확인했다. 현재는 Data
@@ -372,11 +394,11 @@ $PaddlePython = "<PADDLE_ENV_PYTHON>"
 $DoclingPython = "<DOCLING_ENV_PYTHON>"
 $FinalWheelSha256 = "<FINAL_AGENT_WHEEL_SHA256>"
 $PaddleEnvironmentLock = "evals\ocr_environments\v1\paddle.requirements.lock.txt"
-$PaddleEnvironmentLockSha256 = "69361cadc005fc027cbdce20c11548f92e53d661d08b2b70fe67f345602f49db"
+$PaddleEnvironmentLockSha256 = "607459fa093bd01ca1706dfa07222038f05fa190deccc58565ad1d846fc3bdf4"
 $DoclingEnvironmentLock = "evals\ocr_environments\v1\docling.requirements.lock.txt"
-$DoclingEnvironmentLockSha256 = "9548eb2b4e4a3063ebb3466357734e5d28dfa646ca8224b8c41d339daed4ef5d"
+$DoclingEnvironmentLockSha256 = "1d9aa9b9f2ac28dc2d2bff3e61b33ebd37bbf4c052910f3412f130eb79af9e05"
 $ModelAssetsLock = "evals\ocr_environments\v1\model-assets.lock.json"
-$ModelAssetsLockSha256 = "6d93a74c6087e5ea3d06c9b069f0266b7a7fb714e07d5c18d473dbace3e9afca"
+$ModelAssetsLockSha256 = "acab257b285e1e174d5c039a022cc41d190215fc0e71283dad28470bbf1d7e8d"
 $LockedReport = "<LOCKED_REPORT>"
 $CoReport = "<CO_REPORT>"
 $OcrDescriptor = "<SEALED_EVALUATION_V3_OCR_DESCRIPTOR>"
@@ -432,6 +454,28 @@ Windows native access violation으로 종료돼 release 후보에서 제외했�
 아니다. 기준은 critical identifier exact 1.0, CER 0.01 이하, table row/cell F1 0.98 이상,
 bbox F1@IoU 0.5 0.95 이상, crash 0이다.
 
+현재 Paddle engine behavior는 `customs-paddle-layout-table-v4`다. text detection은
+`PP-OCRv5_mobile_det`의 `text_det_unclip_ratio=0.75`를 고정하고 provider-native bbox를
+그대로 사용한다. raster background/foreground 후처리로 text bbox를 다시 만들지 않는다.
+실제 table object가 없으면
+page pixel과 동일 실행의 OCR token bbox에서 nominal/strict threshold topology, 연속선,
+네 모서리, connected component, 최소 `2행×2열`, 행별 column signature와 전 cell grounding을
+모두 검증해 generic ruled table을 만든다. layout image 후보가 있으면 복구 table 면적의 `0.5`
+초과 겹침을 요구하되 잘린 후보가 전체 page geometry를 축소하지 못한다. 후보가 전혀 없어도
+동일한 강한 구조·token 조건은 허용하지만 품목표 의미는 추론하지 않는다. page 복구가 없을
+때만 최대 4개 bounded image crop의 ruled 검증과 strict PP table object 검증으로 내려간다.
+Gold/template 좌표, document type, header keyword는 런타임 입력이 아니다. empty cell,
+모호한 token, threshold topology drift, 구조·좌표 오류와 복수 crop 성공은 fail-closed한다.
+table key는 algorithm revision, page, 분석 bbox와 RGB pixel SHA-256을 결박한다. 이 behavior
+변경으로 engine ID와 model-assets lock hash가 바뀌었으므로 과거 OCR 수치는 재사용할 수 없고
+canonical 60+20을 새 exact wheel에서 다시 실행해야 한다.
+
+Docling 비교 환경은 exact hub ref/snapshot tree를 preflight에서 검증한 뒤
+`HF_HUB_OFFLINE=1`, `TRANSFORMERS_OFFLINE=1`을 강제한
+`DocumentConverter:default-image-pipeline-offline-v2`로 실행한다. 부모 환경의 `0` 또는
+`false` 설정은 worker가 덮어쓴다. 평가 중 누락 모델을 다운로드하거나 ref를 갱신하지 않으므로
+cache가 lock과 다르면 복구 성공이 아니라 provider 실패로 기록한다.
+
 OCR text metric의 순서 계약은 다음처럼 고정한다.
 
 - Gold text: `renderer-bbox-yx/v1`
@@ -454,7 +498,7 @@ ledger/checkpoint는 현재 runtime provenance 또는 benchmark 입력으로 재
   `22.17% → 17.07%/0%` 개선으로 비교 금지
 - 선행 고정 1문서 ordering 실험: prediction XY-cut CER `44.08%`, Paddle native source
   order CER `0%`
-- 현재 CI/PL/B/L/C/O 각 1문서 unsealed ordering 감사:
+- 현재 v4 적용 전 CI/PL/B/L/C/O 각 1문서 unsealed ordering 감사:
   - worker/source order vs Gold bbox-yx CER: 문서별 `0%`, micro `0%`
   - renderer array order counterfactual CER: `23.31%`, `19.30%`, `29.58%`, `21.19%`,
     micro `24%`

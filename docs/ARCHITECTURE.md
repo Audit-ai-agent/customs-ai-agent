@@ -147,13 +147,59 @@ conflict audit에 남긴다. 이 경우 다른 grounded 값은 보존하지만 r
 `paddle`과 `docling`은 격리된 subprocess provider다. `ledger` provider는 사전에 고정한 관측을
 사용하는 재현 평가용이다. ledger PASS는 OCR 엔진 품질 PASS가 아니다.
 
+Paddle engine behavior `customs-paddle-layout-table-v4`는 전체 페이지 결과에 실제 table
+object가 없으면 page pixel과 동일 OCR 실행의 token bbox로 generic ruled-grid observation을
+만든다. nominal/strict threshold에서 topology가 같아야 하고 연속 수평·수직선, 상하 border
+coverage, 네 모서리, 실제 공유 변 connected component, 행별 column signature와 최소
+`2행×2열`을 검증한다. 각 OCR token은 면적 `0.7` 초과로 정확히 한 cell에만 귀속돼야 하고
+모든 cell이 text/confidence를 가져야 한다. layout image 후보가 있으면 table 면적의 `0.5`
+초과 겹침을 corroboration으로 요구하되, 후보가 마지막 행을 자르면 page pixel의 전체 구조를
+보존한다. 후보가 전혀 없을 때도 같은 강한 구조·token 조건은 허용하지만 문서 유형이나
+line-items 의미는 추론하지 않는다.
+
+page 구조가 승인되지 않으면 유한값·page bounds·최소 크기·면적·중복을 검증한 최대 4개 image
+crop에서 같은 ruled 검증을 수행하고, 그 다음에만 fixed PP table pipeline의 실제 object를
+엄격하게 검증한다. Gold/template 좌표, header keyword, 문서 유형은 사용하지 않는다. empty
+cell, 여러 cell에 걸친 token, 구조 불안정, 복수 crop 성공은 원문 없는 safe error로 닫힌다.
+수용한 table key는 algorithm revision, page, 분석 bbox와 RGB pixel SHA-256에 결박된다.
+이는 Claude field crop reread와 별개의 OCR provider 내부 경계이며, 새 engine ID와
+model-assets lock을 사용하는 만큼 canonical 60+20 benchmark를 다시 통과하기 전에는 release
+provider로 승인되지 않는다.
+
+Paddle의 text detection bbox는 실제 glyph보다 넓을 수 있다. v4는
+`PP-OCRv5_mobile_det`의 `text_det_unclip_ratio=0.75`를 engine 설정으로 고정하고 그
+provider-native bbox를 ledger에 그대로 기록한다. page raster의 corner·edge·foreground 색을
+사후 해석하여 좌표를 축소하지 않는다. 이 원칙은 bbox 점수보다 provenance containment를
+우선하며, 좁은 glyph나 밝은 글자와 배경색이 겹치는 반례에서 OCR text는 존재하지만 ledger
+bbox가 원문 glyph를 제외하는 false grounding을 차단한다. table cell에 token을 귀속할 때도
+동일한 provider-native token bbox를 사용한다. 단, generic ruled-grid의 table/row/cell
+geometry 자체는 앞 절에 명시한 worker-derived pixel observation이며 detector-native
+text bbox라고 표시하지 않는다.
+
+모든 text geometry 좌표는 finite number이고 원본 page bounds 안에 완전히 들어와야 한다.
+`NaN`, `Infinity`, 음수, page를 넘는 좌표를 clamp하여 정상 bbox로 바꾸지 않는다. nonblank
+provider text에 유효한 bbox가 없으면 해당 span만 조용히 버리지 않고
+`ocr_text_geometry_invalid`로 page를 fail-closed한다.
+
+worker 출력 뒤 provider-neutral adapter는 table graph를 다시 검증한다. 각 table key에는
+정확히 하나의 table root와 0부터 연속인 row anchor가 있어야 하고, row/cell bbox는 table
+bounds 안에 있어야 한다. row index가 증가하면 물리 row band도 위에서 아래로 진행하며
+서로 면적으로 겹치지 않아야 한다. logical row/column span은 범위를 벗어나거나 겹칠 수 없고,
+rowspan cell은 첫 주장 row의 위 경계부터 마지막 주장 row의 아래 경계까지 실제로 덮어야 한다.
+physical cell bbox도 면적 중첩 없이 완전한 직사각형 grid를 구성해야 한다. Docling은 개별
+cell provenance가 없을 때 table bbox를 cell bbox로 대체하지 않는다. 이 조건을 만족하지
+못한 provider 결과는 ledger ID를 만들기 전에 safe error로 폐기한다. Docling이 table item을
+관찰했지만 cell 목록이 없거나 비어 있는 경우도 표를 조용히 삭제하지 않고 같은 safe error로
+닫힌다.
+
 OCR benchmark의 text contract도 provenance 계약과 분리하지 않는다. Gold 문자열은
 `renderer-bbox-yx/v1`에 따라 renderer word bbox의 top-left y/x와 source-index tie-break로
 시각 순서를 만들고, prediction 문자열은 ledger의 worker-attested `reading_order`를 사용한다.
 bbox는 Gold 시각 순서와 bbox/layout metric에 권한이 있지만 prediction 순서를 다시 만들지
 않는다.
 
-현재 CI/PL/B/L/C/O 각 1문서의 unsealed non-release ordering 감사에서 worker/source order와 Gold
+현재 v4 적용 전 CI/PL/B/L/C/O 각 1문서의 unsealed non-release ordering
+감사에서 worker/source order와 Gold
 bbox-yx order의 CER는 문서별 모두 `0%`였다. renderer array order를 Gold로 쓴
 counterfactual은 `23.31%`, `19.30%`, `29.58%`, `21.19%`와 micro `24%`, prediction을
 OCR line geometry로 다시 정렬한 counterfactual은 micro `36.55%`였다. 표 row/cell F1은
@@ -208,6 +254,10 @@ model-assets lock은 Paddle official-model tree 또는 Docling exact Hugging Fac
 revision/file count/byte count/content-tree hash와 report engine ID를 결박한다.
 provider별 dependency lock hash, 공통 model-assets lock hash, provider engine ID는 코드가
 소유한 canonical 상수에도 결박되어 임의 lock/report/caller 조합으로 대체할 수 없다.
+Docling release preflight는 hub ref와 snapshot tree를 검증하고 isolated worker 환경에서
+`HF_HUB_OFFLINE=1`, `TRANSFORMERS_OFFLINE=1`을 강제한다. 따라서 기본 Docling converter가
+`main` 또는 tag를 해석하더라도 검증 뒤 네트워크에서 다른 revision을 가져올 수 없으며, cache가
+불완전하면 `default-image-pipeline-offline-v2` 초기화가 실패한다.
 
 선택된 runtime provider는 attested wrapper로 감싸며, 각 실제 OCR ledger의 `provider_id`,
 `engine_id`, `engine_version`, canonical model-set ID, model-assets lock SHA-256을 다시 대조한
@@ -373,8 +423,10 @@ Mock, ledger, Claude-only, RAG-only 결과를 전체 서비스 E2E로 승격해 
 `7cfe2cf8e2b88e55f80398425e6866d52bfa85e0886ec8a4b5862f736e01c7e5`와 adversarial Gold
 `b4416cbad6df9fba62f2f636c4267a348bf5f11a1d3b78771aee8b16786db661`에서 각각
 64/64와 21/21을 기록했다. ISO 6346 교정 뒤 현재 정상 Gold는
-`1e300058f6d01330e82002d04e1a3238f42aaceeb9dc5716653a2aa1c67634e0`이며 post-c28
-source와 함께 아직 Live 재실행하지 않았다.
+`1e300058f6d01330e82002d04e1a3238f42aaceeb9dc5716653a2aa1c67634e0`이다. 교정된 Gold와
+post-c28 source의 exact-commit Claude text 진단도 normal 64/64, adversarial 21/21,
+wrong/missing/hallucinated 0을 확인했다. 이 값은 합성 text-only 진단이며 OCR·이미지·Evidence
+Release PASS가 아니다. 실행 SHA와 checksum의 권위 있는 원본은 외부 Artifact manifest다.
 
 같은 과거 공개 AgentRuntime은 Claude 4문서 처리를 끝낸 뒤 runtime identity 강제 전 Evidence
 endpoint에 POST해 `partial`, 최종 `needs_review`, `BLOCKED_DATA_READINESS`를 기록했다. 현재

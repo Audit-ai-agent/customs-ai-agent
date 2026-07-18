@@ -1,6 +1,7 @@
 * text=auto
 *.py text eol=lf
 *.toml text eol=lf
+*.in text eol=lf
 *.lock text eol=lf
 *.json text eol=lf
 *.txt text eol=lf

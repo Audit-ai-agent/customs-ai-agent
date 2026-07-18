@@ -5,7 +5,7 @@ from __future__ import annotations
 from typing import Final
 
 OCR_MODEL_ASSETS_LOCK_SHA256: Final = (
-    "6d93a74c6087e5ea3d06c9b069f0266b7a7fb714e07d5c18d473dbace3e9afca"
+    "acab257b285e1e174d5c039a022cc41d190215fc0e71283dad28470bbf1d7e8d"
 )
 
 OCR_MODEL_SET_IDS: Final[dict[str, str]] = {

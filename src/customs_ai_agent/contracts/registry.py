@@ -371,6 +371,13 @@ def _internal_schema(version: SchemaVersion, kind: SchemaKind) -> dict[str, Any]
             raise ContractSchemaError("generated OCR ledger schema has no version")
         schema_version["const"] = "1.0"
         schema_version["default"] = "1.0"
+        definitions = schema.get("$defs")
+        span_schema = definitions.get("OcrLayoutSpan") if isinstance(definitions, dict) else None
+        span_properties = span_schema.get("properties") if isinstance(span_schema, dict) else None
+        if not isinstance(span_properties, dict):
+            raise ContractSchemaError("generated OCR ledger schema has no span properties")
+        span_properties.pop("row_span", None)
+        span_properties.pop("column_span", None)
     schema["$schema"] = "https://json-schema.org/draft/2020-12/schema"
     schema["$id"] = f"https://schemas.customs.local/agent/internal/{version}/{kind}.schema.json"
     schema["title"] = f"Customs AI Agent internal {version.upper()} {kind}"

@@ -1,5 +1,6 @@
 anthropic==0.117.0
 docling==2.113.0
+jsonschema[format]==4.26.0
 langgraph==1.2.9
 pillow==12.3.0
 pydantic==2.13.4

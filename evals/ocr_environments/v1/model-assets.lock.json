@@ -18,7 +18,7 @@
         }
       ],
       "cache_layout": "huggingface_hub_snapshot",
-      "engine_id": "DocumentConverter:default-image-pipeline"
+      "engine_id": "DocumentConverter:default-image-pipeline-offline-v2"
     },
     "paddle": {
       "assets": [
@@ -94,7 +94,7 @@
         }
       ],
       "cache_layout": "paddlex_official_models",
-      "engine_id": "PP-StructureV3:customs-paddle-layout-table-v1"
+      "engine_id": "PP-StructureV3:customs-paddle-layout-table-v4"
     }
   },
   "schema_version": "ocr-model-assets-lock/v1",

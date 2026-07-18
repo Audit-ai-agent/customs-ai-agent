@@ -47,13 +47,13 @@ OCR_RELEASE_REDACTION = {
 }
 CANONICAL_OCR_MANIFEST_SHA256 = "e95a3a2f3d2539c8fb92c3988010c8aeb33736269f1bbfc1c5e637962ca25196"
 CANONICAL_OCR_ENVIRONMENT_LOCK_SHA256: dict[ProviderName, str] = {
-    "paddle": "69361cadc005fc027cbdce20c11548f92e53d661d08b2b70fe67f345602f49db",
-    "docling": "9548eb2b4e4a3063ebb3466357734e5d28dfa646ca8224b8c41d339daed4ef5d",
+    "paddle": "607459fa093bd01ca1706dfa07222038f05fa190deccc58565ad1d846fc3bdf4",
+    "docling": "1d9aa9b9f2ac28dc2d2bff3e61b33ebd37bbf4c052910f3412f130eb79af9e05",
 }
 CANONICAL_OCR_MODEL_ASSETS_LOCK_SHA256 = OCR_MODEL_ASSETS_LOCK_SHA256
 CANONICAL_OCR_PROVIDER_ENGINE_IDS: dict[ProviderName, str] = {
-    "paddle": "PP-StructureV3:customs-paddle-layout-table-v1",
-    "docling": "DocumentConverter:default-image-pipeline",
+    "paddle": "PP-StructureV3:customs-paddle-layout-table-v4",
+    "docling": "DocumentConverter:default-image-pipeline-offline-v2",
 }
 
 SHA256 = re.compile(r"^[a-f0-9]{64}$")

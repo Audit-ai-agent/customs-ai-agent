@@ -60,6 +60,12 @@ algorithm declared in the lock and hashes regular file content after following
 snapshot links. Paddle release attestation also requires the service-owned
 official-model and repository-cache inventories to contain exactly the declared
 models. Docling rejects undeclared repositories in every namespace declared by
-its lock while allowing unrelated namespaces in a shared Hugging Face hub. No
-OCR provider is a product default until the locked 60-document benchmark
+its lock while allowing unrelated namespaces in a shared Hugging Face hub.
+The Agent forces `HF_HUB_OFFLINE=1`, `TRANSFORMERS_OFFLINE=1`, and
+`HF_HUB_DISABLE_TELEMETRY=1` after its worker environment allowlist, so Docling
+cannot refresh verified refs or download a replacement snapshot. This policy is
+bound to `DocumentConverter:default-image-pipeline-offline-v2`; a missing cache
+fails initialization.
+
+No OCR provider is a product default until the locked 60-document benchmark
 (20 cases × CI/PL/B/L) and 20-document C/O benchmark jointly select it.

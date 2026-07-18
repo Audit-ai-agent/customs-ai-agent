@@ -13,13 +13,17 @@ import ipaddress
 import json
 import os
 import re
+import threading
+from contextlib import contextmanager
+from dataclasses import dataclass
 from datetime import date
 from pathlib import Path
-from typing import Any
+from typing import Any, Iterator
 from urllib.parse import urlsplit
 
 from dotenv import dotenv_values
 
+from customs_ai_agent.adapters import retrieval as retrieval_adapter
 from customs_ai_agent.adapters.retrieval import (
     HttpRegulationRetriever,
     fetch_supported_review_as_of,
@@ -34,9 +38,12 @@ DEFAULT_BASE_URL = "http://127.0.0.1:8010"
 EXPECTED_EVIDENCE_SCHEMA_SHA256 = "531b59ba4e86f78cef20a4fca052996efd8b88c48853ac12113ca76e69cdd69a"
 EXPECTED_PROVIDER_RELEASE = "evidence-api-v1.0.0"
 EXPECTED_PINNED_PROVIDER_REVISION = "a8935007262434523a84e2914271140c5e88489a"
-REPORT_SCHEMA_VERSION = "evidence-live-evaluation-report/v1"
+REPORT_SCHEMA_VERSION = "evidence-live-evaluation-report/v2"
 REPORT_SCOPE = "SYNTHETIC_AGENT_TO_EVIDENCE_HTTP_NOT_RELEASE"
 ALLOWED_SCENARIOS = frozenset({"happy_path", "evidence_live_exact_hsk10"})
+_HTTP_MAX_RETRIES = 1
+_READY_READINESS_GET_RANGE = range(2, (2 * (_HTTP_MAX_RETRIES + 1)) + 1)
+_READY_RETRIEVAL_POST_RANGE = range(1, (_HTTP_MAX_RETRIES + 1) + 1)
 _SAFE_CODE = re.compile(r"^[A-Za-z0-9][A-Za-z0-9._:-]{0,127}$")
 _SAFE_SHA256 = re.compile(r"^[a-f0-9]{64}$")
 _SAFE_HEADER_NAME = re.compile(r"^[A-Za-z0-9-]{1,64}$")
@@ -54,6 +61,73 @@ class EvidenceLiveEvaluationError(RuntimeError):
     def __init__(self, code: str) -> None:
         super().__init__(code)
         self.code = code
+
+
+@dataclass
+class _EvidenceHttpCounts:
+    """Bounded HTTP-attempt counts observed at the Evidence adapter opener."""
+
+    readiness_get_count: int = 0
+    retrieval_post_count: int = 0
+    other_http_count: int = 0
+    observer_error_code: str | None = None
+
+
+_HTTP_OBSERVER_STATE_LOCK = threading.Lock()
+_HTTP_OBSERVER_ACTIVE = False
+
+
+@contextmanager
+def _observe_evidence_http_calls() -> Iterator[_EvidenceHttpCounts]:
+    """Count actual adapter opener attempts for this one-shot evaluator.
+
+    The evaluator is a single-workflow CLI. The wrapper is restored in
+    ``finally`` and records attempts before delegating, so failed and retried
+    requests remain observable without weakening the retriever's readiness
+    checks or changing its network behavior.
+    """
+
+    global _HTTP_OBSERVER_ACTIVE
+
+    counts = _EvidenceHttpCounts()
+    with _HTTP_OBSERVER_STATE_LOCK:
+        if _HTTP_OBSERVER_ACTIVE:
+            counts.observer_error_code = "evidence_http_observer_busy"
+        else:
+            _HTTP_OBSERVER_ACTIVE = True
+    if counts.observer_error_code is not None:
+        # Never run an unobserved nested/concurrent live evaluation. The
+        # caller inspects this code before constructing a retriever or making
+        # any HTTP request.
+        yield counts
+        return
+
+    original_urlopen = retrieval_adapter.urlopen
+
+    def observed_urlopen(request: Any, *args: Any, **kwargs: Any) -> Any:
+        try:
+            method = request.get_method()
+            path = urlsplit(str(request.full_url)).path
+        except (AttributeError, TypeError, ValueError):
+            counts.other_http_count += 1
+        else:
+            if method == "GET" and path == "/internal/rag/v1/health/ready":
+                counts.readiness_get_count += 1
+            elif (
+                method == "POST" and path == retrieval_adapter.HttpRegulationRetriever.endpoint_path
+            ):
+                counts.retrieval_post_count += 1
+            else:
+                counts.other_http_count += 1
+        return original_urlopen(request, *args, **kwargs)
+
+    retrieval_adapter.urlopen = observed_urlopen
+    try:
+        yield counts
+    finally:
+        retrieval_adapter.urlopen = original_urlopen
+        with _HTTP_OBSERVER_STATE_LOCK:
+            _HTTP_OBSERVER_ACTIVE = False
 
 
 def _sha256_bytes(payload: bytes) -> str:
@@ -179,6 +253,7 @@ def _retriever_options(env_file: Path | None) -> dict[str, Any]:
         "service_token": token if token else None,
         "token_header": token_header.strip(),
         "contract_identity_mode": "required",
+        "max_retries": _HTTP_MAX_RETRIES,
     }
 
 
@@ -245,10 +320,12 @@ def _base_report(
     failures: list[str],
     network_mode: str,
     workflow: dict[str, Any] | None = None,
-    api_workflow_count: int = 0,
+    agent_workflow_count: int = 0,
+    http_counts: _EvidenceHttpCounts | None = None,
     readiness_status: str = "not_attempted",
     scenario_id: str = "happy_path",
 ) -> dict[str, Any]:
+    observed = http_counts or _EvidenceHttpCounts()
     return {
         "schema_version": REPORT_SCHEMA_VERSION,
         "scope": REPORT_SCOPE,
@@ -256,8 +333,12 @@ def _base_report(
         "network_mode": network_mode,
         "readiness_status": readiness_status,
         "scenario_id": scenario_id,
-        "case_count": api_workflow_count,
-        "api_workflow_count": api_workflow_count,
+        "case_count": agent_workflow_count,
+        "agent_workflow_count": agent_workflow_count,
+        "readiness_get_count": observed.readiness_get_count,
+        "retrieval_post_count": observed.retrieval_post_count,
+        "other_http_count": observed.other_http_count,
+        "http_count_unit": "adapter_urlopen_attempt_including_retries",
         "contract": contract,
         "workflow": workflow,
         "failures": [{"code": _safe_code(code)} for code in failures],
@@ -319,114 +400,140 @@ def evaluate(
             scenario_id=scenario_id,
         )
 
-    try:
-        options = _retriever_options(env_file)
-        retriever = HttpRegulationRetriever(base_url, **options)
-    except EvidenceLiveEvaluationError as exc:
-        return 1, _base_report(
-            contract=contract,
-            status="FAIL",
-            failures=[exc.code],
-            network_mode="disabled_retriever_preflight_failed",
-            scenario_id=scenario_id,
-        )
-    except Exception:
-        return 1, _base_report(
-            contract=contract,
-            status="FAIL",
-            failures=["retriever_preflight_failed"],
-            network_mode="disabled_retriever_preflight_failed",
-            scenario_id=scenario_id,
-        )
-    readiness_status = "ready"
-    try:
-        review_as_of = fetch_supported_review_as_of(base_url, **options)
-    except Exception:
-        if not allow_unready_diagnostic or diagnostic_review_as_of is None:
+    with _observe_evidence_http_calls() as http_counts:
+        if http_counts.observer_error_code is not None:
             return 1, _base_report(
                 contract=contract,
                 status="FAIL",
-                failures=["evidence_readiness_failed"],
-                network_mode="live",
-                readiness_status="failed",
+                failures=[http_counts.observer_error_code],
+                network_mode="disabled_http_observer_busy",
+                http_counts=http_counts,
                 scenario_id=scenario_id,
             )
-        review_as_of = diagnostic_review_as_of
-        readiness_status = "failed_diagnostic_override"
-    try:
-        state = run_review(
-            ReviewRunRequest(
+        try:
+            options = _retriever_options(env_file)
+            retriever = HttpRegulationRetriever(base_url, **options)
+        except EvidenceLiveEvaluationError as exc:
+            return 1, _base_report(
+                contract=contract,
+                status="FAIL",
+                failures=[exc.code],
+                network_mode="disabled_retriever_preflight_failed",
+                http_counts=http_counts,
                 scenario_id=scenario_id,
-                review_run_id="evidence-live-eval-v1",
-                review_as_of=review_as_of,
-                llm_mode="mock",
-            ),
-            retriever=retriever,
+            )
+        except Exception:
+            return 1, _base_report(
+                contract=contract,
+                status="FAIL",
+                failures=["retriever_preflight_failed"],
+                network_mode="disabled_retriever_preflight_failed",
+                http_counts=http_counts,
+                scenario_id=scenario_id,
+            )
+        readiness_status = "ready"
+        try:
+            review_as_of = fetch_supported_review_as_of(base_url, **options)
+        except Exception:
+            if not allow_unready_diagnostic or diagnostic_review_as_of is None:
+                return 1, _base_report(
+                    contract=contract,
+                    status="FAIL",
+                    failures=["evidence_readiness_failed"],
+                    network_mode="live",
+                    http_counts=http_counts,
+                    readiness_status="failed",
+                    scenario_id=scenario_id,
+                )
+            review_as_of = diagnostic_review_as_of
+            readiness_status = "failed_diagnostic_override"
+        try:
+            state = run_review(
+                ReviewRunRequest(
+                    scenario_id=scenario_id,
+                    review_run_id="evidence-live-eval-v1",
+                    review_as_of=review_as_of,
+                    llm_mode="mock",
+                ),
+                retriever=retriever,
+            )
+        except Exception:
+            return 1, _base_report(
+                contract=contract,
+                status="FAIL",
+                failures=["evidence_workflow_failed"],
+                network_mode=(
+                    "live_unready_diagnostic"
+                    if readiness_status == "failed_diagnostic_override"
+                    else "live"
+                ),
+                agent_workflow_count=1,
+                http_counts=http_counts,
+                readiness_status=readiness_status,
+                scenario_id=scenario_id,
+            )
+
+        workflow = _safe_workflow_report(
+            state,
+            supported_review_as_of=review_as_of.isoformat(),
         )
-    except Exception:
-        return 1, _base_report(
+        incomplete = _retrieval_is_incomplete(state)
+        final_status = state.get("final_status")
+        requires_human_review = bool(state.get("requires_human_review"))
+        decision_failures: list[str] = []
+        if incomplete:
+            if final_status == "completed":
+                decision_failures.append("incomplete_retrieval_completed")
+            if final_status != "needs_review" or not requires_human_review:
+                decision_failures.append("incomplete_retrieval_not_routed_to_review")
+            workflow["retrieval_decision_class"] = "incomplete_fail_closed"
+        else:
+            if final_status not in {"completed", "needs_review", "blocked"}:
+                decision_failures.append("complete_retrieval_outcome_invalid")
+            elif (final_status == "completed") == requires_human_review:
+                decision_failures.append("complete_retrieval_human_flag_inconsistent")
+            workflow["retrieval_decision_class"] = "complete_contract"
+
+        policy_passed = not decision_failures
+        http_measurement_failures: list[str] = []
+        if http_counts.other_http_count:
+            http_measurement_failures.append("unexpected_evidence_http_attempt")
+        if readiness_status == "ready":
+            if http_counts.readiness_get_count not in _READY_READINESS_GET_RANGE:
+                http_measurement_failures.append("evidence_readiness_http_count_invalid")
+            if http_counts.retrieval_post_count not in _READY_RETRIEVAL_POST_RANGE:
+                http_measurement_failures.append("evidence_retrieval_http_count_invalid")
+        decision_failures.extend(http_measurement_failures)
+        if readiness_status == "failed_diagnostic_override":
+            decision_failures.append("evidence_readiness_incomplete")
+        passed = not decision_failures
+        workflow["fail_closed_policy_passed"] = policy_passed
+        workflow["release_readiness_passed"] = (
+            readiness_status == "ready" and not http_measurement_failures
+        )
+        return (0 if passed else 1), _base_report(
             contract=contract,
-            status="FAIL",
-            failures=["evidence_workflow_failed"],
+            status=(
+                "PASS"
+                if passed
+                else (
+                    "BLOCKED"
+                    if readiness_status == "failed_diagnostic_override" and policy_passed
+                    else "FAIL"
+                )
+            ),
+            failures=decision_failures,
             network_mode=(
                 "live_unready_diagnostic"
                 if readiness_status == "failed_diagnostic_override"
                 else "live"
             ),
-            api_workflow_count=1,
+            workflow=workflow,
+            agent_workflow_count=1,
+            http_counts=http_counts,
             readiness_status=readiness_status,
             scenario_id=scenario_id,
         )
-
-    workflow = _safe_workflow_report(
-        state,
-        supported_review_as_of=review_as_of.isoformat(),
-    )
-    incomplete = _retrieval_is_incomplete(state)
-    final_status = state.get("final_status")
-    requires_human_review = bool(state.get("requires_human_review"))
-    decision_failures: list[str] = []
-    if incomplete:
-        if final_status == "completed":
-            decision_failures.append("incomplete_retrieval_completed")
-        if final_status != "needs_review" or not requires_human_review:
-            decision_failures.append("incomplete_retrieval_not_routed_to_review")
-        workflow["retrieval_decision_class"] = "incomplete_fail_closed"
-    else:
-        if final_status not in {"completed", "needs_review", "blocked"}:
-            decision_failures.append("complete_retrieval_outcome_invalid")
-        elif (final_status == "completed") == requires_human_review:
-            decision_failures.append("complete_retrieval_human_flag_inconsistent")
-        workflow["retrieval_decision_class"] = "complete_contract"
-
-    policy_passed = not decision_failures
-    if readiness_status == "failed_diagnostic_override":
-        decision_failures.append("evidence_readiness_incomplete")
-    passed = not decision_failures
-    workflow["fail_closed_policy_passed"] = policy_passed
-    workflow["release_readiness_passed"] = readiness_status == "ready"
-    return (0 if passed else 1), _base_report(
-        contract=contract,
-        status=(
-            "PASS"
-            if passed
-            else (
-                "BLOCKED"
-                if readiness_status == "failed_diagnostic_override" and policy_passed
-                else "FAIL"
-            )
-        ),
-        failures=decision_failures,
-        network_mode=(
-            "live_unready_diagnostic"
-            if readiness_status == "failed_diagnostic_override"
-            else "live"
-        ),
-        workflow=workflow,
-        api_workflow_count=1,
-        readiness_status=readiness_status,
-        scenario_id=scenario_id,
-    )
 
 
 def _parse_date(value: str) -> date:

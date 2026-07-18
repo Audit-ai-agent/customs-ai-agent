@@ -103,6 +103,20 @@
           "default": null,
           "title": "Column Index"
         },
+        "column_span": {
+          "anyOf": [
+            {
+              "maximum": 100,
+              "minimum": 1,
+              "type": "integer"
+            },
+            {
+              "type": "null"
+            }
+          ],
+          "default": null,
+          "title": "Column Span"
+        },
         "confidence": {
           "maximum": 1,
           "minimum": 0,
@@ -145,6 +159,20 @@
           ],
           "default": null,
           "title": "Row Index"
+        },
+        "row_span": {
+          "anyOf": [
+            {
+              "maximum": 100,
+              "minimum": 1,
+              "type": "integer"
+            },
+            {
+              "type": "null"
+            }
+          ],
+          "default": null,
+          "title": "Row Span"
         },
         "span_id": {
           "maxLength": 128,

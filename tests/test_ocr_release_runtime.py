@@ -5,6 +5,7 @@ import importlib.metadata
 import json
 import re
 import sys
+import tomllib
 from dataclasses import replace
 from pathlib import Path
 from typing import Any, cast
@@ -25,6 +26,7 @@ from customs_ai_agent.ocr_release import (
     load_canonical_ocr_release_gate,
     verify_ocr_model_assets,
 )
+from customs_ai_agent.ocr_worker import _PaddleBackend
 from customs_ai_agent.schemas.models import (
     BBox,
     OcrLayoutLedger,
@@ -34,8 +36,67 @@ from customs_ai_agent.schemas.models import (
 )
 
 _DUMMY_HASH = "0" * 64
-_PADDLE_ENGINE = "PP-StructureV3:customs-paddle-layout-table-v1"
-_DOCLING_ENGINE = "DocumentConverter:default-image-pipeline"
+_PADDLE_ENGINE = "PP-StructureV3:customs-paddle-layout-table-v4"
+_DOCLING_ENGINE = "DocumentConverter:default-image-pipeline-offline-v2"
+
+
+def _normalized_requirement_name(value: str) -> str:
+    match = re.match(r"^([A-Za-z0-9_.-]+)", value.strip())
+    assert match is not None
+    return re.sub(r"[-_.]+", "-", match.group(1)).lower()
+
+
+def test_ocr_environment_roots_cover_agent_runtime_dependencies_and_lock_hashes() -> None:
+    root = Path(__file__).resolve().parents[1]
+    project = tomllib.loads((root / "pyproject.toml").read_text(encoding="utf-8"))
+    runtime_dependencies = {
+        _normalized_requirement_name(value) for value in project["project"]["dependencies"]
+    }
+
+    for provider in ("paddle", "docling"):
+        environment_root = root / "evals" / "ocr_environments" / "v1"
+        input_lines = (
+            (environment_root / f"{provider}.requirements.in")
+            .read_text(encoding="utf-8")
+            .splitlines()
+        )
+        input_dependencies = {
+            _normalized_requirement_name(line)
+            for line in input_lines
+            if line.strip() and not line.lstrip().startswith("#")
+        }
+        assert runtime_dependencies <= input_dependencies
+
+        lock_path = environment_root / f"{provider}.requirements.lock.txt"
+        lock_payload = lock_path.read_bytes()
+        lock_text = lock_payload.decode("utf-8")
+        locked_dependencies = {
+            _normalized_requirement_name(line)
+            for line in lock_text.splitlines()
+            if re.match(r"^[A-Za-z0-9_.-]+==", line)
+        }
+        assert runtime_dependencies <= locked_dependencies
+        assert (
+            hashlib.sha256(lock_payload).hexdigest()
+            == release.CANONICAL_OCR_ENVIRONMENT_LOCK_SHA256[provider]
+        )
+
+
+def test_paddle_worker_release_identity_and_model_lock_are_consistent() -> None:
+    lock_path = (
+        Path(__file__).resolve().parents[1]
+        / "evals"
+        / "ocr_environments"
+        / "v1"
+        / "model-assets.lock.json"
+    )
+    payload = lock_path.read_bytes()
+    lock = json.loads(payload)
+
+    assert hashlib.sha256(payload).hexdigest() == OCR_MODEL_ASSETS_LOCK_SHA256
+    assert _PaddleBackend.engine_id == _PADDLE_ENGINE
+    assert release.CANONICAL_OCR_PROVIDER_ENGINE_IDS["paddle"] == _PADDLE_ENGINE
+    assert lock["providers"]["paddle"]["engine_id"] == _PADDLE_ENGINE
 
 
 def _normalized_distribution_name(value: str) -> str:

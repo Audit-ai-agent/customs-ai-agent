@@ -669,6 +669,8 @@ def _normalize_worker_spans(
         table_key = raw_span.get("table_key")
         row_index = raw_span.get("row_index")
         column_index = raw_span.get("column_index")
+        row_span = raw_span.get("row_span")
+        column_span = raw_span.get("column_span")
         if (
             role not in _ALLOWED_ROLES
             or not isinstance(text, str)
@@ -689,6 +691,22 @@ def _normalize_worker_spans(
                     or column_index < 0
                 )
             )
+            or (
+                row_span is not None
+                and (
+                    not isinstance(row_span, int)
+                    or isinstance(row_span, bool)
+                    or not 1 <= row_span <= 100
+                )
+            )
+            or (
+                column_span is not None
+                and (
+                    not isinstance(column_span, int)
+                    or isinstance(column_span, bool)
+                    or not 1 <= column_span <= 100
+                )
+            )
         ):
             raise OcrLayoutProviderError(
                 "ocr_worker_result_invalid",
@@ -701,6 +719,14 @@ def _normalize_worker_spans(
                 "ocr_worker_result_invalid",
                 "The OCR worker returned an incomplete table cell.",
             )
+        if role == "table_cell":
+            row_span = 1 if row_span is None else row_span
+            column_span = 1 if column_span is None else column_span
+        elif row_span is not None or column_span is not None:
+            raise OcrLayoutProviderError(
+                "ocr_worker_result_invalid",
+                "The OCR worker returned cell span metadata on a non-cell observation.",
+            )
         bbox = cast(list[float | int], raw_bbox)
         normalized.append(
             {
@@ -712,9 +738,12 @@ def _normalize_worker_spans(
                 "table_key": table_key,
                 "row_index": row_index,
                 "column_index": column_index,
+                "row_span": row_span,
+                "column_span": column_span,
             }
         )
 
+    _validate_normalized_table_topology(normalized)
     try:
         normalized = preserve_provider_span_order(normalized)
     except OcrSpanLimitExceededError as exc:
@@ -746,6 +775,8 @@ def _normalize_worker_spans(
             "table_key": item["table_key"],
             "row_index": item["row_index"],
             "column_index": item["column_index"],
+            "row_span": item["row_span"],
+            "column_span": item["column_span"],
         }
         digest = hashlib.sha256(_canonical_json(stable_material)).hexdigest()[:24]
         table_key = item["table_key"]
@@ -767,9 +798,186 @@ def _normalize_worker_spans(
                 table_id=table_ids.get(table_key),
                 row_index=item["row_index"],
                 column_index=item["column_index"],
+                row_span=item["row_span"],
+                column_span=item["column_span"],
             )
         )
     return spans
+
+
+def _validate_normalized_table_topology(spans: Sequence[Mapping[str, Any]]) -> None:
+    """Reject incomplete, overlapping, or physically ungrounded table graphs."""
+
+    table_roles = {"table", "table_row", "table_cell"}
+    by_key: dict[str, list[Mapping[str, Any]]] = {}
+    for span in spans:
+        role = cast(str, span["role"])
+        table_key = span["table_key"]
+        row_index = span["row_index"]
+        column_index = span["column_index"]
+        row_span = span["row_span"]
+        column_span = span["column_span"]
+        if role in table_roles:
+            if not isinstance(table_key, str):
+                raise OcrLayoutProviderError(
+                    "ocr_worker_result_invalid",
+                    "The OCR worker returned an unkeyed table observation.",
+                )
+            by_key.setdefault(table_key, []).append(span)
+        elif (
+            table_key is not None
+            or row_index is not None
+            or column_index is not None
+            or row_span is not None
+            or column_span is not None
+        ):
+            raise OcrLayoutProviderError(
+                "ocr_worker_result_invalid",
+                "The OCR worker attached table structure to a non-table observation.",
+            )
+
+        valid_role_shape = (
+            (
+                role == "table"
+                and row_index is None
+                and column_index is None
+                and row_span is None
+                and column_span is None
+            )
+            or (
+                role == "table_row"
+                and isinstance(row_index, int)
+                and column_index is None
+                and row_span is None
+                and column_span is None
+            )
+            or (
+                role == "table_cell"
+                and isinstance(row_index, int)
+                and isinstance(column_index, int)
+                and isinstance(row_span, int)
+                and isinstance(column_span, int)
+            )
+            or role not in table_roles
+        )
+        if not valid_role_shape:
+            raise OcrLayoutProviderError(
+                "ocr_worker_result_invalid",
+                "The OCR worker returned malformed table role metadata.",
+            )
+
+    for table_spans in by_key.values():
+        tables = [span for span in table_spans if span["role"] == "table"]
+        rows = [span for span in table_spans if span["role"] == "table_row"]
+        cells = [span for span in table_spans if span["role"] == "table_cell"]
+        if len(tables) != 1 or not rows or not cells:
+            raise OcrLayoutProviderError(
+                "ocr_worker_result_invalid",
+                "The OCR worker returned an incomplete table graph.",
+            )
+
+        row_indices = [cast(int, row["row_index"]) for row in rows]
+        if len(row_indices) != len(set(row_indices)) or sorted(row_indices) != list(
+            range(len(rows))
+        ):
+            raise OcrLayoutProviderError(
+                "ocr_worker_result_invalid",
+                "The OCR worker returned invalid table row anchors.",
+            )
+        row_count = len(rows)
+        rows_by_index = {
+            cast(int, row["row_index"]): cast(Sequence[float], row["bbox"]) for row in rows
+        }
+        occupied: set[tuple[int, int]] = set()
+        maximum_column = 0
+        table_bbox = cast(Sequence[float], tables[0]["bbox"])
+        physical_boxes: list[Sequence[float]] = []
+        for row in rows:
+            if not _bbox_contains(table_bbox, cast(Sequence[float], row["bbox"])):
+                raise OcrLayoutProviderError(
+                    "ocr_worker_result_invalid",
+                    "The OCR worker returned a row outside its table.",
+                )
+        for row_index in range(row_count - 1):
+            current = rows_by_index[row_index]
+            following = rows_by_index[row_index + 1]
+            if current[1] >= following[1] or current[3] > following[1]:
+                raise OcrLayoutProviderError(
+                    "ocr_worker_result_invalid",
+                    "The OCR worker returned physically unordered or overlapping rows.",
+                )
+        for cell in cells:
+            row_index = cast(int, cell["row_index"])
+            column_index = cast(int, cell["column_index"])
+            row_span = cast(int, cell["row_span"])
+            column_span = cast(int, cell["column_span"])
+            row_end = row_index + row_span
+            column_end = column_index + column_span
+            if row_end > row_count or column_end > 100:
+                raise OcrLayoutProviderError(
+                    "ocr_worker_result_invalid",
+                    "The OCR worker returned a cell beyond its logical table.",
+                )
+            coordinates = {
+                (row, column)
+                for row in range(row_index, row_end)
+                for column in range(column_index, column_end)
+            }
+            if occupied.intersection(coordinates):
+                raise OcrLayoutProviderError(
+                    "ocr_worker_result_invalid",
+                    "The OCR worker returned overlapping logical cells.",
+                )
+            cell_bbox = cast(Sequence[float], cell["bbox"])
+            spanned_rows = [rows_by_index[index] for index in range(row_index, row_end)]
+            spanned_row_bbox = [
+                min(row[0] for row in spanned_rows),
+                min(row[1] for row in spanned_rows),
+                max(row[2] for row in spanned_rows),
+                max(row[3] for row in spanned_rows),
+            ]
+            spans_every_claimed_row = row_span == 1 or (
+                cell_bbox[1] <= spanned_rows[0][1] and cell_bbox[3] >= spanned_rows[-1][3]
+            )
+            if (
+                not _bbox_contains(table_bbox, cell_bbox)
+                or not _bbox_contains(spanned_row_bbox, cell_bbox)
+                or not spans_every_claimed_row
+                or any(
+                    _bbox_intersection_area(cell_bbox, existing) > 0 for existing in physical_boxes
+                )
+            ):
+                raise OcrLayoutProviderError(
+                    "ocr_worker_result_invalid",
+                    "The OCR worker returned overlapping or ungrounded physical cells.",
+                )
+            occupied.update(coordinates)
+            physical_boxes.append(cell_bbox)
+            maximum_column = max(maximum_column, column_end)
+
+        if maximum_column == 0 or any(
+            {column for row, column in occupied if row == row_index} != set(range(maximum_column))
+            for row_index in range(row_count)
+        ):
+            raise OcrLayoutProviderError(
+                "ocr_worker_result_invalid",
+                "The OCR worker returned a ragged or incomplete logical table.",
+            )
+
+
+def _bbox_contains(outer: Sequence[float], inner: Sequence[float]) -> bool:
+    return (
+        outer[0] <= inner[0]
+        and outer[1] <= inner[1]
+        and outer[2] >= inner[2]
+        and outer[3] >= inner[3]
+    )
+
+
+def _bbox_intersection_area(first: Sequence[float], second: Sequence[float]) -> float:
+    width = max(0.0, min(first[2], second[2]) - max(first[0], second[0]))
+    height = max(0.0, min(first[3], second[3]) - max(first[1], second[1]))
+    return width * height
 
 
 def _stable_table_ids(
@@ -793,6 +1001,20 @@ def _stable_table_ids(
                     "engine_version": engine_version,
                     "page": page_number,
                     "table_key": key,
+                    "spans": [
+                        {
+                            "role": span["role"],
+                            "text": span["text"],
+                            "bbox": span["bbox"],
+                            "confidence": span["confidence"],
+                            "row_index": span["row_index"],
+                            "column_index": span["column_index"],
+                            "row_span": span["row_span"],
+                            "column_span": span["column_span"],
+                        }
+                        for span in spans
+                        if span["table_key"] == key
+                    ],
                 }
             )
         ).hexdigest()[:24]
@@ -888,6 +1110,16 @@ def _worker_environment(provider: OcrProviderName) -> dict[str, str]:
         if os.name == "nt":
             environment["HOME"] = cache_root
             environment["USERPROFILE"] = cache_root
+    else:
+        # Docling resolves its pinned Hugging Face revisions during converter
+        # initialization. The parent release preflight verifies the exact
+        # cache refs and snapshot trees first; forcing both hub and
+        # Transformers offline prevents that verified identity from being
+        # replaced or downloaded when the isolated worker starts. These
+        # values deliberately override any weaker parent setting.
+        environment["HF_HUB_OFFLINE"] = "1"
+        environment["TRANSFORMERS_OFFLINE"] = "1"
+        environment["HF_HUB_DISABLE_TELEMETRY"] = "1"
     return environment
 
 

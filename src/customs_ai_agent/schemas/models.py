@@ -167,6 +167,8 @@ class OcrLayoutSpan(BaseModel):
     )
     row_index: int | None = Field(default=None, ge=0)
     column_index: int | None = Field(default=None, ge=0)
+    row_span: int | None = Field(default=None, ge=1, le=100)
+    column_span: int | None = Field(default=None, ge=1, le=100)
 
     @model_validator(mode="after")
     def _valid_span(self) -> "OcrLayoutSpan":
@@ -174,13 +176,25 @@ class OcrLayoutSpan(BaseModel):
             raise ValueError("OCR span page must match bbox page")
         if not self.text.strip():
             raise ValueError("OCR span text cannot be blank")
-        table_coordinates = (self.row_index, self.column_index)
-        if any(value is not None for value in table_coordinates) and self.table_id is None:
-            raise ValueError("OCR table coordinates require table_id")
+        table_structure = (
+            self.row_index,
+            self.column_index,
+            self.row_span,
+            self.column_span,
+        )
+        if any(value is not None for value in table_structure) and self.table_id is None:
+            raise ValueError("OCR table structure requires table_id")
         if self.role == "table_cell" and (
             self.table_id is None or self.row_index is None or self.column_index is None
         ):
             raise ValueError("OCR table_cell requires table_id, row_index and column_index")
+        if self.role == "table_cell":
+            if self.row_span is None:
+                self.row_span = 1
+            if self.column_span is None:
+                self.column_span = 1
+        elif self.row_span is not None or self.column_span is not None:
+            raise ValueError("OCR cell spans are valid only for table_cell observations")
         return self
 
 
