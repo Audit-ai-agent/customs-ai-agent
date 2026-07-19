@@ -239,7 +239,9 @@ class _JsonlWorkerClient:
                 env=_worker_environment(self._provider),
                 cwd=_worker_cwd(),
                 bufsize=0,
-                creationflags=(subprocess.CREATE_NO_WINDOW if os.name == "nt" else 0),
+                creationflags=(
+                    getattr(subprocess, "CREATE_NO_WINDOW", 0) if os.name == "nt" else 0
+                ),
             )
         except (OSError, ValueError) as exc:
             raise _WorkerProtocolError(
@@ -1189,7 +1191,10 @@ def _windows_short_path(path: Path) -> str:
     try:
         import ctypes
 
-        get_short_path_name = ctypes.windll.kernel32.GetShortPathNameW
+        windows_dlls = getattr(ctypes, "windll", None)
+        if windows_dlls is None:
+            return str(path)
+        get_short_path_name = windows_dlls.kernel32.GetShortPathNameW
         required = int(get_short_path_name(str(path), None, 0))
         if required <= 0:
             return str(path)

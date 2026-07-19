@@ -189,7 +189,7 @@ def _invoke_pdf_worker(
             env=_pdf_worker_environment(),
             cwd=_pdf_worker_cwd(),
             bufsize=0,
-            creationflags=(subprocess.CREATE_NO_WINDOW if os.name == "nt" else 0),
+            creationflags=(getattr(subprocess, "CREATE_NO_WINDOW", 0) if os.name == "nt" else 0),
         )
     except (OSError, ValueError) as exc:
         raise PdfRasterizerError("PDF worker failed to start") from exc
