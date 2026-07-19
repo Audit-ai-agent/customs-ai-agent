@@ -12,7 +12,10 @@ from evals.run_deterministic_validation import (
     OPERATOR_EXPECTED_ISSUES,
     evaluate,
 )
-from tools.build_trade_triplet_eval_assets import inject_controlled_defects
+from tools.build_trade_triplet_eval_assets import (
+    BUSINESS_FIELD_OPERATOR_IDS,
+    inject_controlled_defects,
+)
 
 
 def _source_case(index: int) -> dict:
@@ -65,7 +68,7 @@ def _source_case(index: int) -> dict:
         "Port of Loading": "Busan, South Korea",
         "Port of Discharge": "Los Angeles, USA",
         "B/L No. (Bill of Lading Number)": f"BL{suffix}",
-        "Container No.": f"CONT{suffix}",
+        "Container No.": "HMMU9279350",
         "Seal No. / Marks & No.": f"SEAL{suffix} // {ci['Shipping Marks']}",
         "No. & Kinds of Containers or Packages": "1x40HQ / 10 Cartons",
         "Gross Weight": "30.00 KGS",
@@ -275,8 +278,11 @@ def _evidence_bundle(tmp_path, monkeypatch):
     _write_json(bundle["dataset_lock_path"], dataset_lock)
     controlled_case_ids = [f"trade-triplet-{index:04d}" for index in range(1, 21)]
     bundle["controlled_case_ids"] = controlled_case_ids
-    cases = [_source_case(int(case_id.rsplit("-", 1)[1])) for case_id in controlled_case_ids]
-    defects = inject_controlled_defects(cases, controlled_case_ids)
+    generator_case_ids = [
+        f"trade-triplet-{index:04d}" for index in range(1, len(BUSINESS_FIELD_OPERATOR_IDS) + 1)
+    ]
+    cases = [_source_case(int(case_id.rsplit("-", 1)[1])) for case_id in generator_case_ids]
+    defects = inject_controlled_defects(cases, generator_case_ids)[:20]
     _sync_controlled_manifest(bundle, defects)
     _pin_bundle(monkeypatch, bundle)
     return bundle
@@ -289,6 +295,11 @@ def _evaluate_bundle(bundle):
         splits_path=bundle["splits_path"],
         dataset_lock_path=bundle["dataset_lock_path"],
     )
+
+
+def test_historical_v2_contract_remains_the_original_first_20_operators():
+    assert tuple(OPERATOR_EXPECTED_ISSUES) == BUSINESS_FIELD_OPERATOR_IDS[:20]
+    assert len(OPERATOR_EXPECTED_ISSUES) == 20
 
 
 def test_controlled_single_mutation_evaluation_reaches_exact_precision_and_recall(
@@ -330,6 +341,42 @@ def test_evaluation_rejects_a_mutation_that_cannot_reconstruct_pinned_parent(tmp
         match="pinned source hash",
     ):
         _evaluate_bundle(bundle)
+
+
+def test_evaluation_rejects_adjudication_evidence_that_diverges_from_mutation(
+    tmp_path,
+    monkeypatch,
+):
+    bundle = _evidence_bundle(tmp_path, monkeypatch)
+    tampered = copy.deepcopy(bundle["defects"])
+    tampered[0]["adjudication"]["evidence"]["after"] = "internally-inconsistent"
+    _sync_controlled_manifest(bundle, tampered)
+    _pin_bundle(monkeypatch, bundle)
+
+    with pytest.raises(
+        DeterministicEvaluationError,
+        match="adjudication evidence",
+    ):
+        _evaluate_bundle(bundle)
+
+
+def test_parent_reconstruction_rejects_mutated_value_that_diverges_from_after(
+    tmp_path,
+    monkeypatch,
+):
+    bundle = _evidence_bundle(tmp_path, monkeypatch)
+    tampered = copy.deepcopy(bundle["defects"][0])
+    mutation = tampered["mutation"]
+    target = tampered["mutated_case"]["documents"][mutation["document_type"]]["raw_record"]
+    for part in mutation["field_path"][:-1]:
+        target = target[part]
+    target[mutation["field_path"][-1]] = "internally-inconsistent"
+
+    with pytest.raises(
+        DeterministicEvaluationError,
+        match="mutation.after",
+    ):
+        deterministic_eval._reconstruct_parent(tampered)
 
 
 def test_development_set_exercises_every_pinned_business_mutation_operator(tmp_path, monkeypatch):

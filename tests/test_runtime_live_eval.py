@@ -10,7 +10,11 @@ import pytest
 from evals import run_runtime_live
 from customs_ai_agent.adapters.retrieval import RetrievalError
 from customs_ai_agent.runner import run_review_result_v2
-from customs_ai_agent.schemas.models import ReviewRunRequestV2, ReviewRunResultV2
+from customs_ai_agent.schemas.models import (
+    ReviewRunRequestV2,
+    ReviewRunResultV2,
+    ServiceReviewRunRequestV2,
+)
 
 
 def _env_file(tmp_path: Path, *, allowed_origins: str = "") -> Path:
@@ -76,7 +80,7 @@ def _patch_runtime(
         def __init__(self, config: object) -> None:
             captured["config"] = config
 
-        def review(self, request: ReviewRunRequestV2) -> ReviewRunResultV2:
+        def review(self, request: ServiceReviewRunRequestV2) -> ReviewRunResultV2:
             captured.setdefault("order", []).append("agent_runtime")
             captured["request"] = request
             return result
@@ -185,8 +189,7 @@ def test_ready_allowlisted_service_runs_public_runtime_after_readiness(
         config_options["evidence_service_token"].get_secret_value()
         == "private-evidence-test-secret"
     )
-    assert isinstance(request, ReviewRunRequestV2)
-    assert request.scenario_id is None
+    assert isinstance(request, ServiceReviewRunRequestV2)
     assert request.case_id == "case_evidence_live_exact_hsk10"
     assert request.documents is not None
     assert len(request.documents) == run_runtime_live.EXPECTED_DOCUMENT_COUNT
@@ -230,7 +233,7 @@ def test_unready_503_diagnostic_executes_agent_and_stays_non_release(
     assert report["errors"] == [{"code": "evidence_readiness_incomplete"}]
     assert captured["order"] == ["readiness", "runtime_config", "agent_runtime"]
     request = captured["request"]
-    assert request.scenario_id is None
+    assert isinstance(request, ServiceReviewRunRequestV2)
     assert request.case_id == "case_evidence_live_exact_hsk10"
     assert request.documents is not None
     assert len(request.documents) == run_runtime_live.EXPECTED_DOCUMENT_COUNT
@@ -436,7 +439,7 @@ def test_runtime_exception_is_reduced_to_safe_code(
         def __init__(self, _config: object) -> None:
             pass
 
-        def review(self, _request: ReviewRunRequestV2) -> ReviewRunResultV2:
+        def review(self, _request: ServiceReviewRunRequestV2) -> ReviewRunResultV2:
             raise RuntimeError(private_detail)
 
     monkeypatch.setattr(run_runtime_live, "RuntimeConfig", FakeConfig)

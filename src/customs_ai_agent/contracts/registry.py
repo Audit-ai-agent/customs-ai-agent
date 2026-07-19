@@ -20,8 +20,8 @@ from customs_ai_agent.schemas.models import (
     DocumentType,
     OcrLayoutLedger,
     ReviewRunRequest,
-    ReviewRunRequestV2,
     ReviewRunResult,
+    ServiceReviewRunRequestV2,
 )
 
 
@@ -214,36 +214,36 @@ def _strict_object_definitions(schema: dict[str, Any]) -> None:
 
 
 def _backend_request_schema(version: SchemaVersion) -> dict[str, Any]:
-    request_model = ReviewRunRequest if version == "v1" else ReviewRunRequestV2
+    request_model = ReviewRunRequest if version == "v1" else ServiceReviewRunRequestV2
     schema = copy.deepcopy(request_model.model_json_schema(mode="validation"))
     schema["$schema"] = "https://json-schema.org/draft/2020-12/schema"
     schema["$id"] = f"https://schemas.customs.local/agent/{version}/review-request.schema.json"
     schema["title"] = f"Customs AI Agent {version.upper()} review request"
     _strict_object_definitions(schema)
-    schema["oneOf"] = [
-        {
-            "required": ["scenario_id"],
-            "properties": {
-                "scenario_id": {"type": "string", "minLength": 1},
-                "documents": {"type": "null"},
-            },
-        },
-        {
-            "required": ["documents"],
-            "properties": {
-                "scenario_id": {"type": "null"},
-                "documents": {
-                    "type": "array",
-                    "minItems": 1,
-                    "maxItems": 20,
-                },
-            },
-        },
-    ]
     document_definition = "DocumentInput" if version == "v1" else "DocumentInputV2"
     document_schema = schema["$defs"][document_definition]
     document_schema["additionalProperties"] = False
     if version == "v1":
+        schema["oneOf"] = [
+            {
+                "required": ["scenario_id"],
+                "properties": {
+                    "scenario_id": {"type": "string", "minLength": 1},
+                    "documents": {"type": "null"},
+                },
+            },
+            {
+                "required": ["documents"],
+                "properties": {
+                    "scenario_id": {"type": "null"},
+                    "documents": {
+                        "type": "array",
+                        "minItems": 1,
+                        "maxItems": 20,
+                    },
+                },
+            },
+        ]
         schema["description"] = "V1 preserves the text-only ReviewRunRequest wire contract."
         return schema
 
@@ -273,44 +273,10 @@ def _backend_request_schema(version: SchemaVersion) -> dict[str, Any]:
             },
         },
     ]
-    schema["allOf"] = [
-        {
-            "if": {
-                "required": ["documents"],
-                "properties": {
-                    "documents": {
-                        "type": "array",
-                        "contains": {
-                            "type": "object",
-                            "anyOf": [
-                                {
-                                    "required": ["image_pages"],
-                                    "properties": {
-                                        "image_pages": {
-                                            "type": "array",
-                                            "minItems": 1,
-                                        }
-                                    },
-                                },
-                                {
-                                    "required": ["pdf_pages"],
-                                    "properties": {"pdf_pages": {"type": "object"}},
-                                },
-                            ],
-                        },
-                    }
-                },
-            },
-            "then": {
-                "required": ["llm_mode"],
-                "properties": {"llm_mode": {"const": "llm"}},
-            },
-        }
-    ]
     schema["description"] = (
-        "V2 extends ReviewRunRequest with explicit text, direct-image, and "
-        "source-bound PDF-page modalities; raw PDFs, paths, and URLs are not in the wire. "
-        "Visual requests require llm_mode=llm by runtime validation."
+        "Service-only V2 request with an explicit case, bounded text/direct-image/"
+        "source-bound PDF-page documents, and llm_mode=llm. Scenario fixtures, mock "
+        "execution, raw PDFs, paths, and URLs are not part of the Backend wire."
     )
     return schema
 

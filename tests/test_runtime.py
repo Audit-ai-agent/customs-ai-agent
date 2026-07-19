@@ -2,16 +2,20 @@ from __future__ import annotations
 
 import base64
 import hashlib
+import json
 from io import BytesIO
 from typing import Any
 
 import pytest
 from PIL import Image
-from pydantic import SecretStr
+from pydantic import SecretStr, ValidationError
 
 import customs_ai_agent
 import customs_ai_agent.runtime as runtime_module
-from customs_ai_agent.adapters.llm import ClaudeSettings
+import customs_ai_agent.schemas.models as models_module
+from customs_ai_agent.adapters.llm import ClaudeSettings, LLMError
+from customs_ai_agent.adapters.ocr import OcrLayoutProviderError
+from customs_ai_agent.adapters.retrieval import RetrievalError
 from customs_ai_agent.runner import run_review_result_v2
 from customs_ai_agent.runtime import (
     AgentRuntime,
@@ -21,10 +25,12 @@ from customs_ai_agent.runtime import (
     RuntimeInputError,
 )
 from customs_ai_agent.schemas.models import (
+    DocumentInputV2,
     ImagePageInput,
     ImagePageProvenance,
     ReviewRunRequestV2,
     ReviewRunResultV2,
+    ServiceReviewRunRequestV2,
 )
 
 
@@ -61,7 +67,7 @@ def _settings(secret: str = "unit-test-anthropic-secret") -> ClaudeSettings:
 
 
 def _public_result(
-    request: ReviewRunRequestV2 | None = None,
+    request: ServiceReviewRunRequestV2 | ReviewRunRequestV2 | None = None,
 ) -> ReviewRunResultV2:
     request = request or _text_request()
     documents = [
@@ -109,8 +115,8 @@ def _image_page() -> ImagePageInput:
     )
 
 
-def _text_request() -> ReviewRunRequestV2:
-    return ReviewRunRequestV2(
+def _text_request() -> ServiceReviewRunRequestV2:
+    return ServiceReviewRunRequestV2(
         case_id="case-runtime-text",
         llm_mode="llm",
         documents=[
@@ -123,8 +129,30 @@ def _text_request() -> ReviewRunRequestV2:
     )
 
 
-def _visual_request() -> ReviewRunRequestV2:
-    return ReviewRunRequestV2(
+def _service_text_payload() -> dict[str, Any]:
+    return {
+        "case_id": "case-runtime-service-text",
+        "documents": [
+            {
+                "document_id": "doc-runtime-service-text",
+                "filename": "invoice.txt",
+                "content_text": "COMMERCIAL INVOICE\nInvoice No: INV-001",
+            }
+        ],
+        "llm_mode": "llm",
+    }
+
+
+def _service_text_payload_with_document_codes(
+    codes: list[str],
+) -> dict[str, Any]:
+    payload = _service_text_payload()
+    payload["documents"][0]["requirement_document_codes"] = codes
+    return payload
+
+
+def _visual_request() -> ServiceReviewRunRequestV2:
+    return ServiceReviewRunRequestV2(
         case_id="case-runtime-image",
         llm_mode="llm",
         documents=[
@@ -135,6 +163,31 @@ def _visual_request() -> ReviewRunRequestV2:
             }
         ],
     )
+
+
+def _raw_image_page(*, byte_length: int = 3, encoded: str = "AAAA") -> dict[str, Any]:
+    return {
+        "page_number": 1,
+        "media_type": "image/png",
+        "data_base64": encoded,
+        "byte_length": byte_length,
+        "sha256": "a" * 64,
+        "width_px": 1,
+        "height_px": 1,
+        "provenance": {
+            "source_media_type": "image/png",
+            "source_sha256": "a" * 64,
+            "source_page_number": 1,
+        },
+    }
+
+
+def _raw_image_document(index: int, page: dict[str, Any]) -> dict[str, Any]:
+    return {
+        "document_id": f"doc-image-{index}",
+        "filename": f"invoice-{index}.png",
+        "image_pages": [page],
+    }
 
 
 def _patch_runtime_dependencies(
@@ -223,6 +276,498 @@ def test_runtime_config_and_composition_wire_claude_ocr_and_evidence(
     assert "unit-test-evidence-secret" not in rendered_config
 
 
+def test_internal_v2_request_preserves_scenario_and_mock_compatibility() -> None:
+    scenario_request = ReviewRunRequestV2(scenario_id="happy_path")
+    document_request = ReviewRunRequestV2(
+        documents=[
+            {
+                "document_id": "doc-internal-mock",
+                "filename": "invoice.txt",
+                "content_text": "COMMERCIAL INVOICE",
+            }
+        ],
+        llm_mode="mock",
+    )
+
+    assert scenario_request.scenario_id == "happy_path"
+    assert scenario_request.llm_mode == "mock"
+    assert document_request.documents is not None
+    assert document_request.llm_mode == "mock"
+
+
+def test_service_runtime_rejects_internal_workflow_request_model(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    captured = _patch_runtime_dependencies(monkeypatch)
+    agent = AgentRuntime(
+        RuntimeConfig(
+            claude_settings=_settings(),
+            evidence_base_url="http://127.0.0.1:8010",
+        )
+    )
+    internal_request = ReviewRunRequestV2(
+        documents=[
+            {
+                "document_id": "doc-internal-real",
+                "filename": "invoice.txt",
+                "content_text": "COMMERCIAL INVOICE",
+            }
+        ],
+        case_id="case-internal-real",
+        llm_mode="llm",
+    )
+
+    with pytest.raises(RuntimeInputError, match="review_request_invalid"):
+        agent.review(internal_request)  # type: ignore[arg-type]
+
+    assert "request" not in captured
+
+
+def test_schema_valid_service_text_payload_reaches_internal_workflow(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    payload = _service_text_payload()
+    service_request = ServiceReviewRunRequestV2.model_validate(payload)
+    captured = _patch_runtime_dependencies(monkeypatch)
+    agent = AgentRuntime(
+        RuntimeConfig(
+            claude_settings=_settings(),
+            evidence_base_url="http://127.0.0.1:8010",
+        )
+    )
+
+    result = agent.review(payload)
+
+    assert result.case_id == service_request.case_id
+    assert isinstance(captured["request"], ReviewRunRequestV2)
+    assert captured["request"].scenario_id is None
+    assert captured["request"].case_id == service_request.case_id
+    assert captured["request"].llm_mode == "llm"
+
+
+def test_service_request_rejects_aggregate_page_count_before_nested_decode(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    monkeypatch.setattr(
+        models_module.ImagePageInput,
+        "decoded_bytes",
+        lambda _self: pytest.fail("nested image decode must not run"),
+    )
+    payload = {
+        "case_id": "case-aggregate-pages",
+        "llm_mode": "llm",
+        "documents": [_raw_image_document(index, _raw_image_page()) for index in range(11)],
+    }
+
+    with pytest.raises(
+        ValidationError,
+        match="combined image pages",
+    ) as captured:
+        ServiceReviewRunRequestV2.model_validate(payload)
+
+    assert captured.value.errors()[0]["loc"] == ()
+
+
+def test_service_request_rejects_aggregate_base64_before_nested_decode(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    monkeypatch.setattr(
+        models_module.ImagePageInput,
+        "decoded_bytes",
+        lambda _self: pytest.fail("nested image decode must not run"),
+    )
+    monkeypatch.setattr(models_module, "MAX_IMAGE_BYTES_PER_RUN", 100)
+    monkeypatch.setattr(models_module, "MAX_IMAGE_BASE64_CHARS_PER_RUN", 10)
+    payload = {
+        "case_id": "case-aggregate-base64",
+        "llm_mode": "llm",
+        "documents": [_raw_image_document(index, _raw_image_page()) for index in range(3)],
+    }
+
+    with pytest.raises(
+        ValidationError,
+        match="combined image base64",
+    ) as captured:
+        ServiceReviewRunRequestV2.model_validate(payload)
+
+    assert captured.value.errors()[0]["loc"] == ()
+
+
+def test_service_request_rejects_aggregate_declared_bytes_before_nested_decode(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    monkeypatch.setattr(
+        models_module.ImagePageInput,
+        "decoded_bytes",
+        lambda _self: pytest.fail("nested image decode must not run"),
+    )
+    monkeypatch.setattr(models_module, "MAX_IMAGE_BYTES_PER_RUN", 8)
+    monkeypatch.setattr(models_module, "MAX_IMAGE_BASE64_CHARS_PER_RUN", 100)
+    payload = {
+        "case_id": "case-aggregate-bytes",
+        "llm_mode": "llm",
+        "documents": [
+            _raw_image_document(index, _raw_image_page(byte_length=5, encoded="AAAAAAAA"))
+            for index in range(2)
+        ],
+    }
+
+    with pytest.raises(
+        ValidationError,
+        match="combined image bytes",
+    ) as captured:
+        ServiceReviewRunRequestV2.model_validate(payload)
+
+    assert captured.value.errors()[0]["loc"] == ()
+
+
+def test_service_request_rejects_aggregate_text_before_nested_image_decode(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    monkeypatch.setattr(
+        models_module.ImagePageInput,
+        "decoded_bytes",
+        lambda _self: pytest.fail("nested image decode must not run"),
+    )
+    documents = [_raw_image_document(0, _raw_image_page())]
+    documents.extend(
+        {
+            "document_id": f"doc-text-{index}",
+            "filename": f"invoice-{index}.txt",
+            "content_text": "X" * 200_000,
+        }
+        for index in range(3)
+    )
+
+    with pytest.raises(
+        ValidationError,
+        match="combined document text",
+    ) as captured:
+        ServiceReviewRunRequestV2.model_validate(
+            {
+                "case_id": "case-aggregate-text",
+                "llm_mode": "llm",
+                "documents": documents,
+            }
+        )
+
+    assert captured.value.errors()[0]["loc"] == ()
+
+
+def test_review_json_rejects_duplicate_keys_without_running_workflow(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    captured = _patch_runtime_dependencies(monkeypatch)
+    agent = AgentRuntime(
+        RuntimeConfig(
+            claude_settings=_settings(),
+            evidence_base_url="http://127.0.0.1:8010",
+        )
+    )
+
+    with pytest.raises(RuntimeInputError, match="review_request_invalid"):
+        agent.review_json(
+            b'{"case_id":"case-a","case_id":"case-b","documents":[],"llm_mode":"llm"}'
+        )
+
+    assert "request" not in captured
+
+
+def test_review_json_valid_service_payload_reaches_workflow(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    captured = _patch_runtime_dependencies(monkeypatch)
+    agent = AgentRuntime(
+        RuntimeConfig(
+            claude_settings=_settings(),
+            evidence_base_url="http://127.0.0.1:8010",
+        )
+    )
+
+    result = agent.review_json(
+        json.dumps(
+            _service_text_payload(),
+            allow_nan=False,
+            separators=(",", ":"),
+        ).encode()
+    )
+
+    assert result.case_id == "case-runtime-service-text"
+    assert captured["request"].case_id == result.case_id
+
+
+@pytest.mark.parametrize(
+    "serialized",
+    [
+        b'{"case_id":NaN}',
+        ('{"case_id":' + ("1" * 5_000) + "}").encode(),
+    ],
+)
+def test_review_json_normalizes_noncanonical_json_values(
+    monkeypatch: pytest.MonkeyPatch,
+    serialized: bytes,
+) -> None:
+    captured = _patch_runtime_dependencies(monkeypatch)
+    agent = AgentRuntime(
+        RuntimeConfig(
+            claude_settings=_settings(),
+            evidence_base_url="http://127.0.0.1:8010",
+        )
+    )
+
+    with pytest.raises(RuntimeInputError) as error:
+        agent.review_json(serialized)
+
+    assert error.value.code == "review_request_invalid"
+    assert "request" not in captured
+
+
+def test_review_json_rejects_oversized_body_before_json_decode(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    captured = _patch_runtime_dependencies(monkeypatch)
+    monkeypatch.setattr(runtime_module, "_MAX_SERVICE_REQUEST_JSON_BYTES", 16)
+    monkeypatch.setattr(
+        runtime_module.json,
+        "loads",
+        lambda *_args, **_kwargs: pytest.fail("JSON decode must not run"),
+    )
+    agent = AgentRuntime(
+        RuntimeConfig(
+            claude_settings=_settings(),
+            evidence_base_url="http://127.0.0.1:8010",
+        )
+    )
+
+    with pytest.raises(RuntimeInputError, match="review_request_too_large"):
+        agent.review_json(b"{" + (b" " * 16) + b"}")
+
+    assert "request" not in captured
+
+
+def test_review_json_counts_memoryview_bytes_not_elements(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    captured = _patch_runtime_dependencies(monkeypatch)
+    monkeypatch.setattr(runtime_module, "_MAX_SERVICE_REQUEST_JSON_BYTES", 16)
+    agent = AgentRuntime(
+        RuntimeConfig(
+            claude_settings=_settings(),
+            evidence_base_url="http://127.0.0.1:8010",
+        )
+    )
+    wide_view = memoryview(bytearray(20)).cast("I")
+    assert len(wide_view) == 5
+    assert wide_view.nbytes == 20
+
+    with pytest.raises(RuntimeInputError) as error:
+        agent.review_json(wide_view)
+
+    assert error.value.code == "review_request_too_large"
+    assert "request" not in captured
+
+
+def test_review_json_normalizes_released_memoryview(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    captured = _patch_runtime_dependencies(monkeypatch)
+    agent = AgentRuntime(
+        RuntimeConfig(
+            claude_settings=_settings(),
+            evidence_base_url="http://127.0.0.1:8010",
+        )
+    )
+    released = memoryview(b"{}")
+    released.release()
+
+    with pytest.raises(RuntimeInputError) as error:
+        agent.review_json(released)
+
+    assert error.value.code == "review_request_invalid"
+    assert "request" not in captured
+
+
+def test_review_json_rejects_bytes_subclass_with_untrusted_length(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    class LyingBytes(bytes):
+        def __len__(self) -> int:
+            return 0
+
+    captured = _patch_runtime_dependencies(monkeypatch)
+    monkeypatch.setattr(runtime_module, "_MAX_SERVICE_REQUEST_JSON_BYTES", 4)
+    agent = AgentRuntime(
+        RuntimeConfig(
+            claude_settings=_settings(),
+            evidence_base_url="http://127.0.0.1:8010",
+        )
+    )
+
+    with pytest.raises(RuntimeInputError) as error:
+        agent.review_json(LyingBytes(b"{}      "))
+
+    assert error.value.code == "review_request_invalid"
+    assert "request" not in captured
+
+
+def test_runtime_rejects_nested_constructed_models_before_workflow(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    captured = _patch_runtime_dependencies(monkeypatch)
+    agent = AgentRuntime(
+        RuntimeConfig(
+            claude_settings=_settings(),
+            evidence_base_url="http://127.0.0.1:8010",
+        )
+    )
+    bypassed_page = ImagePageInput.model_construct(
+        page_number=1,
+        media_type="image/png",
+        data_base64="private-unvalidated-base64",
+        byte_length=1,
+        sha256="a" * 64,
+        width_px=1,
+        height_px=1,
+        provenance={
+            "source_media_type": "image/png",
+            "source_sha256": "a" * 64,
+            "source_page_number": 1,
+        },
+    )
+    bypassed_document = DocumentInputV2.model_construct(
+        document_id="doc-bypassed",
+        filename=r"C:\private\secret.png",
+        image_pages=[bypassed_page],
+        requirement_document_codes=[],
+    )
+    payload = {
+        "case_id": "case-bypassed-nested",
+        "documents": [bypassed_document],
+        "llm_mode": "llm",
+    }
+
+    with pytest.raises(RuntimeInputError, match="review_request_invalid"):
+        agent.review(payload)
+    with pytest.raises(ValidationError):
+        ServiceReviewRunRequestV2.model_validate(payload)
+
+    assert "request" not in captured
+
+
+def test_runtime_rejects_custom_mapping_subclass_before_workflow(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    class CustomDict(dict[str, Any]):
+        pass
+
+    captured = _patch_runtime_dependencies(monkeypatch)
+    agent = AgentRuntime(
+        RuntimeConfig(
+            claude_settings=_settings(),
+            evidence_base_url="http://127.0.0.1:8010",
+        )
+    )
+    payload = CustomDict(_service_text_payload())
+
+    with pytest.raises(RuntimeInputError, match="review_request_invalid"):
+        agent.review(payload)
+
+    assert "request" not in captured
+
+
+def test_runtime_normalizes_constructed_model_serialization_failure(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    captured = _patch_runtime_dependencies(monkeypatch)
+    agent = AgentRuntime(
+        RuntimeConfig(
+            claude_settings=_settings(),
+            evidence_base_url="http://127.0.0.1:8010",
+        )
+    )
+    circular_documents: list[Any] = []
+    circular_documents.append(circular_documents)
+    bypassed = ServiceReviewRunRequestV2.model_construct(
+        case_id="case-circular",
+        documents=circular_documents,
+        llm_mode="llm",
+    )
+
+    with pytest.raises(RuntimeInputError) as error:
+        agent.review(bypassed)
+
+    assert error.value.code == "review_request_invalid"
+    assert error.value.__cause__ is None
+    assert "request" not in captured
+
+
+@pytest.mark.parametrize(
+    "review_as_of",
+    [
+        "2026-01-01T00:00:00",
+        0,
+    ],
+)
+def test_runtime_applies_json_schema_date_format_before_pydantic_coercion(
+    monkeypatch: pytest.MonkeyPatch,
+    review_as_of: Any,
+) -> None:
+    captured = _patch_runtime_dependencies(monkeypatch)
+    agent = AgentRuntime(
+        RuntimeConfig(
+            claude_settings=_settings(),
+            evidence_base_url="http://127.0.0.1:8010",
+        )
+    )
+    payload = _service_text_payload()
+    payload["review_as_of"] = review_as_of
+
+    with pytest.raises(RuntimeInputError, match="review_request_invalid"):
+        agent.review(payload)
+
+    assert "request" not in captured
+
+
+@pytest.mark.parametrize(
+    "field_name",
+    [
+        "page_number",
+        "byte_length",
+        "width_px",
+        "height_px",
+    ],
+)
+def test_runtime_rejects_image_numeric_strings_before_pydantic_coercion(
+    monkeypatch: pytest.MonkeyPatch,
+    field_name: str,
+) -> None:
+    captured = _patch_runtime_dependencies(monkeypatch)
+    agent = AgentRuntime(
+        RuntimeConfig(
+            claude_settings=_settings(),
+            evidence_base_url="http://127.0.0.1:8010",
+        )
+    )
+    page = _image_page().model_dump(mode="json")
+    page[field_name] = str(page[field_name])
+    payload = {
+        "case_id": "case-numeric-string",
+        "llm_mode": "llm",
+        "documents": [
+            {
+                "document_id": "doc-numeric-string",
+                "filename": "invoice.png",
+                "image_pages": [page],
+            }
+        ],
+    }
+
+    with pytest.raises(RuntimeInputError, match="review_request_invalid"):
+        agent.review(payload)
+
+    assert "request" not in captured
+
+
 def test_runtime_config_rejects_raw_ocr_provider_for_service_use() -> None:
     with pytest.raises(
         RuntimeConfigurationError,
@@ -305,8 +850,10 @@ def test_service_runtime_rejects_mock_mode_without_running_workflow(
         )
     )
 
-    with pytest.raises(RuntimeInputError, match="real_llm_mode_required"):
-        agent.review(_text_request().model_copy(update={"llm_mode": "mock"}))
+    invalid = _service_text_payload()
+    invalid["llm_mode"] = "mock"
+    with pytest.raises(RuntimeInputError, match="review_request_invalid"):
+        agent.review(invalid)
 
     assert "request" not in captured
 
@@ -314,25 +861,38 @@ def test_service_runtime_rejects_mock_mode_without_running_workflow(
 @pytest.mark.parametrize(
     "service_input",
     [
-        ReviewRunRequestV2(
-            scenario_id="happy_path",
-            llm_mode="llm",
-        ),
-        ReviewRunRequestV2(
-            documents=[
+        {
+            "scenario_id": "happy_path",
+            "llm_mode": "llm",
+        },
+        {
+            "documents": [
                 {
                     "document_id": "doc-without-case",
                     "filename": "invoice.txt",
                     "content_text": "COMMERCIAL INVOICE",
                 }
             ],
-            llm_mode="llm",
-        ),
+            "llm_mode": "llm",
+        },
+        {
+            **_service_text_payload(),
+            "scenario_id": None,
+        },
+        {
+            **_service_text_payload(),
+            "unknown_policy": "allow",
+        },
+        {
+            **_service_text_payload(),
+            "uploaded_requirement_document_codes": [f"REQ-{index}" for index in range(101)],
+        },
+        _service_text_payload_with_document_codes(["REQ VALID WITH SPACES"]),
     ],
 )
-def test_service_runtime_requires_explicit_case_and_documents(
+def test_service_runtime_rejects_invalid_policy_before_workflow(
     monkeypatch: pytest.MonkeyPatch,
-    service_input: ReviewRunRequestV2,
+    service_input: dict[str, Any],
 ) -> None:
     captured = _patch_runtime_dependencies(monkeypatch)
     agent = AgentRuntime(
@@ -344,7 +904,7 @@ def test_service_runtime_requires_explicit_case_and_documents(
 
     with pytest.raises(
         RuntimeInputError,
-        match="service_request_identity_required",
+        match="review_request_invalid",
     ):
         agent.review(service_input)
 
@@ -437,7 +997,7 @@ def test_runtime_revalidates_bypassed_request_model_before_workflow(
             evidence_base_url="http://127.0.0.1:8010",
         )
     )
-    bypassed = ReviewRunRequestV2.model_construct(
+    bypassed = ServiceReviewRunRequestV2.model_construct(
         schema_version="2.0",
         case_id="case-bypassed",
         llm_mode="llm",
@@ -536,6 +1096,55 @@ def test_unknown_execution_exception_is_redacted(
         agent.review(_text_request())
 
     assert secret not in str(captured.value)
+
+
+@pytest.mark.parametrize(
+    "provider_error",
+    [
+        LLMError("provider_unavailable", "private-provider-detail"),
+        OcrLayoutProviderError("ocr_worker_failed", "private-provider-detail"),
+        RetrievalError("private-provider-detail"),
+    ],
+)
+def test_runtime_normalizes_provider_errors_at_public_boundary(
+    monkeypatch: pytest.MonkeyPatch,
+    provider_error: Exception,
+) -> None:
+    _patch_runtime_dependencies(monkeypatch)
+
+    def fail_run(*_args: Any, **_kwargs: Any) -> ReviewRunResultV2:
+        raise provider_error
+
+    monkeypatch.setattr(runtime_module, "run_review_result_v2", fail_run)
+    agent = AgentRuntime(
+        RuntimeConfig(
+            claude_settings=_settings(),
+            evidence_base_url="http://127.0.0.1:8010",
+        )
+    )
+
+    with pytest.raises(RuntimeExecutionError) as captured:
+        agent.review(_text_request())
+
+    assert captured.value.code == "review_execution_failed"
+    assert str(captured.value) == (
+        "review_execution_failed: "
+        "The Agent review failed without exposing private execution details."
+    )
+    assert "private-provider-detail" not in str(captured.value)
+    assert captured.value.__cause__ is None
+    assert captured.value.__suppress_context__ is True
+
+
+def test_public_safety_blocks_camel_case_sensitive_key() -> None:
+    with pytest.raises(
+        RuntimeExecutionError,
+        match="public_result_safety_violation",
+    ):
+        runtime_module._assert_public_result_safe(
+            {"dataBase64": "private-image-content"},
+            sensitive_markers=(),
+        )
 
 
 def test_invalid_external_evidence_url_error_does_not_echo_credentials() -> None:

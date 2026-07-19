@@ -11,6 +11,8 @@ from tools.build_trade_triplet_eval_assets import (
     ADJUDICATION_SCHEMA,
     BUSINESS_FIELD_OPERATOR_IDS,
     EvalAssetError,
+    _different_valid_container_number,
+    _valid_container_number,
     build_adjudications,
     build_certificate_of_origin_fixtures,
     build_evaluation_assets,
@@ -43,6 +45,7 @@ def _case(index: int) -> dict:
         "To": "Los Angeles, USA",
         "Invoice No. and Date": f"KR-INV-{index:04d} / 2025-08-05",
         "Other References (Country of Origin)": "Country of Origin: Republic of Korea",
+        "Shipping Marks": f"SYNTHETIC // C/NO. {index:04d}",
         "Goods Description": "Synthetic Item",
         "Quantity": "3 PCS",
         "Unit Price": "USD 10.00",
@@ -56,6 +59,8 @@ def _case(index: int) -> dict:
         "Vessel / Flight": "Synthetic Vessel / V.001E",
         "From": "Busan, South Korea",
         "To": "Los Angeles, USA",
+        "Other References": "Country of Origin: Republic of Korea",
+        "Shipping Marks": ci["Shipping Marks"],
         "No. & Kind of Packages": "10 Cartons",
         "Goods Details": [
             {
@@ -77,7 +82,7 @@ def _case(index: int) -> dict:
         "Port of Discharge": "Los Angeles, USA",
         "No. & Kinds of Containers or Packages": "1x40HQ / 10 Cartons",
         "Revenue Tons": "1.50 RT",
-        "Container No.": f"CONT{index:04d}",
+        "Container No.": "HMMU9279350",
         "Seal No. / Marks & No.": f"SEAL{index:04d} // SYNTHETIC",
         "Prepaid": "Y",
         "Collect": "",
@@ -212,7 +217,7 @@ def test_adjudication_schema_supports_six_states_and_rejects_unsafe_scoring():
 
 
 def test_controlled_defects_are_deterministic_single_mutations_and_keep_source_unchanged():
-    cases = [_case(index) for index in range(1, 21)]
+    cases = [_case(index) for index in range(1, len(BUSINESS_FIELD_OPERATOR_IDS) + 1)]
     original = copy.deepcopy(cases)
     case_ids = [case["case_id"] for case in cases]
 
@@ -221,7 +226,7 @@ def test_controlled_defects_are_deterministic_single_mutations_and_keep_source_u
 
     assert first == second
     assert cases == original
-    assert len(first) == 20
+    assert len(first) == len(BUSINESS_FIELD_OPERATOR_IDS)
     assert tuple(item["mutation"]["operator_id"] for item in first) == (BUSINESS_FIELD_OPERATOR_IDS)
     assert all(item["mutation_count"] == 1 for item in first)
     assert all(
@@ -251,6 +256,60 @@ def test_controlled_defects_are_deterministic_single_mutations_and_keep_source_u
             sum(bool(str(mutated_flags[name]).strip()) for name in ("Prepaid", "Collect"))
             == expected_truth_count
         )
+
+
+def test_container_operator_repairs_invalid_source_check_digit_before_one_mismatch():
+    cases = [_case(index) for index in range(1, len(BUSINESS_FIELD_OPERATOR_IDS) + 1)]
+    container_case = cases[BUSINESS_FIELD_OPERATOR_IDS.index("pl_container_mismatch")]
+    source_bl = container_case["documents"]["bill_of_lading"]["raw_record"]
+    source_bl["Container No."] = "HMMU7610271"
+    original = copy.deepcopy(cases)
+
+    variants = inject_controlled_defects(
+        cases,
+        [case["case_id"] for case in cases],
+    )
+
+    assert cases == original
+    variant = next(
+        item for item in variants if item["mutation"]["operator_id"] == "pl_container_mismatch"
+    )
+    controlled = _valid_container_number("HMMU7610271")
+    replacement = _different_valid_container_number(controlled)
+    assert controlled == "HMMU7610279"
+    assert variant["controlled_parent_setup"] == [
+        {
+            "op": "replace",
+            "path": [
+                "documents",
+                "bill_of_lading",
+                "raw_record",
+                "Container No.",
+            ],
+            "before": "HMMU7610271",
+            "value": controlled,
+        },
+        {
+            "op": "add",
+            "path": [
+                "documents",
+                "packing_list",
+                "raw_record",
+                "Container No.",
+            ],
+            "value": controlled,
+        },
+    ]
+    parent = _reconstruct_parent(variant)
+    assert parent["documents"]["bill_of_lading"]["raw_record"]["Container No."] == controlled
+    assert parent["documents"]["packing_list"]["raw_record"]["Container No."] == controlled
+    assert (
+        variant["mutated_case"]["documents"]["packing_list"]["raw_record"]["Container No."]
+        == replacement
+    )
+    assert variant["mutation"]["before"] == controlled
+    assert variant["mutation"]["after"] == replacement
+    assert variant["mutation_count"] == 1
 
 
 def test_certificate_of_origin_design_generates_20_controlled_non_legal_fixtures():

@@ -68,7 +68,8 @@ V2 `image_pages`는 arbitrary file path/URL이 아니라 검증된 wire object�
 - 실제 decoded width/height
 - source media type/hash/page
 - EXIF transpose 등 적용 transform
-- 문서별·run별 page/byte 상한
+- 문서별 최대 5 page, run 전체 최대 10 page·20 MiB decoded image bytes
+- run 전체 text 최대 500,000 characters와 base64/declared-byte 합계 사전 검사
 
 파일 경로는 CLI edge에서만 사용하고 `ReviewRunRequest`에는 넣지 않는다. Backend가 V2 request를
 만들 때도 object storage URL을 Agent에 전달하는 대신 승인된 업로드 계층에서 byte를 읽어 동일한
@@ -290,13 +291,21 @@ form과 check digit도 결정론적으로 검증하며, 같은 잘못된 번호�
 의도를 알아야 하는 항목은 임의 임계값으로 위반을 확정하지 않고 `ambiguous` 또는
 `needs_review`로 유지한다.
 
-controlled-defect 결정론적 평가는 `trade-document-evaluation-assets/v3` manifest와
+역사적 evaluation-v2 controlled-defect 결정론적 평가는
+`trade-document-evaluation-assets/v3` manifest와
 `deterministic-validation-evaluation-report/v4` report를 사용한다. evaluator는
 dataset-lock, opaque evaluation-v2 provenance bytes, controlled-defect와 manifest의 canonical
 hash만 확인한다. split JSON을 파싱하거나 membership/holdout seed를 재계산하지 않는다.
 development 20개 Case와 operator assignment는 이미 hash-locked controlled manifest에서만
 읽는다. report는 항상 `release_eligible=false`,
 `release_holdout_status=release_holdout_v2_publicly_derivable`를 기록한다.
+
+현재 규칙 커버리지 진단은 별도 `trade-document-rule-coverage-assets/v1` manifest와
+`deterministic-validation-evaluation-report/v5`를 사용한다. 공개 등록 합성 Case에서 29개
+positive operator를 relation-aware finding 단위로 점수화하고, PL-only 추가 품목 1건이
+finding을 추가하거나 제거하지 않으면서 unmatched 목록에 정확히 하나만 증가하는지도 검사한다.
+release split membership은 읽지 않지만 공개 selector와 seed로 재현 가능하므로 이 결과도
+development diagnostic이며 `release_eligible=false`다.
 
 ## Data Platform 경계
 
@@ -370,9 +379,18 @@ Backend       -- Backend OpenAPI --> Frontend (future)
 ```
 
 Agent V1은 text request/result 1.0을 보존한다. V2는 image pages와 result 2.0을 추가한다.
-Backend/service용 공개 package 실행 경계는 `AgentRuntime.review()` 하나이며 현재 V2 결과만
-반환한다. `customs_ai_agent.runner`의 V1/V2 helper는 mock scenario와 임의 analyzer/retriever를
-주입하는 CLI·test·evaluation 내부 경계라서 Backend에서 호출하지 않는다. Backend는 exact
+Backend V2 request는 필수 `case_id`, 비어 있지 않은 `documents`, 명시적 `llm_mode=llm`만
+허용하며 scenario/mock은 포함하지 않는다. Backend/service용 공개 package 실행 경계는
+untrusted UTF-8 JSON bytes용 `AgentRuntime.review_json()`과 신뢰된 in-process object용
+`AgentRuntime.review()`이며 둘 다 현재 V2 결과만 반환한다. Backend는 HTTP body를 buffering하기
+전에 32 MiB 상한을 적용하고, 중복 key 검사를 보존하려면 파싱 전 bytes를 `review_json()`에
+전달해야 한다. `review()`의 dict 입력은 exact built-in JSON tree만 허용하고 constructed Pydantic
+model이나 custom container를 받지 않는다. packaged JSON Schema를 먼저 적용해 문자열 숫자와
+date-time의 Pydantic coercion을 막고, 그 다음 Schema로 표현할 수 없는 합산 text/page/byte
+semantic Gate를 적용한다.
+`customs_ai_agent.runner`와 호환용 `ReviewRunRequestV2`는 mock scenario와 임의
+analyzer/retriever를 주입하는 CLI·test·evaluation 내부 경계라서 Backend에서 호출하지 않는다.
+Backend는 exact
 Agent wheel commit과 package version, `backend` schema scope/version/kind/hash를 함께 고정해야
 한다. 내부 V1 helper의 1.0 결과를 V2로 재표시해서도 안 된다.
 

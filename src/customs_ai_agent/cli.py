@@ -11,6 +11,7 @@ from pathlib import Path
 from typing import Any, Literal, Mapping, Sequence
 
 from dotenv import dotenv_values
+from jsonschema import Draft202012Validator, FormatChecker
 from pydantic import BaseModel, ValidationError
 
 from customs_ai_agent.adapters import (
@@ -69,6 +70,7 @@ from customs_ai_agent.schemas.models import (
     ReviewRunRequestV2,
     ReviewRunResult,
     ReviewRunResultV2,
+    ServiceReviewRunRequestV2,
     XaiReport,
     XaiReportV2,
 )
@@ -691,6 +693,22 @@ def _agent_contract_schema(
     return get_schema("backend", version, schema_kind)
 
 
+def _assert_agent_json_schema(
+    version: AgentContractVersion,
+    kind: AgentContractKind,
+    payload: Mapping[str, Any],
+) -> None:
+    validator = Draft202012Validator(
+        _agent_contract_schema(version, kind),
+        format_checker=FormatChecker(),
+    )
+    if next(validator.iter_errors(payload), None) is not None:
+        raise ContractValidationError(
+            "contract_validation_failed",
+            "The payload does not satisfy the selected Agent contract.",
+        )
+
+
 def _assert_known_object_fields(
     payload: Mapping[str, Any],
     model: type[BaseModel],
@@ -712,7 +730,7 @@ def _validate_contract_payload(
 ) -> BaseModel:
     try:
         if kind == "request":
-            request_model = ReviewRunRequest if version == "v1" else ReviewRunRequestV2
+            request_model = ReviewRunRequest if version == "v1" else ServiceReviewRunRequestV2
             document_model = DocumentInput if version == "v1" else DocumentInputV2
             _assert_known_object_fields(payload, request_model, label="Agent request")
             raw_documents = payload.get("documents")
@@ -761,6 +779,7 @@ def _validate_contract_payload(
                                     ImagePageProvenance,
                                     label="Agent image provenance",
                                 )
+            _assert_agent_json_schema(version, kind, payload)
             return request_model.model_validate(payload)
 
         result_model = ReviewRunResultV2 if version == "v2" else ReviewRunResult
@@ -779,6 +798,7 @@ def _validate_contract_payload(
                 "contract_version_mismatch",
                 "The payload schema_version does not match the selected Agent contract.",
             )
+        _assert_agent_json_schema(version, kind, payload)
         result = result_model.model_validate(payload)
         _assert_public_result_safe(payload)
         return result

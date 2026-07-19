@@ -8,12 +8,19 @@ import math
 from datetime import date, datetime, timezone
 from decimal import Decimal
 from io import BytesIO
-from typing import Any, Literal
+from typing import Annotated, Any, Literal
 from urllib.parse import urlsplit
 from uuid import uuid4
 
 from PIL import Image, UnidentifiedImageError
-from pydantic import BaseModel, ConfigDict, Field, field_validator, model_validator
+from pydantic import (
+    BaseModel,
+    ConfigDict,
+    Field,
+    StringConstraints,
+    field_validator,
+    model_validator,
+)
 
 from customs_ai_agent.ocr_reading_order import OCR_READING_ORDER_POLICY_ID
 
@@ -38,6 +45,15 @@ SourceDocumentMediaType = Literal[
     "image/webp",
     "application/pdf",
 ]
+RequirementDocumentCode = Annotated[
+    str,
+    StringConstraints(
+        min_length=1,
+        max_length=128,
+        pattern=r"^[A-Za-z0-9][A-Za-z0-9._:-]*$",
+    ),
+]
+MAX_REQUIREMENT_DOCUMENT_CODES = 100
 PageTransform = Literal["exif_transpose", "metadata_strip", "pdf_rasterize"]
 
 MAX_IMAGE_BYTES = 5 * 1024 * 1024
@@ -47,6 +63,9 @@ MAX_IMAGE_VISUAL_TOKENS = 4784
 MAX_IMAGE_PAGES_PER_DOCUMENT = 5
 MAX_IMAGE_PAGES_PER_RUN = 10
 MAX_IMAGE_BYTES_PER_RUN = 20 * 1024 * 1024
+MAX_IMAGE_BASE64_CHARS_PER_RUN = ((MAX_IMAGE_BYTES_PER_RUN + 2) // 3) * 4 + (
+    4 * MAX_IMAGE_PAGES_PER_RUN
+)
 
 _FORBIDDEN_PUBLIC_VALUE_KEYS = {
     "api_key",
@@ -65,6 +84,19 @@ _FORBIDDEN_PUBLIC_VALUE_KEYS = {
     "raw_response",
     "source_path",
     "token",
+}
+
+
+def _public_key_safety_token(key: str) -> str:
+    """Collapse common case/separator variants before sensitive-key checks."""
+
+    return "".join(
+        character for character in key.casefold() if character.isascii() and character.isalnum()
+    )
+
+
+_FORBIDDEN_PUBLIC_VALUE_KEY_TOKENS = {
+    _public_key_safety_token(key) for key in _FORBIDDEN_PUBLIC_VALUE_KEYS
 }
 
 
@@ -100,8 +132,7 @@ def _validate_public_json_value(value: Any, *, depth: int = 0) -> Any:
         for key, item in value.items():
             if not isinstance(key, str):
                 raise ValueError("public object keys must be strings")
-            normalized_key = key.strip().lower().replace("-", "_")
-            if normalized_key in _FORBIDDEN_PUBLIC_VALUE_KEYS:
+            if _public_key_safety_token(key) in _FORBIDDEN_PUBLIC_VALUE_KEY_TOKENS:
                 raise ValueError("public structured value contains a forbidden sensitive key")
             validated[key] = _validate_public_json_value(item, depth=depth + 1)
         return validated
@@ -305,7 +336,7 @@ class OcrLayoutLedger(BaseModel):
 class ImagePageProvenance(BaseModel):
     """Trace the validated page bytes back to their immutable source."""
 
-    model_config = ConfigDict(extra="forbid")
+    model_config = ConfigDict(extra="forbid", revalidate_instances="always")
 
     source_media_type: SourceDocumentMediaType
     source_sha256: str = Field(pattern=r"^[a-f0-9]{64}$")
@@ -637,7 +668,7 @@ class ImagePageInput(BaseModel):
     or Evidence Service call.
     """
 
-    model_config = ConfigDict(extra="forbid")
+    model_config = ConfigDict(extra="forbid", revalidate_instances="always")
 
     page_number: int = Field(ge=1, le=50)
     media_type: ImageMediaType
@@ -722,7 +753,7 @@ class PdfPagesInput(BaseModel):
     expanding the core Agent's filesystem or network authority.
     """
 
-    model_config = ConfigDict(extra="forbid")
+    model_config = ConfigDict(extra="forbid", revalidate_instances="always")
 
     source_pdf_sha256: str = Field(pattern=r"^[a-f0-9]{64}$")
     source_pdf_byte_length: int = Field(ge=1, le=MAX_IMAGE_BYTES_PER_RUN)
@@ -782,14 +813,19 @@ class DocumentInput(BaseModel):
 class DocumentInputV2(BaseModel):
     """Additive multimodal input used only by the V2 Backend contract."""
 
-    model_config = ConfigDict(extra="forbid")
+    model_config = ConfigDict(extra="forbid", revalidate_instances="always")
 
     document_id: str = Field(
         min_length=1,
         max_length=128,
         pattern=r"^[A-Za-z0-9][A-Za-z0-9._:-]*$",
     )
-    filename: str = Field(min_length=1, max_length=255)
+    filename: str = Field(
+        min_length=1,
+        max_length=255,
+        pattern=r"^[^/\\:\s\x00-\x1f\x7f](?:[^/\\:\x00-\x1f\x7f]*[^/\\:\s\x00-\x1f\x7f])?$",
+        json_schema_extra={"not": {"enum": [".", ".."]}},
+    )
     content_text: str | None = Field(default=None, min_length=1, max_length=200_000)
     image_pages: list[ImagePageInput] = Field(
         default_factory=list,
@@ -797,7 +833,33 @@ class DocumentInputV2(BaseModel):
     )
     pdf_pages: PdfPagesInput | None = None
     declared_type: DocumentType | None = None
-    requirement_document_codes: list[str] = Field(default_factory=list)
+    requirement_document_codes: list[RequirementDocumentCode] = Field(
+        default_factory=list,
+        max_length=MAX_REQUIREMENT_DOCUMENT_CODES,
+        json_schema_extra={"uniqueItems": True},
+    )
+
+    @field_validator("filename")
+    @classmethod
+    def _safe_logical_filename(cls, value: str) -> str:
+        if (
+            value != value.strip()
+            or value in {".", ".."}
+            or any(character in value for character in ("/", "\\", ":"))
+            or any(ord(character) < 32 or ord(character) == 127 for character in value)
+        ):
+            raise ValueError("filename must be a control-free logical basename")
+        return value
+
+    @field_validator("requirement_document_codes")
+    @classmethod
+    def _unique_requirement_document_codes(
+        cls,
+        values: list[str],
+    ) -> list[str]:
+        if len(values) != len(set(values)):
+            raise ValueError("requirement document codes must be unique")
+        return sorted(values)
 
     @model_validator(mode="after")
     def _exactly_one_document_modality(self) -> "DocumentInputV2":
@@ -856,7 +918,13 @@ class ReviewRunRequest(BaseModel):
 
 
 class ReviewRunRequestV2(BaseModel):
-    """Additive multimodal request used only by the V2 Backend contract."""
+    """Multimodal workflow request used by local diagnostics and compatibility tests.
+
+    The Backend-facing V2 wire is the stricter ``ServiceReviewRunRequestV2``
+    below. Keeping this workflow model separate preserves deterministic
+    scenario fixtures without exposing scenario or mock execution on the
+    service contract.
+    """
 
     model_config = ConfigDict(extra="forbid")
 
@@ -877,7 +945,21 @@ class ReviewRunRequestV2(BaseModel):
     review_as_of: date = Field(default_factory=date.today)
     trade_type: TradeType = "import"
     jurisdiction: Literal["KR"] = "KR"
-    uploaded_requirement_document_codes: list[str] = Field(default_factory=list)
+    uploaded_requirement_document_codes: list[RequirementDocumentCode] = Field(
+        default_factory=list,
+        max_length=MAX_REQUIREMENT_DOCUMENT_CODES,
+        json_schema_extra={"uniqueItems": True},
+    )
+
+    @field_validator("uploaded_requirement_document_codes")
+    @classmethod
+    def _unique_uploaded_requirement_document_codes(
+        cls,
+        values: list[str],
+    ) -> list[str]:
+        if len(values) != len(set(values)):
+            raise ValueError("uploaded requirement document codes must be unique")
+        return sorted(values)
 
     @model_validator(mode="after")
     def _scenario_or_documents(self) -> "ReviewRunRequestV2":
@@ -902,9 +984,134 @@ class ReviewRunRequestV2(BaseModel):
                 raise ValueError("combined image bytes exceed the per-run safety limit")
             if image_pages and self.llm_mode != "llm":
                 raise ValueError("image and PDF documents require llm mode")
-        self.uploaded_requirement_document_codes = sorted(
-            {code.strip() for code in self.uploaded_requirement_document_codes if code.strip()}
-        )
+        return self
+
+
+class ServiceReviewRunRequestV2(BaseModel):
+    """Backend-facing V2 request for the real Claude + Evidence service path."""
+
+    model_config = ConfigDict(extra="forbid", revalidate_instances="always")
+
+    case_id: str = Field(
+        min_length=1,
+        max_length=128,
+        pattern=r"^[A-Za-z0-9][A-Za-z0-9._:-]*$",
+    )
+    documents: list[DocumentInputV2] = Field(min_length=1, max_length=20)
+    llm_mode: Literal["llm"]
+    review_run_id: str = Field(
+        default_factory=lambda: str(uuid4()),
+        min_length=1,
+        max_length=128,
+        pattern=r"^[A-Za-z0-9][A-Za-z0-9._:-]*$",
+    )
+    review_as_of: date = Field(default_factory=date.today)
+    trade_type: TradeType = "import"
+    jurisdiction: Literal["KR"] = "KR"
+    uploaded_requirement_document_codes: list[RequirementDocumentCode] = Field(
+        default_factory=list,
+        max_length=MAX_REQUIREMENT_DOCUMENT_CODES,
+        json_schema_extra={"uniqueItems": True},
+    )
+
+    @field_validator("uploaded_requirement_document_codes")
+    @classmethod
+    def _unique_uploaded_requirement_document_codes(
+        cls,
+        values: list[str],
+    ) -> list[str]:
+        if len(values) != len(set(values)):
+            raise ValueError("uploaded requirement document codes must be unique")
+        return sorted(values)
+
+    @model_validator(mode="before")
+    @classmethod
+    def _preflight_aggregate_payload(cls, value: Any) -> Any:
+        """Reject aggregate payload abuse before nested image decoding or PIL work."""
+
+        if not isinstance(value, dict):
+            return value
+        documents = value.get("documents")
+        if not isinstance(documents, list):
+            return value
+        if len(documents) > 20:
+            raise ValueError("document count exceeds the per-run safety limit")
+
+        text_char_count = 0
+        image_page_count = 0
+        image_byte_count = 0
+        image_base64_char_count = 0
+
+        for raw_document in documents:
+            if isinstance(raw_document, BaseModel):
+                raw_document = raw_document.model_dump(mode="python", warnings=False)
+            if not isinstance(raw_document, dict):
+                continue
+            content_text = raw_document.get("content_text")
+            if isinstance(content_text, str):
+                text_char_count += len(content_text)
+                if text_char_count > 500_000:
+                    raise ValueError("combined document text exceeds the per-run safety limit")
+
+            page_groups: list[Any] = [raw_document.get("image_pages")]
+            raw_pdf_pages = raw_document.get("pdf_pages")
+            if isinstance(raw_pdf_pages, BaseModel):
+                raw_pdf_pages = raw_pdf_pages.model_dump(mode="python", warnings=False)
+            if isinstance(raw_pdf_pages, dict):
+                page_groups.append(raw_pdf_pages.get("pages"))
+
+            for raw_pages in page_groups:
+                if not isinstance(raw_pages, list):
+                    continue
+                if len(raw_pages) > MAX_IMAGE_PAGES_PER_DOCUMENT:
+                    raise ValueError("document image pages exceed the per-document safety limit")
+                image_page_count += len(raw_pages)
+                if image_page_count > MAX_IMAGE_PAGES_PER_RUN:
+                    raise ValueError("combined image pages exceed the per-run safety limit")
+
+                for raw_page in raw_pages:
+                    if isinstance(raw_page, BaseModel):
+                        raw_page = raw_page.model_dump(mode="python", warnings=False)
+                    if not isinstance(raw_page, dict):
+                        continue
+                    encoded = raw_page.get("data_base64")
+                    byte_length = raw_page.get("byte_length")
+                    if isinstance(encoded, str):
+                        image_base64_char_count += len(encoded)
+                        if image_base64_char_count > MAX_IMAGE_BASE64_CHARS_PER_RUN:
+                            raise ValueError(
+                                "combined image base64 exceeds the per-run safety limit"
+                            )
+                    if isinstance(byte_length, int) and not isinstance(byte_length, bool):
+                        image_byte_count += max(byte_length, 0)
+                        if image_byte_count > MAX_IMAGE_BYTES_PER_RUN:
+                            raise ValueError("combined image bytes exceed the per-run safety limit")
+                        if isinstance(encoded, str) and byte_length >= 0:
+                            expected_chars = ((byte_length + 2) // 3) * 4
+                            if len(encoded) != expected_chars:
+                                raise ValueError(
+                                    "image base64 length does not match declared bytes"
+                                )
+        return value
+
+    @model_validator(mode="after")
+    def _bounded_service_documents(self) -> "ServiceReviewRunRequestV2":
+        if sum(len(document.content_text or "") for document in self.documents) > 500_000:
+            raise ValueError("combined document text exceeds the per-run safety limit")
+        document_ids = [document.document_id for document in self.documents]
+        if len(document_ids) != len(set(document_ids)):
+            raise ValueError("document_id values must be unique within a review run")
+        image_pages = [
+            page
+            for document in self.documents
+            for page in (
+                document.image_pages if document.pdf_pages is None else document.pdf_pages.pages
+            )
+        ]
+        if len(image_pages) > MAX_IMAGE_PAGES_PER_RUN:
+            raise ValueError("combined image pages exceed the per-run safety limit")
+        if sum(page.byte_length for page in image_pages) > MAX_IMAGE_BYTES_PER_RUN:
+            raise ValueError("combined image bytes exceed the per-run safety limit")
         return self
 
 

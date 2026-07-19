@@ -1,5 +1,6 @@
 from __future__ import annotations
 
+import copy
 import json
 import re
 from pathlib import Path
@@ -12,6 +13,7 @@ from jsonschema.exceptions import ValidationError
 from customs_ai_agent.contracts import (
     ContractSchemaError,
     available_schemas,
+    generate_schema,
     get_schema,
     schema_sha256,
     verify_packaged_schemas,
@@ -84,6 +86,7 @@ def _referenced_definition_names(
 
 def _image_request() -> dict[str, Any]:
     return {
+        "case_id": "case-image-contract",
         "documents": [
             {
                 "document_id": "invoice-1",
@@ -110,7 +113,63 @@ def _image_request() -> dict[str, Any]:
     }
 
 
-def test_registry_contains_only_the_nine_versioned_release_schemas() -> None:
+def _service_text_request() -> dict[str, Any]:
+    return {
+        "case_id": "case-service-contract",
+        "documents": [
+            {
+                "document_id": "invoice-1",
+                "filename": "invoice.txt",
+                "content_text": "COMMERCIAL INVOICE\nInvoice No: INV-001",
+            }
+        ],
+        "llm_mode": "llm",
+    }
+
+
+def _pdf_request() -> dict[str, Any]:
+    source_pdf_sha256 = "b" * 64
+    return {
+        "case_id": "case-pdf-contract",
+        "documents": [
+            {
+                "document_id": "invoice-pdf-1",
+                "filename": "invoice.pdf",
+                "pdf_pages": {
+                    "source_pdf_sha256": source_pdf_sha256,
+                    "source_pdf_byte_length": 1,
+                    "page_count": 1,
+                    "rasterizer_id": "pypdfium2",
+                    "rasterizer_version": "5.12.0",
+                    "raster_dpi": 200,
+                    "pages": [
+                        {
+                            "page_number": 1,
+                            "media_type": "image/png",
+                            "data_base64": "eA==",
+                            "byte_length": 1,
+                            "sha256": "a" * 64,
+                            "width_px": 1,
+                            "height_px": 1,
+                            "provenance": {
+                                "source_media_type": "application/pdf",
+                                "source_sha256": source_pdf_sha256,
+                                "source_page_number": 1,
+                                "transforms": ["pdf_rasterize"],
+                                "rasterizer_id": "pypdfium2",
+                                "rasterizer_version": "5.12.0",
+                                "raster_dpi": 200,
+                            },
+                        }
+                    ],
+                },
+            }
+        ],
+        "llm_mode": "llm",
+    }
+
+
+def test_registry_contains_only_the_ten_versioned_release_schemas() -> None:
     assert set(available_schemas()) == EXPECTED_SCHEMAS
 
 
@@ -169,6 +228,7 @@ def test_backend_v1_preserves_text_only_request_contract() -> None:
 def test_backend_v2_accepts_bounded_images_but_not_local_manifest_paths() -> None:
     schema = get_schema("backend", "v2", "review-request")
     Draft202012Validator(schema).validate(_image_request())
+    Draft202012Validator(schema).validate(_pdf_request())
 
     property_names = _property_names(schema)
     assert "path" not in property_names
@@ -182,6 +242,66 @@ def test_backend_v2_accepts_bounded_images_but_not_local_manifest_paths() -> Non
     }
     with pytest.raises(ValidationError):
         Draft202012Validator(schema).validate(invalid)
+
+
+@pytest.mark.parametrize("schema_source", ["packaged", "generated"])
+def test_backend_v2_service_request_requires_real_explicit_inputs(
+    schema_source: str,
+) -> None:
+    schema = (
+        get_schema("backend", "v2", "review-request")
+        if schema_source == "packaged"
+        else generate_schema("backend", "v2", "review-request")
+    )
+    validator = Draft202012Validator(schema)
+    valid = _service_text_request()
+
+    validator.validate(valid)
+    assert {"case_id", "documents", "llm_mode"}.issubset(schema["required"])
+
+    invalid_payloads: list[dict[str, Any]] = []
+    for missing in ("case_id", "documents", "llm_mode"):
+        payload = _service_text_request()
+        payload.pop(missing)
+        invalid_payloads.append(payload)
+    for null_field in ("case_id", "documents", "llm_mode"):
+        payload = _service_text_request()
+        payload[null_field] = None
+        invalid_payloads.append(payload)
+    mock_payload = _service_text_request()
+    mock_payload["llm_mode"] = "mock"
+    invalid_payloads.append(mock_payload)
+    scenario_payload = _service_text_request()
+    scenario_payload["scenario_id"] = "happy_path"
+    invalid_payloads.append(scenario_payload)
+    null_scenario_payload = _service_text_request()
+    null_scenario_payload["scenario_id"] = None
+    invalid_payloads.append(null_scenario_payload)
+    unknown_payload = _service_text_request()
+    unknown_payload["unknown_policy"] = "allow"
+    invalid_payloads.append(unknown_payload)
+    too_many_codes = _service_text_request()
+    too_many_codes["uploaded_requirement_document_codes"] = [f"REQ-{index}" for index in range(101)]
+    invalid_payloads.append(too_many_codes)
+    long_code = _service_text_request()
+    long_code["uploaded_requirement_document_codes"] = ["R" * 129]
+    invalid_payloads.append(long_code)
+    duplicate_codes = _service_text_request()
+    duplicate_codes["uploaded_requirement_document_codes"] = ["REQ-A", "REQ-A"]
+    invalid_payloads.append(duplicate_codes)
+    invalid_document_codes = copy.deepcopy(_service_text_request())
+    invalid_document_codes["documents"][0]["requirement_document_codes"] = ["REQ VALID WITH SPACES"]
+    invalid_payloads.append(invalid_document_codes)
+    invalid_case_id = _service_text_request()
+    invalid_case_id["case_id"] = "case with spaces"
+    invalid_payloads.append(invalid_case_id)
+    unsafe_filename = copy.deepcopy(_service_text_request())
+    unsafe_filename["documents"][0]["filename"] = "../private.txt"
+    invalid_payloads.append(unsafe_filename)
+
+    for payload in invalid_payloads:
+        with pytest.raises(ValidationError):
+            validator.validate(payload)
 
 
 def test_local_manifest_contract_is_separate_and_supports_text_image_and_pdf() -> None:

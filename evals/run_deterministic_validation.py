@@ -48,10 +48,10 @@ CANONICAL_DIAGNOSTIC_SPLIT_BYTES_SHA256 = (
     "d7e6b86ef19bbae838a7f5da7b94428637481ab5c15d9599ee3af3e86bda7b64"
 )
 CANONICAL_CONTROLLED_DEFECTS_SHA256 = (
-    "e4f2902b301ac20752c71ab0c96f4b7cc4e265eff44daff8275d61abedb0c762"
+    "ccfcc8b640245389d30221bd4f088f5749bb63f970d67e4cec81daf6997d20c6"
 )
 CANONICAL_EVALUATION_MANIFEST_SHA256 = (
-    "cd91e5513e57592b264f36dcb9e15cecd760c3337bf13b43238e601e17ed7470"
+    "01dbe7865dc30fc2b1b0de5ec6b0ab22440d4d9756a32c5441862bfe7699d3fc"
 )
 OPERATOR_EXPECTED_ISSUES = {
     "pl_invoice_number_mismatch": frozenset({"INVOICE_NO_MISMATCH"}),
@@ -212,6 +212,19 @@ def _validate_controlled_scope(
         operator_id = mutation["operator_id"]
         expected_variant_id = f"{expected_case_id}--{operator_id}"
         mutated_case = record.get("mutated_case")
+        expected_rule_ids = record.get("expected_rule_ids")
+        adjudication = record.get("adjudication")
+        evidence = adjudication.get("evidence") if isinstance(adjudication, dict) else None
+        expected_evidence = {
+            key: mutation.get(key)
+            for key in (
+                "operator_id",
+                "document_type",
+                "field_path",
+                "before",
+                "after",
+            )
+        }
         if (
             record.get("schema_version") != CONTROLLED_DEFECT_SCHEMA
             or record.get("source_case_id") != expected_case_id
@@ -223,6 +236,20 @@ def _validate_controlled_scope(
         ):
             raise DeterministicEvaluationError(
                 "controlled defect records do not match the hash-locked development order"
+            )
+        if (
+            not isinstance(expected_rule_ids, list)
+            or not expected_rule_ids
+            or not all(isinstance(rule_id, str) and rule_id for rule_id in expected_rule_ids)
+            or record.get("expected_outcome") != "needs_review"
+            or not isinstance(adjudication, dict)
+            or adjudication.get("rule_id") != expected_rule_ids[0]
+            or adjudication.get("expected_findings") != expected_rule_ids
+            or adjudication.get("expected_outcome") != record["expected_outcome"]
+            or evidence != expected_evidence
+        ):
+            raise DeterministicEvaluationError(
+                "controlled adjudication evidence does not match its mutation"
             )
         operator_ids.append(operator_id)
 
@@ -650,7 +677,12 @@ def _reconstruct_parent(record: dict[str, Any]) -> dict[str, Any]:
         target: Any = parent["documents"][document_type]["raw_record"]
         for part in field_path[:-1]:
             target = target[part]
-        target[field_path[-1]] = mutation["before"]
+        leaf = field_path[-1]
+        if target[leaf] != mutation.get("after"):
+            raise DeterministicEvaluationError(
+                "controlled mutated value does not match mutation.after"
+            )
+        target[leaf] = mutation["before"]
     except (KeyError, IndexError, TypeError) as exc:
         raise DeterministicEvaluationError(
             "controlled mutation cannot reconstruct its parent"

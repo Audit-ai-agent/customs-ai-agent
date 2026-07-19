@@ -41,13 +41,13 @@ Evidence HTTP API를 소비하는 경계만 검증한다. 합성 `happy_path` �
 기본 실행은 계약 hash만 확인하고 네트워크를 허용하지 않으므로 의도적으로 FAIL한다.
 
 ```powershell
-uv run python evals/run_evidence_live.py
+uv run --locked python evals/run_evidence_live.py
 ```
 
 실제 local Evidence Service가 준비된 경우에만 `--live`를 명시한다.
 
 ```powershell
-uv run python evals/run_evidence_live.py `
+uv run --locked python evals/run_evidence_live.py `
   --live `
   --base-url http://127.0.0.1:8010 `
   --env-file ..\_secrets\.env `
@@ -91,7 +91,7 @@ Evidence retrieval API가 호출되었다는 뜻이 아니다.
 readiness가 실패한 Data snapshot을 조사할 때만 다음 진단 경로를 사용한다.
 
 ```powershell
-uv run python evals/run_evidence_live.py `
+uv run --locked python evals/run_evidence_live.py `
   --live `
   --allow-unready-diagnostic `
   --diagnostic-review-as-of 2026-07-10 `
@@ -137,7 +137,7 @@ source URI, token, `.env` 경로, 절대경로, raw snapshot ID는 기록하지 
 
 ```powershell
 # 1문서 smoke
-uv run python evals/run_claude_live.py `
+uv run --locked python evals/run_claude_live.py `
   --live `
   --env-file ..\_secrets\.env `
   --max-documents 1 `
@@ -146,7 +146,7 @@ uv run python evals/run_claude_live.py `
   --max-total-output-tokens 8192
 
 # 4종 text Gold
-uv run python evals/run_claude_live.py `
+uv run --locked python evals/run_claude_live.py `
   --live `
   --env-file ..\_secrets\.env `
   --max-documents 4 `
@@ -155,7 +155,7 @@ uv run python evals/run_claude_live.py `
   --max-total-output-tokens 32768
 
 # 실제 Claude + deterministic workflow + 명시적 Mock RAG 진단
-uv run python evals/run_claude_live.py `
+uv run --locked python evals/run_claude_live.py `
   --live `
   --env-file ..\_secrets\.env `
   --max-documents 4 `
@@ -165,7 +165,7 @@ uv run python evals/run_claude_live.py `
   --workflow
 
 # adversarial baseline
-uv run python evals/run_claude_live.py `
+uv run --locked python evals/run_claude_live.py `
   --live `
   --env-file ..\_secrets\.env `
   --gold evals/claude_text_adversarial_v1.json `
@@ -313,7 +313,7 @@ $OcrEnvironmentLock = "<SELECTED_PROVIDER_REQUIREMENTS_LOCK>"
 $OcrEnvironmentLockSha256 = "<SELECTED_PROVIDER_REQUIREMENTS_LOCK_SHA256>"
 $OcrModelAssetsLock = "evals\ocr_environments\v1\model-assets.lock.json"
 $OcrModelAssetsLockSha256 = "<MODEL_ASSETS_LOCK_SHA256>"
-uv run python -m evals.run_claude_vision `
+uv run --locked python -m evals.run_claude_vision `
   --live `
   --env-file ..\_secrets\.env `
   --dataset-root "$Dataset\raw" `
@@ -405,7 +405,7 @@ $OcrDescriptor = "<SEALED_EVALUATION_V3_OCR_DESCRIPTOR>"
 $AuthorizationReceipt = "<EVALUATION_V3_CONSUMPTION_RECEIPT>"
 $RepoRoot = "."
 
-uv run python evals/run_ocr_benchmark.py `
+uv run --locked python evals/run_ocr_benchmark.py `
   --repo-root $RepoRoot `
   --authorization-receipt $AuthorizationReceipt `
   --descriptor $OcrDescriptor `
@@ -422,7 +422,7 @@ uv run python evals/run_ocr_benchmark.py `
   --model-assets-lock-sha256 $ModelAssetsLockSha256 `
   --out $LockedReport
 
-uv run python evals/run_ocr_benchmark.py `
+uv run --locked python evals/run_ocr_benchmark.py `
   --repo-root $RepoRoot `
   --authorization-receipt $AuthorizationReceipt `
   --descriptor $OcrDescriptor `
@@ -439,7 +439,7 @@ uv run python evals/run_ocr_benchmark.py `
   --model-assets-lock-sha256 $ModelAssetsLockSha256 `
   --out $CoReport
 
-uv run python evals/combine_ocr_release_gate.py `
+uv run --locked python evals/combine_ocr_release_gate.py `
   --descriptor "<SEALED_EVALUATION_V3_OCR_DESCRIPTOR>" `
   --rendered-root $RenderedRoot `
   --locked-report $LockedReport `
@@ -573,7 +573,7 @@ $OcrEnvironmentLock = "<SELECTED_PROVIDER_REQUIREMENTS_LOCK>"
 $OcrEnvironmentLockSha256 = "<SELECTED_PROVIDER_REQUIREMENTS_LOCK_SHA256>"
 $OcrModelAssetsLock = "evals\ocr_environments\v1\model-assets.lock.json"
 $OcrModelAssetsLockSha256 = "<MODEL_ASSETS_LOCK_SHA256>"
-uv run python evals/run_rendered_claude_live.py `
+uv run --locked python evals/run_rendered_claude_live.py `
   --live `
   --env-file ..\_secrets\.env `
   --descriptor "<SEALED_EVALUATION_V3_OCR_DESCRIPTOR>" `
@@ -657,20 +657,24 @@ not_applicable
 
 ### Controlled-defect 결정론적 평가
 
-`run_deterministic_validation.py`는 임의 JSONL 점수 계산기가 아니다. 다음 네 입력을 함께
-제공해야 한다.
+역사적 evaluation-v2 진단은 임의 JSONL 점수 계산기가 아니다. 먼저 정확히 알려진 generator
+오류 bundle에서 원본을 보존하는 one-time repair를 만들고, 다음 네 입력을 함께 제공해야 한다.
 
 ```powershell
-uv run python evals/run_deterministic_validation.py `
-  --defects "<DATASET_ROOT>/derived/evaluation/v2/injected-defects/cases.jsonl" `
-  --manifest "<DATASET_ROOT>/derived/evaluation/v2/manifest.json" `
+uv run --locked python -m tools.repair_trade_triplet_container_mutation `
+  --source-root "<DATASET_ROOT>/derived/evaluation/v2" `
+  --output-root "<DATASET_ROOT>/derived/evaluation/v2-container-repair-v1"
+
+uv run --locked python -m evals.run_deterministic_validation `
+  --defects "<DATASET_ROOT>/derived/evaluation/v2-container-repair-v1/injected-defects/cases.jsonl" `
+  --manifest "<DATASET_ROOT>/derived/evaluation/v2-container-repair-v1/manifest.json" `
   --splits "<DATASET_ROOT>/derived/evaluation-splits/v2/splits.json" `
   --dataset-lock evals/trade_document_triplets/v1/dataset.lock.json `
   --out "<RUN_ROOT>/deterministic-validation.json"
 ```
 
-Generator는 evaluation-v2 development 20 Case에만 한 필드 mutation과 provenance manifest를
-생성하고, evaluator는 별도로 실제 검출 delta를 점수화한다. manifest schema는
+이 historical evaluator는 evaluation-v2 development 20 Case의 한 필드 mutation에서 실제
+검출 delta를 issue-code 단위로 점수화한다. manifest schema는
 `trade-document-evaluation-assets/v3`, 결과 schema는
 `deterministic-validation-evaluation-report/v4`다. container/seal, freight both/neither,
 C/O origin/exporter/importer/HS를 포함한 20개 business-field operator 전체를 요구한다.
@@ -682,10 +686,35 @@ C/O origin/exporter/importer/HS를 포함한 20개 business-field operator 전�
 사람이 외부에서 공급하는 sealed evaluation-v3 bundle이어야 하지만 runner가 아직 없어
 `release_holdout_v3_sealed_bundle_not_provisioned`로 차단된다.
 
+현재 전체 규칙 커버리지는 별도의 공개 development diagnostic으로 검증한다.
+
+```powershell
+uv run --locked python -m tools.build_trade_triplet_rule_coverage `
+  --dataset-root "<DATASET_ROOT>" `
+  --output-root "<DATASET_ROOT>/derived/evaluation/rule-coverage-v1" `
+  --descriptor evals/trade_document_triplets/v1/rule-coverage-v1.descriptor.json `
+  --dataset-lock evals/trade_document_triplets/v1/dataset.lock.json
+
+uv run --locked python -m evals.run_rule_coverage_validation `
+  --defects "<DATASET_ROOT>/derived/evaluation/rule-coverage-v1/injected-defects/cases.jsonl" `
+  --negative-controls "<DATASET_ROOT>/derived/evaluation/rule-coverage-v1/negative-controls/cases.jsonl" `
+  --manifest "<DATASET_ROOT>/derived/evaluation/rule-coverage-v1/manifest.json" `
+  --selection-descriptor evals/trade_document_triplets/v1/rule-coverage-v1.descriptor.json `
+  --dataset-lock evals/trade_document_triplets/v1/dataset.lock.json `
+  --out "<RUN_ROOT>/rule-coverage-validation.json"
+```
+
+`deterministic-validation-evaluation-report/v5`는 29개 positive operator를 relation-aware finding
+단위(`issue_code`, `source_document_id`, `target_document_id`)로 평가하고 PL-only 추가 품목
+1건을 negative control로 검사한다. negative control은 baseline 대비 unmatched PL item이 정확히
+1개 증가하되 finding 추가·삭제와 review 상태 변화가 모두 0이어야 한다. 총 30개 variant는
+공개 등록 합성 데이터와 공개 seed에서 재현되므로 `release_eligible=false`이며 모델 선택 또는
+production 성능 근거로 사용할 수 없다.
+
 워크플로 경계는 별도 descriptor/evaluator로 검증한다.
 
 ```powershell
-uv run python evals/run_workflow_boundary_validation.py `
+uv run --locked python -m evals.run_workflow_boundary_validation `
   --descriptor evals/trade_document_triplets/v1/workflow-boundary.descriptor.json `
   --out "<RUN_ROOT>/workflow-boundary-validation.json"
 ```

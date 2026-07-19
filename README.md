@@ -192,24 +192,73 @@ Python 3.11과 `uv` lockfile을 기준으로 한다.
 
 ```powershell
 uv sync --locked --group dev
-uv run ruff check .
-uv run mypy
-uv run pytest -q
+uv run --locked ruff check .
+uv run --locked mypy
+uv run --locked pytest -q
 uv build --wheel
 ```
 
 기존 텍스트 회귀 CLI:
 
 ```powershell
-uv run customs-ai-agent list-scenarios
-uv run customs-ai-agent run --scenario happy_path
-uv run customs-ai-agent run --scenario happy_path `
+uv run --locked customs-ai-agent list-scenarios
+uv run --locked customs-ai-agent run --scenario happy_path
+uv run --locked customs-ai-agent run --scenario happy_path `
   --rag-url http://127.0.0.1:8010 --review-as-of 2026-07-10
-uv run customs-ai-agent run --scenario happy_path --llm-mode llm `
+uv run --locked customs-ai-agent run --scenario happy_path --llm-mode llm `
   --env-file ..\_secrets\.env --rag-url http://127.0.0.1:8010
 ```
 
 `run`은 V1 scenario/text 호환 명령이다. 실제 로컬 파일은 새 `review` 명령을 사용한다.
+
+## Python application API
+
+Backend의 untrusted serialized JSON 경계는 `AgentRuntime.review_json(raw_bytes)`다. 이 API는
+32 MiB 상한, strict UTF-8 JSON, 중복 key, NaN/Infinity, 구조 깊이를 nested model/PIL 처리 전에
+검사한다. Backend transport도 body를 메모리에 전부 올리기 전에 같은 32 MiB stream/body 상한을
+적용하고, 중복 key 정보가 사라지지 않도록 원본 bytes를 이 API에 전달해야 한다.
+
+`AgentRuntime.review()`는 이미 신뢰 경계 안에 들어온 `ServiceReviewRunRequestV2` 또는 plain
+JSON built-in tree를 위한 in-process API다. custom container와 nested constructed Pydantic
+model은 거절하고 전체 요청을 다시 검증한다. 두 API 모두 scenario/mock을 통과시키지 않고
+Claude와 Evidence HTTP 경로만 사용한다.
+
+```python
+from customs_ai_agent import AgentRuntime, AgentRuntimeError, RuntimeConfig
+
+evidence_url = "http://127.0.0.1:8010"
+runtime = AgentRuntime(
+    RuntimeConfig.from_environment(
+        evidence_base_url=evidence_url,
+        evidence_allowed_origins=frozenset({evidence_url}),
+        env_file="../_secrets/.env",
+    )
+)
+
+try:
+    result = runtime.review_json(
+        b"""{
+            "case_id": "case-001",
+            "documents": [{
+                    "document_id": "invoice-001",
+                    "filename": "invoice.txt",
+                    "content_text": "COMMERCIAL INVOICE\\nInvoice No: INV-001"
+            }],
+            "llm_mode": "llm",
+            "review_as_of": "2026-07-10"
+        }"""
+    )
+except AgentRuntimeError as exc:
+    safe_error_code = exc.code
+else:
+    public_result = result.model_dump(mode="json")
+```
+
+`RuntimeInputError`, `RuntimeConfigurationError`, `RuntimeExecutionError`는 모두
+`AgentRuntimeError`이며 외부 응답에는 안전한 `code`만 사용한다. 현재 Data readiness에
+필수 contract identity가 없으므로 위 호출은 Data가 그 계약을 제공할 때까지 fail-closed한다.
+image/PDF 호출은 추가로 canonical OCR release attestation을 통과한 provider가 필요하며,
+현재 OCR release pin이 비어 있으므로 성공 예제로 표시하지 않는다.
 
 ## 로컬 text/image/PDF review
 
@@ -270,7 +319,7 @@ $OcrEnvironmentLock = "evals\ocr_environments\v1\paddle.requirements.lock.txt"
 $OcrEnvironmentLockSha256 = "<PADDLE_ENVIRONMENT_LOCK_SHA256>"
 $OcrModelAssetsLock = "evals\ocr_environments\v1\model-assets.lock.json"
 $OcrModelAssetsLockSha256 = "<MODEL_ASSETS_LOCK_SHA256>"
-uv run customs-ai-agent review `
+uv run --locked customs-ai-agent review `
   --manifest .\local-eval\review-manifest.json `
   --out ..\_artifacts\local-review-v2.json `
   --env-file ..\_secrets\.env `
@@ -330,7 +379,7 @@ vision 이후 workflow를 반복 검증하는 모드다.
 ```
 
 ```powershell
-uv run customs-ai-agent review `
+uv run --locked customs-ai-agent review `
   --manifest .\local-eval\review-manifest.json `
   --out ..\_artifacts\local-review-v2.json `
   --env-file ..\_secrets\.env `
@@ -400,17 +449,18 @@ Backend가 소비할 수 있는 것은 `backend` scope뿐이다. `local` manifes
 Backend가 저장하거나 조립할 요청/응답 모델이 아니다.
 
 ```powershell
-uv run customs-ai-agent export-schema --version v1 --kind request `
+uv run --locked customs-ai-agent export-schema --version v1 --kind request `
   --out contracts/agent/v1/review_request.schema.json
-uv run customs-ai-agent export-schema --version v2 --kind result `
+uv run --locked customs-ai-agent export-schema --version v2 --kind result `
   --out contracts/agent/v2/review_result.schema.json
-uv run customs-ai-agent validate-contract --version v2 --kind request `
+uv run --locked customs-ai-agent validate-contract --version v2 --kind request `
   --input request.json
 ```
 
 - V1 request: text only
-- V2 request: text, bounded image pages 또는 bounded PDF pages 중 정확히 하나이며,
-  visual이면 `llm_mode=llm`
+- V2 Backend request: 필수 `case_id`, 1개 이상의 `documents`, 명시적
+  `llm_mode=llm`만 허용한다. 각 문서는 text, bounded image pages 또는 bounded PDF pages 중
+  정확히 하나이며, scenario/mock 필드는 Backend 계약에 존재하지 않는다.
 - V1 result: `schema_version=1.0`
 - V2 result: `schema_version=2.0`
 
@@ -442,8 +492,11 @@ y/x와 source index tie-break로 시각 순서를 만들고, prediction에는 le
 prediction 순서를 다시 정렬하지 않는다.
 
 Backend는 wheel commit, package version, schema scope/version/kind와 SHA-256을 함께 고정한다.
-Breaking change는 기존 V1/V2를 덮어쓰지 않고 다음 버전으로 추가한다. Backend용 공개 실행
-API는 `AgentRuntime.review()`뿐이며 현재 서비스 결과는 V2다. `customs_ai_agent.runner`의
+현재 V2는 아직 외부 release/tag 또는 Backend consumer pin이 없는 implementation candidate라
+service runtime과 일치하도록 위 계약을 동결 전 교정했다. 동결 이후 Breaking change는 기존
+V1/V2를 덮어쓰지 않고 다음 버전으로 추가한다. Backend용 공개 실행
+API는 raw JSON bytes용 `AgentRuntime.review_json()`과 신뢰된 in-process object용
+`AgentRuntime.review()`이며 현재 서비스 결과는 V2다. `customs_ai_agent.runner`의
 V1/V2 함수는 mock scenario와 임의 dependency injection을 허용하는 CLI·test·evaluation 내부
 도구이므로 Backend에서 호출하면 안 된다. 기존 V1 결과를 `schema_version=2.0`으로 재표시해서도
 안 된다.

@@ -39,7 +39,7 @@ CANONICAL_OCR_AUTHORIZATION_COMMIT_SHA: str | None = "<C0_SHA>"
 코드도 허용하지 않는다.
 
 ```powershell
-uv run python tools/verify_ocr_release_freeze.py `
+uv run --locked python tools/verify_ocr_release_freeze.py `
   --repo-root . `
   --descriptor "<SEALED_EVALUATION_V3_OCR_DESCRIPTOR>" `
   --authorization-receipt "<EVALUATION_V3_CONSUMPTION_RECEIPT>"

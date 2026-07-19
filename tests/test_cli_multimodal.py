@@ -1069,6 +1069,7 @@ def test_static_agent_contracts_match_exporter_and_validate_v1_v2_samples(
         "review_as_of": "2026-07-10",
     }
     v2_request = {
+        "case_id": "case-image-contract",
         "documents": [
             {
                 "document_id": "doc-image",
@@ -1096,6 +1097,34 @@ def test_static_agent_contracts_match_exporter_and_validate_v1_v2_samples(
         _validate_contract_payload("v1", "request", v2_request)
     assert list(
         Draft202012Validator(_agent_contract_schema("v1", "request")).iter_errors(v2_request)
+    )
+
+    numeric_string = json.loads(json.dumps(v2_request))
+    numeric_string["documents"][0]["image_pages"][0]["byte_length"] = str(
+        numeric_string["documents"][0]["image_pages"][0]["byte_length"]
+    )
+    with pytest.raises(ContractValidationError, match="contract_validation_failed"):
+        _validate_contract_payload("v2", "request", numeric_string)
+
+    invalid_date = json.loads(json.dumps(v2_request))
+    invalid_date["review_as_of"] = "2026-07-10T00:00:00"
+    with pytest.raises(ContractValidationError, match="contract_validation_failed"):
+        _validate_contract_payload("v2", "request", invalid_date)
+
+
+def test_v2_contract_validator_rejects_internal_scenario_and_mock_payload() -> None:
+    internal_only_payload = {
+        "scenario_id": "happy_path",
+        "llm_mode": "mock",
+    }
+
+    with pytest.raises(ContractValidationError, match="contract_unknown_field"):
+        _validate_contract_payload("v2", "request", internal_only_payload)
+
+    assert list(
+        Draft202012Validator(_agent_contract_schema("v2", "request")).iter_errors(
+            internal_only_payload
+        )
     )
 
 

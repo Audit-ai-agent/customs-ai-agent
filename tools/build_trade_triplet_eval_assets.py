@@ -39,7 +39,6 @@ EVALUATION_SPLIT_SCHEMA = "trade-document-evaluation-splits/v2"
 EVALUATION_SPLIT_SEED = "trade-document-triplets-evaluation-v2-holdout-2026-07-18"
 EVALUATION_REBALANCE_SEED = "trade-document-triplets-evaluation-v2-rebalance-2026-07-18"
 CONTROLLED_CASE_SEED = "trade-document-triplets-evaluation-v2-controlled-development"
-CONTROLLED_CASE_COUNT = 20
 ADJUDICATION_STATES = frozenset(
     {
         "confirmed_normal",
@@ -67,10 +66,74 @@ DEFAULT_WORKFLOW_DESCRIPTOR = (
     / "v1"
     / "workflow-boundary.descriptor.json"
 )
+_ISO_6346_CONTAINER_PATTERN = re.compile(r"^[A-Z]{3}[UJZ]\d{7}$")
+_ISO_6346_LETTER_VALUES = {
+    letter: value
+    for letter, value in zip(
+        "ABCDEFGHIJKLMNOPQRSTUVWXYZ",
+        (
+            10,
+            12,
+            13,
+            14,
+            15,
+            16,
+            17,
+            18,
+            19,
+            20,
+            21,
+            23,
+            24,
+            25,
+            26,
+            27,
+            28,
+            29,
+            30,
+            31,
+            32,
+            34,
+            35,
+            36,
+            37,
+            38,
+        ),
+        strict=True,
+    )
+}
 
 
 class EvalAssetError(ValueError):
     """Raised when evaluation assets cannot be derived reproducibly."""
+
+
+def _iso_6346_check_digit(first_ten: str) -> int:
+    if re.fullmatch(r"[A-Z]{3}[UJZ]\d{6}", first_ten) is None:
+        raise EvalAssetError("container base is not a valid ISO 6346 lexical form")
+    total = 0
+    for index, character in enumerate(first_ten):
+        value = _ISO_6346_LETTER_VALUES[character] if character.isalpha() else int(character)
+        total += value * (2**index)
+    return (total % 11) % 10
+
+
+def _valid_container_number(value: Any) -> str:
+    normalized = re.sub(r"[\s-]+", "", str(value or "")).upper()
+    if _ISO_6346_CONTAINER_PATTERN.fullmatch(normalized) is None:
+        raise EvalAssetError("controlled container source is not a valid ISO 6346 identifier")
+    first_ten = normalized[:10]
+    return f"{first_ten}{_iso_6346_check_digit(first_ten)}"
+
+
+def _different_valid_container_number(value: Any) -> str:
+    canonical = _valid_container_number(value)
+    serial = (int(canonical[4:10]) + 1) % 1_000_000
+    first_ten = f"{canonical[:4]}{serial:06d}"
+    replacement = f"{first_ten}{_iso_6346_check_digit(first_ten)}"
+    if replacement == canonical:
+        raise EvalAssetError("controlled container mutation did not change the identifier")
+    return replacement
 
 
 def _sha256_bytes(value: bytes) -> str:
@@ -543,7 +606,17 @@ BUSINESS_FIELD_OPERATOR_IDS = (
     "co_exporter_mismatch",
     "co_importer_mismatch",
     "co_hs_code_mismatch",
+    "pl_consignee_mismatch",
+    "pl_departure_date_mismatch",
+    "ci_port_of_loading_mismatch",
+    "ci_port_of_discharge_mismatch",
+    "pl_country_of_origin_mismatch",
+    "pl_shipping_marks_mismatch",
+    "pl_line_quantity_mismatch",
+    "pl_line_net_gross_invalid",
+    "pl_line_item_unmatched",
 )
+CONTROLLED_CASE_COUNT = len(BUSINESS_FIELD_OPERATOR_IDS)
 WORKFLOW_BOUNDARY_OPERATOR_IDS = (
     "required_document_missing",
     "duplicate_document_type",
@@ -583,13 +656,13 @@ def _base_operator(
             "bill_of_lading",
             ["Consignee"],
             lambda value: f"{value} [CONTROLLED MISMATCH]",
-            ["ci_bl.consignee"],
+            ["pl_bl.consignee", "ci_bl.consignee"],
         ),
         "pl_vessel_mismatch": (
             "packing_list",
             ["Vessel / Flight"],
             _replace_vessel_name,
-            ["ci_pl.vessel"],
+            ["ci_pl.vessel", "pl_bl.vessel"],
         ),
         "bl_voyage_mismatch": (
             "bill_of_lading",
@@ -601,19 +674,19 @@ def _base_operator(
             "bill_of_lading",
             ["Port of Loading"],
             lambda value: f"{value} [CONTROLLED MISMATCH]",
-            ["ci_bl.port_of_loading"],
+            ["pl_bl.port_of_loading"],
         ),
         "bl_port_of_discharge_mismatch": (
             "bill_of_lading",
             ["Port of Discharge"],
             lambda value: f"{value} [CONTROLLED MISMATCH]",
-            ["ci_bl.port_of_discharge"],
+            ["pl_bl.port_of_discharge"],
         ),
         "pl_package_mismatch": (
             "packing_list",
             ["No. & Kind of Packages"],
             _replace_package_count,
-            ["ci_pl.packages"],
+            ["ci_pl.packages", "pl_bl.packages"],
         ),
         "bl_gross_weight_mismatch": (
             "bill_of_lading",
@@ -632,6 +705,54 @@ def _base_operator(
             ["Amount"],
             lambda value: _add_decimal(value, Decimal("100000.00")),
             ["ci.amount_vs_displayed_unit_price"],
+        ),
+        "pl_consignee_mismatch": (
+            "packing_list",
+            ["Consignee"],
+            lambda value: f"{value} [CONTROLLED MISMATCH]",
+            ["ci_pl.consignee", "pl_bl.consignee"],
+        ),
+        "pl_departure_date_mismatch": (
+            "packing_list",
+            ["Departure Date"],
+            lambda value: "2099-12-30" if value.strip() == "2099-12-31" else "2099-12-31",
+            ["ci_pl.departure_date"],
+        ),
+        "ci_port_of_loading_mismatch": (
+            "commercial_invoice",
+            ["From"],
+            lambda value: f"{value} [CONTROLLED MISMATCH]",
+            ["ci_pl.port_of_loading"],
+        ),
+        "ci_port_of_discharge_mismatch": (
+            "commercial_invoice",
+            ["To"],
+            lambda value: f"{value} [CONTROLLED MISMATCH]",
+            ["ci_pl.port_of_discharge"],
+        ),
+        "pl_country_of_origin_mismatch": (
+            "packing_list",
+            ["Other References"],
+            lambda _value: "Country of Origin: Controlled Mismatch Origin",
+            ["ci_pl.country_of_origin"],
+        ),
+        "pl_shipping_marks_mismatch": (
+            "packing_list",
+            ["Shipping Marks"],
+            lambda value: f"{value} [CONTROLLED MISMATCH]",
+            ["ci_pl.shipping_marks"],
+        ),
+        "pl_line_quantity_mismatch": (
+            "packing_list",
+            ["Goods Details", 0, "quantity"],
+            lambda value: _add_decimal(value, Decimal("1.00")),
+            ["ci_pl.line_item_quantity"],
+        ),
+        "pl_line_item_unmatched": (
+            "packing_list",
+            ["Goods Details", 0, "item"],
+            lambda _value: "CONTROLLED UNRELATED ITEM WITH NO SEMANTIC OVERLAP",
+            ["ci_pl.line_item_matching"],
         ),
     }
     return operators.get(operator_id)
@@ -721,18 +842,25 @@ def _prepare_operator(
     ci = controlled_parent["documents"]["commercial_invoice"]["raw_record"]
     if operator_id == "pl_container_mismatch":
         field_path = ["Container No."]
+        controlled_container = _valid_container_number(bl["Container No."])
+        _setup_replace(
+            controlled_parent,
+            setup_operations,
+            ["documents", "bill_of_lading", "raw_record", "Container No."],
+            controlled_container,
+        )
         _setup_add(
             controlled_parent,
             setup_operations,
             ["documents", "packing_list", "raw_record", *field_path],
-            bl["Container No."],
+            controlled_container,
         )
         return (
             controlled_parent,
             setup_operations,
             "packing_list",
             field_path,
-            f"{bl['Container No.']}-CONTROLLED-MISMATCH",
+            _different_valid_container_number(controlled_container),
             ["pl_bl.container_numbers"],
         )
     if operator_id == "pl_seal_mismatch":
@@ -810,6 +938,28 @@ def _prepare_operator(
             "",
             ["bl.freight_terms"],
         )
+    if operator_id == "pl_line_net_gross_invalid":
+        field_path = ["Goods Details", 0, "net_weight"]
+        gross_weight = str(
+            _path_value(
+                controlled_parent["documents"]["packing_list"]["raw_record"],
+                ["Goods Details", 0, "weight"],
+            )
+        )
+        _setup_add(
+            controlled_parent,
+            setup_operations,
+            ["documents", "packing_list", "raw_record", *field_path],
+            gross_weight,
+        )
+        return (
+            controlled_parent,
+            setup_operations,
+            "packing_list",
+            field_path,
+            _add_decimal(gross_weight, Decimal("100.00")),
+            ["pl.line_item_net_gross_weight"],
+        )
 
     hs_code = "0000000001"
     _setup_add(
@@ -873,6 +1023,8 @@ def _prepare_operator(
 def inject_controlled_defects(
     cases: list[dict[str, Any]],
     controlled_case_ids: list[str],
+    *,
+    evaluation_version: str = EVAL_VERSION,
 ) -> list[dict[str, Any]]:
     """Create one deterministic field mutation per non-holdout development case."""
 
@@ -914,7 +1066,7 @@ def inject_controlled_defects(
             "schema_version": ADJUDICATION_SCHEMA,
             "adjudication_id": f"{variant_id}:expected",
             "dataset_id": DATASET_ID,
-            "dataset_version": EVAL_VERSION,
+            "dataset_version": evaluation_version,
             "scope": "case",
             "case_id": variant_id,
             "rule_id": expected_rules[0],

@@ -101,6 +101,13 @@
         "filename": {
           "maxLength": 255,
           "minLength": 1,
+          "not": {
+            "enum": [
+              ".",
+              ".."
+            ]
+          },
+          "pattern": "^[^/\\\\:\\s\\x00-\\x1f\\x7f](?:[^/\\\\:\\x00-\\x1f\\x7f]*[^/\\\\:\\s\\x00-\\x1f\\x7f])?$",
           "title": "Filename",
           "type": "string"
         },
@@ -125,10 +132,15 @@
         },
         "requirement_document_codes": {
           "items": {
+            "maxLength": 128,
+            "minLength": 1,
+            "pattern": "^[A-Za-z0-9][A-Za-z0-9._:-]*$",
             "type": "string"
           },
+          "maxItems": 100,
           "title": "Requirement Document Codes",
-          "type": "array"
+          "type": "array",
+          "uniqueItems": true
         }
       },
       "required": [
@@ -372,119 +384,23 @@
   "$id": "https://schemas.customs.local/agent/v2/review-request.schema.json",
   "$schema": "https://json-schema.org/draft/2020-12/schema",
   "additionalProperties": false,
-  "allOf": [
-    {
-      "if": {
-        "properties": {
-          "documents": {
-            "contains": {
-              "anyOf": [
-                {
-                  "properties": {
-                    "image_pages": {
-                      "minItems": 1,
-                      "type": "array"
-                    }
-                  },
-                  "required": [
-                    "image_pages"
-                  ]
-                },
-                {
-                  "properties": {
-                    "pdf_pages": {
-                      "type": "object"
-                    }
-                  },
-                  "required": [
-                    "pdf_pages"
-                  ]
-                }
-              ],
-              "type": "object"
-            },
-            "type": "array"
-          }
-        },
-        "required": [
-          "documents"
-        ]
-      },
-      "then": {
-        "properties": {
-          "llm_mode": {
-            "const": "llm"
-          }
-        },
-        "required": [
-          "llm_mode"
-        ]
-      }
-    }
-  ],
-  "description": "V2 extends ReviewRunRequest with explicit text, direct-image, and source-bound PDF-page modalities; raw PDFs, paths, and URLs are not in the wire. Visual requests require llm_mode=llm by runtime validation.",
-  "oneOf": [
-    {
-      "properties": {
-        "documents": {
-          "type": "null"
-        },
-        "scenario_id": {
-          "minLength": 1,
-          "type": "string"
-        }
-      },
-      "required": [
-        "scenario_id"
-      ]
-    },
-    {
-      "properties": {
-        "documents": {
-          "maxItems": 20,
-          "minItems": 1,
-          "type": "array"
-        },
-        "scenario_id": {
-          "type": "null"
-        }
-      },
-      "required": [
-        "documents"
-      ]
-    }
-  ],
+  "description": "Service-only V2 request with an explicit case, bounded text/direct-image/source-bound PDF-page documents, and llm_mode=llm. Scenario fixtures, mock execution, raw PDFs, paths, and URLs are not part of the Backend wire.",
   "properties": {
     "case_id": {
-      "anyOf": [
-        {
-          "maxLength": 128,
-          "minLength": 1,
-          "type": "string"
-        },
-        {
-          "type": "null"
-        }
-      ],
-      "default": null,
-      "title": "Case Id"
+      "maxLength": 128,
+      "minLength": 1,
+      "pattern": "^[A-Za-z0-9][A-Za-z0-9._:-]*$",
+      "title": "Case Id",
+      "type": "string"
     },
     "documents": {
-      "anyOf": [
-        {
-          "items": {
-            "$ref": "#/$defs/DocumentInputV2"
-          },
-          "maxItems": 20,
-          "minItems": 1,
-          "type": "array"
-        },
-        {
-          "type": "null"
-        }
-      ],
-      "default": null,
-      "title": "Documents"
+      "items": {
+        "$ref": "#/$defs/DocumentInputV2"
+      },
+      "maxItems": 20,
+      "minItems": 1,
+      "title": "Documents",
+      "type": "array"
     },
     "jurisdiction": {
       "const": "KR",
@@ -493,11 +409,7 @@
       "type": "string"
     },
     "llm_mode": {
-      "default": "mock",
-      "enum": [
-        "mock",
-        "llm"
-      ],
+      "const": "llm",
       "title": "Llm Mode",
       "type": "string"
     },
@@ -513,20 +425,6 @@
       "title": "Review Run Id",
       "type": "string"
     },
-    "scenario_id": {
-      "anyOf": [
-        {
-          "maxLength": 128,
-          "minLength": 1,
-          "type": "string"
-        },
-        {
-          "type": "null"
-        }
-      ],
-      "default": null,
-      "title": "Scenario Id"
-    },
     "trade_type": {
       "default": "import",
       "enum": [
@@ -538,12 +436,22 @@
     },
     "uploaded_requirement_document_codes": {
       "items": {
+        "maxLength": 128,
+        "minLength": 1,
+        "pattern": "^[A-Za-z0-9][A-Za-z0-9._:-]*$",
         "type": "string"
       },
+      "maxItems": 100,
       "title": "Uploaded Requirement Document Codes",
-      "type": "array"
+      "type": "array",
+      "uniqueItems": true
     }
   },
+  "required": [
+    "case_id",
+    "documents",
+    "llm_mode"
+  ],
   "title": "Customs AI Agent V2 review request",
   "type": "object"
 }

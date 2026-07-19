@@ -427,3 +427,8 @@ def test_v2_public_any_values_reject_nested_sensitive_payload_keys() -> None:
     }
     with pytest.raises(ValidationError, match="forbidden sensitive key"):
         ReviewRunResultV2.model_validate(unsafe_field)
+
+    camel_case_key = json.loads(json.dumps(payload))
+    camel_case_key["audit_trail"][0]["metadata"]["dataBase64"] = "raw-media"
+    with pytest.raises(ValidationError, match="forbidden sensitive key"):
+        ReviewRunResultV2.model_validate(camel_case_key)

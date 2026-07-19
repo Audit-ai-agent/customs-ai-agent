@@ -1,9 +1,12 @@
 from __future__ import annotations
 
+import json
+import math
 from dataclasses import dataclass, field
 from os import PathLike
 from typing import Any, Literal
 
+from jsonschema import Draft202012Validator, FormatChecker
 from pydantic import SecretStr, ValidationError
 
 from customs_ai_agent.adapters.llm import (
@@ -17,9 +20,14 @@ from customs_ai_agent.adapters.retrieval import (
     RetrievalError,
     validate_evidence_destination,
 )
+from customs_ai_agent.contracts import get_schema
 from customs_ai_agent.ocr_release import ReleaseLockedOcrProvider
 from customs_ai_agent.runner import run_review_result_v2
-from customs_ai_agent.schemas.models import ReviewRunRequestV2, ReviewRunResultV2
+from customs_ai_agent.schemas.models import (
+    ReviewRunRequestV2,
+    ReviewRunResultV2,
+    ServiceReviewRunRequestV2,
+)
 
 
 _FORBIDDEN_RESULT_KEYS = frozenset(
@@ -48,6 +56,100 @@ _FORBIDDEN_RESULT_KEYS = frozenset(
         "token",
     }
 )
+_MAX_SERVICE_REQUEST_JSON_BYTES = 32 * 1024 * 1024
+_MAX_SERVICE_REQUEST_JSON_NODES = 20_000
+_MAX_SERVICE_REQUEST_JSON_DEPTH = 32
+_SERVICE_REQUEST_VALIDATOR = Draft202012Validator(
+    get_schema("backend", "v2", "review-request"),
+    format_checker=FormatChecker(),
+)
+
+
+def _key_safety_token(key: str) -> str:
+    return "".join(
+        character for character in key.casefold() if character.isascii() and character.isalnum()
+    )
+
+
+_FORBIDDEN_RESULT_KEY_TOKENS = frozenset(_key_safety_token(key) for key in _FORBIDDEN_RESULT_KEYS)
+
+
+class _DuplicateJsonKeyError(ValueError):
+    pass
+
+
+def _reject_duplicate_json_keys(pairs: list[tuple[str, Any]]) -> dict[str, Any]:
+    value: dict[str, Any] = {}
+    for key, item in pairs:
+        if key in value:
+            raise _DuplicateJsonKeyError
+        value[key] = item
+    return value
+
+
+def _reject_nonfinite_json_constant(_value: str) -> Any:
+    raise ValueError
+
+
+def _assert_plain_json_request(value: Any) -> None:
+    """Reject constructed models and custom containers at the untrusted dict boundary."""
+
+    stack: list[tuple[Any, int]] = [(value, 0)]
+    node_count = 0
+    string_char_count = 0
+    while stack:
+        item, depth = stack.pop()
+        node_count += 1
+        if node_count > _MAX_SERVICE_REQUEST_JSON_NODES or depth > _MAX_SERVICE_REQUEST_JSON_DEPTH:
+            raise RuntimeInputError(
+                "review_request_invalid",
+                "The Agent request exceeds the service structure limit.",
+            )
+        if item is None or type(item) is bool:
+            continue
+        if type(item) is int:
+            if item.bit_length() > 4096:
+                raise RuntimeInputError(
+                    "review_request_invalid",
+                    "The Agent request contains an unsupported numeric value.",
+                )
+            continue
+        if type(item) is float:
+            if not math.isfinite(item):
+                raise RuntimeInputError(
+                    "review_request_invalid",
+                    "The Agent request contains an unsupported numeric value.",
+                )
+            continue
+        if type(item) is str:
+            string_char_count += len(item)
+            if string_char_count > _MAX_SERVICE_REQUEST_JSON_BYTES:
+                raise RuntimeInputError(
+                    "review_request_too_large",
+                    "The Agent request exceeds the service safety limit.",
+                )
+            continue
+        if type(item) is list:
+            if len(item) > 1_000:
+                raise RuntimeInputError(
+                    "review_request_invalid",
+                    "The Agent request exceeds the service structure limit.",
+                )
+            stack.extend((nested, depth + 1) for nested in item)
+            continue
+        if type(item) is dict:
+            if len(item) > 1_000 or any(type(key) is not str for key in item):
+                raise RuntimeInputError(
+                    "review_request_invalid",
+                    "The Agent request must contain only JSON object keys.",
+                )
+            stack.extend((key, depth + 1) for key in item)
+            stack.extend((nested, depth + 1) for nested in item.values())
+            continue
+        raise RuntimeInputError(
+            "review_request_invalid",
+            "The Agent request must contain only plain JSON values.",
+        )
 
 
 class AgentRuntimeError(RuntimeError):
@@ -209,14 +311,14 @@ class RuntimeConfig:
         )
 
 
-def _has_visual_documents(request: ReviewRunRequestV2) -> bool:
+def _has_visual_documents(request: ServiceReviewRunRequestV2) -> bool:
     return any(
         document.image_pages or document.pdf_pages is not None
         for document in (request.documents or [])
     )
 
 
-def _input_base64_markers(request: ReviewRunRequestV2) -> tuple[str, ...]:
+def _input_base64_markers(request: ServiceReviewRunRequestV2) -> tuple[str, ...]:
     markers: list[str] = []
     for document in request.documents or []:
         pages = document.pdf_pages.pages if document.pdf_pages is not None else document.image_pages
@@ -224,16 +326,8 @@ def _input_base64_markers(request: ReviewRunRequestV2) -> tuple[str, ...]:
     return tuple(markers)
 
 
-def _assert_service_request(request: ReviewRunRequestV2) -> None:
-    if request.scenario_id is not None or request.documents is None or request.case_id is None:
-        raise RuntimeInputError(
-            "service_request_identity_required",
-            "Service reviews require an explicit case and document set.",
-        )
-
-
 def _assert_result_correlated(
-    request: ReviewRunRequestV2,
+    request: ServiceReviewRunRequestV2,
     result: ReviewRunResultV2,
 ) -> None:
     if request.case_id is None or request.documents is None:
@@ -278,8 +372,8 @@ def _assert_public_result_safe(
             "The Agent result exceeded the public safety inspection depth.",
         )
     if isinstance(value, dict):
-        normalized_keys = {str(key).strip().casefold().replace("-", "_") for key in value}
-        if normalized_keys.intersection(_FORBIDDEN_RESULT_KEYS):
+        normalized_keys = {_key_safety_token(str(key)) for key in value}
+        if normalized_keys.intersection(_FORBIDDEN_RESULT_KEY_TOKENS):
             raise RuntimeExecutionError(
                 "public_result_safety_violation",
                 "Sensitive input material reached the public Agent result.",
@@ -342,7 +436,10 @@ class AgentRuntime:
                 ocr_layout_provider=config.ocr_layout_provider,
             )
         except LLMError:
-            raise
+            raise RuntimeConfigurationError(
+                "runtime_dependency_configuration_failed",
+                "Claude, OCR, or Evidence runtime configuration is invalid.",
+            ) from None
         except Exception:
             raise RuntimeConfigurationError(
                 "runtime_dependency_configuration_failed",
@@ -360,49 +457,114 @@ class AgentRuntime:
             if marker
         )
 
+    def review_json(
+        self,
+        payload: bytes | bytearray | memoryview,
+    ) -> ReviewRunResultV2:
+        """Validate a bounded, duplicate-key-free UTF-8 JSON service request."""
+
+        if type(payload) not in {bytes, bytearray, memoryview}:
+            raise RuntimeInputError(
+                "review_request_invalid",
+                "The serialized Agent request must be UTF-8 JSON bytes.",
+            )
+        try:
+            payload_size = payload.nbytes if isinstance(payload, memoryview) else len(payload)
+        except ValueError:
+            raise RuntimeInputError(
+                "review_request_invalid",
+                "The serialized Agent request bytes are unavailable.",
+            ) from None
+        if payload_size > _MAX_SERVICE_REQUEST_JSON_BYTES:
+            raise RuntimeInputError(
+                "review_request_too_large",
+                "The serialized Agent request exceeds the service safety limit.",
+            )
+        try:
+            raw = bytes(payload)
+        except (BufferError, TypeError, ValueError):
+            raise RuntimeInputError(
+                "review_request_invalid",
+                "The serialized Agent request bytes are unavailable.",
+            ) from None
+        if len(raw) > _MAX_SERVICE_REQUEST_JSON_BYTES:
+            del raw
+            raise RuntimeInputError(
+                "review_request_too_large",
+                "The serialized Agent request exceeds the service safety limit.",
+            )
+        try:
+            decoded = json.loads(
+                raw.decode("utf-8"),
+                object_pairs_hook=_reject_duplicate_json_keys,
+                parse_constant=_reject_nonfinite_json_constant,
+            )
+        except (UnicodeDecodeError, ValueError, RecursionError):
+            raise RuntimeInputError(
+                "review_request_invalid",
+                "The serialized Agent request is not valid duplicate-key-free JSON.",
+            ) from None
+        finally:
+            del raw
+        if not isinstance(decoded, dict):
+            raise RuntimeInputError(
+                "review_request_invalid",
+                "The serialized Agent request must contain one JSON object.",
+            )
+        return self.review(decoded)
+
     def review(
         self,
-        request: ReviewRunRequestV2 | dict[str, Any],
+        request: ServiceReviewRunRequestV2 | dict[str, Any],
     ) -> ReviewRunResultV2:
         """Run one real V2 review and return only the redacted public contract."""
 
-        if not isinstance(request, (ReviewRunRequestV2, dict)):
+        if not isinstance(request, (ServiceReviewRunRequestV2, dict)):
             raise RuntimeInputError(
                 "review_request_invalid",
-                "The Agent runtime accepts ReviewRunRequestV2 or a request object.",
+                "The Agent runtime accepts ServiceReviewRunRequestV2 or a request object.",
             )
         # A Pydantic instance can have been created with ``model_construct`` or
         # mutated after validation. Re-parse a detached dump at the service
         # boundary instead of trusting the caller-owned object.
-        request_payload = (
-            request.model_dump(mode="python", warnings=False)
-            if isinstance(request, ReviewRunRequestV2)
-            else request
-        )
         try:
-            parsed_request = ReviewRunRequestV2.model_validate(request_payload)
+            request_payload = (
+                request.model_dump(mode="json", warnings=False)
+                if isinstance(request, ServiceReviewRunRequestV2)
+                else request
+            )
+        except Exception:
+            raise RuntimeInputError(
+                "review_request_invalid",
+                "The V2 Agent request could not be serialized safely.",
+            ) from None
+        _assert_plain_json_request(request_payload)
+        if next(_SERVICE_REQUEST_VALIDATOR.iter_errors(request_payload), None) is not None:
+            raise RuntimeInputError(
+                "review_request_invalid",
+                "The V2 Agent request does not satisfy the service contract.",
+            )
+        try:
+            service_request = ServiceReviewRunRequestV2.model_validate(request_payload)
         except ValidationError:
             raise RuntimeInputError(
                 "review_request_invalid",
-                "The V2 Agent request does not satisfy the public contract.",
+                "The V2 Agent request does not satisfy the service contract.",
             ) from None
 
-        _assert_service_request(parsed_request)
-        if parsed_request.llm_mode != "llm":
-            raise RuntimeInputError(
-                "real_llm_mode_required",
-                "The service runtime accepts only explicit llm mode requests.",
-            )
-        if _has_visual_documents(parsed_request) and self._config.ocr_layout_provider is None:
+        if _has_visual_documents(service_request) and self._config.ocr_layout_provider is None:
             raise RuntimeConfigurationError(
                 "ocr_layout_provider_required",
                 "Image and PDF reviews require an explicitly configured OCR/layout provider.",
             )
 
-        sensitive_markers = self._secret_markers + _input_base64_markers(parsed_request)
+        sensitive_markers = self._secret_markers + _input_base64_markers(service_request)
         try:
+            workflow_request = ReviewRunRequestV2.model_validate(
+                service_request.model_dump(mode="python", warnings=False)
+            )
             result = run_review_result_v2(
-                parsed_request,
+                workflow_request,
                 retriever=self._retriever,
                 analyzer=self._analyzer,
             )
@@ -422,14 +584,19 @@ class AgentRuntime:
                     "review_result_invalid",
                     "The Agent workflow returned an invalid V2 public result.",
                 ) from None
-            _assert_result_correlated(parsed_request, result)
+            _assert_result_correlated(service_request, result)
             _assert_public_result_safe(
                 result.model_dump(mode="python"),
                 sensitive_markers=sensitive_markers,
             )
             return result
-        except (AgentRuntimeError, LLMError, OcrLayoutProviderError, RetrievalError):
+        except AgentRuntimeError:
             raise
+        except (LLMError, OcrLayoutProviderError, RetrievalError):
+            raise RuntimeExecutionError(
+                "review_execution_failed",
+                "The Agent review failed without exposing private execution details.",
+            ) from None
         except Exception:
             raise RuntimeExecutionError(
                 "review_execution_failed",

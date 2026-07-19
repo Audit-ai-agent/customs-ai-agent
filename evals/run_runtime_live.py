@@ -44,7 +44,10 @@ from customs_ai_agent.prompts import (
 )
 from customs_ai_agent.runtime import AgentRuntime, AgentRuntimeError, RuntimeConfig
 from customs_ai_agent.schemas.llm import ClaudeDocumentCandidate
-from customs_ai_agent.schemas.models import ReviewRunRequestV2, ReviewRunResultV2
+from customs_ai_agent.schemas.models import (
+    ReviewRunResultV2,
+    ServiceReviewRunRequestV2,
+)
 
 
 DEFAULT_BASE_URL = "http://127.0.0.1:8010"
@@ -412,7 +415,7 @@ def _runtime_failure_code(exc: Exception) -> str:
     return "agent_runtime_execution_failed"
 
 
-def _explicit_service_request(*, review_as_of: date) -> ReviewRunRequestV2:
+def _explicit_service_request(*, review_as_of: date) -> ServiceReviewRunRequestV2:
     """Expand the fixed evaluation fixture before crossing the service boundary.
 
     ``AgentRuntime`` deliberately rejects fixture identifiers because a service
@@ -423,7 +426,7 @@ def _explicit_service_request(*, review_as_of: date) -> ReviewRunRequestV2:
 
     try:
         scenario = get_scenario(SCENARIO_ID)
-        return ReviewRunRequestV2(
+        return ServiceReviewRunRequestV2(
             case_id=str(scenario["case_id"]),
             documents=scenario["documents"],
             llm_mode="llm",
