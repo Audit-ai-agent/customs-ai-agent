@@ -19,6 +19,8 @@ recursive-include fixtures *.md *.json
 recursive-include prompts *.md
 recursive-include security *.toml
 recursive-include tests *.py
+include tests/fixtures/evidence_runtime_v2/README.md
+include tests/fixtures/evidence_runtime_v2/provider-runtime-lock.json
 recursive-include tools *.py
 
 prune build

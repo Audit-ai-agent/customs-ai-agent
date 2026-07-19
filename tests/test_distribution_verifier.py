@@ -13,6 +13,7 @@ from typing import Any
 
 import pytest
 
+from tools.build_release_distributions import ReleaseBuildError, _assert_exact_clean_head
 from tools.verify_distribution import (
     BUILD_MANIFEST_SDIST_PATH,
     BUILD_MANIFEST_WHEEL_PATH,
@@ -358,6 +359,8 @@ def test_manifest_is_explicit_and_excludes_raw_documents_secrets_and_outputs() -
         "recursive-include fixtures *.md *.json",
         "recursive-include security *.toml",
         "recursive-include tests *.py",
+        "include tests/fixtures/evidence_runtime_v2/README.md",
+        "include tests/fixtures/evidence_runtime_v2/provider-runtime-lock.json",
         "recursive-include tools *.py",
         "global-exclude .env .env.*",
         "global-exclude *.pdf *.png *.jpg *.jpeg *.webp *.bmp *.gif *.tif *.tiff",
@@ -548,6 +551,19 @@ def test_wheel_payloads_are_bound_to_exact_git_source(tmp_path: Path) -> None:
             expected_git_sha=head,
             source_root=repository,
         )
+
+
+def test_release_builder_requires_exact_clean_git_head(tmp_path: Path) -> None:
+    repository = _source_git_repository(tmp_path / "source-repository")
+    head, _, _ = _head_source_build_payloads(repository)
+
+    assert _assert_exact_clean_head(repository, head) == head
+
+    (repository / "untracked.txt").write_text("dirty\n", encoding="utf-8")
+    with pytest.raises(ReleaseBuildError, match="release_git_worktree_not_clean"):
+        _assert_exact_clean_head(repository, head)
+    with pytest.raises(ReleaseBuildError, match="release_git_head_mismatch"):
+        _assert_exact_clean_head(repository, "0" * 40)
 
 
 def test_sdist_payloads_are_bound_to_exact_git_source(tmp_path: Path) -> None:

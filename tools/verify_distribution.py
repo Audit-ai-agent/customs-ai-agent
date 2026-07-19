@@ -171,6 +171,8 @@ _SDIST_REQUIRED_FILES: Final = frozenset(
         "tests/test_distribution_verifier.py",
         "tests/test_security_gate.py",
         "tests/test_ocr_freeze.py",
+        "tests/fixtures/evidence_runtime_v2/README.md",
+        "tests/fixtures/evidence_runtime_v2/provider-runtime-lock.json",
         "tools/run_security_gate.py",
         "tools/build_evidence_runtime_release_lock.py",
         "tools/build_release_distributions.py",
