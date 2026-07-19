@@ -296,7 +296,16 @@ match로 검증한다. 현재 lock은 실제 sealed Data release가 없어서 �
 `release_state=unreleased`이며, liveness 외 readiness/review는 fail-closed한다.
 
 Data의 contract/header 구현만 확인하는 서버를 사용할 때는 runtime Live evaluator에
-`--provider-conformance`를 명시한다. 이 모드의 `status=PASS`는
+`--provider-conformance`를 명시하고 다음 네 입력을 모두 제공한다.
+
+- `--provider-runtime-lock`: exact Data commit에서 생성한 canonical provider lock
+- `--runtime-identity`: 실행 중인 conformance Provider가 기동 시 봉인한 identity
+- `--conformance-manifest-output`: Git working tree 밖의 새 파일 경로
+- `--conformance-base-commit`: dirty 상태가 없는 현재 Agent exact commit
+
+이 입력은 evaluator가 메모리 안에서만 검증·적용하며 제품 lock이나 wheel을 변경하지 않는다.
+검증 manifest도 배포 artifact가 아니고, 기존 파일을 덮어쓰지 않는다. 이 모드의
+`status=PASS`는
 `scope=PROVIDER_CONFORMANCE_NOT_RAG_QUALITY`,
 `implementation_candidate_ready=true`, `release_ready=false`로 기록한다. 합성 conformance
 서버에서 이 플래그를 생략해도 release로 승격되지 않는다. 현재 evaluator는 검증된 Data

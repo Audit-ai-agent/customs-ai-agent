@@ -80,7 +80,16 @@ evaluation report가 아직 없으므로 generation/evaluation hash를 임의 �
 snapshot을 released로 표시하지 않는다.
 
 이 candidate에 맞춘 conformance provider 검증은 runtime evaluator의 명시적
-`--provider-conformance`에서만 수행한다. 성공해도 report scope는
+`--provider-conformance`에서만 수행하며, 다음 네 입력을 동시에 요구한다.
+
+- exact Data commit에서 생성한 외부 `--provider-runtime-lock`
+- 실행 Provider가 봉인한 외부 `--runtime-identity`
+- Git working tree 밖에 exclusive-create할 `--conformance-manifest-output`
+- clean Agent checkout의 exact `--conformance-base-commit`
+
+validator는 두 schema, Data provider lock, 실행 identity, Agent root/package lock을 함께
+검증한다. 검증된 외부 identity는 evaluator 실행 동안 메모리에만 적용하고 `finally`에서
+복원하며, 제품 lock·source tree·wheel에는 쓰지 않는다. 성공해도 report scope는
 `PROVIDER_CONFORMANCE_NOT_RAG_QUALITY`, `release_ready=false`다. 실제 Data release 모드는
 별도의 검증된 RAG 품질 attestation이 없으면
 `BLOCKED_RAG_RELEASE_ATTESTATION`으로 종료한다. 따라서 동일한 conformance provider를
@@ -90,7 +99,9 @@ snapshot을 released로 표시하지 않는다.
 ## Data readiness 완료 조건
 
 - target law corpus 58/58
-- PostgreSQL/Qdrant/Neo4j 기반 law index 1007/1007/1007
+- sealed generation manifest가 선언한 대상 조문 수와 PostgreSQL indexable 조문 수 일치
+- PostgreSQL indexable 조문, Qdrant point, Neo4j Article projection 수가 모두 일치
+- Neo4j projection 누락·고아 0
 - readiness HTTP 200
 - supported review date와 immutable knowledge snapshot 제공
 - runtime identity와 bundled schema hash 일치
@@ -99,6 +110,10 @@ snapshot을 released로 표시하지 않는다.
 
 expected count를 3으로 줄여 readiness를 통과시키는 것은 corpus scope를 공식 변경하는 별도
 Data ADR과 평가셋 변경이 없는 한 허용하지 않는다.
+
+현재 개발 volume의 `1007`은 적재된 3개 법령에서 파생된 조문 수이지, 목표 58개 법령이
+완료됐다는 뜻이 아니다. 따라서 `1007/1007/1007`만 맞는 상태를 production-ready 근거로
+사용하지 않는다.
 
 ## Cross-repository Live Gate
 
