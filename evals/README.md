@@ -115,13 +115,14 @@ Evidence consumer snapshot의 고정 SHA-256은
 `531b59ba4e86f78cef20a4fca052996efd8b88c48853ac12113ca76e69cdd69a`다. evaluator는 실제 local
 schema bytes, lock SHA, 이 기대 SHA가 모두 같은지 API 호출 전에 확인한다. lock의 release
 metadata는 local candidate `evidence-api-v1.1.0`,
-`f88456ea46cd4a1e65875dabe0e3318a7d112155`와 build SHA-256
-`87f9ec97b0f51ba0da8a0915f81ed0fa2613283b81706627577a200150440053`다.
+`facf9e051812523914bbd599be9391fc58cfa05e`와 build SHA-256
+`4d120bf7356c21527e37eceaa50fd102a3de95d1880450101b9fe220e2bb49d0`다.
 
-Data 저장소의 작업 HEAD는 이 release pin과 다른 개념이다. TASK-0009 작업 시 관찰된 HEAD
-`7c3ea37...`은 후속 구현 commit이고 lock release revision을 바꾸는 근거가 아니다. 이 evaluator는
-HTTP-only 경계를 지키므로 provider Git HEAD를 읽거나 검증하지 않으며 report에
-`provider_repository_head_status=not_observed_http_only`로 구분한다.
+이 candidate pin은 clean Data commit `facf9e0...`에서 생성·검증한
+`provider-build.json`과 일치한다. evaluator 자체는 HTTP-only 경계를 지키므로 실행 중 provider
+Git HEAD를 읽지 않으며 report에
+`provider_repository_head_status=not_observed_http_only`로 구분한다. Git revision과 build
+document의 결박은 별도의 cross-repository contract Gate가 담당한다.
 
 결과에는 retrieval status/coverage, readiness date, snapshot ID의 SHA-256, HS resolution별 개수,
 safe error code, issue/finding 수, 최종 상태와 계약 hash만 남긴다. request field, evidence text,
