@@ -745,7 +745,7 @@ def test_release_lock_builder_requires_exact_data_code_and_schema_lock() -> None
     fixture_root = Path(__file__).parent / "fixtures" / "evidence_runtime_v2"
     lock_bytes = (fixture_root / "provider-runtime-lock.json").read_bytes()
     assert hashlib.sha256(lock_bytes).hexdigest() == (
-        "71a0ddf4b9e58f1d598221e980fd90230ed1bff560ad467c2cfa0692116e35eb"
+        "e96f5802db02b67ba83b58001780e2cacab4233a5a452c587c17d8d8373b1de5"
     )
     expected = json.loads(lock_bytes)
     identity = _identity(
