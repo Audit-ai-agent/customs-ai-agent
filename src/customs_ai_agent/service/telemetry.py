@@ -42,6 +42,10 @@ class ServiceMetrics:
     review_replayed_total: int = 0
     review_rejected_total: int = 0
     review_timeouts_total: int = 0
+    replay_cache_evictions_total: int = 0
+    replay_cache_oversize_total: int = 0
+    replay_cache_entries: int = 0
+    replay_cache_result_bytes: int = 0
     inflight: int = 0
     duration_ms_sum: int = 0
     duration_ms_max: int = 0
@@ -55,11 +59,18 @@ class ServiceMetrics:
             "review_replayed_total",
             "review_rejected_total",
             "review_timeouts_total",
+            "replay_cache_evictions_total",
+            "replay_cache_oversize_total",
             "model_calls_total",
         }:
             raise ValueError("unsupported service metric")
         with self._lock:
             setattr(self, name, getattr(self, name) + amount)
+
+    def set_replay_cache(self, *, entries: int, result_bytes: int) -> None:
+        with self._lock:
+            self.replay_cache_entries = max(0, entries)
+            self.replay_cache_result_bytes = max(0, result_bytes)
 
     def begin(self) -> int:
         with self._lock:
@@ -80,6 +91,10 @@ class ServiceMetrics:
                 "duration_ms_sum": self.duration_ms_sum,
                 "inflight": self.inflight,
                 "model_calls_total": self.model_calls_total,
+                "replay_cache_entries": self.replay_cache_entries,
+                "replay_cache_evictions_total": self.replay_cache_evictions_total,
+                "replay_cache_oversize_total": self.replay_cache_oversize_total,
+                "replay_cache_result_bytes": self.replay_cache_result_bytes,
                 "review_completed_total": self.review_completed_total,
                 "review_failed_total": self.review_failed_total,
                 "review_rejected_total": self.review_rejected_total,

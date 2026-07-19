@@ -40,7 +40,7 @@ customs-ai-agent-serve = "customs_ai_agent.service.__main__:main"
 where = ["src"]
 
 [tool.setuptools.package-data]
-customs_ai_agent = ["prompts/*.txt"]
+customs_ai_agent = ["build-manifest.json", "prompts/*.txt"]
 "customs_ai_agent.contracts" = [
   "evidence/*.json",
   "schemas/backend/v1/*.json",

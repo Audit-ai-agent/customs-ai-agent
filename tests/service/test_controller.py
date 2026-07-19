@@ -281,3 +281,132 @@ def test_finite_transport_probe_does_not_poison_readiness_executor(
         await controller.shutdown()
 
     asyncio.run(scenario())
+
+
+def test_replay_cache_evicts_completed_lru_by_serialized_byte_budget(
+    service_settings: Any,
+) -> None:
+    class SizedResult:
+        def __init__(self, run_id: str) -> None:
+            self.run_id = run_id
+
+        def model_dump(self, **_options: Any) -> dict[str, Any]:
+            return {
+                "model_calls": [],
+                "padding": "x" * 400_000,
+                "review_run_id": self.run_id,
+            }
+
+    class SizedRuntime:
+        def __init__(self) -> None:
+            self.calls = 0
+
+        def review_json(self, payload: bytes) -> SizedResult:
+            self.calls += 1
+            return SizedResult(json.loads(payload)["review_run_id"])
+
+        def close(self) -> None:
+            return None
+
+    async def scenario() -> None:
+        runtime = SizedRuntime()
+        controller = AgentServiceController(
+            settings=settings_with(
+                service_settings,
+                replay_max_bytes=1 * 1024 * 1024,
+            ),
+            runtime=runtime,
+            readiness_probe=lambda: object(),
+            logger=__import__("logging").getLogger("test-service"),
+        )
+        for run_id, request_hash in (("run-a", "a" * 64), ("run-b", "b" * 64)):
+            outcome, replayed = await controller.submit(
+                payload=_payload(run_id),
+                review_run_id=run_id,
+                request_hash=request_hash,
+            )
+            assert outcome.status_code == 200
+            assert replayed is False
+
+        _, replayed = await controller.submit(
+            payload=_payload("run-a"),
+            review_run_id="run-a",
+            request_hash="a" * 64,
+        )
+        assert replayed is True
+        await controller.submit(
+            payload=_payload("run-c"),
+            review_run_id="run-c",
+            request_hash="c" * 64,
+        )
+        metrics = controller.metrics.snapshot()
+        expected_result_bytes = len(
+            json.dumps(
+                SizedResult("run-a").model_dump(),
+                ensure_ascii=False,
+                allow_nan=False,
+                separators=(",", ":"),
+                sort_keys=True,
+            ).encode("utf-8")
+        )
+        assert metrics["replay_cache_entries"] == 2
+        assert metrics["replay_cache_result_bytes"] == 2 * expected_result_bytes
+        assert metrics["replay_cache_evictions_total"] == 1
+
+        _, replayed = await controller.submit(
+            payload=_payload("run-b"),
+            review_run_id="run-b",
+            request_hash="b" * 64,
+        )
+        assert replayed is False
+        assert runtime.calls == 4
+        await controller.shutdown()
+
+    asyncio.run(scenario())
+
+
+def test_single_oversize_result_is_returned_but_never_cached(
+    service_settings: Any,
+) -> None:
+    class OversizeResult:
+        def model_dump(self, **_options: Any) -> dict[str, Any]:
+            return {"model_calls": [], "padding": "x" * (1 * 1024 * 1024)}
+
+    class OversizeRuntime:
+        def __init__(self) -> None:
+            self.calls = 0
+
+        def review_json(self, _payload: bytes) -> OversizeResult:
+            self.calls += 1
+            return OversizeResult()
+
+        def close(self) -> None:
+            return None
+
+    async def scenario() -> None:
+        runtime = OversizeRuntime()
+        controller = AgentServiceController(
+            settings=settings_with(
+                service_settings,
+                replay_max_bytes=1 * 1024 * 1024,
+            ),
+            runtime=runtime,
+            readiness_probe=lambda: object(),
+            logger=__import__("logging").getLogger("test-service"),
+        )
+        for _ in range(2):
+            outcome, replayed = await controller.submit(
+                payload=_payload("run-oversize"),
+                review_run_id="run-oversize",
+                request_hash="d" * 64,
+            )
+            assert outcome.status_code == 200
+            assert replayed is False
+        metrics = controller.metrics.snapshot()
+        assert metrics["replay_cache_entries"] == 0
+        assert metrics["replay_cache_result_bytes"] == 0
+        assert metrics["replay_cache_oversize_total"] == 2
+        assert runtime.calls == 2
+        await controller.shutdown()
+
+    asyncio.run(scenario())

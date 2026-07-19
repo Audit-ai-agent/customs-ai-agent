@@ -91,17 +91,19 @@ jobs:
         run: uv run --locked python tools/verify_service_openapi.py
       - name: Test
         run: uv run pytest -q
-      - name: Build source distribution
-        run: uv build --sdist --no-sources --clear --out-dir dist/source .
-      - name: Build wheel from source distribution
+      - name: Build exact-commit release distributions
         run: >-
-          uv build --wheel --no-sources --clear --out-dir dist/wheel
-          dist/source/customs_ai_agent-0.3.0.tar.gz
+          .venv/bin/python -m tools.build_release_distributions
+          --expected-git-sha "${GITHUB_SHA}"
+          --output-root dist
+          --replace
       - name: Verify wheel and source distribution inventories
         run: >-
           .venv/bin/python tools/verify_distribution.py
           --wheel dist/wheel/customs_ai_agent-0.3.0-py3-none-any.whl
           --sdist dist/source/customs_ai_agent-0.3.0.tar.gz
+          --expected-git-sha "${GITHUB_SHA}"
+          --source-root .
       - name: Verify source distribution is self-contained
         shell: bash
         run: |
@@ -147,6 +149,7 @@ jobs:
             --installed \
             --wheel "$WHEEL" \
             --expected-wheel-sha256 "$WHEEL_SHA" \
+            --expected-git-sha "${GITHUB_SHA}" \
             --source-root "$GITHUB_WORKSPACE"
           "$CLI" --help
           "$CLI" list-scenarios

@@ -4,6 +4,7 @@ import csv
 import hashlib
 import io
 import json
+import subprocess
 import tarfile
 import tomllib
 import zipfile
@@ -13,6 +14,8 @@ from typing import Any
 import pytest
 
 from tools.verify_distribution import (
+    BUILD_MANIFEST_SDIST_PATH,
+    BUILD_MANIFEST_WHEEL_PATH,
     EXPECTED_CONSOLE_ENTRY_POINT,
     EXPECTED_SERVICE_CONSOLE_ENTRY_POINT,
     EXPECTED_IMPORT_PACKAGE,
@@ -21,9 +24,12 @@ from tools.verify_distribution import (
     _SDIST_REQUIRED_FILES,
     _WHEEL_REQUIRED_PACKAGE_FILES,
     _direct_url_wheel_path,
+    _git_archive_payloads,
     _record_digest,
     _verify_installed_record_against_wheel,
     _verify_wheel_origin,
+    build_manifest_bytes,
+    source_snapshot_sha256,
     verify_sdist,
     verify_wheel,
 )
@@ -48,6 +54,12 @@ METADATA = (
     "Requires-Dist: uvicorn<1,>=0.32\n"
     "\n"
 ).encode()
+TEST_GIT_SHA = "1" * 40
+TEST_SOURCE_SNAPSHOT_SHA256 = "2" * 64
+TEST_BUILD_MANIFEST = build_manifest_bytes(
+    git_sha=TEST_GIT_SHA,
+    source_snapshot_sha256_value=TEST_SOURCE_SNAPSHOT_SHA256,
+)
 
 
 def _write_wheel(
@@ -74,18 +86,24 @@ def _write_wheel(
             / "evidence"
             / "runtime-release-v2.lock.json"
         ).read_bytes()
+    generated_payloads = {
+        BUILD_MANIFEST_WHEEL_PATH: TEST_BUILD_MANIFEST,
+        f"{DIST_INFO}/METADATA": metadata,
+        f"{DIST_INFO}/WHEEL": (
+            b"Wheel-Version: 1.0\nGenerator: test\nRoot-Is-Purelib: true\nTag: py3-none-any\n"
+        ),
+        f"{DIST_INFO}/entry_points.txt": (
+            (
+                f"[console_scripts]\n{EXPECTED_CONSOLE_ENTRY_POINT}\n"
+                f"{EXPECTED_SERVICE_CONSOLE_ENTRY_POINT}\n"
+            ).encode()
+        ),
+    }
     payloads.update(
         {
-            f"{DIST_INFO}/METADATA": metadata,
-            f"{DIST_INFO}/WHEEL": (
-                b"Wheel-Version: 1.0\nGenerator: test\nRoot-Is-Purelib: true\nTag: py3-none-any\n"
-            ),
-            f"{DIST_INFO}/entry_points.txt": (
-                (
-                    f"[console_scripts]\n{EXPECTED_CONSOLE_ENTRY_POINT}\n"
-                    f"{EXPECTED_SERVICE_CONSOLE_ENTRY_POINT}\n"
-                ).encode()
-            ),
+            name: payload
+            for name, payload in generated_payloads.items()
+            if name not in (excluded_files or set())
         }
     )
     payloads.update(extra_files or {})
@@ -196,6 +214,7 @@ def _write_sdist(
         / "evidence"
         / "runtime-release-v2.lock.json"
     ).read_bytes()
+    payloads[BUILD_MANIFEST_SDIST_PATH] = TEST_BUILD_MANIFEST
     payloads.update(extra_files or {})
     root = f"{EXPECTED_IMPORT_PACKAGE}-{EXPECTED_VERSION}"
     with tarfile.open(path, mode="w:gz") as archive:
@@ -224,6 +243,69 @@ def _tar_member(
         return member, payload
     member.size = 0
     return member, None
+
+
+def _source_git_repository(path: Path) -> Path:
+    package_root = ROOT / "src" / "customs_ai_agent"
+    for source in package_root.rglob("*"):
+        if not source.is_file():
+            continue
+        relative = source.relative_to(ROOT)
+        if "__pycache__" in relative.parts or source.name == "build-manifest.json":
+            continue
+        target = path / relative
+        target.parent.mkdir(parents=True, exist_ok=True)
+        target.write_bytes(source.read_bytes())
+
+    subprocess.run(["git", "init", str(path)], check=True, capture_output=True)
+    subprocess.run(
+        ["git", "config", "user.email", "test@example.invalid"],
+        cwd=path,
+        check=True,
+        capture_output=True,
+    )
+    subprocess.run(
+        ["git", "config", "user.name", "Distribution verifier test"],
+        cwd=path,
+        check=True,
+        capture_output=True,
+    )
+    subprocess.run(
+        ["git", "config", "core.autocrlf", "false"],
+        cwd=path,
+        check=True,
+        capture_output=True,
+    )
+    subprocess.run(["git", "add", "src/customs_ai_agent"], cwd=path, check=True)
+    subprocess.run(
+        ["git", "commit", "-m", "source fixture"],
+        cwd=path,
+        check=True,
+        capture_output=True,
+    )
+    return path
+
+
+def _head_source_build_payloads(
+    repository: Path,
+) -> tuple[str, dict[str, bytes], bytes]:
+    head = subprocess.run(
+        ["git", "-C", str(repository), "rev-parse", "HEAD"],
+        check=True,
+        capture_output=True,
+        text=True,
+    ).stdout.strip()
+    source_payloads = _git_archive_payloads(repository, head)
+    manifest = build_manifest_bytes(
+        git_sha=head,
+        source_snapshot_sha256_value=source_snapshot_sha256(source_payloads),
+    )
+    package_payloads = {
+        name.removeprefix("src/"): payload
+        for name, payload in source_payloads.items()
+        if name.startswith("src/customs_ai_agent/")
+    }
+    return head, package_payloads, manifest
 
 
 def test_project_metadata_limits_runtime_to_python_311_and_next_major_versions() -> None:
@@ -417,6 +499,75 @@ def test_distribution_verifier_rejects_missing_evidence_contract_runtime_file(
         match="missing a required runtime file or package resource",
     ):
         verify_wheel(wheel)
+
+
+def test_wheel_requires_release_only_build_manifest(tmp_path: Path) -> None:
+    wheel = tmp_path / "customs_ai_agent-0.3.0-py3-none-any.whl"
+    _write_wheel(wheel, excluded_files={BUILD_MANIFEST_WHEEL_PATH})
+
+    with pytest.raises(
+        DistributionVerificationError,
+        match="release-only build manifest is missing",
+    ):
+        verify_wheel(wheel)
+
+
+def test_wheel_payloads_are_bound_to_exact_git_source(tmp_path: Path) -> None:
+    wheel = tmp_path / "customs_ai_agent-0.3.0-py3-none-any.whl"
+    repository = _source_git_repository(tmp_path / "source-repository")
+    head, package_payloads, manifest = _head_source_build_payloads(repository)
+    _write_wheel(
+        wheel,
+        extra_files={
+            **package_payloads,
+            BUILD_MANIFEST_WHEEL_PATH: manifest,
+        },
+    )
+
+    result = verify_wheel(
+        wheel,
+        expected_git_sha=head,
+        source_root=repository,
+    )
+    assert result["git_sha"] == head
+
+    package_payloads["customs_ai_agent/adapters/retrieval.py"] += b"\n# stale\n"
+    _write_wheel(
+        wheel,
+        extra_files={
+            **package_payloads,
+            BUILD_MANIFEST_WHEEL_PATH: manifest,
+        },
+    )
+    with pytest.raises(
+        DistributionVerificationError,
+        match="package payloads do not match",
+    ):
+        verify_wheel(
+            wheel,
+            expected_git_sha=head,
+            source_root=repository,
+        )
+
+
+def test_sdist_payloads_are_bound_to_exact_git_source(tmp_path: Path) -> None:
+    sdist = tmp_path / "customs_ai_agent-0.3.0.tar.gz"
+    repository = _source_git_repository(tmp_path / "source-repository")
+    head, package_payloads, manifest = _head_source_build_payloads(repository)
+    _write_sdist(
+        sdist,
+        extra_files={
+            **{f"src/{name}": payload for name, payload in package_payloads.items()},
+            BUILD_MANIFEST_SDIST_PATH: manifest,
+        },
+    )
+
+    result = verify_sdist(
+        sdist,
+        expected_git_sha=head,
+        source_root=repository,
+    )
+    assert result["git_sha"] == head
 
 
 def test_uv_hashless_direct_url_requires_exact_wheel_and_installed_record(

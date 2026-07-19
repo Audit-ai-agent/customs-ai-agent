@@ -28,6 +28,7 @@ RUN set -eu; \
     test "$(printf '%s' "${BUILD_SHA}" | wc -c)" -eq 40; \
     test "$(printf '%s' "${WHEEL_SHA256}" | wc -c)" -eq 64; \
     echo "${WHEEL_SHA256}  /tmp/customs_ai_agent.whl" | sha256sum --check --strict; \
+    python -c "import json,re,sys,zipfile; p='/tmp/customs_ai_agent.whl'; raw=zipfile.ZipFile(p).read('customs_ai_agent/build-manifest.json'); m=json.loads(raw); expected={'contract','distribution','git_sha','package_version','schema_version','source_snapshot_algorithm','source_snapshot_sha256'}; canonical=(json.dumps(m,ensure_ascii=True,allow_nan=False,separators=(',',':'),sort_keys=True)+'\n').encode(); valid=set(m)==expected and raw==canonical and m['contract']=='customs-ai-agent-build-manifest' and m['schema_version']=='1.0' and m['distribution']=='customs-ai-agent' and m['package_version']=='0.3.0' and m['source_snapshot_algorithm']=='git-archive-files-sha256-v1' and m['git_sha']=='${BUILD_SHA}' and re.fullmatch('[a-f0-9]{64}',m['source_snapshot_sha256']); sys.exit(0 if valid else 1)"; \
     python -m pip install --no-cache-dir --disable-pip-version-check \
       --require-hashes --requirement /tmp/runtime-requirements.txt; \
     python -m pip install --no-cache-dir --disable-pip-version-check \

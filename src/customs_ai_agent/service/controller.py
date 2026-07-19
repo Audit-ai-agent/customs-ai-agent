@@ -1,6 +1,7 @@
 from __future__ import annotations
 
 import asyncio
+import json
 import logging
 import time
 from collections import OrderedDict
@@ -32,6 +33,7 @@ class ServiceOutcome:
     error_code: str | None = None
     retryable: bool = False
     retry_after_seconds: int | None = None
+    replay_result_bytes: int = 0
 
 
 @dataclass(slots=True)
@@ -39,6 +41,7 @@ class _ReplayEntry:
     request_hash: str
     task: asyncio.Task[ServiceOutcome]
     completed_at: float | None = None
+    result_bytes: int = 0
 
 
 class AgentServiceController:
@@ -69,6 +72,7 @@ class AgentServiceController:
         self._state_lock = asyncio.Lock()
         self._readiness_lock = asyncio.Lock()
         self._replays: OrderedDict[str, _ReplayEntry] = OrderedDict()
+        self._replay_result_bytes = 0
         self._background: set[asyncio.Task[None]] = set()
         self._readiness_cache: tuple[float, bool] | None = None
         self._closing = False
@@ -78,6 +82,21 @@ class AgentServiceController:
     def closing(self) -> bool:
         return self._closing
 
+    def _update_replay_metrics(self) -> None:
+        self.metrics.set_replay_cache(
+            entries=len(self._replays),
+            result_bytes=self._replay_result_bytes,
+        )
+
+    def _remove_replay(self, run_id: str) -> None:
+        entry = self._replays.pop(run_id, None)
+        if entry is not None:
+            self._replay_result_bytes = max(
+                0,
+                self._replay_result_bytes - entry.result_bytes,
+            )
+            self._update_replay_metrics()
+
     def _purge_replays(self, now: float) -> None:
         expired = [
             run_id
@@ -86,16 +105,34 @@ class AgentServiceController:
             and now - entry.completed_at >= self.settings.replay_ttl_seconds
         ]
         for run_id in expired:
-            self._replays.pop(run_id, None)
+            self._remove_replay(run_id)
+            self.metrics.increment("replay_cache_evictions_total")
 
     def _make_replay_room(self) -> bool:
         if len(self._replays) < self.settings.replay_max_entries:
             return True
         for run_id, entry in tuple(self._replays.items()):
             if entry.task.done():
-                self._replays.pop(run_id, None)
+                self._remove_replay(run_id)
+                self.metrics.increment("replay_cache_evictions_total")
                 return True
         return False
+
+    def _enforce_replay_byte_cap(self, run_id: str, entry: _ReplayEntry) -> None:
+        if entry.result_bytes > self.settings.replay_max_bytes:
+            self._remove_replay(run_id)
+            self.metrics.increment("replay_cache_oversize_total")
+            return
+        while self._replay_result_bytes > self.settings.replay_max_bytes:
+            evicted = False
+            for candidate_run_id, candidate in tuple(self._replays.items()):
+                if candidate.task.done():
+                    self._remove_replay(candidate_run_id)
+                    self.metrics.increment("replay_cache_evictions_total")
+                    evicted = True
+                    break
+            if not evicted:
+                break
 
     async def submit(
         self,
@@ -132,9 +169,24 @@ class AgentServiceController:
                 task = asyncio.create_task(self._run_once(payload))
                 entry = _ReplayEntry(request_hash=request_hash, task=task)
                 self._replays[review_run_id] = entry
+                self._update_replay_metrics()
 
-                def mark_completed(_task: asyncio.Task[ServiceOutcome]) -> None:
+                def mark_completed(completed_task: asyncio.Task[ServiceOutcome]) -> None:
                     entry.completed_at = time.monotonic()
+                    if completed_task.cancelled():
+                        self._remove_replay(review_run_id)
+                        return
+                    try:
+                        outcome = completed_task.result()
+                    except BaseException:
+                        self._remove_replay(review_run_id)
+                        return
+                    entry.result_bytes = outcome.replay_result_bytes
+                    self._replay_result_bytes += entry.result_bytes
+                    if self._replays.get(review_run_id) is entry:
+                        self._replays.move_to_end(review_run_id)
+                    self._enforce_replay_byte_cap(review_run_id, entry)
+                    self._update_replay_metrics()
 
                 task.add_done_callback(mark_completed)
         return await asyncio.shield(task), replayed
@@ -241,10 +293,23 @@ class AgentServiceController:
         else:
             try:
                 public_result = result.model_dump(mode="json", warnings=False)
+                serialized = json.dumps(
+                    public_result,
+                    ensure_ascii=False,
+                    allow_nan=False,
+                    separators=(",", ":"),
+                    sort_keys=True,
+                ).encode("utf-8")
+                replay_result_bytes = len(serialized)
+                del serialized
                 model_calls = len(public_result.get("model_calls") or [])
                 if model_calls:
                     self.metrics.increment("model_calls_total", model_calls)
-                outcome = ServiceOutcome(status_code=200, result=public_result)
+                outcome = ServiceOutcome(
+                    status_code=200,
+                    result=public_result,
+                    replay_result_bytes=replay_result_bytes,
+                )
             except Exception:
                 outcome = ServiceOutcome(status_code=500, error_code="internal_error")
 

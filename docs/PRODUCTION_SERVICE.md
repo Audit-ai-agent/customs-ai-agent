@@ -88,6 +88,9 @@ timeout 뒤의 새 요청으로 concurrency 상한을 우회할 수 없다.
 - 같은 ID와 canonical request hash: 진행 중 task를 공유하거나 TTL 안의 결과를 replay한다.
 - 같은 ID와 다른 hash: 409 `idempotency_conflict`
 - 결과/error는 bounded TTL과 bounded entry 수만큼 메모리에 유지한다.
+- 완료 결과는 canonical public JSON byte 수로 회계하며 기본 64 MiB, 최대 256 MiB의 process
+  budget을 넘으면 가장 오래 사용되지 않은 완료 entry부터 제거한다. 진행 중 entry는 중복 실행을
+  막기 위해 제거하지 않고, 단일 결과가 budget보다 크면 replay cache에 넣지 않는다.
 
 이 보장은 container 재시작 또는 여러 replica 사이에서는 유지되지 않는다. durable Case/Job
 idempotency는 Backend가 소유해야 한다. Backend 구현 전 여러 Agent replica를 active-active로
@@ -132,10 +135,12 @@ Dockerfile은 CI에서 이미 생성·검증한 exact wheel만 입력받는다.
 ```powershell
 $Uv = "uv"
 $Wheel = "dist/wheel/customs_ai_agent-0.3.0-py3-none-any.whl"
+$BuildSha = git rev-parse HEAD
+python -m tools.build_release_distributions `
+  --expected-git-sha $BuildSha --output-root dist --replace
 $Uv export --locked --no-dev --no-emit-project --no-emit-local --no-sources `
   --format requirements.txt --output-file dist/runtime-requirements.txt
 $WheelSha = (Get-FileHash $Wheel -Algorithm SHA256).Hash.ToLowerInvariant()
-$BuildSha = git rev-parse HEAD
 docker build `
   --build-arg "AGENT_WHEEL=$Wheel" `
   --build-arg "BUILD_SHA=$BuildSha" `
@@ -147,6 +152,11 @@ image는 wheel hash를 build 안에서 다시 확인한다. dependency는 `uv.lo
 hash-pinned runtime requirements를 `pip --require-hashes`로 설치한 뒤 `pip check`한다. 이후
 UID/GID 65532로 실행한다. filesystem write는 필요하지 않으며 compose 예제는 read-only root,
 `/tmp` tmpfs, all capability drop, no-new-privileges와 resource limit을 적용한다.
+
+Release wheel/sdist는 일반 `uv build`가 아니라 exact clean Git commit을 archive하는 전용 builder만
+생성한다. 생성된 package에는 commit SHA와 전체 tracked-source snapshot SHA-256을 담은 canonical
+build manifest가 포함된다. verifier는 package payload를 해당 Git object와 byte-for-byte 비교하고
+Docker build는 manifest commit과 `BUILD_SHA`가 다르면 중단한다.
 
 Base image tag도 실제 release pipeline에서 digest로 고정해야 한다. Dockerfile 기본 tag는
 개발 편의를 위한 것이며 digest 없는 build를 최종 release attestation으로 사용하지 않는다.

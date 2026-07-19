@@ -7,7 +7,9 @@ import pytest
 from fastapi.testclient import TestClient
 from pydantic import SecretStr
 
+from customs_ai_agent.build_info import BuildManifest
 from customs_ai_agent.service.auth import bearer_authorized
+from customs_ai_agent.service.metadata import build_metadata
 from customs_ai_agent.service.settings import ServiceConfigurationError, ServiceSettings
 from tests.service.conftest import TEST_TOKEN
 
@@ -65,6 +67,58 @@ def test_production_settings_require_evidence_bearer_auth() -> None:
     source.pop("EVIDENCE_SERVICE_TOKEN")
     with pytest.raises(ServiceConfigurationError, match="evidence_service_token_missing"):
         ServiceSettings.from_environment(source)
+
+
+@pytest.mark.parametrize(
+    ("name", "value", "error"),
+    [
+        (
+            "CUSTOMS_AGENT_REPLAY_MAX_BYTES",
+            str(256 * 1024 * 1024 + 1),
+            "customs_agent_replay_max_bytes_invalid",
+        ),
+        (
+            "CUSTOMS_AGENT_REPLAY_MAX_ENTRIES",
+            "10001",
+            "customs_agent_replay_max_entries_invalid",
+        ),
+    ],
+)
+def test_replay_cache_limits_are_bounded_for_one_gib_container(
+    name: str,
+    value: str,
+    error: str,
+) -> None:
+    source = {
+        "CUSTOMS_AGENT_SERVICE_BEARER_TOKEN": TEST_TOKEN,
+        "EVIDENCE_SERVICE_BASE_URL": "http://127.0.0.1:8010",
+        name: value,
+    }
+    with pytest.raises(ServiceConfigurationError, match=error):
+        ServiceSettings.from_environment(source)
+
+
+def test_metadata_rejects_build_sha_not_bound_to_packaged_manifest(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    settings = ServiceSettings(
+        bearer_token=SecretStr(TEST_TOKEN),
+        evidence_base_url="https://evidence.example.test",
+        evidence_allowed_origins=frozenset({"https://evidence.example.test"}),
+        evidence_service_token=SecretStr("EvidenceBearer_abcdefghijklmnopqrstuvwxyz0123456789"),
+        environment="production",
+        build_sha="1" * 40,
+        wheel_sha256="2" * 64,
+    )
+    monkeypatch.setattr(
+        "customs_ai_agent.service.metadata.load_packaged_build_manifest",
+        lambda **_options: BuildManifest(
+            git_sha="3" * 40,
+            source_snapshot_sha256="4" * 64,
+        ),
+    )
+    with pytest.raises(ServiceConfigurationError, match="customs_agent_build_sha_mismatch"):
+        build_metadata(settings)
 
 
 def test_bearer_comparison_hashes_both_sides_before_constant_time_compare(

@@ -196,7 +196,11 @@ uv sync --locked --group dev
 uv run --locked ruff check .
 uv run --locked mypy
 uv run --locked pytest -q
+# 개발용 build만 생성한다. 배포 산출물은 아래 exact-commit builder를 사용한다.
 uv build --wheel
+$BuildSha = git rev-parse HEAD
+uv run --locked python -m tools.build_release_distributions `
+  --expected-git-sha $BuildSha --output-root dist --replace
 ```
 
 기존 텍스트 회귀 CLI:

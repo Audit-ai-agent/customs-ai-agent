@@ -13,8 +13,10 @@ import base64
 import csv
 import hashlib
 import importlib.metadata
+import io
 import json
 import re
+import subprocess
 import sys
 import tarfile
 import zipfile
@@ -28,6 +30,11 @@ from urllib.request import url2pathname
 EXPECTED_DISTRIBUTION: Final = "customs-ai-agent"
 EXPECTED_IMPORT_PACKAGE: Final = "customs_ai_agent"
 EXPECTED_VERSION: Final = "0.3.0"
+BUILD_MANIFEST_CONTRACT: Final = "customs-ai-agent-build-manifest"
+BUILD_MANIFEST_SCHEMA_VERSION: Final = "1.0"
+SOURCE_SNAPSHOT_ALGORITHM: Final = "git-archive-files-sha256-v1"
+BUILD_MANIFEST_WHEEL_PATH: Final = "customs_ai_agent/build-manifest.json"
+BUILD_MANIFEST_SDIST_PATH: Final = "src/customs_ai_agent/build-manifest.json"
 EXPECTED_REQUIRES_PYTHON: Final = frozenset({">=3.11", "<3.12"})
 EXPECTED_REQUIRES_DIST: Final = frozenset(
     {
@@ -166,6 +173,7 @@ _SDIST_REQUIRED_FILES: Final = frozenset(
         "tests/test_ocr_freeze.py",
         "tools/run_security_gate.py",
         "tools/build_evidence_runtime_release_lock.py",
+        "tools/build_release_distributions.py",
         "tools/validate_v2_conformance_identity.py",
         "tools/verify_ocr_release_freeze.py",
         "tools/verify_distribution.py",
@@ -225,6 +233,8 @@ _CONFORMANCE_WHEEL_MARKERS: Final = (
     b"evaluator-process-memory-only",
     b"_provider_conformance_runtime_identity",
 )
+_GIT_SHA: Final = re.compile(r"^[a-f0-9]{40}$")
+_SHA256: Final = re.compile(r"^[a-f0-9]{64}$")
 _FORBIDDEN_MEDIA_SUFFIXES: Final = frozenset(
     {
         ".bmp",
@@ -441,6 +451,166 @@ def _strict_json_object(payload: bytes, *, distribution_kind: str) -> dict[str, 
     return value
 
 
+def _git_archive_payloads(repository: Path, git_sha: str) -> dict[str, bytes]:
+    if _GIT_SHA.fullmatch(git_sha) is None:
+        raise DistributionVerificationError("expected Git SHA is invalid")
+    try:
+        repository = repository.resolve(strict=True)
+        completed = subprocess.run(
+            ["git", "-C", str(repository), "archive", "--format=tar", git_sha],
+            check=True,
+            capture_output=True,
+        )
+        with tarfile.open(fileobj=io.BytesIO(completed.stdout), mode="r:") as archive:
+            validated = _validate_sdist_members(archive.getmembers())
+            payloads: dict[str, bytes] = {}
+            for member, name in validated:
+                if not member.isfile():
+                    continue
+                stream = archive.extractfile(member)
+                if stream is None:
+                    raise OSError
+                payloads[name] = stream.read()
+    except (OSError, subprocess.CalledProcessError, tarfile.TarError):
+        raise DistributionVerificationError("exact Git source snapshot is unavailable") from None
+    if not payloads:
+        raise DistributionVerificationError("exact Git source snapshot is empty")
+    return payloads
+
+
+def source_snapshot_sha256(payloads: Mapping[str, bytes]) -> str:
+    digest = hashlib.sha256()
+    digest.update(b"customs-ai-agent-source-snapshot-v1\0")
+    for name in sorted(payloads):
+        encoded_name = name.encode("utf-8")
+        payload = payloads[name]
+        digest.update(len(encoded_name).to_bytes(8, "big"))
+        digest.update(encoded_name)
+        digest.update(len(payload).to_bytes(8, "big"))
+        digest.update(payload)
+    return digest.hexdigest()
+
+
+def build_manifest_bytes(*, git_sha: str, source_snapshot_sha256_value: str) -> bytes:
+    if (
+        _GIT_SHA.fullmatch(git_sha) is None
+        or _SHA256.fullmatch(source_snapshot_sha256_value) is None
+    ):
+        raise DistributionVerificationError("build manifest identity is invalid")
+    manifest = {
+        "contract": BUILD_MANIFEST_CONTRACT,
+        "distribution": EXPECTED_DISTRIBUTION,
+        "git_sha": git_sha,
+        "package_version": EXPECTED_VERSION,
+        "schema_version": BUILD_MANIFEST_SCHEMA_VERSION,
+        "source_snapshot_algorithm": SOURCE_SNAPSHOT_ALGORITHM,
+        "source_snapshot_sha256": source_snapshot_sha256_value,
+    }
+    return (
+        json.dumps(
+            manifest,
+            ensure_ascii=True,
+            allow_nan=False,
+            separators=(",", ":"),
+            sort_keys=True,
+        )
+        + "\n"
+    ).encode("utf-8")
+
+
+def _parse_build_manifest(payload: bytes, *, distribution_kind: str) -> dict[str, str]:
+    try:
+        value = json.loads(payload)
+    except (UnicodeError, ValueError, json.JSONDecodeError):
+        raise DistributionVerificationError(
+            f"{distribution_kind} build manifest is invalid"
+        ) from None
+    expected_keys = {
+        "contract",
+        "distribution",
+        "git_sha",
+        "package_version",
+        "schema_version",
+        "source_snapshot_algorithm",
+        "source_snapshot_sha256",
+    }
+    if (
+        not isinstance(value, dict)
+        or set(value) != expected_keys
+        or any(not isinstance(item, str) for item in value.values())
+        or value.get("contract") != BUILD_MANIFEST_CONTRACT
+        or value.get("distribution") != EXPECTED_DISTRIBUTION
+        or value.get("package_version") != EXPECTED_VERSION
+        or value.get("schema_version") != BUILD_MANIFEST_SCHEMA_VERSION
+        or value.get("source_snapshot_algorithm") != SOURCE_SNAPSHOT_ALGORITHM
+        or _GIT_SHA.fullmatch(str(value.get("git_sha"))) is None
+        or _SHA256.fullmatch(str(value.get("source_snapshot_sha256"))) is None
+    ):
+        raise DistributionVerificationError(f"{distribution_kind} build manifest is invalid")
+    rendered = build_manifest_bytes(
+        git_sha=str(value["git_sha"]),
+        source_snapshot_sha256_value=str(value["source_snapshot_sha256"]),
+    )
+    if payload != rendered:
+        raise DistributionVerificationError(f"{distribution_kind} build manifest is not canonical")
+    return {key: str(item) for key, item in value.items()}
+
+
+def _assert_source_bound_build(
+    payloads: Mapping[str, bytes],
+    *,
+    manifest_path: str,
+    package_prefix: str,
+    distribution_kind: str,
+    expected_git_sha: str | None,
+    source_root: Path | None,
+) -> dict[str, str]:
+    try:
+        manifest_payload = payloads[manifest_path]
+    except KeyError:
+        raise DistributionVerificationError(
+            f"{distribution_kind} release-only build manifest is missing"
+        ) from None
+    manifest = _parse_build_manifest(
+        manifest_payload,
+        distribution_kind=distribution_kind,
+    )
+    if (expected_git_sha is None) != (source_root is None):
+        raise DistributionVerificationError(
+            "expected Git SHA and source root must be supplied together"
+        )
+    if expected_git_sha is None or source_root is None:
+        return manifest
+    if manifest["git_sha"] != expected_git_sha:
+        raise DistributionVerificationError(
+            f"{distribution_kind} build manifest Git SHA does not match"
+        )
+    source_payloads = _git_archive_payloads(source_root, expected_git_sha)
+    snapshot_sha256 = source_snapshot_sha256(source_payloads)
+    if manifest["source_snapshot_sha256"] != snapshot_sha256:
+        raise DistributionVerificationError(
+            f"{distribution_kind} build manifest source snapshot does not match"
+        )
+    expected_package_payloads = {
+        name.removeprefix("src/"): payload
+        for name, payload in source_payloads.items()
+        if name.startswith("src/customs_ai_agent/")
+    }
+    observed_package_payloads = {
+        name.removeprefix(package_prefix): payload
+        for name, payload in payloads.items()
+        if name.startswith(package_prefix) and name != manifest_path
+    }
+    if observed_package_payloads != {
+        name.removeprefix("customs_ai_agent/"): payload
+        for name, payload in expected_package_payloads.items()
+    }:
+        raise DistributionVerificationError(
+            f"{distribution_kind} package payloads do not match the exact Git source"
+        )
+    return manifest
+
+
 def _assert_unreleased_runtime_lock(payload: bytes, *, distribution_kind: str) -> None:
     lock = _strict_json_object(payload, distribution_kind=distribution_kind)
     if (
@@ -606,7 +776,12 @@ def _verify_wheel_record(
             )
 
 
-def verify_wheel(path: Path) -> dict[str, str]:
+def verify_wheel(
+    path: Path,
+    *,
+    expected_git_sha: str | None = None,
+    source_root: Path | None = None,
+) -> dict[str, str]:
     """Verify exact wheel inventory, metadata, entry point, and RECORD."""
 
     try:
@@ -651,6 +826,14 @@ def verify_wheel(path: Path) -> dict[str, str]:
             "wheel is missing a required runtime file or package resource"
         )
 
+    build_manifest = _assert_source_bound_build(
+        payloads,
+        manifest_path=BUILD_MANIFEST_WHEEL_PATH,
+        package_prefix="customs_ai_agent/",
+        distribution_kind="wheel",
+        expected_git_sha=expected_git_sha,
+        source_root=source_root,
+    )
     _assert_wheel_conformance_boundary(payloads)
     _metadata_from_bytes(payloads[f"{dist_info_prefix}METADATA"])
     try:
@@ -668,10 +851,17 @@ def verify_wheel(path: Path) -> dict[str, str]:
     return {
         "sha256": hashlib.sha256(path.read_bytes()).hexdigest(),
         "member_count": str(len(payloads)),
+        "git_sha": build_manifest["git_sha"],
+        "source_snapshot_sha256": build_manifest["source_snapshot_sha256"],
     }
 
 
-def verify_sdist(path: Path) -> dict[str, str]:
+def verify_sdist(
+    path: Path,
+    *,
+    expected_git_sha: str | None = None,
+    source_root: Path | None = None,
+) -> dict[str, str]:
     """Verify the source distribution is self-contained and safely bounded."""
 
     try:
@@ -746,11 +936,21 @@ def verify_sdist(path: Path) -> dict[str, str]:
         raise DistributionVerificationError(
             "sdist is missing required source, contract, evaluation, fixture, tool, or test files"
         )
+    build_manifest = _assert_source_bound_build(
+        relative_payloads,
+        manifest_path=BUILD_MANIFEST_SDIST_PATH,
+        package_prefix="src/customs_ai_agent/",
+        distribution_kind="sdist",
+        expected_git_sha=expected_git_sha,
+        source_root=source_root,
+    )
     _assert_sdist_canonical_locks(relative_payloads)
     _metadata_from_bytes(relative_payloads["PKG-INFO"])
     return {
         "sha256": hashlib.sha256(path.read_bytes()).hexdigest(),
         "member_count": str(len(relative_payloads)),
+        "git_sha": build_manifest["git_sha"],
+        "source_snapshot_sha256": build_manifest["source_snapshot_sha256"],
     }
 
 
@@ -825,12 +1025,18 @@ def _verify_wheel_origin(
     *,
     wheel_path: Path,
     expected_wheel_sha256: str,
+    expected_git_sha: str | None = None,
+    source_root: Path | None = None,
 ) -> Path:
     try:
         resolved_wheel_path = wheel_path.resolve(strict=True)
     except OSError:
         raise DistributionVerificationError("attested wheel archive is unavailable") from None
-    wheel_result = verify_wheel(resolved_wheel_path)
+    wheel_result = verify_wheel(
+        resolved_wheel_path,
+        expected_git_sha=expected_git_sha,
+        source_root=source_root,
+    )
     if wheel_result["sha256"] != expected_wheel_sha256:
         raise DistributionVerificationError(
             "attested wheel archive hash does not match caller expectation"
@@ -970,6 +1176,7 @@ def _verify_installed_record_against_wheel(
 def verify_installed_distribution(
     *,
     expected_wheel_sha256: str,
+    expected_git_sha: str,
     source_root: Path,
     wheel_path: Path,
 ) -> dict[str, str]:
@@ -1033,6 +1240,8 @@ def verify_installed_distribution(
         direct_url,
         wheel_path=wheel_path,
         expected_wheel_sha256=expected_wheel_sha256,
+        expected_git_sha=expected_git_sha,
+        source_root=source_root,
     )
     installed_record_result = _verify_installed_record_against_wheel(
         distribution,
@@ -1077,6 +1286,7 @@ def build_parser() -> argparse.ArgumentParser:
     parser.add_argument("--sdist", type=Path)
     parser.add_argument("--installed", action="store_true")
     parser.add_argument("--expected-wheel-sha256")
+    parser.add_argument("--expected-git-sha")
     parser.add_argument("--source-root", type=Path)
     return parser
 
@@ -1088,10 +1298,22 @@ def main(argv: list[str] | None = None) -> int:
             "at least one distribution verification target is required"
         )
     results: dict[str, Mapping[str, str]] = {}
+    if (args.wheel or args.sdist) and (args.expected_git_sha is None or args.source_root is None):
+        raise DistributionVerificationError(
+            "distribution verification requires expected Git SHA and source root"
+        )
     if args.wheel:
-        results["wheel"] = verify_wheel(args.wheel.resolve(strict=True))
+        results["wheel"] = verify_wheel(
+            args.wheel.resolve(strict=True),
+            expected_git_sha=args.expected_git_sha,
+            source_root=args.source_root,
+        )
     if args.sdist:
-        results["sdist"] = verify_sdist(args.sdist.resolve(strict=True))
+        results["sdist"] = verify_sdist(
+            args.sdist.resolve(strict=True),
+            expected_git_sha=args.expected_git_sha,
+            source_root=args.source_root,
+        )
     if args.installed:
         if args.expected_wheel_sha256 is None or args.source_root is None or args.wheel is None:
             raise DistributionVerificationError(
@@ -1099,6 +1321,7 @@ def main(argv: list[str] | None = None) -> int:
             )
         results["installed"] = verify_installed_distribution(
             expected_wheel_sha256=args.expected_wheel_sha256.casefold(),
+            expected_git_sha=args.expected_git_sha,
             source_root=args.source_root,
             wheel_path=args.wheel,
         )

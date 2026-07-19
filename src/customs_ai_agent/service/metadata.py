@@ -4,6 +4,7 @@ import hashlib
 from importlib.metadata import PackageNotFoundError, version
 from typing import Any
 
+from customs_ai_agent.build_info import BuildManifestError, load_packaged_build_manifest
 from customs_ai_agent.adapters.llm import DEFAULT_CLAUDE_MODEL
 from customs_ai_agent.contracts import schema_sha256
 from customs_ai_agent.contracts.evidence_runtime_release import (
@@ -15,12 +16,21 @@ from customs_ai_agent.prompts import (
     load_document_analysis_system_prompt,
 )
 from customs_ai_agent.service.settings import ServiceSettings
+from customs_ai_agent.service.settings import ServiceConfigurationError
 
 
 SERVICE_API_VERSION = "internal-agent-service/v1"
 
 
 def build_metadata(settings: ServiceSettings) -> dict[str, Any]:
+    try:
+        build_manifest = load_packaged_build_manifest(
+            required=settings.environment == "production",
+        )
+    except BuildManifestError:
+        raise ServiceConfigurationError("customs_agent_build_manifest_invalid") from None
+    if build_manifest is not None and settings.build_sha != build_manifest.git_sha:
+        raise ServiceConfigurationError("customs_agent_build_sha_mismatch")
     try:
         package_version = version("customs-ai-agent")
     except PackageNotFoundError:
@@ -32,6 +42,9 @@ def build_metadata(settings: ServiceSettings) -> dict[str, Any]:
             "build_sha": settings.build_sha,
             "package_version": package_version,
             "wheel_sha256": settings.wheel_sha256,
+            "source_snapshot_sha256": (
+                build_manifest.source_snapshot_sha256 if build_manifest is not None else "unknown"
+            ),
         },
         "capabilities": ["text"],
         "evidence_runtime_release": (
