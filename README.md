@@ -275,7 +275,10 @@ Data의 contract/header 구현만 확인하는 서버를 사용할 때는 runtim
 `--provider-conformance`를 명시한다. 이 모드의 `status=PASS`는
 `scope=PROVIDER_CONFORMANCE_NOT_RAG_QUALITY`,
 `implementation_candidate_ready=true`, `release_ready=false`로 기록한다. 합성 conformance
-provider의 PASS를 실제 법령 corpus·RAG 품질·서비스 release PASS로 승격하지 않는다.
+서버에서 이 플래그를 생략해도 release로 승격되지 않는다. 현재 evaluator는 검증된 Data
+RAG 품질 attestation을 입력받지 않으므로 `BLOCKED_RAG_RELEASE_ATTESTATION`,
+`release_ready=false`로 fail-closed한다. Provider의 PASS를 실제 법령 corpus·RAG
+품질·서비스 release PASS로 승격하지 않는다.
 
 ## 로컬 text/image/PDF review
 

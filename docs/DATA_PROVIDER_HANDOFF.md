@@ -62,7 +62,10 @@ tag 발행을 의미하지 않는다.
 이 candidate에 맞춘 conformance provider 검증은 runtime evaluator의 명시적
 `--provider-conformance`에서만 수행한다. 성공해도 report scope는
 `PROVIDER_CONFORMANCE_NOT_RAG_QUALITY`, `release_ready=false`다. 실제 Data release 모드는
-최종 provider digest, 58/58 corpus와 RAG 품질 Gate를 별도로 요구한다.
+별도의 검증된 RAG 품질 attestation이 없으면
+`BLOCKED_RAG_RELEASE_ATTESTATION`으로 종료한다. 따라서 동일한 conformance provider를
+대상으로 플래그를 생략하는 것만으로 release-ready를 만들 수 없다. 최종 provider digest,
+58/58 corpus와 RAG 품질 Gate를 별도로 요구한다.
 
 ## Data readiness 완료 조건
 

@@ -137,7 +137,7 @@ def test_without_live_flag_never_reads_env_or_calls_network(
     assert report["errors"] == [{"code": "live_flag_required"}]
 
 
-def test_ready_allowlisted_service_runs_public_runtime_after_readiness(
+def test_ready_allowlisted_service_without_quality_attestation_stays_blocked(
     monkeypatch: pytest.MonkeyPatch,
     tmp_path: Path,
 ) -> None:
@@ -167,14 +167,14 @@ def test_ready_allowlisted_service_runs_public_runtime_after_readiness(
     request = captured["request"]
     config_options = captured["config_options"]
     readiness_url, readiness_options = captured["readiness"]
-    assert exit_code == 0
-    assert report["status"] == "PASS"
+    assert exit_code == 1
+    assert report["status"] == "BLOCKED_RAG_RELEASE_ATTESTATION"
     assert report["readiness_status"] == "READY"
     assert report["agent_execution_passed"] is True
-    assert report["release_ready"] is True
+    assert report["release_ready"] is False
     assert report["implementation_candidate_ready"] is False
     assert report["scope"] == run_runtime_live.LIVE_PROVIDER_SCOPE
-    assert report["errors"] == []
+    assert report["errors"] == [{"code": "rag_quality_attestation_missing"}]
     assert report["counts"]["document_count"] == 4
     assert report["counts"]["document_completed_count"] == 4
     assert report["counts"]["model_call_count"] == 4
@@ -398,6 +398,7 @@ def test_ready_but_incomplete_evidence_is_fail_closed_not_release_pass(
     exit_code, report = run_runtime_live.evaluate(
         env_file=env_file,
         live=True,
+        provider_conformance=True,
     )
     failure_codes = {item["code"] for item in report["errors"]}
 
@@ -472,6 +473,7 @@ def test_report_omits_source_values_credentials_paths_and_provider_ids(
     exit_code, report = run_runtime_live.evaluate(
         env_file=env_file,
         live=True,
+        provider_conformance=True,
     )
     serialized = json.dumps(report)
 

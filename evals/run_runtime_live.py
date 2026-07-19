@@ -385,7 +385,7 @@ def _agent_execution_failures(result: ReviewRunResultV2) -> list[str]:
     return sorted(set(failures))
 
 
-def _ready_release_failures(result: ReviewRunResultV2) -> list[str]:
+def _ready_contract_failures(result: ReviewRunResultV2) -> list[str]:
     failures: list[str] = []
     if result.retrieval_status != "ok":
         failures.append("ready_retrieval_status_not_ok")
@@ -581,18 +581,26 @@ def evaluate(
         report["errors"] = [{"code": _safe_code(code)} for code in sorted(set(failures))]
         return 1, report
 
-    release_failures = _ready_release_failures(result)
+    contract_failures = _ready_contract_failures(result)
     failures = [
         *execution_failures,
-        *release_failures,
+        *contract_failures,
         *observed_error_codes,
     ]
-    release_ready = not failures
-    report["status"] = "PASS" if release_ready else "FAIL"
-    report["release_ready"] = release_ready and not provider_conformance
-    report["implementation_candidate_ready"] = release_ready and provider_conformance
+    contract_ready = not failures
+    if contract_ready and not provider_conformance:
+        # This evaluator can prove Agent execution and the pinned Evidence HTTP
+        # contract, but it does not consume a signed/hashed Data RAG-quality
+        # attestation. A caller-controlled omission of --provider-conformance
+        # must therefore never promote the same test provider to release-ready.
+        failures.append("rag_quality_attestation_missing")
+        report["status"] = "BLOCKED_RAG_RELEASE_ATTESTATION"
+    else:
+        report["status"] = "PASS" if contract_ready else "FAIL"
+    report["release_ready"] = False
+    report["implementation_candidate_ready"] = contract_ready and provider_conformance
     report["errors"] = [{"code": _safe_code(code)} for code in sorted(set(failures))]
-    return (0 if release_ready else 1), report
+    return (0 if contract_ready and provider_conformance else 1), report
 
 
 def _parse_date(value: str) -> date:
@@ -621,7 +629,8 @@ def build_parser() -> argparse.ArgumentParser:
         action="store_true",
         help=(
             "Classify a successful run as provider transport/contract conformance only, "
-            "never as RAG quality or release readiness."
+            "never as RAG quality or release readiness. Without this flag, a ready "
+            "provider remains blocked until a separate RAG-quality attestation exists."
         ),
     )
     parser.add_argument(
