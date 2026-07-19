@@ -28,7 +28,7 @@ from customs_ai_agent.adapters.llm import (
 )
 from customs_ai_agent.adapters.retrieval import (
     RetrievalError,
-    fetch_supported_review_as_of,
+    fetch_evidence_runtime_readiness,
     validate_evidence_destination,
 )
 from customs_ai_agent.contracts import (
@@ -166,20 +166,17 @@ def _evidence_options(
     token_header = _configured_value(
         "EVIDENCE_SERVICE_TOKEN_HEADER",
         file_values,
-        "X-Demo-Token",
+        "Authorization",
     )
-    if not token_header or not token_header.strip():
+    if not token_header or token_header.strip().casefold() != "authorization":
         raise RuntimeLiveEvaluationError("evidence_token_header_invalid")
 
     readiness_options: dict[str, Any] = {
         "service_token": token if token else None,
-        "token_header": token_header.strip(),
         "allowed_origins": allowed_origins,
-        "contract_identity_mode": "required",
     }
     runtime_options: dict[str, Any] = {
         "evidence_service_token": SecretStr(token) if token else None,
-        "evidence_token_header": token_header.strip(),
         "evidence_allowed_origins": allowed_origins,
     }
     return normalized_base_url, readiness_options, runtime_options
@@ -497,10 +494,11 @@ def evaluate(
 
     readiness_status = "READY"
     try:
-        review_as_of = fetch_supported_review_as_of(
+        runtime_identity = fetch_evidence_runtime_readiness(
             normalized_url,
             **readiness_options,
         )
+        review_as_of = runtime_identity.supported_review_as_of
     except Exception as exc:
         readiness_failure = _readiness_failure_code(exc)
         if (
