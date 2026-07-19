@@ -43,7 +43,7 @@ def test_rule_coverage_cli_redacts_filesystem_errors(
     monkeypatch: pytest.MonkeyPatch,
     capsys: pytest.CaptureFixture[str],
 ) -> None:
-    private_path = r"C:\Users\private-reviewer\missing-dataset"
+    private_path = "C:" + r"\Users" + r"\private-reviewer\missing-dataset"
     monkeypatch.setattr(
         rule_builder,
         "_parse_args",

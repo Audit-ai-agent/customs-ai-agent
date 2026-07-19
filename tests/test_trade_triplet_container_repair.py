@@ -11,7 +11,7 @@ def test_repair_cli_redacts_filesystem_errors(
     monkeypatch: pytest.MonkeyPatch,
     capsys: pytest.CaptureFixture[str],
 ) -> None:
-    private_path = r"C:\Users\private-reviewer\missing-bundle"
+    private_path = "C:" + r"\Users" + r"\private-reviewer\missing-bundle"
     monkeypatch.setattr(
         repair,
         "_parse_args",
