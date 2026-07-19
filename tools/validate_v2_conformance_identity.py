@@ -1,14 +1,10 @@
-"""Materialize an explicitly non-deployable Evidence v2 conformance lock.
+"""Validate an evaluator-only Evidence v2 conformance identity without mutation.
 
-The production Agent intentionally ships an ``unreleased`` Evidence runtime
-lock until a real sealed Data generation and evaluation are approved. This
-tool creates a released *test-only* lock in a separate, clean, detached
-worktree so the production HTTP code path can be exercised against an
-explicit Data conformance provider.
-
-It never builds a wheel, invokes a provider, pushes, tags, or releases
-anything. The resulting worktree is dirty by design and must remain a local
-conformance artifact.
+The production Agent lock remains ``unreleased`` in both canonical checkout
+locations and in every wheel. This tool validates external Data conformance
+artifacts against one exact, clean Agent commit and writes only an external
+non-deployable manifest. It never writes an Agent file, builds a distribution,
+invokes a provider, or creates a production release lock.
 """
 
 from __future__ import annotations
@@ -20,7 +16,7 @@ import os
 import re
 import shutil
 import subprocess
-import tempfile
+from dataclasses import dataclass
 from pathlib import Path
 from typing import Any, Mapping
 
@@ -67,14 +63,28 @@ _UNRELEASED_LOCK_FIELDS = {
     "identity",
     "unreleased_reason",
 }
+_REPOSITORY_INPUTS = (
+    ROOT_CONSUMER_LOCK,
+    PACKAGED_CONSUMER_LOCK,
+    ROOT_RETRIEVAL_SCHEMA,
+    PACKAGED_RETRIEVAL_SCHEMA,
+    ROOT_READINESS_SCHEMA,
+    PACKAGED_READINESS_SCHEMA,
+)
 
 
-class ConformanceLockMaterializationError(RuntimeError):
-    """A content-free materialization failure safe to report to an operator."""
+class ConformanceIdentityValidationError(RuntimeError):
+    """A content-free conformance validation failure safe for operator output."""
 
     def __init__(self, code: str) -> None:
         super().__init__(code)
         self.code = code
+
+
+@dataclass(frozen=True, slots=True)
+class ConformanceIdentityValidation:
+    identity: EvidenceRuntimeReleaseIdentity
+    manifest: dict[str, object]
 
 
 def _sha256(payload: bytes) -> str:
@@ -100,9 +110,9 @@ def _strict_json_object(payload: bytes, *, error_code: str) -> dict[str, Any]:
             object_pairs_hook=reject_duplicates,
         )
     except (UnicodeError, ValueError, json.JSONDecodeError):
-        raise ConformanceLockMaterializationError(error_code) from None
+        raise ConformanceIdentityValidationError(error_code) from None
     if not isinstance(value, dict):
-        raise ConformanceLockMaterializationError(error_code)
+        raise ConformanceIdentityValidationError(error_code)
     return value
 
 
@@ -122,7 +132,7 @@ def _serialized_document(value: Mapping[str, object]) -> bytes:
 def _git_executable() -> str:
     executable = shutil.which("git")
     if executable is None:
-        raise ConformanceLockMaterializationError("git_unavailable")
+        raise ConformanceIdentityValidationError("git_unavailable")
     return executable
 
 
@@ -136,7 +146,7 @@ def _git(repository: Path, *arguments: str, check: bool = True) -> subprocess.Co
         check=False,
     )
     if check and result.returncode:
-        raise ConformanceLockMaterializationError("git_state_invalid")
+        raise ConformanceIdentityValidationError("git_state_invalid")
     return result
 
 
@@ -150,14 +160,14 @@ def _is_within(path: Path, parent: Path) -> bool:
 
 def _read_regular_file(path: Path, *, error_code: str) -> bytes:
     if path.is_symlink():
-        raise ConformanceLockMaterializationError(error_code)
+        raise ConformanceIdentityValidationError(error_code)
     try:
         resolved = path.resolve(strict=True)
         if not resolved.is_file():
             raise OSError
         return resolved.read_bytes()
     except OSError:
-        raise ConformanceLockMaterializationError(error_code) from None
+        raise ConformanceIdentityValidationError(error_code) from None
 
 
 def _read_repository_file(
@@ -165,67 +175,69 @@ def _read_repository_file(
     relative_path: Path,
     *,
     error_code: str,
-) -> tuple[bytes, Path]:
+) -> bytes:
     candidate = repository / relative_path
     current = candidate
     while current != repository:
         if current.is_symlink():
-            raise ConformanceLockMaterializationError(error_code)
+            raise ConformanceIdentityValidationError(error_code)
         current = current.parent
     try:
         resolved = candidate.resolve(strict=True)
     except OSError:
-        raise ConformanceLockMaterializationError(error_code) from None
+        raise ConformanceIdentityValidationError(error_code) from None
     if not _is_within(resolved, repository):
-        raise ConformanceLockMaterializationError(error_code)
-    return _read_regular_file(candidate, error_code=error_code), candidate
+        raise ConformanceIdentityValidationError(error_code)
+    return _read_regular_file(candidate, error_code=error_code)
 
 
-def _assert_external_input(path: Path, repository: Path, *, error_code: str) -> bytes:
+def _read_external_input(path: Path, repository: Path, *, error_code: str) -> bytes:
+    if path.is_symlink():
+        raise ConformanceIdentityValidationError(error_code)
     try:
         resolved = path.resolve(strict=True)
     except OSError:
-        raise ConformanceLockMaterializationError(error_code) from None
+        raise ConformanceIdentityValidationError(error_code) from None
     if _is_within(resolved, repository):
-        raise ConformanceLockMaterializationError(error_code)
-    return _read_regular_file(path, error_code=error_code)
+        raise ConformanceIdentityValidationError(error_code)
+    return _read_regular_file(resolved, error_code=error_code)
 
 
-def _assert_external_manifest_output(path: Path, repository: Path) -> Path:
+def _external_manifest_output(path: Path, repository: Path) -> Path:
     if path.exists() or path.is_symlink():
-        raise ConformanceLockMaterializationError("manifest_output_exists")
+        raise ConformanceIdentityValidationError("manifest_output_exists")
     try:
         parent = path.parent.resolve(strict=True)
     except OSError:
-        raise ConformanceLockMaterializationError("manifest_parent_invalid") from None
+        raise ConformanceIdentityValidationError("manifest_parent_invalid") from None
     if not parent.is_dir() or _is_within(parent, repository):
-        raise ConformanceLockMaterializationError("manifest_output_must_be_external")
+        raise ConformanceIdentityValidationError("manifest_output_must_be_external")
+    git_probe = _git(parent, "rev-parse", "--git-dir", check=False)
+    if git_probe.returncode == 0:
+        raise ConformanceIdentityValidationError("manifest_output_git_repository_forbidden")
     return parent / path.name
 
 
-def _assert_detached_clean_head(repository: Path, expected_base_commit: str) -> str:
+def _assert_exact_clean_head(repository: Path, expected_base_commit: str) -> str:
     if _GIT_SHA.fullmatch(expected_base_commit) is None:
-        raise ConformanceLockMaterializationError("base_commit_invalid")
-    try:
-        repository = repository.resolve(strict=True)
-    except OSError:
-        raise ConformanceLockMaterializationError("repository_invalid") from None
+        raise ConformanceIdentityValidationError("base_commit_invalid")
     top_level = _git(repository, "rev-parse", "--show-toplevel").stdout.strip()
     try:
         if Path(top_level).resolve(strict=True) != repository:
-            raise ConformanceLockMaterializationError("repository_invalid")
+            raise ConformanceIdentityValidationError("repository_invalid")
     except OSError:
-        raise ConformanceLockMaterializationError("repository_invalid") from None
+        raise ConformanceIdentityValidationError("repository_invalid") from None
     head = _git(repository, "rev-parse", "HEAD").stdout.strip()
     if head != expected_base_commit:
-        raise ConformanceLockMaterializationError("base_commit_mismatch")
-    symbolic = _git(repository, "symbolic-ref", "-q", "HEAD", check=False)
-    if symbolic.returncode == 0:
-        raise ConformanceLockMaterializationError("detached_head_required")
-    if symbolic.returncode not in {1}:
-        raise ConformanceLockMaterializationError("git_state_invalid")
-    if _git(repository, "status", "--porcelain").stdout:
-        raise ConformanceLockMaterializationError("clean_worktree_required")
+        raise ConformanceIdentityValidationError("base_commit_mismatch")
+    status = _git(
+        repository,
+        "status",
+        "--porcelain=v1",
+        "--untracked-files=all",
+    ).stdout
+    if status:
+        raise ConformanceIdentityValidationError("clean_worktree_required")
     return head
 
 
@@ -236,10 +248,10 @@ def _verified_provider_lock(payload: dict[str, Any]) -> dict[str, str]:
         or payload.get("schema_version") != "1.0"
         or payload.get("provider_release") != "evidence-api-v1.2.0"
     ):
-        raise ConformanceLockMaterializationError("provider_runtime_lock_invalid")
+        raise ConformanceIdentityValidationError("provider_runtime_lock_invalid")
     revision = payload.get("provider_revision")
     if not isinstance(revision, str) or _GIT_SHA.fullmatch(revision) is None:
-        raise ConformanceLockMaterializationError("provider_runtime_lock_invalid")
+        raise ConformanceIdentityValidationError("provider_runtime_lock_invalid")
     for field_name in (
         "provider_build_sha256",
         "retrieval_schema_sha256",
@@ -248,7 +260,7 @@ def _verified_provider_lock(payload: dict[str, Any]) -> dict[str, str]:
     ):
         value = payload.get(field_name)
         if not isinstance(value, str) or _SHA256.fullmatch(value) is None:
-            raise ConformanceLockMaterializationError("provider_runtime_lock_invalid")
+            raise ConformanceIdentityValidationError("provider_runtime_lock_invalid")
     build_input = {
         "contract": "evidence-retrieval",
         "schema_version": payload["schema_version"],
@@ -258,7 +270,7 @@ def _verified_provider_lock(payload: dict[str, Any]) -> dict[str, str]:
         "source_manifest_sha256": payload["provider_source_manifest_sha256"],
     }
     if _sha256(canonical_json_bytes(build_input)) != payload["provider_build_sha256"]:
-        raise ConformanceLockMaterializationError("provider_runtime_lock_invalid")
+        raise ConformanceIdentityValidationError("provider_runtime_lock_invalid")
     return payload  # type: ignore[return-value]
 
 
@@ -269,7 +281,7 @@ def _verified_identity(
     try:
         identity = EvidenceRuntimeReleaseIdentity.from_mapping(payload)
     except ValueError:
-        raise ConformanceLockMaterializationError("runtime_identity_invalid") from None
+        raise ConformanceIdentityValidationError("runtime_identity_invalid") from None
     comparisons = {
         "provider_release": identity.provider_release,
         "provider_revision": identity.provider_revision,
@@ -278,30 +290,30 @@ def _verified_identity(
         "provider_source_manifest_sha256": identity.provider_source_manifest_sha256,
     }
     if any(provider_lock[field] != observed for field, observed in comparisons.items()):
-        raise ConformanceLockMaterializationError("runtime_identity_provider_mismatch")
+        raise ConformanceIdentityValidationError("runtime_identity_provider_mismatch")
     return identity
 
 
 def _verified_local_contracts(
     repository: Path,
     provider_lock: Mapping[str, str],
-) -> None:
-    retrieval_root, _ = _read_repository_file(
+) -> tuple[bytes, bytes]:
+    retrieval_root = _read_repository_file(
         repository,
         ROOT_RETRIEVAL_SCHEMA,
         error_code="retrieval_schema_invalid",
     )
-    retrieval_package, _ = _read_repository_file(
+    retrieval_package = _read_repository_file(
         repository,
         PACKAGED_RETRIEVAL_SCHEMA,
         error_code="retrieval_schema_invalid",
     )
-    readiness_root, _ = _read_repository_file(
+    readiness_root = _read_repository_file(
         repository,
         ROOT_READINESS_SCHEMA,
         error_code="readiness_schema_invalid",
     )
-    readiness_package, _ = _read_repository_file(
+    readiness_package = _read_repository_file(
         repository,
         PACKAGED_READINESS_SCHEMA,
         error_code="readiness_schema_invalid",
@@ -310,36 +322,36 @@ def _verified_local_contracts(
         retrieval_root != retrieval_package
         or _sha256(retrieval_root) != provider_lock["retrieval_schema_sha256"]
     ):
-        raise ConformanceLockMaterializationError("retrieval_schema_mismatch")
+        raise ConformanceIdentityValidationError("retrieval_schema_mismatch")
     if (
         readiness_root != readiness_package
         or _sha256(readiness_root) != provider_lock["readiness_schema_sha256"]
     ):
-        raise ConformanceLockMaterializationError("readiness_schema_mismatch")
+        raise ConformanceIdentityValidationError("readiness_schema_mismatch")
     for payload, error_code in (
         (retrieval_root, "retrieval_schema_invalid"),
         (readiness_root, "readiness_schema_invalid"),
     ):
         _strict_json_object(payload, error_code=error_code)
+    return retrieval_root, readiness_root
 
 
 def _verified_unreleased_consumer_locks(
     repository: Path,
     provider_lock: Mapping[str, str],
-) -> tuple[bytes, tuple[Path, Path]]:
-    root_bytes, root_path = _read_repository_file(
+) -> bytes:
+    root_bytes = _read_repository_file(
         repository,
         ROOT_CONSUMER_LOCK,
         error_code="consumer_lock_invalid",
     )
-    package_bytes, package_path = _read_repository_file(
+    package_bytes = _read_repository_file(
         repository,
         PACKAGED_CONSUMER_LOCK,
         error_code="consumer_lock_invalid",
     )
-    paths = (root_path, package_path)
     if root_bytes != package_bytes:
-        raise ConformanceLockMaterializationError("consumer_lock_copies_mismatch")
+        raise ConformanceIdentityValidationError("consumer_lock_copies_mismatch")
     payload = _strict_json_object(root_bytes, error_code="consumer_lock_invalid")
     if (
         set(payload) != _UNRELEASED_LOCK_FIELDS
@@ -356,25 +368,20 @@ def _verified_unreleased_consumer_locks(
         or not isinstance(payload.get("unreleased_reason"), str)
         or not payload["unreleased_reason"].strip()
     ):
-        raise ConformanceLockMaterializationError("consumer_lock_not_unreleased")
-    return root_bytes, paths
+        raise ConformanceIdentityValidationError("consumer_lock_not_unreleased")
+    return root_bytes
 
 
-def _released_consumer_lock(
-    identity: EvidenceRuntimeReleaseIdentity,
-    provider_lock: Mapping[str, str],
-) -> dict[str, object]:
+def _repository_snapshot(repository: Path) -> dict[str, str]:
     return {
-        "contract": "evidence-runtime-release-consumer-lock",
-        "schema_version": "1.0",
-        "canonical_owner": "customs-data-platform",
-        "consumer": "customs-ai-agent",
-        "provider_release": identity.provider_release,
-        "retrieval_schema_version": identity.retrieval_schema_version,
-        "retrieval_schema_sha256": identity.retrieval_schema_sha256,
-        "readiness_schema_sha256": provider_lock["readiness_schema_sha256"],
-        "release_state": "released",
-        "identity": identity.to_wire(),
+        path.as_posix(): _sha256(
+            _read_repository_file(
+                repository,
+                path,
+                error_code="repository_input_changed",
+            )
+        )
+        for path in _REPOSITORY_INPUTS
     }
 
 
@@ -385,17 +392,23 @@ def _manifest(
     provider_lock_bytes: bytes,
     identity_bytes: bytes,
     identity: EvidenceRuntimeReleaseIdentity,
-    original_consumer_lock_bytes: bytes,
     consumer_lock_bytes: bytes,
+    repository_snapshot: Mapping[str, str],
 ) -> dict[str, object]:
     return {
-        "artifact_type": "agent-v2-provider-conformance-lock-materialization",
+        "artifact_type": "agent-v2-provider-conformance-identity-validation",
         "schema_version": "1.0",
         "conformance_only": True,
         "deployable": False,
         "push_allowed": False,
         "tag_allowed": False,
         "release_allowed": False,
+        "runtime_overlay": "evaluator-process-memory-only",
+        "canonical_lock_release_state": "unreleased",
+        "repository_mutated": False,
+        "repository_clean_before": True,
+        "repository_clean_after": True,
+        "modified_agent_file_count": 0,
         "forbidden_actions": ["deploy", "push", "release", "tag"],
         "base_commit": base_commit,
         "provider_release": provider_lock["provider_release"],
@@ -407,83 +420,26 @@ def _manifest(
         "retrieval_schema_sha256": provider_lock["retrieval_schema_sha256"],
         "readiness_schema_sha256": provider_lock["readiness_schema_sha256"],
         "runtime_release_sha256": identity.runtime_release_sha256,
-        "base_consumer_lock_sha256": _sha256(original_consumer_lock_bytes),
-        "consumer_lock_sha256": _sha256(consumer_lock_bytes),
-        "modified_agent_file_count": 2,
+        "canonical_unreleased_consumer_lock_sha256": _sha256(consumer_lock_bytes),
+        "repository_input_set_sha256": _sha256(canonical_json_bytes(dict(repository_snapshot))),
     }
 
 
-def _prepare_temp_file(target: Path, payload: bytes) -> Path:
-    descriptor, temporary_name = tempfile.mkstemp(
-        dir=target.parent,
-        prefix=f".{target.name}.",
-        suffix=".tmp",
-    )
-    temporary = Path(temporary_name)
+def _write_external_manifest(path: Path, payload: bytes) -> None:
+    created = False
     try:
-        with os.fdopen(descriptor, "wb") as stream:
+        with path.open("xb") as stream:
+            created = True
             stream.write(payload)
             stream.flush()
             os.fsync(stream.fileno())
-    except Exception:
-        temporary.unlink(missing_ok=True)
-        raise
-    return temporary
-
-
-def _restore_file(path: Path, payload: bytes) -> None:
-    temporary = _prepare_temp_file(path, payload)
-    try:
-        os.replace(temporary, path)
-    finally:
-        temporary.unlink(missing_ok=True)
-
-
-def _commit_outputs(
-    *,
-    lock_paths: tuple[Path, Path],
-    original_lock_bytes: bytes,
-    consumer_lock_bytes: bytes,
-    manifest_output: Path,
-    manifest_bytes: bytes,
-) -> None:
-    prepared: dict[Path, Path] = {}
-    try:
-        for target, payload in (
-            (lock_paths[0], consumer_lock_bytes),
-            (lock_paths[1], consumer_lock_bytes),
-            (manifest_output, manifest_bytes),
-        ):
-            prepared[target] = _prepare_temp_file(target, payload)
     except OSError:
-        for temporary in prepared.values():
-            temporary.unlink(missing_ok=True)
-        raise ConformanceLockMaterializationError("output_write_failed") from None
-    replaced_locks: list[Path] = []
-    try:
-        for lock_path in lock_paths:
-            os.replace(prepared[lock_path], lock_path)
-            replaced_locks.append(lock_path)
-        # A hard link publishes the already-fsynced manifest atomically and
-        # refuses to replace a file created after the initial preflight.
-        os.link(prepared[manifest_output], manifest_output)
-        prepared[manifest_output].unlink()
-    except OSError:
-        rollback_failed = False
-        for lock_path in replaced_locks:
-            try:
-                _restore_file(lock_path, original_lock_bytes)
-            except OSError:
-                rollback_failed = True
-        if rollback_failed:
-            raise ConformanceLockMaterializationError("output_rollback_failed") from None
-        raise ConformanceLockMaterializationError("output_write_failed") from None
-    finally:
-        for temporary in prepared.values():
-            temporary.unlink(missing_ok=True)
+        if created:
+            path.unlink(missing_ok=True)
+        raise ConformanceIdentityValidationError("manifest_write_failed") from None
 
 
-def materialize_conformance_lock(
+def validate_conformance_identity(
     *,
     repository: Path,
     provider_runtime_lock_path: Path,
@@ -491,24 +447,25 @@ def materialize_conformance_lock(
     manifest_output: Path,
     expected_base_commit: str,
     test_only_conformance: bool,
-) -> dict[str, object]:
-    """Validate and materialize one local-only conformance consumer lock."""
+) -> ConformanceIdentityValidation:
+    """Validate one local-only identity while preserving every Agent file."""
 
     if test_only_conformance is not True:
-        raise ConformanceLockMaterializationError("test_only_acknowledgement_required")
+        raise ConformanceIdentityValidationError("test_only_acknowledgement_required")
     try:
         repository = repository.resolve(strict=True)
     except OSError:
-        raise ConformanceLockMaterializationError("repository_invalid") from None
-    base_commit = _assert_detached_clean_head(repository, expected_base_commit)
-    manifest_output = _assert_external_manifest_output(manifest_output, repository)
+        raise ConformanceIdentityValidationError("repository_invalid") from None
+    base_commit = _assert_exact_clean_head(repository, expected_base_commit)
+    manifest_output = _external_manifest_output(manifest_output, repository)
+    before_snapshot = _repository_snapshot(repository)
 
-    provider_lock_bytes = _assert_external_input(
+    provider_lock_bytes = _read_external_input(
         provider_runtime_lock_path,
         repository,
         error_code="provider_runtime_lock_invalid",
     )
-    identity_bytes = _assert_external_input(
+    identity_bytes = _read_external_input(
         runtime_identity_path,
         repository,
         error_code="runtime_identity_invalid",
@@ -524,39 +481,30 @@ def materialize_conformance_lock(
         provider_lock,
     )
     _verified_local_contracts(repository, provider_lock)
-    original_lock_bytes, lock_paths = _verified_unreleased_consumer_locks(
-        repository,
-        provider_lock,
-    )
+    consumer_lock_bytes = _verified_unreleased_consumer_locks(repository, provider_lock)
 
-    # Close the validation-to-write window as far as a local CLI can: the
-    # worktree must still be at the exact detached clean commit immediately
-    # before the two intentional lock writes.
-    _assert_detached_clean_head(repository, expected_base_commit)
-    consumer_lock_bytes = _serialized_document(_released_consumer_lock(identity, provider_lock))
+    _assert_exact_clean_head(repository, expected_base_commit)
+    after_snapshot = _repository_snapshot(repository)
+    if after_snapshot != before_snapshot:
+        raise ConformanceIdentityValidationError("repository_input_changed")
     manifest = _manifest(
         base_commit=base_commit,
         provider_lock=provider_lock,
         provider_lock_bytes=provider_lock_bytes,
         identity_bytes=identity_bytes,
         identity=identity,
-        original_consumer_lock_bytes=original_lock_bytes,
         consumer_lock_bytes=consumer_lock_bytes,
+        repository_snapshot=before_snapshot,
     )
-    manifest_bytes = _serialized_document(manifest)
+    _write_external_manifest(manifest_output, _serialized_document(manifest))
     try:
-        _commit_outputs(
-            lock_paths=lock_paths,
-            original_lock_bytes=original_lock_bytes,
-            consumer_lock_bytes=consumer_lock_bytes,
-            manifest_output=manifest_output,
-            manifest_bytes=manifest_bytes,
-        )
-    except ConformanceLockMaterializationError:
+        _assert_exact_clean_head(repository, expected_base_commit)
+        if _repository_snapshot(repository) != before_snapshot:
+            raise ConformanceIdentityValidationError("repository_input_changed")
+    except ConformanceIdentityValidationError:
+        manifest_output.unlink(missing_ok=True)
         raise
-    except OSError:
-        raise ConformanceLockMaterializationError("output_write_failed") from None
-    return manifest
+    return ConformanceIdentityValidation(identity=identity, manifest=manifest)
 
 
 def build_parser() -> argparse.ArgumentParser:
@@ -565,7 +513,7 @@ def build_parser() -> argparse.ArgumentParser:
         "--test-only-conformance",
         action="store_true",
         required=True,
-        help="Required acknowledgement that the output is non-deployable test material.",
+        help="Required acknowledgement that the validated identity is evaluator-only.",
     )
     parser.add_argument("--repository", type=Path, default=REPOSITORY_ROOT)
     parser.add_argument("--base-commit", required=True)
@@ -578,7 +526,7 @@ def build_parser() -> argparse.ArgumentParser:
 def main(argv: list[str] | None = None) -> int:
     args = build_parser().parse_args(argv)
     try:
-        manifest = materialize_conformance_lock(
+        validation = validate_conformance_identity(
             repository=args.repository,
             provider_runtime_lock_path=args.provider_runtime_lock,
             runtime_identity_path=args.runtime_identity,
@@ -586,12 +534,13 @@ def main(argv: list[str] | None = None) -> int:
             expected_base_commit=args.base_commit,
             test_only_conformance=args.test_only_conformance,
         )
-    except ConformanceLockMaterializationError as exc:
-        print(f"conformance_lock_materialization_failed={exc.code}")
+    except ConformanceIdentityValidationError as exc:
+        print(f"conformance_identity_validation_failed={exc.code}")
         return 1
-    print(f"conformance_only={str(manifest['conformance_only']).lower()}")
-    print(f"deployable={str(manifest['deployable']).lower()}")
-    print(f"consumer_lock_sha256={manifest['consumer_lock_sha256']}")
+    print(f"conformance_only={str(validation.manifest['conformance_only']).lower()}")
+    print(f"deployable={str(validation.manifest['deployable']).lower()}")
+    print(f"repository_mutated={str(validation.manifest['repository_mutated']).lower()}")
+    print(f"runtime_release_sha256={validation.identity.runtime_release_sha256}")
     return 0
 
 

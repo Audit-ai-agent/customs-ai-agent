@@ -166,9 +166,11 @@ _SDIST_REQUIRED_FILES: Final = frozenset(
         "tests/test_ocr_freeze.py",
         "tools/run_security_gate.py",
         "tools/build_evidence_runtime_release_lock.py",
+        "tools/validate_v2_conformance_identity.py",
         "tools/verify_ocr_release_freeze.py",
         "tools/verify_distribution.py",
         "tools/verify_service_openapi.py",
+        "src/customs_ai_agent/contracts/evidence/runtime-release-v2.lock.json",
         *{f"src/customs_ai_agent/prompts/{name}" for name in EXPECTED_PROMPT_RESOURCES},
         *{f"src/customs_ai_agent/contracts/{name}" for name in EXPECTED_SCHEMA_RESOURCES},
     }
@@ -210,6 +212,18 @@ _SDIST_ALLOWED_ROOT_DIRECTORIES: Final = frozenset(
         "tools",
         ".github",
     }
+)
+_WHEEL_RUNTIME_RELEASE_LOCK: Final = (
+    "customs_ai_agent/contracts/evidence/runtime-release-v2.lock.json"
+)
+_SDIST_ROOT_RUNTIME_RELEASE_LOCK: Final = "contracts/evidence/runtime-release-v2.lock.json"
+_SDIST_PACKAGED_RUNTIME_RELEASE_LOCK: Final = (
+    "src/customs_ai_agent/contracts/evidence/runtime-release-v2.lock.json"
+)
+_CONFORMANCE_WHEEL_MARKERS: Final = (
+    b"agent-v2-provider-conformance-identity-validation",
+    b"evaluator-process-memory-only",
+    b"_provider_conformance_runtime_identity",
 )
 _FORBIDDEN_MEDIA_SUFFIXES: Final = frozenset(
     {
@@ -398,6 +412,100 @@ def _assert_archive_size_limit(payloads: Mapping[str, bytes]) -> None:
         )
 
 
+def _strict_json_object(payload: bytes, *, distribution_kind: str) -> dict[str, object]:
+    def reject_constant(_value: str) -> None:
+        raise ValueError
+
+    def reject_duplicates(pairs: list[tuple[str, object]]) -> dict[str, object]:
+        value: dict[str, object] = {}
+        for key, item in pairs:
+            if key in value:
+                raise ValueError
+            value[key] = item
+        return value
+
+    try:
+        value = json.loads(
+            payload,
+            parse_constant=reject_constant,
+            object_pairs_hook=reject_duplicates,
+        )
+    except (UnicodeError, ValueError, json.JSONDecodeError):
+        raise DistributionVerificationError(
+            f"{distribution_kind} production runtime release lock is invalid"
+        ) from None
+    if not isinstance(value, dict):
+        raise DistributionVerificationError(
+            f"{distribution_kind} production runtime release lock is invalid"
+        )
+    return value
+
+
+def _assert_unreleased_runtime_lock(payload: bytes, *, distribution_kind: str) -> None:
+    lock = _strict_json_object(payload, distribution_kind=distribution_kind)
+    if (
+        set(lock)
+        != {
+            "contract",
+            "schema_version",
+            "canonical_owner",
+            "consumer",
+            "provider_release",
+            "retrieval_schema_version",
+            "retrieval_schema_sha256",
+            "readiness_schema_sha256",
+            "release_state",
+            "identity",
+            "unreleased_reason",
+        }
+        or lock.get("contract") != "evidence-runtime-release-consumer-lock"
+        or lock.get("schema_version") != "1.0"
+        or lock.get("canonical_owner") != "customs-data-platform"
+        or lock.get("consumer") != "customs-ai-agent"
+        or lock.get("release_state") != "unreleased"
+        or lock.get("identity") is not None
+        or not isinstance(lock.get("unreleased_reason"), str)
+        or not str(lock["unreleased_reason"]).strip()
+    ):
+        raise DistributionVerificationError(
+            f"{distribution_kind} production runtime release lock must remain unreleased"
+        )
+
+
+def _assert_wheel_conformance_boundary(payloads: Mapping[str, bytes]) -> None:
+    try:
+        lock_bytes = payloads[_WHEEL_RUNTIME_RELEASE_LOCK]
+    except KeyError:
+        raise DistributionVerificationError(
+            "wheel production runtime release lock is missing"
+        ) from None
+    _assert_unreleased_runtime_lock(lock_bytes, distribution_kind="wheel")
+    for name, payload in payloads.items():
+        if not name.startswith(f"{EXPECTED_IMPORT_PACKAGE}/"):
+            continue
+        if "conformance" in PurePosixPath(name).name.casefold() or any(
+            marker in payload for marker in _CONFORMANCE_WHEEL_MARKERS
+        ):
+            raise DistributionVerificationError(
+                "wheel contains evaluator-only conformance identity or overlay code"
+            )
+
+
+def _assert_sdist_canonical_locks(payloads: Mapping[str, bytes]) -> None:
+    try:
+        root_lock = payloads[_SDIST_ROOT_RUNTIME_RELEASE_LOCK]
+        packaged_lock = payloads[_SDIST_PACKAGED_RUNTIME_RELEASE_LOCK]
+    except KeyError:
+        raise DistributionVerificationError(
+            "sdist production runtime release lock is missing"
+        ) from None
+    if root_lock != packaged_lock:
+        raise DistributionVerificationError(
+            "sdist canonical production runtime release locks differ"
+        )
+    _assert_unreleased_runtime_lock(root_lock, distribution_kind="sdist")
+
+
 def _metadata_from_bytes(payload: bytes) -> None:
     metadata = BytesParser().parsebytes(payload)
     if metadata.get("Name") != EXPECTED_DISTRIBUTION:
@@ -543,6 +651,7 @@ def verify_wheel(path: Path) -> dict[str, str]:
             "wheel is missing a required runtime file or package resource"
         )
 
+    _assert_wheel_conformance_boundary(payloads)
     _metadata_from_bytes(payloads[f"{dist_info_prefix}METADATA"])
     try:
         entry_points = payloads[f"{dist_info_prefix}entry_points.txt"].decode("utf-8")
@@ -637,6 +746,7 @@ def verify_sdist(path: Path) -> dict[str, str]:
         raise DistributionVerificationError(
             "sdist is missing required source, contract, evaluation, fixture, tool, or test files"
         )
+    _assert_sdist_canonical_locks(relative_payloads)
     _metadata_from_bytes(relative_payloads["PKG-INFO"])
     return {
         "sha256": hashlib.sha256(path.read_bytes()).hexdigest(),

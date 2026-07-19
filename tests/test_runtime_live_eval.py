@@ -14,6 +14,7 @@ import pytest
 from evals import run_runtime_live
 from customs_ai_agent.adapters import retrieval as retrieval_module
 from customs_ai_agent.adapters.retrieval import RetrievalError
+import customs_ai_agent.runtime as runtime_module
 from customs_ai_agent.contracts.evidence_runtime_release import (
     EvidenceRuntimeReleaseIdentity,
     canonical_json_bytes,
@@ -45,6 +46,29 @@ def _env_file(
 
 def _readiness_identity(review_as_of: date = date(2026, 7, 10)) -> SimpleNamespace:
     return SimpleNamespace(supported_review_as_of=review_as_of)
+
+
+def _conformance_options(
+    monkeypatch: pytest.MonkeyPatch,
+    tmp_path: Path,
+    *,
+    identity: EvidenceRuntimeReleaseIdentity | None = None,
+    captured: dict[str, Any] | None = None,
+) -> dict[str, object]:
+    validated_identity = identity or _sealed_runtime_identity()
+
+    def fake_validate(**options: Any) -> SimpleNamespace:
+        if captured is not None:
+            captured["validation_options"] = options
+        return SimpleNamespace(identity=validated_identity)
+
+    monkeypatch.setattr(run_runtime_live, "validate_conformance_identity", fake_validate)
+    return {
+        "provider_runtime_lock": tmp_path / "external-provider-lock.json",
+        "runtime_identity": tmp_path / "external-runtime-identity.json",
+        "conformance_manifest_output": tmp_path / "external-validation-manifest.json",
+        "conformance_base_commit": "1" * 40,
+    }
 
 
 def _sealed_runtime_identity() -> EvidenceRuntimeReleaseIdentity:
@@ -272,6 +296,7 @@ def test_provider_conformance_pass_is_never_reported_as_rag_release_ready(
         base_url=base_url,
         live=True,
         provider_conformance=True,
+        **_conformance_options(monkeypatch, tmp_path),
     )
 
     assert exit_code == 0
@@ -321,18 +346,21 @@ def test_live_preflight_uses_real_v2_loopback_readiness_and_bearer_auth(
             env_file = _env_file(tmp_path)
             result = _live_result("happy_path")
             captured: dict[str, Any] = {"order": []}
-            monkeypatch.setattr(
-                retrieval_module,
-                "load_released_evidence_runtime_identity",
-                lambda: identity,
-            )
             _patch_runtime(monkeypatch, result, captured)
+            original_runtime_loader = runtime_module.load_released_evidence_runtime_identity
+            original_retrieval_loader = retrieval_module.load_released_evidence_runtime_identity
 
             exit_code, report = run_runtime_live.evaluate(
                 env_file=env_file,
                 base_url=f"http://127.0.0.1:{port}",
                 live=True,
                 provider_conformance=True,
+                **_conformance_options(
+                    monkeypatch,
+                    tmp_path,
+                    identity=identity,
+                    captured=captured,
+                ),
             )
         finally:
             server.shutdown()
@@ -350,6 +378,9 @@ def test_live_preflight_uses_real_v2_loopback_readiness_and_bearer_auth(
     ]
     assert captured["request"].review_as_of == identity.supported_review_as_of
     assert "evidence_token_header" not in captured["config_options"]
+    assert captured["validation_options"]["repository"] == run_runtime_live.REPOSITORY_ROOT
+    assert runtime_module.load_released_evidence_runtime_identity is original_runtime_loader
+    assert retrieval_module.load_released_evidence_runtime_identity is original_retrieval_loader
 
 
 def test_custom_evidence_auth_header_is_rejected_before_network(
@@ -391,6 +422,103 @@ def test_provider_conformance_scope_is_preserved_when_live_is_disabled(
     assert report["implementation_candidate_ready"] is False
 
 
+def test_provider_conformance_requires_all_external_artifacts_before_network(
+    monkeypatch: pytest.MonkeyPatch,
+    tmp_path: Path,
+) -> None:
+    _forbid_live_dependencies(monkeypatch)
+    monkeypatch.setattr(
+        run_runtime_live,
+        "validate_conformance_identity",
+        lambda **_kwargs: pytest.fail("validator must not run with incomplete inputs"),
+    )
+
+    exit_code, report = run_runtime_live.evaluate(
+        env_file=tmp_path / "must-not-be-read.env",
+        live=True,
+        provider_conformance=True,
+    )
+
+    assert exit_code == 1
+    assert report["network_status"] == "DISABLED_CONFORMANCE_PREFLIGHT_FAILED"
+    assert report["errors"] == [{"code": "provider_conformance_artifacts_required"}]
+
+
+def test_conformance_inputs_without_explicit_flag_are_rejected_before_network(
+    monkeypatch: pytest.MonkeyPatch,
+    tmp_path: Path,
+) -> None:
+    _forbid_live_dependencies(monkeypatch)
+
+    exit_code, report = run_runtime_live.evaluate(
+        env_file=tmp_path / "must-not-be-read.env",
+        live=True,
+        provider_runtime_lock=tmp_path / "provider.json",
+        runtime_identity=tmp_path / "identity.json",
+        conformance_manifest_output=tmp_path / "manifest.json",
+        conformance_base_commit="1" * 40,
+    )
+
+    assert exit_code == 1
+    assert report["network_status"] == "DISABLED_CONFORMANCE_PREFLIGHT_FAILED"
+    assert report["errors"] == [{"code": "provider_conformance_flag_required"}]
+
+
+def test_conformance_validation_failure_is_safe_and_prevents_network(
+    monkeypatch: pytest.MonkeyPatch,
+    tmp_path: Path,
+) -> None:
+    _forbid_live_dependencies(monkeypatch)
+
+    def reject(**_kwargs: Any) -> None:
+        raise run_runtime_live.ConformanceIdentityValidationError(
+            "runtime_identity_provider_mismatch"
+        )
+
+    monkeypatch.setattr(run_runtime_live, "validate_conformance_identity", reject)
+    exit_code, report = run_runtime_live.evaluate(
+        env_file=tmp_path / "must-not-be-read.env",
+        live=True,
+        provider_conformance=True,
+        provider_runtime_lock=tmp_path / "provider.json",
+        runtime_identity=tmp_path / "identity.json",
+        conformance_manifest_output=tmp_path / "manifest.json",
+        conformance_base_commit="1" * 40,
+    )
+
+    assert exit_code == 1
+    assert report["network_status"] == "DISABLED_CONFORMANCE_PREFLIGHT_FAILED"
+    assert report["errors"] == [{"code": "runtime_identity_provider_mismatch"}]
+
+
+def test_conformance_overlay_restores_both_loaders_after_readiness_failure(
+    monkeypatch: pytest.MonkeyPatch,
+    tmp_path: Path,
+) -> None:
+    identity = _sealed_runtime_identity()
+    env_file = _env_file(tmp_path)
+    original_runtime_loader = runtime_module.load_released_evidence_runtime_identity
+    original_retrieval_loader = retrieval_module.load_released_evidence_runtime_identity
+
+    def fail_readiness(*_args: Any, **_kwargs: Any) -> None:
+        assert runtime_module.load_released_evidence_runtime_identity() == identity
+        assert retrieval_module.load_released_evidence_runtime_identity() == identity
+        raise RetrievalError("Evidence runtime readiness request failed: network error")
+
+    monkeypatch.setattr(run_runtime_live, "fetch_evidence_runtime_readiness", fail_readiness)
+    exit_code, report = run_runtime_live.evaluate(
+        env_file=env_file,
+        live=True,
+        provider_conformance=True,
+        **_conformance_options(monkeypatch, tmp_path, identity=identity),
+    )
+
+    assert exit_code == 1
+    assert report["errors"] == [{"code": "evidence_readiness_failed"}]
+    assert runtime_module.load_released_evidence_runtime_identity is original_runtime_loader
+    assert retrieval_module.load_released_evidence_runtime_identity is original_retrieval_loader
+
+
 def test_cli_exposes_explicit_provider_conformance_flag(tmp_path: Path) -> None:
     args = run_runtime_live.build_parser().parse_args(
         [
@@ -398,11 +526,23 @@ def test_cli_exposes_explicit_provider_conformance_flag(tmp_path: Path) -> None:
             str(tmp_path / "runtime.env"),
             "--live",
             "--provider-conformance",
+            "--provider-runtime-lock",
+            str(tmp_path / "provider.json"),
+            "--runtime-identity",
+            str(tmp_path / "identity.json"),
+            "--conformance-manifest-output",
+            str(tmp_path / "manifest.json"),
+            "--conformance-base-commit",
+            "1" * 40,
         ]
     )
 
     assert args.live is True
     assert args.provider_conformance is True
+    assert args.provider_runtime_lock == tmp_path / "provider.json"
+    assert args.runtime_identity == tmp_path / "identity.json"
+    assert args.conformance_manifest_output == tmp_path / "manifest.json"
+    assert args.conformance_base_commit == "1" * 40
 
 
 def test_unready_503_diagnostic_executes_agent_and_stays_non_release(
@@ -533,6 +673,7 @@ def test_ready_but_incomplete_evidence_is_fail_closed_not_release_pass(
         env_file=env_file,
         live=True,
         provider_conformance=True,
+        **_conformance_options(monkeypatch, tmp_path),
     )
     failure_codes = {item["code"] for item in report["errors"]}
 
@@ -608,6 +749,7 @@ def test_report_omits_source_values_credentials_paths_and_provider_ids(
         env_file=env_file,
         live=True,
         provider_conformance=True,
+        **_conformance_options(monkeypatch, tmp_path),
     )
     serialized = json.dumps(report)
 

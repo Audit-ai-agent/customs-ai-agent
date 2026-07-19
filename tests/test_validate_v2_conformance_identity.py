@@ -2,6 +2,7 @@ from __future__ import annotations
 
 import hashlib
 import json
+import os
 import subprocess
 from pathlib import Path
 from typing import Any
@@ -9,10 +10,11 @@ from typing import Any
 import pytest
 
 from customs_ai_agent.contracts.evidence_runtime_release import canonical_json_bytes
-from tools.materialize_v2_conformance_lock import (
-    ConformanceLockMaterializationError,
+import tools.validate_v2_conformance_identity as validator_module
+from tools.validate_v2_conformance_identity import (
+    ConformanceIdentityValidationError,
     build_parser,
-    materialize_conformance_lock,
+    validate_conformance_identity,
 )
 
 
@@ -112,7 +114,7 @@ def _unreleased_lock(provider_lock: dict[str, str]) -> dict[str, object]:
     }
 
 
-def _fixture(tmp_path: Path, *, detach: bool = True) -> dict[str, Any]:
+def _fixture(tmp_path: Path) -> dict[str, Any]:
     repository = tmp_path / "agent-repository"
     external = tmp_path / "external-inputs"
     repository.mkdir()
@@ -143,22 +145,19 @@ def _fixture(tmp_path: Path, *, detach: bool = True) -> dict[str, Any]:
     _run_git(repository, "config", "user.email", "conformance@example.invalid")
     _run_git(repository, "add", ".")
     _run_git(repository, "commit", "-q", "-m", "fixture")
-    base_commit = _run_git(repository, "rev-parse", "HEAD")
-    if detach:
-        _run_git(repository, "switch", "--detach", "-q", base_commit)
     return {
         "repository": repository,
         "external": external,
         "provider_lock": provider_lock,
         "provider_lock_path": provider_lock_path,
         "identity_path": identity_path,
-        "manifest_path": external / "materialization-manifest.json",
-        "base_commit": base_commit,
+        "manifest_path": external / "validation-manifest.json",
+        "base_commit": _run_git(repository, "rev-parse", "HEAD"),
     }
 
 
-def _materialize(fixture: dict[str, Any]) -> dict[str, object]:
-    return materialize_conformance_lock(
+def _validate(fixture: dict[str, Any]):
+    return validate_conformance_identity(
         repository=fixture["repository"],
         provider_runtime_lock_path=fixture["provider_lock_path"],
         runtime_identity_path=fixture["identity_path"],
@@ -168,46 +167,48 @@ def _materialize(fixture: dict[str, Any]) -> dict[str, object]:
     )
 
 
-def test_materializes_only_identical_consumer_locks_and_external_safe_manifest(
+def test_validates_identity_and_writes_only_external_non_deployable_manifest(
     tmp_path: Path,
 ) -> None:
     fixture = _fixture(tmp_path)
-
-    manifest = _materialize(fixture)
-
     repository: Path = fixture["repository"]
-    root_bytes = (repository / ROOT_LOCK).read_bytes()
-    package_bytes = (repository / PACKAGE_LOCK).read_bytes()
+    before_tree = {
+        path: (repository / path).read_bytes()
+        for path in (
+            ROOT_LOCK,
+            PACKAGE_LOCK,
+            ROOT_RETRIEVAL,
+            PACKAGE_RETRIEVAL,
+            ROOT_READINESS,
+            PACKAGE_READINESS,
+        )
+    }
+
+    validation = _validate(fixture)
+
     manifest_bytes = fixture["manifest_path"].read_bytes()
-    parsed_lock = json.loads(root_bytes)
     parsed_manifest = json.loads(manifest_bytes)
-    assert root_bytes == package_bytes
-    assert parsed_lock["release_state"] == "released"
-    assert parsed_lock["identity"]["runtime_release_sha256"] == (manifest["runtime_release_sha256"])
-    assert parsed_manifest == manifest
-    assert manifest["conformance_only"] is True
-    assert manifest["deployable"] is False
-    assert manifest["push_allowed"] is False
-    assert manifest["tag_allowed"] is False
-    assert manifest["release_allowed"] is False
-    assert manifest["forbidden_actions"] == ["deploy", "push", "release", "tag"]
-    assert manifest["consumer_lock_sha256"] == hashlib.sha256(root_bytes).hexdigest()
-    assert (
-        manifest["provider_runtime_lock_sha256"]
-        == hashlib.sha256(fixture["provider_lock_path"].read_bytes()).hexdigest()
-    )
-    assert (
-        manifest["runtime_identity_document_sha256"]
-        == hashlib.sha256(fixture["identity_path"].read_bytes()).hexdigest()
-    )
-    serialized_manifest = manifest_bytes.decode("utf-8")
-    assert str(tmp_path) not in serialized_manifest
+    assert parsed_manifest == validation.manifest
+    assert validation.identity.to_wire() == json.loads(fixture["identity_path"].read_bytes())
+    assert validation.manifest["conformance_only"] is True
+    assert validation.manifest["deployable"] is False
+    assert validation.manifest["push_allowed"] is False
+    assert validation.manifest["tag_allowed"] is False
+    assert validation.manifest["release_allowed"] is False
+    assert validation.manifest["runtime_overlay"] == "evaluator-process-memory-only"
+    assert validation.manifest["canonical_lock_release_state"] == "unreleased"
+    assert validation.manifest["repository_mutated"] is False
+    assert validation.manifest["repository_clean_before"] is True
+    assert validation.manifest["repository_clean_after"] is True
+    assert validation.manifest["modified_agent_file_count"] == 0
+    assert validation.manifest["forbidden_actions"] == ["deploy", "push", "release", "tag"]
+    assert str(tmp_path) not in manifest_bytes.decode("utf-8")
     assert "path" not in parsed_manifest
-    assert _run_git(repository, "diff", "--name-only").splitlines() == [
-        ROOT_LOCK.as_posix(),
-        PACKAGE_LOCK.as_posix(),
-    ]
-    assert not _run_git(repository, "ls-files", "--others", "--exclude-standard")
+    assert _run_git(repository, "status", "--porcelain=v1", "--untracked-files=all") == ""
+    assert _run_git(repository, "diff", "--name-only") == ""
+    assert {path: (repository / path).read_bytes() for path in before_tree} == before_tree
+    assert json.loads((repository / ROOT_LOCK).read_bytes())["release_state"] == "unreleased"
+    assert json.loads((repository / PACKAGE_LOCK).read_bytes())["release_state"] == "unreleased"
 
 
 def test_requires_explicit_cli_acknowledgement() -> None:
@@ -230,10 +231,10 @@ def test_function_requires_explicit_acknowledgement(tmp_path: Path) -> None:
     fixture = _fixture(tmp_path)
 
     with pytest.raises(
-        ConformanceLockMaterializationError,
+        ConformanceIdentityValidationError,
         match="test_only_acknowledgement_required",
     ):
-        materialize_conformance_lock(
+        validate_conformance_identity(
             repository=fixture["repository"],
             provider_runtime_lock_path=fixture["provider_lock_path"],
             runtime_identity_path=fixture["identity_path"],
@@ -248,7 +249,6 @@ def test_function_requires_explicit_acknowledgement(tmp_path: Path) -> None:
 @pytest.mark.parametrize(
     ("mutation", "expected_code"),
     [
-        ("attached", "detached_head_required"),
         ("dirty", "clean_worktree_required"),
         ("base", "base_commit_mismatch"),
         ("provider_extra", "provider_runtime_lock_invalid"),
@@ -259,14 +259,15 @@ def test_function_requires_explicit_acknowledgement(tmp_path: Path) -> None:
         ("consumer_released", "consumer_lock_not_unreleased"),
         ("manifest_exists", "manifest_output_exists"),
         ("manifest_internal", "manifest_output_must_be_external"),
+        ("manifest_git_repository", "manifest_output_git_repository_forbidden"),
     ],
 )
-def test_rejects_unsafe_or_unattested_materialization(
+def test_rejects_unsafe_or_unattested_validation(
     tmp_path: Path,
     mutation: str,
     expected_code: str,
 ) -> None:
-    fixture = _fixture(tmp_path, detach=mutation != "attached")
+    fixture = _fixture(tmp_path)
     repository: Path = fixture["repository"]
     if mutation == "dirty":
         (repository / "unrelated.txt").write_text("dirty", encoding="utf-8")
@@ -313,10 +314,39 @@ def test_rejects_unsafe_or_unattested_materialization(
     elif mutation == "manifest_exists":
         fixture["manifest_path"].write_text("existing", encoding="utf-8")
     elif mutation == "manifest_internal":
-        fixture["manifest_path"] = repository / "materialization-manifest.json"
+        fixture["manifest_path"] = repository / "validation-manifest.json"
+    elif mutation == "manifest_git_repository":
+        other_repository = fixture["external"] / "other-repository"
+        other_repository.mkdir()
+        _run_git(other_repository, "init", "-q")
+        fixture["manifest_path"] = other_repository / "validation-manifest.json"
 
-    with pytest.raises(ConformanceLockMaterializationError, match=expected_code):
-        _materialize(fixture)
+    with pytest.raises(ConformanceIdentityValidationError, match=expected_code):
+        _validate(fixture)
 
     if mutation != "manifest_exists":
         assert not fixture["manifest_path"].exists()
+
+
+@pytest.mark.skipif(os.name == "nt", reason="Windows symlink creation requires host policy")
+def test_rejects_symlinked_external_identity(tmp_path: Path) -> None:
+    fixture = _fixture(tmp_path)
+    real_identity = fixture["identity_path"]
+    linked_identity = fixture["external"] / "identity-link.json"
+    linked_identity.symlink_to(real_identity)
+    fixture["identity_path"] = linked_identity
+
+    with pytest.raises(ConformanceIdentityValidationError, match="runtime_identity_invalid"):
+        _validate(fixture)
+
+    assert not fixture["manifest_path"].exists()
+
+
+def test_manifest_create_race_never_deletes_an_existing_file(tmp_path: Path) -> None:
+    manifest = tmp_path / "manifest.json"
+    manifest.write_bytes(b"other-process-owned")
+
+    with pytest.raises(ConformanceIdentityValidationError, match="manifest_write_failed"):
+        validator_module._write_external_manifest(manifest, b"validator-owned")
+
+    assert manifest.read_bytes() == b"other-process-owned"

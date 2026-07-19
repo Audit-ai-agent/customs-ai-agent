@@ -13,14 +13,18 @@ import hashlib
 import json
 import os
 import re
+import threading
 from collections import Counter
+from contextlib import contextmanager
 from datetime import date
 from pathlib import Path
-from typing import Any, Iterable
+from typing import Any, Iterable, Iterator
 
 from dotenv import dotenv_values
 from pydantic import SecretStr
 
+import customs_ai_agent.adapters.retrieval as retrieval_module
+import customs_ai_agent.runtime as runtime_module
 from customs_ai_agent.adapters.llm import (
     CLAUDE_CANDIDATE_SCHEMA_VERSION,
     DEFAULT_CLAUDE_MODEL,
@@ -36,6 +40,9 @@ from customs_ai_agent.contracts import (
     schema_sha256,
     verify_packaged_schemas,
 )
+from customs_ai_agent.contracts.evidence_runtime_release import (
+    EvidenceRuntimeReleaseIdentity,
+)
 from customs_ai_agent.fixtures.scenarios import get_scenario
 from customs_ai_agent.prompts import (
     DOCUMENT_ANALYSIS_PROMPT_ID,
@@ -48,6 +55,10 @@ from customs_ai_agent.schemas.models import (
     ReviewRunResultV2,
     ServiceReviewRunRequestV2,
 )
+from tools.validate_v2_conformance_identity import (
+    ConformanceIdentityValidationError,
+    validate_conformance_identity,
+)
 
 
 DEFAULT_BASE_URL = "http://127.0.0.1:8010"
@@ -58,7 +69,9 @@ LIVE_PROVIDER_SCOPE = "AGENT_TO_EVIDENCE_LIVE_RELEASE_EVALUATION"
 PROVIDER_CONFORMANCE_SCOPE = "PROVIDER_CONFORMANCE_NOT_RAG_QUALITY"
 RESULT_SCHEMA_VERSION = "2.0"
 TEXT_OUTPUT_SCHEMA_ID = "customs_claude_document_candidate"
+REPOSITORY_ROOT = Path(__file__).resolve().parents[1]
 _SAFE_CODE = re.compile(r"^[A-Za-z0-9][A-Za-z0-9._:-]{0,127}$")
+_CONFORMANCE_OVERLAY_LOCK = threading.RLock()
 _EVIDENCE_ENV_KEYS = frozenset(
     {
         "EVIDENCE_SERVICE_ALLOWED_ORIGINS",
@@ -74,6 +87,28 @@ class RuntimeLiveEvaluationError(RuntimeError):
     def __init__(self, code: str) -> None:
         super().__init__(code)
         self.code = code
+
+
+@contextmanager
+def _provider_conformance_runtime_identity(
+    identity: EvidenceRuntimeReleaseIdentity,
+) -> Iterator[None]:
+    """Temporarily bind evaluator-local runtime loaders to one validated identity."""
+
+    with _CONFORMANCE_OVERLAY_LOCK:
+        original_runtime_loader = runtime_module.load_released_evidence_runtime_identity
+        original_retrieval_loader = retrieval_module.load_released_evidence_runtime_identity
+
+        def load_validated_identity() -> EvidenceRuntimeReleaseIdentity:
+            return identity
+
+        runtime_module.load_released_evidence_runtime_identity = load_validated_identity
+        retrieval_module.load_released_evidence_runtime_identity = load_validated_identity
+        try:
+            yield
+        finally:
+            retrieval_module.load_released_evidence_runtime_identity = original_retrieval_loader
+            runtime_module.load_released_evidence_runtime_identity = original_runtime_loader
 
 
 def _safe_code(value: object) -> str:
@@ -439,59 +474,17 @@ def _explicit_service_request(*, review_as_of: date) -> ServiceReviewRunRequestV
         raise RuntimeLiveEvaluationError("service_fixture_invalid") from None
 
 
-def evaluate(
+def _evaluate_live_network(
     *,
+    contracts: dict[str, str | None],
+    normalized_url: str,
+    readiness_options: dict[str, Any],
+    runtime_options: dict[str, Any],
     env_file: Path,
-    base_url: str = DEFAULT_BASE_URL,
-    live: bool = False,
-    provider_conformance: bool = False,
-    allow_unready_diagnostic: bool = False,
-    diagnostic_review_as_of: date | None = None,
+    provider_conformance: bool,
+    allow_unready_diagnostic: bool,
+    diagnostic_review_as_of: date | None,
 ) -> tuple[int, dict[str, Any]]:
-    contracts, failures = _contract_preflight()
-    if failures:
-        return 1, _base_report(
-            contracts=contracts,
-            status="FAIL",
-            readiness_status="NOT_ATTEMPTED",
-            network_status="DISABLED_CONTRACT_PREFLIGHT_FAILED",
-            failures=failures,
-            provider_conformance=provider_conformance,
-        )
-    if not live:
-        return 1, _base_report(
-            contracts=contracts,
-            status="FAIL",
-            readiness_status="NOT_ATTEMPTED",
-            network_status="DISABLED_LIVE_FLAG_REQUIRED",
-            failures=["live_flag_required"],
-            provider_conformance=provider_conformance,
-        )
-    if diagnostic_review_as_of is not None and not allow_unready_diagnostic:
-        return 1, _base_report(
-            contracts=contracts,
-            status="FAIL",
-            readiness_status="NOT_ATTEMPTED",
-            network_status="DISABLED_DIAGNOSTIC_PREFLIGHT_FAILED",
-            failures=["diagnostic_date_without_override"],
-            provider_conformance=provider_conformance,
-        )
-
-    try:
-        normalized_url, readiness_options, runtime_options = _evidence_options(
-            env_file=env_file,
-            base_url=base_url,
-        )
-    except RuntimeLiveEvaluationError as exc:
-        return 1, _base_report(
-            contracts=contracts,
-            status="FAIL",
-            readiness_status="NOT_ATTEMPTED",
-            network_status="DISABLED_CONFIGURATION_PREFLIGHT_FAILED",
-            failures=[exc.code],
-            provider_conformance=provider_conformance,
-        )
-
     readiness_status = "READY"
     try:
         runtime_identity = fetch_evidence_runtime_readiness(
@@ -601,6 +594,142 @@ def evaluate(
     return (0 if contract_ready and provider_conformance else 1), report
 
 
+def evaluate(
+    *,
+    env_file: Path,
+    base_url: str = DEFAULT_BASE_URL,
+    live: bool = False,
+    provider_conformance: bool = False,
+    provider_runtime_lock: Path | None = None,
+    runtime_identity: Path | None = None,
+    conformance_manifest_output: Path | None = None,
+    conformance_base_commit: str | None = None,
+    allow_unready_diagnostic: bool = False,
+    diagnostic_review_as_of: date | None = None,
+) -> tuple[int, dict[str, Any]]:
+    contracts, failures = _contract_preflight()
+    if failures:
+        return 1, _base_report(
+            contracts=contracts,
+            status="FAIL",
+            readiness_status="NOT_ATTEMPTED",
+            network_status="DISABLED_CONTRACT_PREFLIGHT_FAILED",
+            failures=failures,
+            provider_conformance=provider_conformance,
+        )
+    if not live:
+        return 1, _base_report(
+            contracts=contracts,
+            status="FAIL",
+            readiness_status="NOT_ATTEMPTED",
+            network_status="DISABLED_LIVE_FLAG_REQUIRED",
+            failures=["live_flag_required"],
+            provider_conformance=provider_conformance,
+        )
+    if diagnostic_review_as_of is not None and not allow_unready_diagnostic:
+        return 1, _base_report(
+            contracts=contracts,
+            status="FAIL",
+            readiness_status="NOT_ATTEMPTED",
+            network_status="DISABLED_DIAGNOSTIC_PREFLIGHT_FAILED",
+            failures=["diagnostic_date_without_override"],
+            provider_conformance=provider_conformance,
+        )
+
+    conformance_inputs = (
+        provider_runtime_lock,
+        runtime_identity,
+        conformance_manifest_output,
+        conformance_base_commit,
+    )
+    if provider_conformance and any(value is None for value in conformance_inputs):
+        return 1, _base_report(
+            contracts=contracts,
+            status="FAIL",
+            readiness_status="NOT_ATTEMPTED",
+            network_status="DISABLED_CONFORMANCE_PREFLIGHT_FAILED",
+            failures=["provider_conformance_artifacts_required"],
+            provider_conformance=True,
+        )
+    if not provider_conformance and any(value is not None for value in conformance_inputs):
+        return 1, _base_report(
+            contracts=contracts,
+            status="FAIL",
+            readiness_status="NOT_ATTEMPTED",
+            network_status="DISABLED_CONFORMANCE_PREFLIGHT_FAILED",
+            failures=["provider_conformance_flag_required"],
+            provider_conformance=False,
+        )
+
+    validated_identity: EvidenceRuntimeReleaseIdentity | None = None
+    if provider_conformance:
+        if (
+            provider_runtime_lock is None
+            or runtime_identity is None
+            or conformance_manifest_output is None
+            or conformance_base_commit is None
+        ):
+            return 1, _base_report(
+                contracts=contracts,
+                status="FAIL",
+                readiness_status="NOT_ATTEMPTED",
+                network_status="DISABLED_CONFORMANCE_PREFLIGHT_FAILED",
+                failures=["provider_conformance_artifacts_required"],
+                provider_conformance=True,
+            )
+        try:
+            validation = validate_conformance_identity(
+                repository=REPOSITORY_ROOT,
+                provider_runtime_lock_path=provider_runtime_lock,
+                runtime_identity_path=runtime_identity,
+                manifest_output=conformance_manifest_output,
+                expected_base_commit=conformance_base_commit,
+                test_only_conformance=True,
+            )
+        except ConformanceIdentityValidationError as exc:
+            return 1, _base_report(
+                contracts=contracts,
+                status="FAIL",
+                readiness_status="NOT_ATTEMPTED",
+                network_status="DISABLED_CONFORMANCE_PREFLIGHT_FAILED",
+                failures=[exc.code],
+                provider_conformance=True,
+            )
+        validated_identity = validation.identity
+
+    try:
+        normalized_url, readiness_options, runtime_options = _evidence_options(
+            env_file=env_file,
+            base_url=base_url,
+        )
+    except RuntimeLiveEvaluationError as exc:
+        return 1, _base_report(
+            contracts=contracts,
+            status="FAIL",
+            readiness_status="NOT_ATTEMPTED",
+            network_status="DISABLED_CONFIGURATION_PREFLIGHT_FAILED",
+            failures=[exc.code],
+            provider_conformance=provider_conformance,
+        )
+
+    def run_network() -> tuple[int, dict[str, Any]]:
+        return _evaluate_live_network(
+            contracts=contracts,
+            normalized_url=normalized_url,
+            readiness_options=readiness_options,
+            runtime_options=runtime_options,
+            env_file=env_file,
+            provider_conformance=provider_conformance,
+            allow_unready_diagnostic=allow_unready_diagnostic,
+            diagnostic_review_as_of=diagnostic_review_as_of,
+        )
+
+    if validated_identity is None:
+        return run_network()
+    with _provider_conformance_runtime_identity(validated_identity):
+        return run_network()
+
+
 def _parse_date(value: str) -> date:
     try:
         return date.fromisoformat(value)
@@ -628,8 +757,28 @@ def build_parser() -> argparse.ArgumentParser:
         help=(
             "Classify a successful run as provider transport/contract conformance only, "
             "never as RAG quality or release readiness. Without this flag, a ready "
-            "provider remains blocked until a separate RAG-quality attestation exists."
+            "provider remains blocked until a separate RAG-quality attestation exists. "
+            "Requires all --conformance-* inputs."
         ),
+    )
+    parser.add_argument(
+        "--provider-runtime-lock",
+        type=Path,
+        help="External Data provider lock used only with --provider-conformance.",
+    )
+    parser.add_argument(
+        "--runtime-identity",
+        type=Path,
+        help="External sealed runtime identity used only with --provider-conformance.",
+    )
+    parser.add_argument(
+        "--conformance-manifest-output",
+        type=Path,
+        help="New external path for the non-deployable conformance validation manifest.",
+    )
+    parser.add_argument(
+        "--conformance-base-commit",
+        help="Exact clean Agent commit validated for evaluator-only conformance.",
     )
     parser.add_argument(
         "--allow-unready-diagnostic",
@@ -655,6 +804,10 @@ def main(argv: list[str] | None = None) -> int:
         base_url=args.base_url,
         live=args.live,
         provider_conformance=args.provider_conformance,
+        provider_runtime_lock=args.provider_runtime_lock,
+        runtime_identity=args.runtime_identity,
+        conformance_manifest_output=args.conformance_manifest_output,
+        conformance_base_commit=args.conformance_base_commit,
         allow_unready_diagnostic=args.allow_unready_diagnostic,
         diagnostic_review_as_of=args.diagnostic_review_as_of,
     )

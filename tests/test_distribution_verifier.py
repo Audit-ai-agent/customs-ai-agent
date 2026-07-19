@@ -64,6 +64,16 @@ def _write_wheel(
         for name in _WHEEL_REQUIRED_PACKAGE_FILES
         if name not in (excluded_files or set())
     }
+    runtime_lock_name = "customs_ai_agent/contracts/evidence/runtime-release-v2.lock.json"
+    if runtime_lock_name in payloads:
+        payloads[runtime_lock_name] = (
+            ROOT
+            / "src"
+            / "customs_ai_agent"
+            / "contracts"
+            / "evidence"
+            / "runtime-release-v2.lock.json"
+        ).read_bytes()
     payloads.update(
         {
             f"{DIST_INFO}/METADATA": metadata,
@@ -175,6 +185,17 @@ def _write_sdist(
         name: (METADATA if name == "PKG-INFO" else b"{}\n" if name.endswith(".json") else b"\n")
         for name in {*_SDIST_REQUIRED_FILES, "PKG-INFO"}
     }
+    payloads["contracts/evidence/runtime-release-v2.lock.json"] = (
+        ROOT / "contracts" / "evidence" / "runtime-release-v2.lock.json"
+    ).read_bytes()
+    payloads["src/customs_ai_agent/contracts/evidence/runtime-release-v2.lock.json"] = (
+        ROOT
+        / "src"
+        / "customs_ai_agent"
+        / "contracts"
+        / "evidence"
+        / "runtime-release-v2.lock.json"
+    ).read_bytes()
     payloads.update(extra_files or {})
     root = f"{EXPECTED_IMPORT_PACKAGE}-{EXPECTED_VERSION}"
     with tarfile.open(path, mode="w:gz") as archive:
@@ -293,6 +314,87 @@ def test_distribution_verifier_accepts_bounded_wheel_and_sdist(tmp_path: Path) -
     assert int(wheel_result["member_count"]) > 0
     assert len(sdist_result["sha256"]) == 64
     assert int(sdist_result["member_count"]) > 0
+
+
+def test_distribution_verifier_rejects_released_or_conformance_enabled_wheel(
+    tmp_path: Path,
+) -> None:
+    wheel = tmp_path / "customs_ai_agent-0.3.0-py3-none-any.whl"
+    lock_name = "customs_ai_agent/contracts/evidence/runtime-release-v2.lock.json"
+    released_lock = json.loads(
+        (
+            ROOT
+            / "src"
+            / "customs_ai_agent"
+            / "contracts"
+            / "evidence"
+            / "runtime-release-v2.lock.json"
+        ).read_bytes()
+    )
+    released_lock["release_state"] = "released"
+    released_lock["identity"] = {}
+    released_lock.pop("unreleased_reason")
+    _write_wheel(
+        wheel,
+        extra_files={
+            lock_name: json.dumps(released_lock).encode(),
+        },
+    )
+
+    with pytest.raises(
+        DistributionVerificationError,
+        match="must remain unreleased",
+    ):
+        verify_wheel(wheel)
+
+    _write_wheel(
+        wheel,
+        extra_files={
+            "customs_ai_agent/runtime.py": b"_provider_conformance_runtime_identity = True\n",
+        },
+    )
+    with pytest.raises(
+        DistributionVerificationError,
+        match="evaluator-only conformance",
+    ):
+        verify_wheel(wheel)
+
+
+def test_distribution_verifier_rejects_changed_or_released_canonical_sdist_locks(
+    tmp_path: Path,
+) -> None:
+    sdist = tmp_path / "customs_ai_agent-0.3.0.tar.gz"
+    root_lock_name = "contracts/evidence/runtime-release-v2.lock.json"
+    packaged_lock_name = "src/customs_ai_agent/contracts/evidence/runtime-release-v2.lock.json"
+    _write_sdist(
+        sdist,
+        extra_files={packaged_lock_name: b"{}\n"},
+    )
+    with pytest.raises(
+        DistributionVerificationError,
+        match="canonical production runtime release locks differ",
+    ):
+        verify_sdist(sdist)
+
+    released_lock = json.loads(
+        (ROOT / "contracts" / "evidence" / "runtime-release-v2.lock.json").read_bytes()
+    )
+    released_lock["release_state"] = "released"
+    released_lock["identity"] = {}
+    released_lock.pop("unreleased_reason")
+    released_bytes = json.dumps(released_lock).encode()
+    _write_sdist(
+        sdist,
+        extra_files={
+            root_lock_name: released_bytes,
+            packaged_lock_name: released_bytes,
+        },
+    )
+    with pytest.raises(
+        DistributionVerificationError,
+        match="must remain unreleased",
+    ):
+        verify_sdist(sdist)
 
 
 @pytest.mark.parametrize(
