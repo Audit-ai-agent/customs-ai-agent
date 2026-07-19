@@ -465,11 +465,12 @@ def test_review_json_rejects_duplicate_keys_without_running_workflow(
         )
     )
 
-    with pytest.raises(RuntimeInputError, match="review_request_invalid"):
+    with pytest.raises(RuntimeInputError, match="review_request_invalid") as error:
         agent.review_json(
             b'{"case_id":"case-a","case_id":"case-b","documents":[],"llm_mode":"llm"}'
         )
 
+    assert error.value.__context__ is None
     assert "request" not in captured
 
 
@@ -1075,6 +1076,26 @@ def test_public_safety_blocks_raw_image_marker() -> None:
         )
 
 
+@pytest.mark.parametrize("position", ["prefix", "middle", "suffix"])
+def test_public_safety_blocks_substantial_raw_image_fragments(position: str) -> None:
+    marker = ("ABCDEFGHIJKLMNOPQRSTUVWXYZabcdefghijklmnopqrstuvwxyz0123456789+/" * 700)[:40_000]
+    starts = {
+        "prefix": 0,
+        "middle": (len(marker) - 500) // 2,
+        "suffix": len(marker) - 500,
+    }
+    fragment = marker[starts[position] : starts[position] + 500]
+
+    with pytest.raises(
+        RuntimeExecutionError,
+        match="public_result_safety_violation",
+    ):
+        runtime_module._assert_public_result_safe(
+            {"value": f"model-output:{fragment}:end"},
+            sensitive_markers=(marker,),
+        )
+
+
 def test_unknown_execution_exception_is_redacted(
     monkeypatch: pytest.MonkeyPatch,
 ) -> None:
@@ -1096,6 +1117,7 @@ def test_unknown_execution_exception_is_redacted(
         agent.review(_text_request())
 
     assert secret not in str(captured.value)
+    assert captured.value.__context__ is None
 
 
 @pytest.mark.parametrize(
@@ -1133,7 +1155,8 @@ def test_runtime_normalizes_provider_errors_at_public_boundary(
     )
     assert "private-provider-detail" not in str(captured.value)
     assert captured.value.__cause__ is None
-    assert captured.value.__suppress_context__ is True
+    assert captured.value.__context__ is None
+    assert captured.value.__suppress_context__ is False
 
 
 def test_public_safety_blocks_camel_case_sensitive_key() -> None:

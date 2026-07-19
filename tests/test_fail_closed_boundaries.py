@@ -5,6 +5,15 @@ from customs_ai_agent.runner import run_review
 from customs_ai_agent.schemas.models import ReviewRunRequest
 
 
+class _NeverCalledRetriever:
+    def __init__(self) -> None:
+        self.called = False
+
+    def retrieve(self, _request):
+        self.called = True
+        raise AssertionError("Evidence retrieval must not receive an ambiguous Invoice")
+
+
 def _invoice(document_id: str, invoice_no: str) -> dict[str, object]:
     return {
         "document_id": document_id,
@@ -33,8 +42,10 @@ def test_duplicate_document_type_is_not_silently_first_selected():
         llm_mode="mock",
     )
 
-    state = run_review(request, retriever=MockRegulationRetriever())
+    retriever = _NeverCalledRetriever()
+    state = run_review(request, retriever=retriever)
 
+    assert retriever.called is False
     assert state["pairing_result"]["invoice_document_id"] is None
     assert state["pairing_result"]["document_type_conflicts"] == [
         {
@@ -50,6 +61,18 @@ def test_duplicate_document_type_is_not_silently_first_selected():
     ]
     assert len(duplicate_issues) == 1
     assert duplicate_issues[0]["observed_value"] == "invoice_a, invoice_b"
+    assert state["retrieval_request"] == {}
+    assert state["retrieval_status"] == "failed"
+    assert state["retrieval_errors"] == [
+        {
+            "code": "AMBIGUOUS_INVOICE_RETRIEVAL_BLOCKED",
+            "message": (
+                "Regulatory retrieval was not called because the Case contains "
+                "multiple invoice candidates."
+            ),
+            "retryable": False,
+        }
+    ]
     assert state["requires_human_review"] is True
     assert state["final_status"] == "needs_review"
 

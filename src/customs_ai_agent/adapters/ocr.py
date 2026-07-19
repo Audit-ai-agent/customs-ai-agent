@@ -39,6 +39,9 @@ _DEFAULT_TIMEOUT_SECONDS: Final = 180.0
 _MAX_WORKER_REQUEST_BYTES: Final = 32 * 1024 * 1024
 _MAX_WORKER_RESPONSE_BYTES: Final = 8 * 1024 * 1024
 _PROCESS_SHUTDOWN_SECONDS: Final = 2.0
+_SENSITIVE_FRAGMENT_CHARS: Final = 256
+_SENSITIVE_FRAGMENT_STEP: Final = 128
+_BASE64_RUN_PATTERN: Final = re.compile(rf"[A-Za-z0-9+/=]{{{_SENSITIVE_FRAGMENT_CHARS},}}")
 _SAFE_CODE_PATTERN: Final = re.compile(r"^[a-z][a-z0-9_]{0,63}$")
 _DOCUMENT_ID_PATTERN: Final = re.compile(r"^[A-Za-z0-9][A-Za-z0-9._:-]{0,127}$")
 _WORKER_ENV_ALLOWLIST: Final = frozenset(
@@ -365,15 +368,18 @@ class _SubprocessOcrLayoutProvider:
                 for page in pages
             ],
         }
+        worker_failure: tuple[str, bool] | None = None
         with self._analysis_lock:
             try:
                 response = self._worker.request(request)
             except _WorkerProtocolError as exc:
-                raise OcrLayoutProviderError(
-                    exc.code,
-                    "The isolated OCR worker failed safely.",
-                    retryable=exc.retryable,
-                ) from None
+                worker_failure = (exc.code, exc.retryable)
+        if worker_failure is not None:
+            raise OcrLayoutProviderError(
+                worker_failure[0],
+                "The isolated OCR worker failed safely.",
+                retryable=worker_failure[1],
+            )
         try:
             self._validate_response_envelope(
                 response,
@@ -443,7 +449,7 @@ class _SubprocessOcrLayoutProvider:
                 "The OCR worker response contained forbidden raw content.",
             )
         page_payloads = {page.data_base64 for page in pages}
-        if _contains_exact_string(response, page_payloads):
+        if _contains_sensitive_string(response, page_payloads):
             raise OcrLayoutProviderError(
                 "ocr_worker_raw_content_rejected",
                 "The OCR worker response contained forbidden raw content.",
@@ -1061,13 +1067,30 @@ def _contains_forbidden_response_key(value: object) -> bool:
     return False
 
 
-def _contains_exact_string(value: object, forbidden: set[str]) -> bool:
+def _string_contains_sensitive_fragment(value: str, marker: str) -> bool:
+    if value == marker or marker in value:
+        return True
+    if len(marker) < _SENSITIVE_FRAGMENT_CHARS or len(value) < _SENSITIVE_FRAGMENT_CHARS:
+        return False
+    for match in _BASE64_RUN_PATTERN.finditer(value):
+        candidate = match.group(0)
+        if candidate in marker:
+            return True
+        last_start = len(candidate) - _SENSITIVE_FRAGMENT_CHARS
+        starts = set(range(0, last_start + 1, _SENSITIVE_FRAGMENT_STEP))
+        starts.add(last_start)
+        if any(candidate[start : start + _SENSITIVE_FRAGMENT_CHARS] in marker for start in starts):
+            return True
+    return False
+
+
+def _contains_sensitive_string(value: object, forbidden: set[str]) -> bool:
     if isinstance(value, str):
-        return value in forbidden
+        return any(_string_contains_sensitive_fragment(value, marker) for marker in forbidden)
     if isinstance(value, dict):
-        return any(_contains_exact_string(child, forbidden) for child in value.values())
+        return any(_contains_sensitive_string(child, forbidden) for child in value.values())
     if isinstance(value, list):
-        return any(_contains_exact_string(child, forbidden) for child in value)
+        return any(_contains_sensitive_string(child, forbidden) for child in value)
     return False
 
 

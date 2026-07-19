@@ -39,9 +39,9 @@ from customs_ai_agent.schemas.models import (
 )
 
 
-def _image_page() -> ImagePageInput:
+def _image_page(*, side_px: int = 100) -> ImagePageInput:
     output = io.BytesIO()
-    Image.new("RGB", (100, 100), "white").save(output, format="PNG")
+    Image.new("RGB", (side_px, side_px), "white").save(output, format="PNG")
     raw = output.getvalue()
     digest = hashlib.sha256(raw).hexdigest()
     return ImagePageInput(
@@ -50,8 +50,8 @@ def _image_page() -> ImagePageInput:
         data_base64=base64.b64encode(raw).decode("ascii"),
         byte_length=len(raw),
         sha256=digest,
-        width_px=100,
-        height_px=100,
+        width_px=side_px,
+        height_px=side_px,
         provenance=ImagePageProvenance(
             source_media_type="image/png",
             source_sha256=digest,
@@ -930,6 +930,29 @@ def test_provider_rejects_raw_echo_and_never_leaks_it_in_error() -> None:
     assert captured.value.code == "ocr_worker_raw_content_rejected"
     assert page.data_base64 not in str(captured.value)
     assert "invoice-secret" not in str(captured.value)
+
+
+@pytest.mark.parametrize("position", ["prefix", "middle", "suffix"])
+def test_provider_rejects_substantial_raw_fragments(position: str) -> None:
+    page = _image_page(side_px=500)
+    starts = {
+        "prefix": 0,
+        "middle": (len(page.data_base64) - 500) // 2,
+        "suffix": len(page.data_base64) - 500,
+    }
+    fragment = page.data_base64[starts[position] : starts[position] + 500]
+
+    def fragment_response(request: dict[str, Any]) -> dict[str, Any]:
+        response = _ok_response(request)
+        response["result"]["pages"][0]["spans"][0]["text"] = f"worker-output:{fragment}:end"
+        return response
+
+    provider = _provider_with_worker(_FakeWorker(fragment_response))
+    with pytest.raises(OcrLayoutProviderError) as captured:
+        provider.analyze(document_id="invoice-secret", pages=[page])
+
+    assert captured.value.code == "ocr_worker_raw_content_rejected"
+    assert fragment not in str(captured.value)
 
 
 def test_provider_fail_closed_for_malformed_and_backend_error_envelopes() -> None:

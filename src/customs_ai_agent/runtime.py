@@ -2,6 +2,7 @@ from __future__ import annotations
 
 import json
 import math
+import re
 from dataclasses import dataclass, field
 from os import PathLike
 from typing import Any, Literal
@@ -59,6 +60,9 @@ _FORBIDDEN_RESULT_KEYS = frozenset(
 _MAX_SERVICE_REQUEST_JSON_BYTES = 32 * 1024 * 1024
 _MAX_SERVICE_REQUEST_JSON_NODES = 20_000
 _MAX_SERVICE_REQUEST_JSON_DEPTH = 32
+_SENSITIVE_FRAGMENT_CHARS = 256
+_SENSITIVE_FRAGMENT_STEP = 128
+_BASE64_RUN_PATTERN = re.compile(rf"[A-Za-z0-9+/=]{{{_SENSITIVE_FRAGMENT_CHARS},}}")
 _SERVICE_REQUEST_VALIDATOR = Draft202012Validator(
     get_schema("backend", "v2", "review-request"),
     format_checker=FormatChecker(),
@@ -152,6 +156,27 @@ def _assert_plain_json_request(value: Any) -> None:
         )
 
 
+def _contains_sensitive_fragment(value: str, marker: str) -> bool:
+    """Detect full secrets and substantial raw-media fragments without echoing them."""
+
+    if not marker:
+        return False
+    if value == marker or (len(marker) >= 16 and marker in value):
+        return True
+    if len(marker) < _SENSITIVE_FRAGMENT_CHARS or len(value) < _SENSITIVE_FRAGMENT_CHARS:
+        return False
+    for match in _BASE64_RUN_PATTERN.finditer(value):
+        candidate = match.group(0)
+        if candidate in marker:
+            return True
+        last_start = len(candidate) - _SENSITIVE_FRAGMENT_CHARS
+        starts = set(range(0, last_start + 1, _SENSITIVE_FRAGMENT_STEP))
+        starts.add(last_start)
+        if any(candidate[start : start + _SENSITIVE_FRAGMENT_CHARS] in marker for start in starts):
+            return True
+    return False
+
+
 class AgentRuntimeError(RuntimeError):
     """A content-free error safe to return across a service boundary."""
 
@@ -218,13 +243,16 @@ class RuntimeConfig:
                     "ocr_release_gate_required",
                     "Service OCR requires a release-attested provider wrapper.",
                 )
+            release_error_code: str | None = None
             try:
                 self.ocr_layout_provider.assert_service_ready()
             except OcrLayoutProviderError as exc:
+                release_error_code = exc.code
+            if release_error_code is not None:
                 raise RuntimeConfigurationError(
-                    exc.code,
+                    release_error_code,
                     "The configured OCR release Gate is not ready.",
-                ) from None
+                )
         if self.evidence_service_token is not None and not isinstance(
             self.evidence_service_token,
             SecretStr,
@@ -269,16 +297,19 @@ class RuntimeConfig:
                 "evidence_base_url_invalid",
                 "Evidence Service base URL is invalid.",
             )
+        invalid_destination = False
         try:
             normalized_url = validate_evidence_destination(
                 self.evidence_base_url,
                 self.evidence_allowed_origins,
             )
         except (TypeError, ValueError):
+            invalid_destination = True
+        if invalid_destination:
             raise RuntimeConfigurationError(
                 "evidence_base_url_invalid",
                 "Evidence Service base URL is invalid or not explicitly allowed.",
-            ) from None
+            )
         object.__setattr__(self, "evidence_base_url", normalized_url)
 
     @classmethod
@@ -393,7 +424,7 @@ def _assert_public_result_safe(
             )
     elif isinstance(value, str):
         for marker in sensitive_markers:
-            if marker and (value == marker or (len(marker) >= 16 and marker in value)):
+            if _contains_sensitive_fragment(value, marker):
                 raise RuntimeExecutionError(
                     "public_result_safety_violation",
                     "Sensitive input material reached the public Agent result.",
@@ -421,6 +452,7 @@ class AgentRuntime:
             if config.evidence_service_token is not None
             else None
         )
+        dependency_configuration_failed = False
         try:
             retriever = HttpRegulationRetriever(
                 config.evidence_base_url,
@@ -435,16 +467,13 @@ class AgentRuntime:
                 config.claude_settings,
                 ocr_layout_provider=config.ocr_layout_provider,
             )
-        except LLMError:
-            raise RuntimeConfigurationError(
-                "runtime_dependency_configuration_failed",
-                "Claude, OCR, or Evidence runtime configuration is invalid.",
-            ) from None
         except Exception:
+            dependency_configuration_failed = True
+        if dependency_configuration_failed:
             raise RuntimeConfigurationError(
                 "runtime_dependency_configuration_failed",
                 "Claude, OCR, or Evidence runtime configuration is invalid.",
-            ) from None
+            )
         self._config = config
         self._retriever = retriever
         self._analyzer = analyzer
@@ -468,31 +497,38 @@ class AgentRuntime:
                 "review_request_invalid",
                 "The serialized Agent request must be UTF-8 JSON bytes.",
             )
+        payload_bytes_unavailable = False
         try:
             payload_size = payload.nbytes if isinstance(payload, memoryview) else len(payload)
         except ValueError:
+            payload_bytes_unavailable = True
+        if payload_bytes_unavailable:
             raise RuntimeInputError(
                 "review_request_invalid",
                 "The serialized Agent request bytes are unavailable.",
-            ) from None
+            )
         if payload_size > _MAX_SERVICE_REQUEST_JSON_BYTES:
             raise RuntimeInputError(
                 "review_request_too_large",
                 "The serialized Agent request exceeds the service safety limit.",
             )
+        payload_bytes_unavailable = False
         try:
             raw = bytes(payload)
         except (BufferError, TypeError, ValueError):
+            payload_bytes_unavailable = True
+        if payload_bytes_unavailable:
             raise RuntimeInputError(
                 "review_request_invalid",
                 "The serialized Agent request bytes are unavailable.",
-            ) from None
+            )
         if len(raw) > _MAX_SERVICE_REQUEST_JSON_BYTES:
             del raw
             raise RuntimeInputError(
                 "review_request_too_large",
                 "The serialized Agent request exceeds the service safety limit.",
             )
+        invalid_serialized_request = False
         try:
             decoded = json.loads(
                 raw.decode("utf-8"),
@@ -500,12 +536,14 @@ class AgentRuntime:
                 parse_constant=_reject_nonfinite_json_constant,
             )
         except (UnicodeDecodeError, ValueError, RecursionError):
+            invalid_serialized_request = True
+        finally:
+            del raw
+        if invalid_serialized_request:
             raise RuntimeInputError(
                 "review_request_invalid",
                 "The serialized Agent request is not valid duplicate-key-free JSON.",
-            ) from None
-        finally:
-            del raw
+            )
         if not isinstance(decoded, dict):
             raise RuntimeInputError(
                 "review_request_invalid",
@@ -527,6 +565,7 @@ class AgentRuntime:
         # A Pydantic instance can have been created with ``model_construct`` or
         # mutated after validation. Re-parse a detached dump at the service
         # boundary instead of trusting the caller-owned object.
+        request_serialization_failed = False
         try:
             request_payload = (
                 request.model_dump(mode="json", warnings=False)
@@ -534,23 +573,28 @@ class AgentRuntime:
                 else request
             )
         except Exception:
+            request_serialization_failed = True
+        if request_serialization_failed:
             raise RuntimeInputError(
                 "review_request_invalid",
                 "The V2 Agent request could not be serialized safely.",
-            ) from None
+            )
         _assert_plain_json_request(request_payload)
         if next(_SERVICE_REQUEST_VALIDATOR.iter_errors(request_payload), None) is not None:
             raise RuntimeInputError(
                 "review_request_invalid",
                 "The V2 Agent request does not satisfy the service contract.",
             )
+        request_validation_failed = False
         try:
             service_request = ServiceReviewRunRequestV2.model_validate(request_payload)
         except ValidationError:
+            request_validation_failed = True
+        if request_validation_failed:
             raise RuntimeInputError(
                 "review_request_invalid",
                 "The V2 Agent request does not satisfy the service contract.",
-            ) from None
+            )
 
         if _has_visual_documents(service_request) and self._config.ocr_layout_provider is None:
             raise RuntimeConfigurationError(
@@ -573,6 +617,7 @@ class AgentRuntime:
                     "review_result_invalid",
                     "The Agent workflow did not return the V2 public result contract.",
                 )
+            result_validation_failed = False
             try:
                 # Re-validate even a model instance so a bypassed or mutated
                 # result can never cross the public service boundary.
@@ -580,10 +625,12 @@ class AgentRuntime:
                     result.model_dump(mode="python", warnings=False)
                 )
             except ValidationError:
+                result_validation_failed = True
+            if result_validation_failed:
                 raise RuntimeExecutionError(
                     "review_result_invalid",
                     "The Agent workflow returned an invalid V2 public result.",
-                ) from None
+                )
             _assert_result_correlated(service_request, result)
             _assert_public_result_safe(
                 result.model_dump(mode="python"),
@@ -593,15 +640,13 @@ class AgentRuntime:
         except AgentRuntimeError:
             raise
         except (LLMError, OcrLayoutProviderError, RetrievalError):
-            raise RuntimeExecutionError(
-                "review_execution_failed",
-                "The Agent review failed without exposing private execution details.",
-            ) from None
+            pass
         except Exception:
-            raise RuntimeExecutionError(
-                "review_execution_failed",
-                "The Agent review failed without exposing private execution details.",
-            ) from None
+            pass
+        raise RuntimeExecutionError(
+            "review_execution_failed",
+            "The Agent review failed without exposing private execution details.",
+        )
 
 
 __all__ = [

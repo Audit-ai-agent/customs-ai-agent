@@ -18,9 +18,13 @@ from customs_ai_agent.schemas.models import (
 
 
 def _invoice_items(state: dict[str, Any]) -> list[dict[str, Any]]:
-    for doc in (state.get("normalized_documents") or {}).values():
-        if doc.get("document_type") == "invoice":
-            return doc.get("line_items") or []
+    pairing_result = state.get("pairing_result") or {}
+    invoice_document_id = pairing_result.get("invoice_document_id")
+    if not isinstance(invoice_document_id, str) or not invoice_document_id:
+        return []
+    document = (state.get("normalized_documents") or {}).get(invoice_document_id)
+    if isinstance(document, dict) and document.get("document_type") == "invoice":
+        return document.get("line_items") or []
     return []
 
 
@@ -273,6 +277,24 @@ def retrieve_regulations(
         str(state["review_run_id"]),
         int(state.get("retry_count") or 0),
     )
+    document_type_conflicts = (state.get("pairing_result") or {}).get(
+        "document_type_conflicts"
+    ) or []
+    if any(
+        conflict.get("document_type") == "invoice"
+        for conflict in document_type_conflicts
+        if isinstance(conflict, dict)
+    ):
+        return _failed_update(
+            state,
+            request_id=request_id,
+            code="AMBIGUOUS_INVOICE_RETRIEVAL_BLOCKED",
+            message=(
+                "Regulatory retrieval was not called because the Case contains "
+                "multiple invoice candidates."
+            ),
+            retryable=False,
+        )
     invoice_items = _invoice_items(state)
     invalid_hs_item_ids = sorted(
         str(item.get("item_id") or "unknown")
