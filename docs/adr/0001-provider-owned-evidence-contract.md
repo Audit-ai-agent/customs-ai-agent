@@ -66,9 +66,9 @@ readiness 503으로 차단되고, sealed test-only conformance Provider만 명�
 ## Provider와 합의해야 하는 잔여 release 조건
 
 현재 lock은 Data candidate revision
-`7fa46fb487c08c4230312ffe539978f7141fa56f`와 clean source manifest에서 계산한
+`f88456ea46cd4a1e65875dabe0e3318a7d112155`와 clean source manifest에서 계산한
 `provider_build_sha256`
-`97c7c99886f333547b84b1f93584dcc7729ce021f2f365b4714f04d8ec75f0df`를 함께 고정한다.
+`87f9ec97b0f51ba0da8a0915f81ed0fa2613283b81706627577a200150440053`를 함께 고정한다.
 이는 검증된 local candidate identity이며 annotated tag나 production 배포 증거는 아니다.
 두 consumer lock과 evaluation literal은 byte-identical identity를 사용하고
 Cross-repository Gate에서 다시 검증한다.

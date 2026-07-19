@@ -4,7 +4,7 @@
 
 Agent의 Evidence HTTP consumer는 provider-owned v1 JSON Schema와 lock을 wheel에 포함하고,
 readiness identity·지원 날짜·snapshot·wire schema를 fail-closed로 검증한다. TASK-0010
-Data candidate `7fa46fb487c08c4230312ffe539978f7141fa56f`는 runtime identity와
+Data candidate `f88456ea46cd4a1e65875dabe0e3318a7d112155`는 runtime identity와
 GET/POST build binding을 구현했다. 다만 실제 로컬 law corpus는 여전히 58개 중 3개만
 적재돼 production readiness 대상이 아니다.
 
@@ -54,8 +54,8 @@ exact match로 검증한다. 누락·불일치 시 body를 읽지 않고 실패�
 실행 build가 다르면 body 처리 전에 HTTP 412를 반환해야 한다.
 
 현재 Agent lock은 Data candidate revision
-`7fa46fb487c08c4230312ffe539978f7141fa56f`와 provider build SHA-256
-`97c7c99886f333547b84b1f93584dcc7729ce021f2f365b4714f04d8ec75f0df`를 고정한다.
+`f88456ea46cd4a1e65875dabe0e3318a7d112155`와 provider build SHA-256
+`87f9ec97b0f51ba0da8a0915f81ed0fa2613283b81706627577a200150440053`를 고정한다.
 이 값은 clean commit에서 생성·검증한 local candidate identity이며, 원격 merge와 annotated
 tag 발행을 의미하지 않는다.
 

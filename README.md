@@ -267,8 +267,8 @@ provider는 호출자 소유이므로 Runtime이 닫지 않으며 Backend가 별
 required Evidence 경로는 readiness의 schema/release/revision/build SHA-256을 네
 `X-Evidence-*` POST header로 전달하고 response의 같은 네 header를 body보다 먼저 exact match로
 검증한다. 현재 lock은 Data candidate revision
-`7fa46fb487c08c4230312ffe539978f7141fa56f`와 build SHA-256
-`97c7c99886f333547b84b1f93584dcc7729ce021f2f365b4714f04d8ec75f0df`를 고정한다.
+`f88456ea46cd4a1e65875dabe0e3318a7d112155`와 build SHA-256
+`87f9ec97b0f51ba0da8a0915f81ed0fa2613283b81706627577a200150440053`를 고정한다.
 이는 local candidate pin이며 annotated tag나 production 배포 증거가 아니다.
 
 Data의 contract/header 구현만 확인하는 서버를 사용할 때는 runtime Live evaluator에
