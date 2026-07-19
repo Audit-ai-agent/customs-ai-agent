@@ -114,8 +114,9 @@ Evidence Live/Release PASS가 아니다. 역사 redacted report SHA-256은
 Evidence consumer snapshot의 고정 SHA-256은
 `531b59ba4e86f78cef20a4fca052996efd8b88c48853ac12113ca76e69cdd69a`다. evaluator는 실제 local
 schema bytes, lock SHA, 이 기대 SHA가 모두 같은지 API 호출 전에 확인한다. lock의 release
-metadata는 `evidence-api-v1.0.0`과
-`a8935007262434523a84e2914271140c5e88489a`다.
+metadata는 local candidate `evidence-api-v1.1.0`,
+`7fa46fb487c08c4230312ffe539978f7141fa56f`와 build SHA-256
+`97c7c99886f333547b84b1f93584dcc7729ce021f2f365b4714f04d8ec75f0df`다.
 
 Data 저장소의 작업 HEAD는 이 release pin과 다른 개념이다. TASK-0009 작업 시 관찰된 HEAD
 `7c3ea37...`은 후속 구현 commit이고 lock release revision을 바꾸는 근거가 아니다. 이 evaluator는

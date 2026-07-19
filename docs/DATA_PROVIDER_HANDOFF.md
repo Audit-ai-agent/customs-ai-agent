@@ -3,19 +3,20 @@
 ## 현재 판정
 
 Agent의 Evidence HTTP consumer는 provider-owned v1 JSON Schema와 lock을 wheel에 포함하고,
-readiness identity·지원 날짜·snapshot·wire schema를 fail-closed로 검증한다. 현재 Data
-Provider는 요청/응답 body schema는 호환되지만 readiness에 필수 `evidence_contract` identity를
-제공하지 않는다. 실제 로컬 law corpus도 58개 중 3개만 적재돼 readiness 대상이 아니다.
+readiness identity·지원 날짜·snapshot·wire schema를 fail-closed로 검증한다. TASK-0010
+Data candidate `7fa46fb487c08c4230312ffe539978f7141fa56f`는 runtime identity와
+GET/POST build binding을 구현했다. 다만 실제 로컬 law corpus는 여전히 58개 중 3개만
+적재돼 production readiness 대상이 아니다.
 
-따라서 현재 성공하는 Agent–Data Live E2E가 없는 것은 Agent가 Mock으로 fallback해서 숨긴
-상태가 아니라, Evidence POST 전에 의도대로 차단된 상태다. Agent에서 `required`를
-`optional`로 낮추거나 provider 신원을 추정해 우회하지 않는다.
+별도의 sealed test-only conformance Provider에서는 실제 HTTP GET/POST 계약을 검증한다.
+실제 팀 Data에서는 Evidence POST 전에 의도대로 차단돼야 하며 Agent가 Mock으로 fallback하지
+않는다. Agent에서 `required`를 `optional`로 낮추거나 provider 신원을 추정해 우회하지 않는다.
 
-## Data Provider가 새 release에서 제공해야 하는 것
+## Data Provider candidate가 제공하는 것
 
-기존 `evidence-api-v1.0.0` tag와 frozen v1 response body를 수정하지 않는다. Data 팀이 새
-commit/tag에서 다음 runtime identity를 build artifact에 주입하고 typed readiness response의
-`evidence_contract`로 제공해야 한다.
+기존 `evidence-api-v1.0.0` tag와 frozen v1 response body를 수정하지 않았다. 새
+`evidence-api-v1.1.0` candidate는 다음 runtime identity를 build artifact에 주입하고 typed
+readiness response의 `evidence_contract`로 제공한다.
 
 - contract name과 schema version
 - packaged canonical schema bytes에서 다시 계산한 SHA-256
@@ -52,12 +53,13 @@ Agent는 각 POST에 네 expected header를 보내고, 각 response의 네 actua
 exact match로 검증한다. 누락·불일치 시 body를 읽지 않고 실패한다. Data는 expected identity와
 실행 build가 다르면 body 처리 전에 HTTP 412를 반환해야 한다.
 
-현재 Agent lock의 `provider_build_sha256`
-`e9261a74e0e8044c90c0e275a18002f5155500f8fc088a88430cc050c41eee9d`는 TASK-0010 회귀용
-임시 값이다. Data 최종 commit/image artifact가 발행되면 그 실제 digest로 교체해야 하며, 현재
-값으로 Live release PASS를 만들면 안 된다.
+현재 Agent lock은 Data candidate revision
+`7fa46fb487c08c4230312ffe539978f7141fa56f`와 provider build SHA-256
+`97c7c99886f333547b84b1f93584dcc7729ce021f2f365b4714f04d8ec75f0df`를 고정한다.
+이 값은 clean commit에서 생성·검증한 local candidate identity이며, 원격 merge와 annotated
+tag 발행을 의미하지 않는다.
 
-이 임시 값에 맞춘 conformance provider 검증은 runtime evaluator의 명시적
+이 candidate에 맞춘 conformance provider 검증은 runtime evaluator의 명시적
 `--provider-conformance`에서만 수행한다. 성공해도 report scope는
 `PROVIDER_CONFORMANCE_NOT_RAG_QUALITY`, `release_ready=false`다. 실제 Data release 모드는
 최종 provider digest, 58/58 corpus와 RAG 품질 Gate를 별도로 요구한다.
@@ -80,7 +82,7 @@ Data ADR과 평가셋 변경이 없는 한 허용하지 않는다.
 새 Data release 이후에만 다음 순서로 검증한다.
 
 1. Data canonical schema와 Agent packaged schema의 byte/hash 일치
-2. 새 provider tag, build commit, artifact digest를 Agent lock에 고정
+2. candidate build commit·artifact digest를 Agent lock에 고정하고, 발행 시 annotated tag를 검증
 3. Agent → readiness → retrieval → ReviewResult 한 Case 실제 실행
 4. request ID, item ID, review date, snapshot, citation metadata 일치
 5. `partial`, `failed`, `ambiguous` Evidence의 자동 완료 0

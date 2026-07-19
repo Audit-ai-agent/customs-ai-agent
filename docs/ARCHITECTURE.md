@@ -332,8 +332,9 @@ exact match를 요구한다. 요청 `review_as_of`도 readiness의
 각 response의 네 header는 body byte를 읽기 전에 exact match여야 한다. 누락·GET A/POST B
 불일치와 provider HTTP 412는 안전 오류로 종료하며 불일치 body를 사용하지 않는다. POST 응답의
 snapshot도 바로 앞 readiness snapshot과 같아야 하며 rollout 불일치는 결과를 폐기한다. 현재
-Data readiness는 identity를 아직 광고하지 않고 lock의 build digest도 task-local 임시 값이므로
-HTTP release 경로는 Data 변경 전까지 fail-closed다.
+Data candidate는 identity를 광고하고 Agent lock은 exact candidate build를 고정한다. sealed
+test-only Provider의 conformance와 달리 실제 3/58 corpus는 readiness 503으로 fail-closed하며,
+58/58 적재와 실제 RAG 품질 Gate 전에는 HTTP release-ready로 판정하지 않는다.
 
 현재 provider의 정확한 handoff 조건과 GET–POST build header 계약은
 [`DATA_PROVIDER_HANDOFF.md`](DATA_PROVIDER_HANDOFF.md)에 기록한다. frozen v1 response body를

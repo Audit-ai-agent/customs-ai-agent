@@ -69,18 +69,19 @@ TASK-0009의 pre-freeze 상태는 다음과 같다.
   외부 Artifact manifest를 따른다.
 - 별도의 과거 공개 runtime Evidence HTTP 진단은 runtime identity 강제 전 Data corpus
   readiness 실패 상태에서 POST를 실행해 `partial`, 최종 `needs_review`,
-  `BLOCKED_DATA_READINESS`를 기록했다. 현재 Agent는 readiness의 필수
-  `evidence_contract` identity를 요구하지만 Data Provider가 이를 제공하지 않고 corpus도
-  58개 중 3개만 적재돼 있다. 따라서 현재 Evidence POST는 0건이고 성공하는
-  Agent–Data Live E2E는 없다. 과거 진단은 현재 image evaluation PASS 또는 Evidence Release
-  PASS가 아니다.
+  `BLOCKED_DATA_READINESS`를 기록했다. TASK-0010 Data candidate는 필수
+  `evidence_contract`와 GET/POST build binding을 제공한다. sealed test-only Provider에서는
+  HTTP conformance를 검증하고, 실제 3/58 corpus는 readiness 503·POST 0으로 fail-closed한다.
+  conformance PASS와 과거 진단은 image evaluation PASS 또는 실제 Evidence Release PASS가
+  아니다.
 - OCR provider는 exact-commit wheel로 canonical locked 60 CI/PL/B/L와 C/O 20을 모두
   검증하기 전까지 선택하지 않는다.
 - OCR release pin은 descriptor SHA와 C0 authorization commit SHA 모두 `None`이다. 향후
   evaluation-v3가 준비돼도 C0 승인과 C1 literal-only pin 검증을 통과하기 전에는
   `NOT_FROZEN` 상태를 유지한다.
-- 이 Task는 Backend·Frontend와 Data Platform source를 변경하지 않는다. Data는 pinned
-  Evidence HTTP API의 소비자 경계에서만 관찰한다.
+- 이 Agent 저장소는 Backend·Frontend를 변경하지 않고 Data 구현을 복제하거나 import하지
+  않는다. companion Data 변경은 독립 Data worktree/commit이 소유하며 Agent는 pinned
+  Evidence HTTP API만 소비한다.
 
 과거 c28 exact commit의 611-test·package·Live 결과 뒤에도 Gold 무효화, Evidence identity,
 HS/date/ISO 6346과 OCR ordering 보완이 추가됐다. 보완된 후보는 exact-commit Fast·Contract·
@@ -254,10 +255,10 @@ else:
 ```
 
 `RuntimeInputError`, `RuntimeConfigurationError`, `RuntimeExecutionError`는 모두
-`AgentRuntimeError`이며 외부 응답에는 안전한 `code`만 사용한다. 현재 Data readiness에
-필수 contract identity가 없으므로 위 호출은 Data가 그 계약을 제공할 때까지 fail-closed한다.
-image/PDF 호출은 추가로 canonical OCR release attestation을 통과한 provider가 필요하며,
-현재 OCR release pin이 비어 있으므로 성공 예제로 표시하지 않는다.
+`AgentRuntimeError`이며 외부 응답에는 안전한 `code`만 사용한다. Data candidate는 필수
+contract identity를 제공하지만 실제 3/58 corpus의 readiness는 503이므로 위 호출은
+fail-closed한다. image/PDF 호출은 추가로 canonical OCR release attestation을 통과한
+provider가 필요하며, 현재 OCR release pin이 비어 있으므로 성공 예제로 표시하지 않는다.
 
 장기 실행 Backend는 `AgentRuntime`을 context manager로 사용하거나 종료 시 `close()`를
 호출한다. Runtime은 자신이 생성한 Anthropic client만 닫는다. `RuntimeConfig`로 주입한 OCR
@@ -265,8 +266,10 @@ provider는 호출자 소유이므로 Runtime이 닫지 않으며 Backend가 별
 
 required Evidence 경로는 readiness의 schema/release/revision/build SHA-256을 네
 `X-Evidence-*` POST header로 전달하고 response의 같은 네 header를 body보다 먼저 exact match로
-검증한다. 현재 lock의 build SHA-256은 TASK-0010 transport 회귀용 임시 값이며 Data 최종
-artifact digest가 발행되면 교체해야 한다.
+검증한다. 현재 lock은 Data candidate revision
+`7fa46fb487c08c4230312ffe539978f7141fa56f`와 build SHA-256
+`97c7c99886f333547b84b1f93584dcc7729ce021f2f365b4714f04d8ec75f0df`를 고정한다.
+이는 local candidate pin이며 annotated tag나 production 배포 증거가 아니다.
 
 Data의 contract/header 구현만 확인하는 서버를 사용할 때는 runtime Live evaluator에
 `--provider-conformance`를 명시한다. 이 모드의 `status=PASS`는
