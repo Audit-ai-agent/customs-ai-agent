@@ -2,7 +2,6 @@ from __future__ import annotations
 
 import hashlib
 import json
-import os
 import subprocess
 from pathlib import Path
 from typing import Any
@@ -328,12 +327,28 @@ def test_rejects_unsafe_or_unattested_validation(
         assert not fixture["manifest_path"].exists()
 
 
-@pytest.mark.skipif(os.name == "nt", reason="Windows symlink creation requires host policy")
-def test_rejects_symlinked_external_identity(tmp_path: Path) -> None:
+def test_rejects_symlinked_external_identity(
+    tmp_path: Path,
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
     fixture = _fixture(tmp_path)
     real_identity = fixture["identity_path"]
     linked_identity = fixture["external"] / "identity-link.json"
-    linked_identity.symlink_to(real_identity)
+    try:
+        linked_identity.symlink_to(real_identity)
+    except OSError:
+        # Windows hosts without Developer Mode cannot create a symlink. Keep
+        # the rejection branch covered without turning a platform policy into
+        # an expected test skip.
+        linked_identity.write_bytes(real_identity.read_bytes())
+        original_is_symlink = Path.is_symlink
+
+        def reports_test_link(path: Path) -> bool:
+            if path == linked_identity:
+                return True
+            return original_is_symlink(path)
+
+        monkeypatch.setattr(Path, "is_symlink", reports_test_link)
     fixture["identity_path"] = linked_identity
 
     with pytest.raises(ConformanceIdentityValidationError, match="runtime_identity_invalid"):
