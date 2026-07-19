@@ -5,6 +5,7 @@ import hashlib
 import io
 import json
 import subprocess
+import sys
 import tarfile
 import tomllib
 import zipfile
@@ -13,6 +14,7 @@ from typing import Any
 
 import pytest
 
+import tools.build_release_distributions as release_builder
 from tools.build_release_distributions import ReleaseBuildError, _assert_exact_clean_head
 from tools.verify_distribution import (
     BUILD_MANIFEST_SDIST_PATH,
@@ -564,6 +566,32 @@ def test_release_builder_requires_exact_clean_git_head(tmp_path: Path) -> None:
         _assert_exact_clean_head(repository, head)
     with pytest.raises(ReleaseBuildError, match="release_git_head_mismatch"):
         _assert_exact_clean_head(repository, "0" * 40)
+
+
+def test_release_builder_resolves_executable_to_regular_absolute_file(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    monkeypatch.setattr(release_builder.shutil, "which", lambda _: sys.executable)
+
+    resolved = release_builder._resolve_executable("uv", error_code="invalid")
+
+    assert Path(resolved) == Path(sys.executable).resolve(strict=True)
+    assert Path(resolved).is_absolute()
+    assert Path(resolved).is_file()
+
+
+@pytest.mark.parametrize("discovered", [None, "."])
+def test_release_builder_rejects_missing_or_non_file_executable(
+    discovered: str | None,
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    monkeypatch.setattr(release_builder.shutil, "which", lambda _: discovered)
+
+    with pytest.raises(ReleaseBuildError, match="release_executable_invalid"):
+        release_builder._resolve_executable(
+            "uv",
+            error_code="release_executable_invalid",
+        )
 
 
 def test_sdist_payloads_are_bound_to_exact_git_source(tmp_path: Path) -> None:

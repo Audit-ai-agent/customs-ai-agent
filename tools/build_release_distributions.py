@@ -23,12 +23,28 @@ class ReleaseBuildError(RuntimeError):
     pass
 
 
+def _resolve_executable(command: str, *, error_code: str) -> str:
+    try:
+        discovered = shutil.which(command)
+        if discovered is None:
+            raise OSError
+        executable = Path(discovered).resolve(strict=True)
+    except OSError:
+        raise ReleaseBuildError(error_code) from None
+    if not executable.is_file():
+        raise ReleaseBuildError(error_code)
+    return str(executable)
+
+
 def _git(repository: Path, *arguments: str) -> str:
     try:
-        completed = subprocess.run(
-            ["git", "-C", str(repository), *arguments],
+        git = _resolve_executable("git", error_code="release_git_state_invalid")
+        completed = subprocess.run(  # noqa: S603 - resolved executable; fixed argv; no shell
+            [git, "-C", str(repository), *arguments],
             check=True,
             capture_output=True,
+            stdin=subprocess.DEVNULL,
+            shell=False,
             text=True,
         )
     except (OSError, subprocess.CalledProcessError):
@@ -61,7 +77,16 @@ def _materialize_snapshot(destination: Path, payloads: dict[str, bytes]) -> None
 
 def _run_uv(uv: str, *arguments: str) -> None:
     try:
-        subprocess.run([uv, *arguments], check=True)
+        executable = _resolve_executable(
+            uv,
+            error_code="release_distribution_build_failed",
+        )
+        subprocess.run(  # noqa: S603 - resolved executable; fixed argv; no shell
+            [executable, *arguments],
+            check=True,
+            stdin=subprocess.DEVNULL,
+            shell=False,
+        )
     except (OSError, subprocess.CalledProcessError):
         raise ReleaseBuildError("release_distribution_build_failed") from None
 

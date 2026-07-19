@@ -16,6 +16,7 @@ import importlib.metadata
 import io
 import json
 import re
+import shutil
 import subprocess
 import sys
 import tarfile
@@ -457,11 +458,19 @@ def _git_archive_payloads(repository: Path, git_sha: str) -> dict[str, bytes]:
     if _GIT_SHA.fullmatch(git_sha) is None:
         raise DistributionVerificationError("expected Git SHA is invalid")
     try:
+        discovered = shutil.which("git")
+        if discovered is None:
+            raise OSError
+        git = Path(discovered).resolve(strict=True)
+        if not git.is_file():
+            raise OSError
         repository = repository.resolve(strict=True)
-        completed = subprocess.run(
-            ["git", "-C", str(repository), "archive", "--format=tar", git_sha],
+        completed = subprocess.run(  # noqa: S603 - resolved executable; fixed argv; no shell
+            [str(git), "-C", str(repository), "archive", "--format=tar", git_sha],
             check=True,
             capture_output=True,
+            stdin=subprocess.DEVNULL,
+            shell=False,
         )
         with tarfile.open(fileobj=io.BytesIO(completed.stdout), mode="r:") as archive:
             validated = _validate_sdist_members(archive.getmembers())
