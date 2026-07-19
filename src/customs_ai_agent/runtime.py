@@ -603,6 +603,7 @@ class AgentRuntime:
             )
 
         sensitive_markers = self._secret_markers + _input_base64_markers(service_request)
+        execution_failure: RuntimeExecutionError | None = None
         try:
             workflow_request = ReviewRunRequestV2.model_validate(
                 service_request.model_dump(mode="python", warnings=False)
@@ -640,13 +641,21 @@ class AgentRuntime:
         except AgentRuntimeError:
             raise
         except (LLMError, OcrLayoutProviderError, RetrievalError):
-            pass
+            execution_failure = RuntimeExecutionError(
+                "review_execution_failed",
+                "The Agent review failed without exposing private execution details.",
+            )
         except Exception:
-            pass
-        raise RuntimeExecutionError(
-            "review_execution_failed",
-            "The Agent review failed without exposing private execution details.",
-        )
+            execution_failure = RuntimeExecutionError(
+                "review_execution_failed",
+                "The Agent review failed without exposing private execution details.",
+            )
+        if execution_failure is None:
+            execution_failure = RuntimeExecutionError(
+                "review_execution_failed",
+                "The Agent review failed without exposing private execution details.",
+            )
+        raise execution_failure
 
 
 __all__ = [
