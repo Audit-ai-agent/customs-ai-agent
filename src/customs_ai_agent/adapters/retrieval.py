@@ -4,6 +4,9 @@ import hashlib
 import ipaddress
 import json
 import re
+import threading
+import time
+from collections.abc import Callable
 from dataclasses import dataclass
 from datetime import date
 from typing import Any, Literal, Protocol, runtime_checkable
@@ -45,6 +48,10 @@ from customs_ai_agent.schemas.models import (
 
 class RetrievalError(RuntimeError):
     """The Evidence Service could not return a contract-valid response."""
+
+
+class _EvidenceDeadlineExceeded(TimeoutError):
+    """One complete Evidence operation exhausted its absolute deadline."""
 
 
 EvidenceContractIdentityMode = Literal["disabled", "optional", "required"]
@@ -104,6 +111,9 @@ _RESERVED_HEADERS = {
     "x-request-id",
 }
 MAX_EVIDENCE_RESPONSE_BYTES = 2 * 1024 * 1024
+_EVIDENCE_RESPONSE_CHUNK_BYTES = 64 * 1024
+_MAX_EVIDENCE_TRANSPORT_WORKERS = 32
+_EVIDENCE_TRANSPORT_SLOTS = threading.BoundedSemaphore(_MAX_EVIDENCE_TRANSPORT_WORKERS)
 
 
 class _NoRedirectHandler(HTTPRedirectHandler):
@@ -130,11 +140,158 @@ def urlopen(request: Request, timeout: float):
     return _NO_REDIRECT_OPENER.open(request, timeout=timeout)
 
 
-def _read_bounded_response(response: Any) -> bytes:
-    payload = response.read(MAX_EVIDENCE_RESPONSE_BYTES + 1)
-    if len(payload) > MAX_EVIDENCE_RESPONSE_BYTES:
-        raise ValueError("Evidence Service response exceeded the byte limit")
-    return payload
+def _new_deadline(timeout_seconds: float) -> float:
+    return time.monotonic() + timeout_seconds
+
+
+def _remaining_seconds(deadline: float) -> float:
+    remaining = deadline - time.monotonic()
+    if remaining <= 0:
+        raise _EvidenceDeadlineExceeded
+    return remaining
+
+
+def _close_response(response: Any) -> None:
+    close = getattr(response, "close", None)
+    if callable(close):
+        try:
+            close()
+        except Exception:  # noqa: S110 - deadline cleanup is best effort
+            pass
+
+
+def _close_response_async(response: Any) -> None:
+    """Request socket teardown without extending the caller's deadline."""
+
+    closer = threading.Thread(
+        target=_close_response,
+        args=(response,),
+        name="customs-evidence-response-close",
+        daemon=True,
+    )
+    closer.start()
+
+
+def _set_response_socket_timeout(response: Any, timeout_seconds: float) -> None:
+    """Best-effort tightening of urllib's socket timeout for the next read."""
+
+    fp = getattr(response, "fp", None)
+    raw = getattr(fp, "raw", None)
+    sock = getattr(raw, "_sock", None)
+    settimeout = getattr(sock, "settimeout", None)
+    if callable(settimeout):
+        try:
+            settimeout(timeout_seconds)
+        except (OSError, TypeError, ValueError):
+            return
+
+
+def _read_bounded_response(response: Any, *, deadline: float) -> bytes:
+    """Read one response under a byte cap and an absolute wall-clock deadline."""
+
+    timed_out = threading.Event()
+
+    def expire() -> None:
+        timed_out.set()
+        _close_response(response)
+
+    timer = threading.Timer(_remaining_seconds(deadline), expire)
+    timer.daemon = True
+    timer.start()
+    chunks: list[bytes] = []
+    total = 0
+    try:
+        while True:
+            remaining = _remaining_seconds(deadline)
+            _set_response_socket_timeout(response, remaining)
+            read_size = min(
+                _EVIDENCE_RESPONSE_CHUNK_BYTES,
+                MAX_EVIDENCE_RESPONSE_BYTES + 1 - total,
+            )
+            chunk = response.read(read_size)
+            if timed_out.is_set() or time.monotonic() >= deadline:
+                raise _EvidenceDeadlineExceeded
+            if not isinstance(chunk, (bytes, bytearray)):
+                raise ValueError("Evidence Service returned a non-byte response")
+            if not chunk:
+                break
+            encoded = bytes(chunk)
+            chunks.append(encoded)
+            total += len(encoded)
+            if total > MAX_EVIDENCE_RESPONSE_BYTES:
+                raise ValueError("Evidence Service response exceeded the byte limit")
+        return b"".join(chunks)
+    finally:
+        timer.cancel()
+
+
+def _perform_http_exchange(
+    request: Request,
+    *,
+    deadline: float,
+    header_validator: Callable[[Any], None] | None = None,
+) -> bytes:
+    """Run one HTTP exchange behind a finite caller-visible deadline.
+
+    The daemon boundary ensures an uncooperative socket cannot retain an Agent
+    review slot forever. Real urllib responses are also closed at expiry so
+    the worker normally terminates and returns its bounded transport slot.
+    """
+
+    if not _EVIDENCE_TRANSPORT_SLOTS.acquire(timeout=_remaining_seconds(deadline)):
+        raise _EvidenceDeadlineExceeded
+    completed = threading.Event()
+    state_lock = threading.Lock()
+    state: dict[str, Any] = {}
+
+    def exchange() -> None:
+        try:
+            with urlopen(request, timeout=_remaining_seconds(deadline)) as response:
+                with state_lock:
+                    state["response"] = response
+                _remaining_seconds(deadline)
+                if header_validator is not None:
+                    header_validator(response)
+                _remaining_seconds(deadline)
+                body = _read_bounded_response(response, deadline=deadline)
+                _remaining_seconds(deadline)
+                with state_lock:
+                    state["body"] = body
+        except Exception as exc:
+            with state_lock:
+                state["error"] = exc
+        finally:
+            completed.set()
+            _EVIDENCE_TRANSPORT_SLOTS.release()
+
+    worker = threading.Thread(
+        target=exchange,
+        name="customs-evidence-transport",
+        daemon=True,
+    )
+    try:
+        worker.start()
+    except Exception:
+        _EVIDENCE_TRANSPORT_SLOTS.release()
+        raise
+    try:
+        completed_in_time = completed.wait(_remaining_seconds(deadline))
+    except _EvidenceDeadlineExceeded:
+        completed_in_time = False
+    if not completed_in_time:
+        with state_lock:
+            response = state.get("response")
+        if response is not None:
+            _close_response_async(response)
+        raise _EvidenceDeadlineExceeded
+    with state_lock:
+        error = state.get("error")
+        body = state.get("body")
+    if isinstance(error, Exception):
+        raise error
+    if not isinstance(body, bytes):
+        raise RuntimeError("Evidence transport completed without a response")
+    return body
 
 
 def _reject_nonstandard_json_constant(_value: str) -> None:
@@ -405,11 +562,13 @@ def fetch_evidence_readiness(
     timeout_seconds: float = 10.0,
     max_retries: int = 1,
     contract_identity_mode: EvidenceContractIdentityMode = "required",
+    _deadline: float | None = None,
 ) -> EvidenceReadiness:
     """Read and optionally attest the provider's Evidence readiness identity."""
 
     normalized_base_url = validate_evidence_destination(base_url, allowed_origins)
     _validate_transport_settings(timeout_seconds, max_retries)
+    deadline = _new_deadline(timeout_seconds) if _deadline is None else _deadline
     identity_mode = _validate_contract_identity_mode(contract_identity_mode)
     expected_identity: EvidenceContractIdentity | None = None
     if identity_mode != "disabled":
@@ -430,8 +589,12 @@ def fetch_evidence_readiness(
                 headers=headers,
                 method="GET",
             )
-            with urlopen(request, timeout=timeout_seconds) as response:
-                payload = _load_strict_json(_read_bounded_response(response))
+            payload = _load_strict_json(
+                _perform_http_exchange(
+                    request,
+                    deadline=deadline,
+                )
+            )
             return _parse_evidence_readiness(
                 payload,
                 contract_identity_mode=identity_mode,
@@ -445,6 +608,9 @@ def fetch_evidence_readiness(
             ValueError,
         ) as exc:
             last_error = exc
+            if isinstance(exc, _EvidenceDeadlineExceeded) or time.monotonic() >= deadline:
+                last_error = _EvidenceDeadlineExceeded()
+                break
     if last_error is None:
         raise RetrievalError("Evidence Service readiness request failed: internal state") from None
     reason = _safe_failure_reason(last_error)
@@ -481,11 +647,13 @@ def fetch_evidence_runtime_readiness(
     allowed_origins: set[str] | frozenset[str] | None = None,
     timeout_seconds: float = 10.0,
     max_retries: int = 1,
+    _deadline: float | None = None,
 ) -> EvidenceRuntimeReleaseIdentity:
     """Attest the exact sealed production Data runtime release over HTTP."""
 
     normalized_base_url = validate_evidence_destination(base_url, allowed_origins)
     _validate_transport_settings(timeout_seconds, max_retries)
+    deadline = _new_deadline(timeout_seconds) if _deadline is None else _deadline
     try:
         expected_identity = load_released_evidence_runtime_identity()
         # Loading the v1 schema verifies the retrieval bytes pinned by the lock.
@@ -503,8 +671,12 @@ def fetch_evidence_runtime_readiness(
                 headers=headers,
                 method="GET",
             )
-            with urlopen(request, timeout=timeout_seconds) as response:
-                payload = _load_strict_json(_read_bounded_response(response))
+            payload = _load_strict_json(
+                _perform_http_exchange(
+                    request,
+                    deadline=deadline,
+                )
+            )
             observed_identity = parse_evidence_runtime_readiness(payload)
             if observed_identity != expected_identity:
                 raise _ReadinessValidationError("runtime release identity mismatch")
@@ -518,6 +690,9 @@ def fetch_evidence_runtime_readiness(
             ValueError,
         ) as exc:
             last_error = exc
+            if isinstance(exc, _EvidenceDeadlineExceeded) or time.monotonic() >= deadline:
+                last_error = _EvidenceDeadlineExceeded()
+                break
     if last_error is None:
         raise RetrievalError("Evidence runtime readiness request failed: internal state") from None
     reason = _safe_failure_reason(last_error)
@@ -771,6 +946,8 @@ class HttpRegulationRetriever:
     def _ensure_readiness(
         self,
         request: EvidenceRetrievalRequest,
+        *,
+        deadline: float,
     ) -> EvidenceReadiness | None:
         if self.contract_identity_mode == "disabled":
             return None
@@ -784,6 +961,7 @@ class HttpRegulationRetriever:
             timeout_seconds=self.timeout_seconds,
             max_retries=self.max_retries,
             contract_identity_mode=self.contract_identity_mode,
+            _deadline=deadline,
         )
         if request.review_as_of != readiness.supported_review_as_of:
             raise RetrievalError(
@@ -792,12 +970,13 @@ class HttpRegulationRetriever:
         return readiness
 
     def retrieve(self, request: EvidenceRetrievalRequest) -> EvidenceRetrievalResponse:
+        deadline = _new_deadline(self.timeout_seconds)
         request_payload = request.model_dump(mode="json")
         try:
             validate_pinned_evidence_payload(request_payload)
         except (EvidenceContractLockError, EvidenceContractPayloadError):
             raise RetrievalError("Evidence request does not satisfy the pinned contract") from None
-        readiness = self._ensure_readiness(request)
+        readiness = self._ensure_readiness(request, deadline=deadline)
         payload = json.dumps(
             request_payload,
             ensure_ascii=False,
@@ -822,16 +1001,21 @@ class HttpRegulationRetriever:
                     headers=headers,
                     method="POST",
                 )
-                with urlopen(
-                    http_request,
-                    timeout=self.timeout_seconds,
-                ) as response:
-                    if response_identity is not None:
-                        _validate_response_identity_headers(
+                header_validator = (
+                    (
+                        lambda response: _validate_response_identity_headers(
                             response,
                             response_identity,
                         )
-                    body = _read_bounded_response(response)
+                    )
+                    if response_identity is not None
+                    else None
+                )
+                body = _perform_http_exchange(
+                    http_request,
+                    deadline=deadline,
+                    header_validator=header_validator,
+                )
                 response_payload = _load_strict_json(body)
                 validate_pinned_evidence_payload(response_payload)
                 parsed = EvidenceRetrievalResponse.model_validate(response_payload)
@@ -863,6 +1047,9 @@ class HttpRegulationRetriever:
                 ValueError,
             ) as exc:
                 last_error = exc
+                if isinstance(exc, _EvidenceDeadlineExceeded) or time.monotonic() >= deadline:
+                    last_error = _EvidenceDeadlineExceeded()
+                    break
         if last_error is None:
             raise RetrievalError("Evidence Service request failed: internal state") from None
         reason = _safe_failure_reason(last_error)
@@ -912,13 +1099,17 @@ class ProductionHttpRegulationRetriever:
     def preflight(
         self,
         review_as_of: date | None = None,
+        *,
+        _deadline: float | None = None,
     ) -> EvidenceRuntimeReleaseIdentity:
+        deadline = _new_deadline(self.timeout_seconds) if _deadline is None else _deadline
         identity = fetch_evidence_runtime_readiness(
             self._base_url,
             service_token=self._service_token,
             allowed_origins=self._allowed_origins,
             timeout_seconds=self.timeout_seconds,
             max_retries=self.max_retries,
+            _deadline=deadline,
         )
         if identity != self._expected_identity:
             raise RetrievalError("Evidence runtime release identity does not match")
@@ -929,6 +1120,7 @@ class ProductionHttpRegulationRetriever:
         return identity
 
     def retrieve(self, request: EvidenceRetrievalRequest) -> EvidenceRetrievalResponse:
+        deadline = _new_deadline(self.timeout_seconds)
         request_payload = request.model_dump(mode="json")
         try:
             validate_pinned_evidence_payload(request_payload)
@@ -937,7 +1129,7 @@ class ProductionHttpRegulationRetriever:
 
         # Re-attest for every retrieval. The identity observed by this GET is
         # the only identity accepted on the immediately following POST.
-        observed_identity = self.preflight(request.review_as_of)
+        observed_identity = self.preflight(request.review_as_of, _deadline=deadline)
         payload = json.dumps(
             request_payload,
             ensure_ascii=False,
@@ -959,14 +1151,16 @@ class ProductionHttpRegulationRetriever:
                     headers=headers,
                     method="POST",
                 )
-                with urlopen(http_request, timeout=self.timeout_seconds) as response:
+                body = _perform_http_exchange(
+                    http_request,
+                    deadline=deadline,
                     # Header identity is deliberately checked before body
                     # access, so a rollout race cannot expose unbound bytes.
-                    _validate_runtime_release_response_headers(
+                    header_validator=lambda response: _validate_runtime_release_response_headers(
                         response,
                         observed_identity,
-                    )
-                    body = _read_bounded_response(response)
+                    ),
+                )
                 response_payload = _load_strict_json(body)
                 validate_pinned_evidence_payload(response_payload)
                 parsed = EvidenceRetrievalResponse.model_validate(response_payload)
@@ -995,6 +1189,9 @@ class ProductionHttpRegulationRetriever:
                 ValueError,
             ) as exc:
                 last_error = exc
+                if isinstance(exc, _EvidenceDeadlineExceeded) or time.monotonic() >= deadline:
+                    last_error = _EvidenceDeadlineExceeded()
+                    break
         if last_error is None:
             raise RetrievalError("Evidence Service request failed: internal state") from None
         reason = _safe_failure_reason(last_error)

@@ -482,7 +482,10 @@ readiness의 전체 sealed generation/evaluation identity가 exact match일 때�
 허용한다. 현재 lock은 실제 sealed Data generation이 없으므로 의도적으로 `unreleased`다.
 따라서 service liveness는 확인할 수 있지만 readiness와 review는 503이며 Claude를 호출하지
 않는다. `tools/build_evidence_runtime_release_lock.py`는 검증된 Data readiness 문서와 exact
-Data code/schema lock이 모두 일치할 때만 released lock을 생성한다.
+Data `provider-runtime-lock.json`, retrieval/readiness schema bytes가 모두 일치할 때만
+released lock을 생성한다. readiness GET부터 retrieval POST·retry·header·bounded body
+chunk까지 하나의 monotonic deadline을 공유하므로 slow-drip 응답도 제한 시간을 갱신하지
+못한다.
 
 일반 Agent 설정은 bounded SDK retry를 허용할 수 있지만, 비용 상한을 검증하는 Claude Live
 evaluator는 환경의 retry 값과 무관하게 `max_retries=0`을 강제한다. `--live`,

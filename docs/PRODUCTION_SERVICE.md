@@ -110,6 +110,11 @@ conformance Provider의 200을 실제 법령 RAG 품질이나 전체 서비스 r
 현재 packaged lock은 의도적으로 `unreleased`이므로 liveness는 200이지만 readiness와 review는
 503이다. 이 상태에서 Claude client나 review workflow를 시작하지 않는다.
 
+Evidence timeout은 socket idle timeout의 합이 아니라 한 operation의 절대 wall-clock
+deadline이다. readiness GET, retrieval POST, retry, header 검증, 최대 2 MiB의 64 KiB chunk
+read가 같은 deadline을 사용한다. 비협조적인 transport는 bounded daemon 경계 밖에 격리되므로
+review slot과 readiness executor가 무기한 기다리지 않는다.
+
 ## 결과와 관측성
 
 로그는 JSON 한 줄이며 event, 생성된 request ID, safe error code, HTTP status, retryability,

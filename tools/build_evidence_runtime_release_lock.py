@@ -31,8 +31,9 @@ _EXPECTED_DATA_LOCK_KEYS = {
     "provider_release",
     "provider_revision",
     "provider_build_sha256",
-    "schema_sha256",
-    "source_manifest_sha256",
+    "retrieval_schema_sha256",
+    "readiness_schema_sha256",
+    "provider_source_manifest_sha256",
 }
 
 
@@ -68,7 +69,7 @@ def _strict_json(path: Path) -> dict[str, Any]:
 def _verified_data_lock(payload: dict[str, Any]) -> dict[str, str]:
     if (
         set(payload) != _EXPECTED_DATA_LOCK_KEYS
-        or payload.get("contract") != "evidence-retrieval"
+        or payload.get("contract") != "evidence-runtime-release-provider-lock"
         or payload.get("schema_version") != "1.0"
         or payload.get("provider_release") != "evidence-api-v1.2.0"
     ):
@@ -78,22 +79,24 @@ def _verified_data_lock(payload: dict[str, Any]) -> dict[str, str]:
         raise ReleaseLockBuildError("expected_data_lock_invalid")
     for field_name in (
         "provider_build_sha256",
-        "schema_sha256",
-        "source_manifest_sha256",
+        "retrieval_schema_sha256",
+        "readiness_schema_sha256",
+        "provider_source_manifest_sha256",
     ):
         value = payload.get(field_name)
         if not isinstance(value, str) or _SHA256.fullmatch(value) is None:
             raise ReleaseLockBuildError("expected_data_lock_invalid")
+    # The Data-owned provider lock is a projection of its canonical
+    # evidence-retrieval build. Reconstructing that build hash here prevents
+    # a syntactically valid hand-authored lock from replacing the Data
+    # generator's attestation.
     digest_input = {
-        field_name: payload[field_name]
-        for field_name in (
-            "contract",
-            "schema_version",
-            "provider_release",
-            "provider_revision",
-            "schema_sha256",
-            "source_manifest_sha256",
-        )
+        "contract": "evidence-retrieval",
+        "schema_version": payload["schema_version"],
+        "provider_release": payload["provider_release"],
+        "provider_revision": payload["provider_revision"],
+        "schema_sha256": payload["retrieval_schema_sha256"],
+        "source_manifest_sha256": payload["provider_source_manifest_sha256"],
     }
     if (
         hashlib.sha256(canonical_json_bytes(digest_input)).hexdigest()
@@ -130,15 +133,16 @@ def build_released_lock(
         "provider_release": identity.provider_release,
         "provider_revision": identity.provider_revision,
         "provider_build_sha256": identity.provider_build_sha256,
-        "schema_sha256": identity.retrieval_schema_sha256,
-        "source_manifest_sha256": identity.provider_source_manifest_sha256,
+        "retrieval_schema_sha256": identity.retrieval_schema_sha256,
+        "provider_source_manifest_sha256": identity.provider_source_manifest_sha256,
     }
     if any(expected[field] != observed for field, observed in comparisons.items()):
         raise ReleaseLockBuildError("data_readiness_does_not_match_expected_lock")
     readiness_schema_sha256 = hashlib.sha256(readiness_schema_bytes).hexdigest()
     retrieval_schema_sha256 = hashlib.sha256(retrieval_schema_bytes).hexdigest()
     if (
-        expected["schema_sha256"] != retrieval_schema_sha256
+        expected["readiness_schema_sha256"] != readiness_schema_sha256
+        or expected["retrieval_schema_sha256"] != retrieval_schema_sha256
         or identity.retrieval_schema_sha256 != retrieval_schema_sha256
     ):
         raise ReleaseLockBuildError("data_schema_does_not_match_expected_lock")

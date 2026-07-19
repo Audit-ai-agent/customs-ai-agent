@@ -2,14 +2,38 @@ from __future__ import annotations
 
 import asyncio
 import json
+import threading
+import time
 from typing import Any
+from urllib.request import Request
 
+import customs_ai_agent.adapters.retrieval as retrieval_module
 from customs_ai_agent.service.controller import AgentServiceController
-from tests.service.conftest import FakeRuntime, settings_with
+from tests.service.conftest import FakeResult, FakeRuntime, settings_with
 
 
 def _payload(run_id: str) -> bytes:
     return json.dumps({"review_run_id": run_id}).encode()
+
+
+class _SlowTransportResponse:
+    def __init__(self, *, interval_seconds: float = 0.01) -> None:
+        self.interval_seconds = interval_seconds
+        self.closed = threading.Event()
+
+    def __enter__(self) -> _SlowTransportResponse:
+        return self
+
+    def __exit__(self, *_args: object) -> None:
+        self.close()
+
+    def close(self) -> None:
+        self.closed.set()
+
+    def read(self, _limit: int) -> bytes:
+        if self.closed.wait(self.interval_seconds):
+            return b""
+        return b"x"
 
 
 def test_controller_single_flight_and_lifecycle(service_settings: Any) -> None:
@@ -141,5 +165,119 @@ def test_run_timeout_keeps_capacity_consumed_until_worker_finishes(
         await controller.shutdown()
         assert controller.metrics.snapshot()["inflight"] == 0
         assert runtime.close_calls == 1
+
+    asyncio.run(scenario())
+
+
+def test_absolute_evidence_deadline_releases_timed_out_review_slot(
+    service_settings: Any,
+    monkeypatch: Any,
+) -> None:
+    class EvidenceRuntime:
+        def __init__(self) -> None:
+            self.calls = 0
+            self.close_calls = 0
+
+        def review_json(self, _payload_bytes: bytes) -> FakeResult:
+            self.calls += 1
+            if self.calls == 1:
+                retrieval_module._perform_http_exchange(
+                    Request("http://127.0.0.1:8010/internal/rag/v2/retrieve"),
+                    deadline=retrieval_module._new_deadline(1.1),
+                )
+            return FakeResult()
+
+        def close(self) -> None:
+            self.close_calls += 1
+
+    slow_response = _SlowTransportResponse()
+    monkeypatch.setattr(
+        retrieval_module,
+        "urlopen",
+        lambda *_args, **_kwargs: slow_response,
+    )
+
+    async def scenario() -> None:
+        runtime = EvidenceRuntime()
+        controller = AgentServiceController(
+            settings=settings_with(
+                service_settings,
+                max_concurrency=1,
+                queue_wait_seconds=0.01,
+                run_timeout_seconds=1,
+                shutdown_grace_seconds=2,
+            ),
+            runtime=runtime,
+            readiness_probe=lambda: object(),
+            logger=__import__("logging").getLogger("test-service"),
+        )
+        timed_out, _ = await controller.submit(
+            payload=_payload("run-slow-evidence"),
+            review_run_id="run-slow-evidence",
+            request_hash="e" * 64,
+        )
+        assert timed_out.status_code == 504
+
+        busy, _ = await controller.submit(
+            payload=_payload("run-still-bounded"),
+            review_run_id="run-still-bounded",
+            request_hash="f" * 64,
+        )
+        assert busy.status_code == 503
+        await asyncio.sleep(0.25)
+
+        recovered, _ = await controller.submit(
+            payload=_payload("run-recovered"),
+            review_run_id="run-recovered",
+            request_hash="1" * 64,
+        )
+        assert recovered.status_code == 200
+        assert slow_response.closed.is_set()
+        assert runtime.calls == 2
+        await controller.shutdown()
+        assert runtime.close_calls == 1
+
+    asyncio.run(scenario())
+
+
+def test_finite_transport_probe_does_not_poison_readiness_executor(
+    service_settings: Any,
+    monkeypatch: Any,
+) -> None:
+    def uncooperative_open(*_args: Any, **_kwargs: Any) -> _SlowTransportResponse:
+        time.sleep(0.2)
+        return _SlowTransportResponse()
+
+    monkeypatch.setattr(retrieval_module, "urlopen", uncooperative_open)
+
+    async def scenario() -> None:
+        calls = 0
+
+        def probe() -> object:
+            nonlocal calls
+            calls += 1
+            if calls == 1:
+                retrieval_module._perform_http_exchange(
+                    Request("http://127.0.0.1:8010/internal/rag/v2/health/ready"),
+                    deadline=retrieval_module._new_deadline(0.05),
+                )
+            return object()
+
+        controller = AgentServiceController(
+            settings=settings_with(
+                service_settings,
+                readiness_timeout_seconds=0.3,
+                readiness_ttl_seconds=0.1,
+            ),
+            runtime=FakeRuntime(),
+            readiness_probe=probe,
+            logger=__import__("logging").getLogger("test-service"),
+        )
+        assert await controller.ready() is False
+        await asyncio.sleep(0.11)
+        assert await controller.ready() is True
+        assert calls == 2
+        await asyncio.sleep(0.15)
+        await controller.shutdown()
 
     asyncio.run(scenario())

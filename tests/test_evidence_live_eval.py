@@ -104,6 +104,7 @@ class _HttpBody:
     ) -> None:
         self._payload = json.dumps(payload).encode("utf-8")
         self.headers = _identity_headers() if headers is None else headers
+        self._offset = 0
 
     def __enter__(self):
         return self
@@ -112,7 +113,11 @@ class _HttpBody:
         return None
 
     def read(self, size: int = -1) -> bytes:
-        return self._payload if size < 0 else self._payload[:size]
+        if size < 0:
+            size = len(self._payload) - self._offset
+        chunk = self._payload[self._offset : self._offset + size]
+        self._offset += len(chunk)
+        return chunk
 
     def getheader(self, name: str) -> str | None:
         return self.headers.get(name)
@@ -174,14 +179,8 @@ def test_current_data_readiness_without_identity_can_never_be_a_release_pass(
     methods: list[str] = []
 
     class Response:
-        def __enter__(self):
-            return self
-
-        def __exit__(self, *_args):
-            return None
-
-        def read(self, _size: int = -1) -> bytes:
-            return json.dumps(
+        def __init__(self) -> None:
+            self._body = json.dumps(
                 {
                     "status": "ready",
                     "knowledge_snapshot_id": "current-data-snapshot",
@@ -190,6 +189,20 @@ def test_current_data_readiness_without_identity_can_never_be_a_release_pass(
                     "law_index": {"status": "ready"},
                 }
             ).encode("utf-8")
+            self._offset = 0
+
+        def __enter__(self):
+            return self
+
+        def __exit__(self, *_args):
+            return None
+
+        def read(self, size: int = -1) -> bytes:
+            if size < 0:
+                size = len(self._body) - self._offset
+            chunk = self._body[self._offset : self._offset + size]
+            self._offset += len(chunk)
+            return chunk
 
     def current_data_readiness(request, **_kwargs):
         methods.append(request.get_method())

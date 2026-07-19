@@ -2,6 +2,8 @@ from __future__ import annotations
 
 import hashlib
 import json
+import threading
+import time
 from contextlib import AbstractContextManager
 from pathlib import Path
 from typing import Any
@@ -22,6 +24,7 @@ from customs_ai_agent.adapters.retrieval import (
     EVIDENCE_SCHEMA_SHA256_HEADER,
     ProductionHttpRegulationRetriever,
     RetrievalError,
+    fetch_evidence_runtime_readiness,
 )
 from customs_ai_agent.contracts.evidence_runtime_release import (
     EvidenceRuntimeReleaseIdentity,
@@ -145,6 +148,7 @@ class _Response(AbstractContextManager["_Response"]):
         self.body = body
         self.headers = headers or {}
         self.read_calls = 0
+        self._offset = 0
 
     def __enter__(self) -> _Response:
         return self
@@ -152,9 +156,11 @@ class _Response(AbstractContextManager["_Response"]):
     def __exit__(self, *_args: object) -> None:
         return None
 
-    def read(self, _limit: int) -> bytes:
+    def read(self, limit: int) -> bytes:
         self.read_calls += 1
-        return self.body
+        chunk = self.body[self._offset : self._offset + limit]
+        self._offset += len(chunk)
+        return chunk
 
     def getheader(self, name: str) -> str | None:
         return self.headers.get(name)
@@ -170,6 +176,42 @@ class _DuplicateIdentityHeaders:
         if value is None:
             return None
         return [value, value] if name.casefold() == self.duplicate else [value]
+
+
+class _SlowDripResponse(AbstractContextManager["_SlowDripResponse"]):
+    def __init__(
+        self,
+        body: bytes,
+        *,
+        headers: dict[str, str] | None = None,
+        interval_seconds: float = 0.01,
+    ) -> None:
+        self.body = body
+        self.headers = headers or {}
+        self.interval_seconds = interval_seconds
+        self.closed = threading.Event()
+        self._offset = 0
+
+    def __enter__(self) -> _SlowDripResponse:
+        return self
+
+    def __exit__(self, *_args: object) -> None:
+        self.close()
+
+    def close(self) -> None:
+        self.closed.set()
+
+    def read(self, limit: int) -> bytes:
+        if self.closed.wait(self.interval_seconds):
+            return b""
+        if self._offset >= len(self.body):
+            return b""
+        chunk = self.body[self._offset : self._offset + min(limit, 1)]
+        self._offset += len(chunk)
+        return chunk
+
+    def getheader(self, name: str) -> str | None:
+        return self.headers.get(name)
 
 
 def test_packaged_production_lock_is_explicitly_unreleased() -> None:
@@ -568,6 +610,79 @@ def test_post_timeout_retries_only_the_same_attested_identity(
     assert observed_headers[0] == observed_headers[1]
 
 
+def test_get_and_post_share_one_absolute_deadline_against_slow_drip(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    identity = _identity()
+    slow_response = _SlowDripResponse(
+        _response_payload(_request(), identity.knowledge_snapshot_id),
+        headers=_headers(identity),
+    )
+    calls = 0
+
+    def fake_urlopen(_request: Any, timeout: float) -> _Response | _SlowDripResponse:
+        assert 0 < timeout <= 0.081
+        nonlocal calls
+        calls += 1
+        if calls == 1:
+            return _Response(_readiness(identity))
+        return slow_response
+
+    monkeypatch.setattr(
+        retrieval_module,
+        "load_released_evidence_runtime_identity",
+        lambda: identity,
+    )
+    monkeypatch.setattr(retrieval_module, "urlopen", fake_urlopen)
+    retriever = ProductionHttpRegulationRetriever(
+        "http://127.0.0.1:8010",
+        service_token="Abcdefghijklmnopqrstuvwxyz0123456789",
+        timeout_seconds=0.08,
+        max_retries=3,
+    )
+    started = time.monotonic()
+    with pytest.raises(RetrievalError, match="timeout"):
+        retriever.retrieve(_request())
+    elapsed = time.monotonic() - started
+
+    assert elapsed < 0.3
+    assert calls == 2
+    assert slow_response.closed.wait(0.2)
+
+
+def test_readiness_absolute_deadline_bounds_uncooperative_header_open(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    identity = _identity()
+    calls = 0
+
+    def uncooperative_urlopen(_request: Any, timeout: float) -> _Response:
+        assert 0 < timeout <= 0.051
+        nonlocal calls
+        calls += 1
+        time.sleep(0.2)
+        return _Response(_readiness(identity))
+
+    monkeypatch.setattr(
+        retrieval_module,
+        "load_released_evidence_runtime_identity",
+        lambda: identity,
+    )
+    monkeypatch.setattr(retrieval_module, "urlopen", uncooperative_urlopen)
+    started = time.monotonic()
+    with pytest.raises(RetrievalError, match="timeout"):
+        fetch_evidence_runtime_readiness(
+            "http://127.0.0.1:8010",
+            service_token="Abcdefghijklmnopqrstuvwxyz0123456789",
+            timeout_seconds=0.05,
+            max_retries=2,
+        )
+    elapsed = time.monotonic() - started
+
+    assert elapsed < 0.15
+    assert calls == 1
+
+
 def test_redirect_status_is_not_followed(monkeypatch: pytest.MonkeyPatch) -> None:
     identity = _identity()
     calls = 0
@@ -627,19 +742,21 @@ def test_missing_production_bearer_fails_before_lock_or_network(
 
 
 def test_release_lock_builder_requires_exact_data_code_and_schema_lock() -> None:
-    provider_payload = {
-        "contract": "evidence-retrieval",
-        "schema_version": "1.0",
-        "provider_release": "evidence-api-v1.2.0",
-        "provider_revision": "1" * 40,
-        "schema_sha256": ("531b59ba4e86f78cef20a4fca052996efd8b88c48853ac12113ca76e69cdd69a"),
-        "source_manifest_sha256": "3" * 64,
-    }
-    provider_build_sha256 = hashlib.sha256(canonical_json_bytes(provider_payload)).hexdigest()
-    identity = _identity(provider_build_sha256=provider_build_sha256)
+    fixture_root = Path(__file__).parent / "fixtures" / "evidence_runtime_v2"
+    lock_bytes = (fixture_root / "provider-runtime-lock.json").read_bytes()
+    assert hashlib.sha256(lock_bytes).hexdigest() == (
+        "6845f05dd154cd78583fe618fddbf681e092314eb3fc0a611dbb81788aa8f6da"
+    )
+    expected = json.loads(lock_bytes)
+    identity = _identity(
+        provider_revision=expected["provider_revision"],
+        provider_build_sha256=expected["provider_build_sha256"],
+        provider_source_manifest_sha256=expected["provider_source_manifest_sha256"],
+    )
     readiness_schema = release_module._read_resource_bytes("runtime-release-v2.schema.json")
     retrieval_schema = release_module._read_resource_bytes("v1.schema.json")
-    expected = {**provider_payload, "provider_build_sha256": provider_build_sha256}
+    assert expected["readiness_schema_sha256"] == hashlib.sha256(readiness_schema).hexdigest()
+    assert expected["retrieval_schema_sha256"] == hashlib.sha256(retrieval_schema).hexdigest()
     result = build_released_lock(
         readiness=json.loads(_readiness(identity)),
         expected_data_lock=expected,
@@ -649,26 +766,28 @@ def test_release_lock_builder_requires_exact_data_code_and_schema_lock() -> None
     assert result["release_state"] == "released"
     assert result["identity"] == identity.to_wire()
 
-    expected["provider_revision"] = "f" * 40
-    expected["provider_build_sha256"] = hashlib.sha256(
-        canonical_json_bytes(
-            {
-                field_name: expected[field_name]
-                for field_name in (
-                    "contract",
-                    "schema_version",
-                    "provider_release",
-                    "provider_revision",
-                    "schema_sha256",
-                    "source_manifest_sha256",
-                )
-            }
-        )
-    ).hexdigest()
-    with pytest.raises(ReleaseLockBuildError, match="does_not_match"):
+    obsolete_provider_build = {
+        "contract": "evidence-retrieval",
+        "schema_version": "1.0",
+        "provider_release": "evidence-api-v1.2.0",
+        "provider_revision": expected["provider_revision"],
+        "provider_build_sha256": expected["provider_build_sha256"],
+        "schema_sha256": expected["retrieval_schema_sha256"],
+        "source_manifest_sha256": expected["provider_source_manifest_sha256"],
+    }
+    with pytest.raises(ReleaseLockBuildError, match="expected_data_lock_invalid"):
         build_released_lock(
             readiness=json.loads(_readiness(identity)),
-            expected_data_lock=expected,
+            expected_data_lock=obsolete_provider_build,
+            readiness_schema_bytes=readiness_schema,
+            retrieval_schema_bytes=retrieval_schema,
+        )
+
+    tampered = {**expected, "readiness_schema_sha256": "f" * 64}
+    with pytest.raises(ReleaseLockBuildError, match="data_schema_does_not_match"):
+        build_released_lock(
+            readiness=json.loads(_readiness(identity)),
+            expected_data_lock=tampered,
             readiness_schema_bytes=readiness_schema,
             retrieval_schema_bytes=retrieval_schema,
         )
@@ -676,11 +795,7 @@ def test_release_lock_builder_requires_exact_data_code_and_schema_lock() -> None
     with pytest.raises(ReleaseLockBuildError, match="schema_bytes"):
         build_released_lock(
             readiness=json.loads(_readiness(identity)),
-            expected_data_lock={
-                **expected,
-                "provider_revision": identity.provider_revision,
-                "provider_build_sha256": identity.provider_build_sha256,
-            },
+            expected_data_lock=expected,
             readiness_schema_bytes=readiness_schema + b"\n",
             retrieval_schema_bytes=retrieval_schema,
         )

@@ -132,6 +132,7 @@ class _HttpBody:
         self.payload = payload
         self.headers = _identity_headers() if headers is None else headers
         self.read_count = 0
+        self._offset = 0
 
     def __enter__(self):
         return self
@@ -141,7 +142,11 @@ class _HttpBody:
 
     def read(self, size: int = -1) -> bytes:
         self.read_count += 1
-        return self.payload if size < 0 else self.payload[:size]
+        if size < 0:
+            size = len(self.payload) - self._offset
+        chunk = self.payload[self._offset : self._offset + size]
+        self._offset += len(chunk)
+        return chunk
 
     def getheader(self, name: str) -> str | None:
         return self.headers.get(name)
@@ -1059,7 +1064,7 @@ def test_http_retriever_uses_v1_endpoint_and_retries_once(monkeypatch):
     assert sent_request.full_url == "https://evidence.local/internal/rag/v1/retrieve"
     assert sent_request.get_method() == "POST"
     assert json.loads(sent_request.data)["review_run_id"] == "run-http-1"
-    assert timeout == 60.0
+    assert 0 < timeout <= 60.0
     assert actual == response
 
 
@@ -1402,7 +1407,7 @@ def test_readiness_returns_provider_supported_review_date_and_token(monkeypatch)
     assert request.get_method() == "GET"
     assert request.full_url == "http://localhost:8010/internal/rag/v1/health/ready"
     assert sent_headers["x-demo-token"] == "readiness-secret"
-    assert captured["timeout"] == 10.0
+    assert 0 < captured["timeout"] <= 10.0
 
 
 def test_required_readiness_verifies_exact_pinned_contract_identity(monkeypatch):
@@ -1502,7 +1507,7 @@ def test_required_http_retrieval_attests_before_every_post(monkeypatch):
     post_headers = []
 
     def fake_urlopen(request, timeout):
-        assert timeout == 60.0
+        assert 0 < timeout <= 60.0
         methods.append(request.get_method())
         if request.get_method() == "POST":
             post_headers.append({name.casefold(): value for name, value in request.header_items()})
@@ -1544,7 +1549,7 @@ def test_required_http_retrieval_rejects_get_post_build_mismatch_before_body_rea
     )
 
     def fake_urlopen(request, timeout):
-        assert timeout == 60.0
+        assert 0 < timeout <= 60.0
         methods.append(request.get_method())
         if request.get_method() == "GET":
             return _HttpBody(
@@ -1676,7 +1681,7 @@ def test_required_http_retrieval_rejects_snapshot_changed_after_readiness(monkey
     methods = []
 
     def fake_urlopen(request, timeout):
-        assert timeout == 60.0
+        assert 0 < timeout <= 60.0
         methods.append(request.get_method())
         payload = (
             _readiness_payload(snapshot_id="readiness-snapshot")
@@ -1700,7 +1705,7 @@ def test_required_http_retrieval_rejects_unsupported_as_of_before_post(monkeypat
     methods = []
 
     def fake_urlopen(request, timeout):
-        assert timeout == 60.0
+        assert 0 < timeout <= 60.0
         methods.append(request.get_method())
         return _HttpBody(json.dumps(_readiness_payload()).encode("utf-8"))
 
@@ -1722,7 +1727,7 @@ def test_missing_runtime_contract_identity_fails_closed_without_retrieval_post(m
     methods = []
 
     def fake_urlopen(request, timeout):
-        assert timeout == 60.0
+        assert 0 < timeout <= 60.0
         methods.append(request.get_method())
         return _HttpBody(json.dumps(_readiness_payload(include_identity=False)).encode("utf-8"))
 

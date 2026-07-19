@@ -30,6 +30,14 @@ runtime-release identity로 fail-closed 검증한다.
 `.git` checkout이나 사람이 입력한 환경변수만 보고 실행 artifact 신원을 추정해서는 안 된다.
 identity가 누락·오염됐거나 bundled schema hash와 다르면 readiness 503이어야 한다.
 
+Agent release lock 생성기는 Data가 canonical generator로 만든
+`provider-runtime-lock.json`만 입력으로 받는다. 이 파일은
+`evidence-runtime-release-provider-lock` 1.0의 exact 8-field 문서이며 retrieval/readiness
+schema SHA-256과 provider source manifest SHA-256을 모두 포함한다. 구형 7-field
+`provider-runtime-build.json`, 수동 변환 문서, 추가 필드가 있는 문서는 거부한다. Agent는
+두 schema의 실제 bytes를 package snapshot과 비교하고 provider build hash도 canonical
+JSON으로 재계산한다.
+
 ## GET readiness와 POST retrieval의 원자적 결박
 
 readiness를 처리한 build와 retrieval을 처리한 build가 다른 rollout 상황도 검출해야 한다.
@@ -58,6 +66,14 @@ frozen v1 response body는 `additionalProperties: false`이므로 임의 identit
 Agent는 각 POST에 8개 expected header를 보내고, 각 response의 8개 actual header를 body byte보다 먼저
 exact match로 검증한다. 누락·불일치 시 body를 읽지 않고 실패한다. Data는 expected identity와
 실행 build가 다르면 body 처리 전에 HTTP 412를 반환해야 한다.
+
+한 retrieval의 readiness GET, retrieval POST, 모든 retry, response header와 bounded chunk
+body read는 하나의 monotonic wall-clock deadline을 공유한다. socket idle timeout이
+초기화되는 slow-header/slow-drip 응답도 deadline을 연장할 수 없다. 네트워크 호출은
+caller-visible finite daemon isolation과 최대 32개 transport slot 뒤에서 실행되므로,
+비협조적인 socket이 서비스 review slot이나 readiness executor를 무기한 점유하지 않는다.
+실제 socket은 deadline에 닫고, 종료되지 않는 transport worker는 한정된 slot을 보유해
+무제한 thread 증가 대신 이후 요청을 fail-closed시킨다.
 
 현재 Agent lock은 `release_state=unreleased`다. 실제 sealed generation과 locked Gold
 evaluation report가 아직 없으므로 generation/evaluation hash를 임의 생성하거나 기존 3/58

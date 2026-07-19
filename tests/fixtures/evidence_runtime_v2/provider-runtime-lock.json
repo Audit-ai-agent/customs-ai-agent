@@ -1,0 +1,10 @@
+{
+  "contract": "evidence-runtime-release-provider-lock",
+  "provider_build_sha256": "05d16ce99fbf2805bbb38fc568bc71c22c0e34aeed40983d9ef7db343426a799",
+  "provider_release": "evidence-api-v1.2.0",
+  "provider_revision": "27bc2b43392262a93113fd1b6e06840b0c816c17",
+  "provider_source_manifest_sha256": "8472f7c9e249de059348e9b47e6d9c5ed7be6a9992aabece90235fc990e3ae4e",
+  "readiness_schema_sha256": "0a0b50fef627ecbbad954af5878ccb3630ecc51f618132f8cfc674c324467a69",
+  "retrieval_schema_sha256": "531b59ba4e86f78cef20a4fca052996efd8b88c48853ac12113ca76e69cdd69a",
+  "schema_version": "1.0"
+}
