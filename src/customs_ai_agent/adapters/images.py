@@ -105,13 +105,19 @@ class IsolatedPdfium2Rasterizer:
         executable = Path(
             os.fspath(python_executable) if python_executable is not None else sys.executable
         ).expanduser()
+        invocation_path = Path(os.path.abspath(executable))
         try:
-            executable = executable.resolve(strict=True)
+            executable_target = invocation_path.resolve(strict=True)
         except OSError:
             raise PdfRasterizerError("PDF worker Python is unavailable") from None
-        if not executable.is_file() or timeout_seconds <= 0:
+        if not invocation_path.is_file() or not executable_target.is_file() or timeout_seconds <= 0:
             raise PdfRasterizerError("PDF worker configuration is invalid")
-        self._python_executable = executable
+        # POSIX virtual environments normally expose ``bin/python`` as a
+        # symlink. Launch through that venv path so isolated mode retains the
+        # locked environment, while remembering the resolved target to detect a
+        # swapped link before each invocation.
+        self._python_executable = invocation_path
+        self._python_executable_target = executable_target
         self._timeout_seconds = timeout_seconds
 
     def rasterize(
@@ -121,6 +127,12 @@ class IsolatedPdfium2Rasterizer:
         dpi: int,
         max_pages: int,
     ) -> PdfRasterizationResult:
+        try:
+            current_target = self._python_executable.resolve(strict=True)
+        except OSError:
+            raise PdfRasterizerError("PDF worker Python is unavailable") from None
+        if current_target != self._python_executable_target or not current_target.is_file():
+            raise PdfRasterizerError("PDF worker Python identity changed")
         if (
             not isinstance(pdf_bytes, bytes)
             or not pdf_bytes

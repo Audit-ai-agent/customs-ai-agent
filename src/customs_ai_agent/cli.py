@@ -7,7 +7,7 @@ import re
 import sys
 from dataclasses import dataclass
 from datetime import date
-from pathlib import Path
+from pathlib import Path, PureWindowsPath
 from typing import Any, Literal, Mapping, Sequence
 
 from dotenv import dotenv_values
@@ -245,7 +245,15 @@ def _read_json_object(path: Path, *, byte_limit: int, label: str) -> dict[str, A
 
 def _resolve_manifest_file(manifest_dir: Path, relative_value: str, *, label: str) -> Path:
     relative_path = Path(relative_value)
-    if relative_path.is_absolute() or bool(relative_path.drive) or ".." in relative_path.parts:
+    windows_path = PureWindowsPath(relative_value)
+    if (
+        relative_path.is_absolute()
+        or bool(relative_path.drive)
+        or windows_path.is_absolute()
+        or bool(windows_path.drive)
+        or ".." in relative_path.parts
+        or ".." in windows_path.parts
+    ):
         raise LocalReviewInputError(
             f"{label}_path_invalid",
             f"The configured {label} path must stay within the manifest directory.",

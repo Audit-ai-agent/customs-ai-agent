@@ -6,7 +6,7 @@ import json
 import os
 from datetime import date
 from importlib import resources
-from pathlib import Path
+from pathlib import Path, PureWindowsPath
 from typing import Any, Literal
 
 from pydantic import BaseModel, ConfigDict, Field, field_validator
@@ -89,11 +89,15 @@ class LocalManifestSourceV1(BaseModel):
         if value is None:
             return None
         candidate = Path(value)
+        windows_candidate = PureWindowsPath(value)
         if (
             "\x00" in value
             or candidate.is_absolute()
             or bool(candidate.drive)
+            or windows_candidate.is_absolute()
+            or bool(windows_candidate.drive)
             or ".." in candidate.parts
+            or ".." in windows_candidate.parts
         ):
             raise ValueError("manifest source references must be safe relative paths")
         return value

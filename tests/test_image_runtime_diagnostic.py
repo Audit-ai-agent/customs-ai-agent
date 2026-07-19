@@ -249,7 +249,10 @@ def _evaluate(
     return diagnostic.evaluate(
         env_file=env_file,
         provider="paddle",
-        ocr_python=Path(sys.executable),
+        # POSIX virtual environments normally expose ``sys.executable`` as a
+        # symlink. The production diagnostic requires the exact regular-file
+        # target so the executable identity can be hashed and frozen.
+        ocr_python=Path(sys.executable).resolve(strict=True),
         evidence_base_url="http://127.0.0.1:8010",
         review_date=date(2026, 7, 10),
         live=True,
