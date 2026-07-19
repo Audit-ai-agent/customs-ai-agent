@@ -161,7 +161,7 @@ prompt 또는 Agent 자동 context로 읽지 않는다. 내용을 다시 쓰려�
 | 소유자 | 책임 | Agent와 연결 |
 |---|---|---|
 | AI Agent | 문서 이해, workflow, 정책, 평가, Agent 계약 | 이 저장소 |
-| Data Platform | 법령·HSK·CCCT 원장, RAG, Evidence API | HTTP `POST /internal/rag/v1/retrieve`만 사용 |
+| Data Platform | 법령·HSK·CCCT 원장, RAG, Evidence API | 제품은 HTTP Evidence v2 release endpoint만 사용 |
 | Backend | 인증, Case, Job, HITL, Operational DB | 추후 Agent wheel/계약 버전을 고정해 호출 |
 | Frontend | 사용자 작업대 | 추후 Backend API만 호출 |
 
@@ -225,13 +225,17 @@ model은 거절하고 전체 요청을 다시 검증한다. 두 API 모두 scena
 Claude와 Evidence HTTP 경로만 사용한다.
 
 ```python
+from pydantic import SecretStr
+
 from customs_ai_agent import AgentRuntime, AgentRuntimeError, RuntimeConfig
 
 evidence_url = "http://127.0.0.1:8010"
+evidence_token = SecretStr(secret_manager.read("evidence-service-token"))
 try:
     with AgentRuntime(
         RuntimeConfig.from_environment(
             evidence_base_url=evidence_url,
+            evidence_service_token=evidence_token,
             evidence_allowed_origins=frozenset({evidence_url}),
             env_file="../_secrets/.env",
         )
@@ -286,12 +290,10 @@ Evidence 호출 전에 거부한다. Case/Job/HITL과 복제본 간 durable idem
 [Service Runbook](docs/RUNBOOK.md)을 따른다. 현재 실제 Data 3/58 상태에서는 service code가
 정상이어도 `/health/ready` 503이 올바른 결과다.
 
-required Evidence 경로는 readiness의 schema/release/revision/build SHA-256을 네
-`X-Evidence-*` POST header로 전달하고 response의 같은 네 header를 body보다 먼저 exact match로
-검증한다. 현재 lock은 Data candidate revision
-`f88456ea46cd4a1e65875dabe0e3318a7d112155`와 build SHA-256
-`87f9ec97b0f51ba0da8a0915f81ed0fa2613283b81706627577a200150440053`를 고정한다.
-이는 local candidate pin이며 annotated tag나 production 배포 증거가 아니다.
+제품 Evidence 경로는 readiness의 provider/schema/build와 sealed generation/evaluation identity를
+8개 `X-Evidence-*` POST header로 전달하고 response의 같은 header를 body보다 먼저 exact
+match로 검증한다. 현재 lock은 실제 sealed Data release가 없어서 명시적으로
+`release_state=unreleased`이며, liveness 외 readiness/review는 fail-closed한다.
 
 Data의 contract/header 구현만 확인하는 서버를 사용할 때는 runtime Live evaluator에
 `--provider-conformance`를 명시한다. 이 모드의 `status=PASS`는
@@ -459,6 +461,7 @@ EVIDENCE_SERVICE_BASE_URL=http://127.0.0.1:8010
 EVIDENCE_SERVICE_ALLOWED_ORIGINS=
 EVIDENCE_SERVICE_TOKEN=
 EVIDENCE_SERVICE_TOKEN_HEADER=Authorization
+CUSTOMS_AGENT_BODY_READ_TIMEOUT_SECONDS=15
 ```
 
 Agent는 `--env-file`로 지정한 파일만 allowlist 방식으로 읽고 `os.environ`을 변경하지 않는다.
@@ -472,6 +475,14 @@ SDK debug logging은 fail-closed한다. 모델 변경은 환경변수만 바꾸�
 운영 Agent service는 Data API와의 인증을 `Authorization: Bearer <token>`으로 고정한다.
 `X-Demo-Token` 같은 legacy custom header는 로컬 평가 호환을 위해 명시적으로 선택할 수 있지만
 production service 설정에서는 fail-closed된다.
+
+운영 Runtime은 Data Evidence v2 release 경계만 사용한다. wheel에 포함된
+`contracts/evidence/runtime-release-v2.lock.json`이 `release_state=released`이고 Data
+readiness의 전체 sealed generation/evaluation identity가 exact match일 때만 review를
+허용한다. 현재 lock은 실제 sealed Data generation이 없으므로 의도적으로 `unreleased`다.
+따라서 service liveness는 확인할 수 있지만 readiness와 review는 503이며 Claude를 호출하지
+않는다. `tools/build_evidence_runtime_release_lock.py`는 검증된 Data readiness 문서와 exact
+Data code/schema lock이 모두 일치할 때만 released lock을 생성한다.
 
 일반 Agent 설정은 bounded SDK retry를 허용할 수 있지만, 비용 상한을 검증하는 Claude Live
 evaluator는 환경의 retry 값과 무관하게 `max_retries=0`을 강제한다. `--live`,

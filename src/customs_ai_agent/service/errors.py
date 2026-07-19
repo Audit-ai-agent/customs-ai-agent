@@ -12,6 +12,7 @@ _MESSAGES = {
     "idempotency_conflict": "The review run identifier is already bound to another request.",
     "internal_error": "The request could not be processed.",
     "request_invalid": "The review request is invalid.",
+    "request_body_timeout": "The review request body exceeded the receive deadline.",
     "request_too_large": "The review request exceeds the service limit.",
     "required_field_missing": "A required service field is missing.",
     "review_execution_failed": "The review could not be completed.",

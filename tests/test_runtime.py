@@ -58,6 +58,15 @@ class _FakeOwnedAnalyzer:
         self.close_calls += 1
 
 
+class _FakeProductionRetriever:
+    def __init__(self) -> None:
+        self.preflight_calls: list[Any] = []
+
+    def preflight(self, review_as_of: Any = None) -> object:
+        self.preflight_calls.append(review_as_of)
+        return object()
+
+
 def test_top_level_package_exports_only_service_runtime_api() -> None:
     assert set(customs_ai_agent.__all__) == {
         "AgentRuntime",
@@ -78,6 +87,14 @@ def test_top_level_package_exports_only_service_runtime_api() -> None:
 
 def _settings(secret: str = "unit-test-anthropic-secret") -> ClaudeSettings:
     return ClaudeSettings(api_key=SecretStr(secret))
+
+
+def _runtime_config(**options: Any) -> RuntimeConfig:
+    options.setdefault(
+        "evidence_service_token",
+        SecretStr("Abcdefghijklmnopqrstuvwxyz0123456789"),
+    )
+    return runtime_module.RuntimeConfig(**options)
 
 
 def _public_result(
@@ -210,7 +227,7 @@ def _patch_runtime_dependencies(
     expected_result: ReviewRunResultV2 | None = None,
 ) -> dict[str, Any]:
     captured: dict[str, Any] = {}
-    retriever = object()
+    retriever = _FakeProductionRetriever()
     analyzer = _FakeOwnedAnalyzer()
 
     def fake_retriever(base_url: str, **options: Any) -> object:
@@ -231,7 +248,16 @@ def _patch_runtime_dependencies(
         captured["run_options"] = options
         return expected_result or _public_result(request)
 
-    monkeypatch.setattr(runtime_module, "HttpRegulationRetriever", fake_retriever)
+    monkeypatch.setattr(
+        runtime_module,
+        "ProductionHttpRegulationRetriever",
+        fake_retriever,
+    )
+    monkeypatch.setattr(
+        runtime_module,
+        "load_released_evidence_runtime_identity",
+        lambda: object(),
+    )
     monkeypatch.setattr(
         runtime_module.ClaudeDocumentAnalyzer,
         "from_settings",
@@ -254,13 +280,12 @@ def test_runtime_config_and_composition_wire_claude_ocr_and_evidence(
     )
     provider = _FakeReleaseOcrProvider()
     settings = _settings()
-    token = SecretStr("unit-test-evidence-secret")
-    config = RuntimeConfig(
+    token = SecretStr("Abcdefghijklmnopqrstuvwxyz0123456789")
+    config = _runtime_config(
         claude_settings=settings,
         evidence_base_url="http://127.0.0.1:8010/",
         ocr_layout_provider=provider,
         evidence_service_token=token,
-        evidence_token_header="X-Agent-Token",
         evidence_timeout_seconds=12.0,
         evidence_max_retries=2,
     )
@@ -274,12 +299,10 @@ def test_runtime_config_and_composition_wire_claude_ocr_and_evidence(
     assert captured["settings"] is settings
     assert captured["ocr_layout_provider"] is provider
     assert captured["retriever_options"] == {
-        "service_token": "unit-test-evidence-secret",
-        "token_header": "X-Agent-Token",
+        "service_token": "Abcdefghijklmnopqrstuvwxyz0123456789",
         "allowed_origins": frozenset(),
         "timeout_seconds": 12.0,
         "max_retries": 2,
-        "contract_identity_mode": "required",
     }
     assert captured["run_options"] == {
         "retriever": captured["retriever"],
@@ -287,7 +310,81 @@ def test_runtime_config_and_composition_wire_claude_ocr_and_evidence(
     }
     rendered_config = repr(config)
     assert "unit-test-anthropic-secret" not in rendered_config
-    assert "unit-test-evidence-secret" not in rendered_config
+    assert "Abcdefghijklmnopqrstuvwxyz0123456789" not in rendered_config
+
+
+def test_unreleased_production_lock_prevents_claude_client_and_network(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    calls: list[str] = []
+
+    def no_analyzer(*_args: Any, **_kwargs: Any) -> object:
+        calls.append("claude")
+        raise AssertionError
+
+    def no_retriever(*_args: Any, **_kwargs: Any) -> object:
+        calls.append("network")
+        raise AssertionError
+
+    monkeypatch.setattr(
+        runtime_module.ClaudeDocumentAnalyzer,
+        "from_settings",
+        no_analyzer,
+    )
+    monkeypatch.setattr(
+        runtime_module,
+        "ProductionHttpRegulationRetriever",
+        no_retriever,
+    )
+    with pytest.raises(
+        RuntimeConfigurationError,
+        match="evidence_runtime_release_unreleased",
+    ):
+        AgentRuntime(
+            _runtime_config(
+                claude_settings=_settings(),
+                evidence_base_url="http://127.0.0.1:8010",
+            )
+        )
+    assert calls == []
+
+
+def test_missing_evidence_bearer_fails_before_runtime_dependencies(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    monkeypatch.setattr(
+        runtime_module.ClaudeDocumentAnalyzer,
+        "from_settings",
+        lambda *_args, **_kwargs: pytest.fail("Claude client must not be built"),
+    )
+    with pytest.raises(
+        RuntimeConfigurationError,
+        match="evidence_service_token_required",
+    ):
+        runtime_module.RuntimeConfig(
+            claude_settings=_settings(),
+            evidence_base_url="http://127.0.0.1:8010",
+        )
+
+
+def test_data_preflight_failure_prevents_any_claude_workflow_call(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    captured = _patch_runtime_dependencies(monkeypatch)
+
+    def unready(_review_as_of: Any = None) -> object:
+        raise RetrievalError("private data detail")
+
+    captured["retriever"].preflight = unready
+    agent = AgentRuntime(
+        _runtime_config(
+            claude_settings=_settings(),
+            evidence_base_url="http://127.0.0.1:8010",
+        )
+    )
+    with pytest.raises(RuntimeExecutionError, match="review_execution_failed"):
+        agent.review(_text_request())
+    assert "request" not in captured
 
 
 def test_internal_v2_request_preserves_scenario_and_mock_compatibility() -> None:
@@ -314,7 +411,7 @@ def test_service_runtime_rejects_internal_workflow_request_model(
 ) -> None:
     captured = _patch_runtime_dependencies(monkeypatch)
     agent = AgentRuntime(
-        RuntimeConfig(
+        _runtime_config(
             claude_settings=_settings(),
             evidence_base_url="http://127.0.0.1:8010",
         )
@@ -344,7 +441,7 @@ def test_schema_valid_service_text_payload_reaches_internal_workflow(
     service_request = ServiceReviewRunRequestV2.model_validate(payload)
     captured = _patch_runtime_dependencies(monkeypatch)
     agent = AgentRuntime(
-        RuntimeConfig(
+        _runtime_config(
             claude_settings=_settings(),
             evidence_base_url="http://127.0.0.1:8010",
         )
@@ -473,7 +570,7 @@ def test_review_json_rejects_duplicate_keys_without_running_workflow(
 ) -> None:
     captured = _patch_runtime_dependencies(monkeypatch)
     agent = AgentRuntime(
-        RuntimeConfig(
+        _runtime_config(
             claude_settings=_settings(),
             evidence_base_url="http://127.0.0.1:8010",
         )
@@ -493,7 +590,7 @@ def test_review_json_valid_service_payload_reaches_workflow(
 ) -> None:
     captured = _patch_runtime_dependencies(monkeypatch)
     agent = AgentRuntime(
-        RuntimeConfig(
+        _runtime_config(
             claude_settings=_settings(),
             evidence_base_url="http://127.0.0.1:8010",
         )
@@ -524,7 +621,7 @@ def test_review_json_normalizes_noncanonical_json_values(
 ) -> None:
     captured = _patch_runtime_dependencies(monkeypatch)
     agent = AgentRuntime(
-        RuntimeConfig(
+        _runtime_config(
             claude_settings=_settings(),
             evidence_base_url="http://127.0.0.1:8010",
         )
@@ -548,7 +645,7 @@ def test_review_json_rejects_oversized_body_before_json_decode(
         lambda *_args, **_kwargs: pytest.fail("JSON decode must not run"),
     )
     agent = AgentRuntime(
-        RuntimeConfig(
+        _runtime_config(
             claude_settings=_settings(),
             evidence_base_url="http://127.0.0.1:8010",
         )
@@ -566,7 +663,7 @@ def test_review_json_counts_memoryview_bytes_not_elements(
     captured = _patch_runtime_dependencies(monkeypatch)
     monkeypatch.setattr(runtime_module, "_MAX_SERVICE_REQUEST_JSON_BYTES", 16)
     agent = AgentRuntime(
-        RuntimeConfig(
+        _runtime_config(
             claude_settings=_settings(),
             evidence_base_url="http://127.0.0.1:8010",
         )
@@ -587,7 +684,7 @@ def test_review_json_normalizes_released_memoryview(
 ) -> None:
     captured = _patch_runtime_dependencies(monkeypatch)
     agent = AgentRuntime(
-        RuntimeConfig(
+        _runtime_config(
             claude_settings=_settings(),
             evidence_base_url="http://127.0.0.1:8010",
         )
@@ -612,7 +709,7 @@ def test_review_json_rejects_bytes_subclass_with_untrusted_length(
     captured = _patch_runtime_dependencies(monkeypatch)
     monkeypatch.setattr(runtime_module, "_MAX_SERVICE_REQUEST_JSON_BYTES", 4)
     agent = AgentRuntime(
-        RuntimeConfig(
+        _runtime_config(
             claude_settings=_settings(),
             evidence_base_url="http://127.0.0.1:8010",
         )
@@ -630,7 +727,7 @@ def test_runtime_rejects_nested_constructed_models_before_workflow(
 ) -> None:
     captured = _patch_runtime_dependencies(monkeypatch)
     agent = AgentRuntime(
-        RuntimeConfig(
+        _runtime_config(
             claude_settings=_settings(),
             evidence_base_url="http://127.0.0.1:8010",
         )
@@ -677,7 +774,7 @@ def test_runtime_rejects_custom_mapping_subclass_before_workflow(
 
     captured = _patch_runtime_dependencies(monkeypatch)
     agent = AgentRuntime(
-        RuntimeConfig(
+        _runtime_config(
             claude_settings=_settings(),
             evidence_base_url="http://127.0.0.1:8010",
         )
@@ -695,7 +792,7 @@ def test_runtime_normalizes_constructed_model_serialization_failure(
 ) -> None:
     captured = _patch_runtime_dependencies(monkeypatch)
     agent = AgentRuntime(
-        RuntimeConfig(
+        _runtime_config(
             claude_settings=_settings(),
             evidence_base_url="http://127.0.0.1:8010",
         )
@@ -729,7 +826,7 @@ def test_runtime_applies_json_schema_date_format_before_pydantic_coercion(
 ) -> None:
     captured = _patch_runtime_dependencies(monkeypatch)
     agent = AgentRuntime(
-        RuntimeConfig(
+        _runtime_config(
             claude_settings=_settings(),
             evidence_base_url="http://127.0.0.1:8010",
         )
@@ -758,7 +855,7 @@ def test_runtime_rejects_image_numeric_strings_before_pydantic_coercion(
 ) -> None:
     captured = _patch_runtime_dependencies(monkeypatch)
     agent = AgentRuntime(
-        RuntimeConfig(
+        _runtime_config(
             claude_settings=_settings(),
             evidence_base_url="http://127.0.0.1:8010",
         )
@@ -788,26 +885,31 @@ def test_runtime_config_rejects_raw_ocr_provider_for_service_use() -> None:
         RuntimeConfigurationError,
         match="ocr_release_gate_required",
     ):
-        RuntimeConfig(
+        _runtime_config(
             claude_settings=_settings(),
             evidence_base_url="http://127.0.0.1:8010",
             ocr_layout_provider=_FakeOcrProvider(),
         )
 
 
-def test_runtime_contract_identity_handshake_is_required_by_default(
+def test_runtime_uses_only_production_v2_release_retriever(
     monkeypatch: pytest.MonkeyPatch,
 ) -> None:
     captured = _patch_runtime_dependencies(monkeypatch)
 
     AgentRuntime(
-        RuntimeConfig(
+        _runtime_config(
             claude_settings=_settings(),
             evidence_base_url="http://127.0.0.1:8010",
         )
     )
 
-    assert captured["retriever_options"]["contract_identity_mode"] == "required"
+    assert captured["retriever_options"] == {
+        "service_token": "Abcdefghijklmnopqrstuvwxyz0123456789",
+        "allowed_origins": frozenset(),
+        "timeout_seconds": 60.0,
+        "max_retries": 1,
+    }
 
 
 def test_runtime_context_closes_owned_anthropic_analyzer_but_not_injected_ocr(
@@ -820,7 +922,7 @@ def test_runtime_context_closes_owned_anthropic_analyzer_but_not_injected_ocr(
         _FakeReleaseOcrProvider,
     )
     provider = _FakeReleaseOcrProvider()
-    config = RuntimeConfig(
+    config = _runtime_config(
         claude_settings=_settings(),
         evidence_base_url="http://127.0.0.1:8010",
         ocr_layout_provider=provider,
@@ -852,7 +954,7 @@ def test_runtime_close_failure_is_content_free_and_stays_closed(
 
     captured["analyzer"].close = fail_close
     runtime = AgentRuntime(
-        RuntimeConfig(
+        _runtime_config(
             claude_settings=_settings(),
             evidence_base_url="http://127.0.0.1:8010",
         )
@@ -868,24 +970,18 @@ def test_runtime_close_failure_is_content_free_and_stays_closed(
         runtime.review_json(b"{}")
 
 
-def test_service_runtime_rejects_optional_contract_identity_mode() -> None:
-    with pytest.raises(
-        RuntimeConfigurationError,
-        match="evidence_contract_identity_mode_invalid",
-    ):
-        RuntimeConfig(
+def test_service_runtime_has_no_optional_v1_contract_identity_mode() -> None:
+    with pytest.raises(TypeError, match="evidence_contract_identity_mode"):
+        _runtime_config(
             claude_settings=_settings(),
             evidence_base_url="http://127.0.0.1:8010",
             evidence_contract_identity_mode="optional",  # type: ignore[arg-type]
         )
 
 
-def test_runtime_rejects_disabled_or_unknown_contract_identity_mode() -> None:
-    with pytest.raises(
-        RuntimeConfigurationError,
-        match="evidence_contract_identity_mode_invalid",
-    ):
-        RuntimeConfig(
+def test_service_runtime_has_no_disabled_v1_contract_identity_mode() -> None:
+    with pytest.raises(TypeError, match="evidence_contract_identity_mode"):
+        _runtime_config(
             claude_settings=_settings(),
             evidence_base_url="http://127.0.0.1:8010",
             evidence_contract_identity_mode="disabled",  # type: ignore[arg-type]
@@ -897,7 +993,7 @@ def test_visual_review_without_ocr_provider_fails_before_workflow_call(
 ) -> None:
     captured = _patch_runtime_dependencies(monkeypatch)
     agent = AgentRuntime(
-        RuntimeConfig(
+        _runtime_config(
             claude_settings=_settings(),
             evidence_base_url="http://127.0.0.1:8010",
         )
@@ -917,7 +1013,7 @@ def test_service_runtime_rejects_mock_mode_without_running_workflow(
 ) -> None:
     captured = _patch_runtime_dependencies(monkeypatch)
     agent = AgentRuntime(
-        RuntimeConfig(
+        _runtime_config(
             claude_settings=_settings(),
             evidence_base_url="http://127.0.0.1:8010",
         )
@@ -969,7 +1065,7 @@ def test_service_runtime_rejects_invalid_policy_before_workflow(
 ) -> None:
     captured = _patch_runtime_dependencies(monkeypatch)
     agent = AgentRuntime(
-        RuntimeConfig(
+        _runtime_config(
             claude_settings=_settings(),
             evidence_base_url="http://127.0.0.1:8010",
         )
@@ -994,7 +1090,7 @@ def test_runtime_rejects_result_from_different_case(
     result = ReviewRunResultV2.model_validate(payload)
     _patch_runtime_dependencies(monkeypatch, expected_result=result)
     agent = AgentRuntime(
-        RuntimeConfig(
+        _runtime_config(
             claude_settings=_settings(),
             evidence_base_url="http://127.0.0.1:8010",
         )
@@ -1017,7 +1113,7 @@ def test_runtime_rejects_result_document_set_from_different_request(
     result = _public_result(other_request)
     _patch_runtime_dependencies(monkeypatch, expected_result=result)
     agent = AgentRuntime(
-        RuntimeConfig(
+        _runtime_config(
             claude_settings=_settings(),
             evidence_base_url="http://127.0.0.1:8010",
         )
@@ -1035,7 +1131,7 @@ def test_invalid_dict_error_does_not_echo_raw_base64(
 ) -> None:
     _patch_runtime_dependencies(monkeypatch)
     agent = AgentRuntime(
-        RuntimeConfig(
+        _runtime_config(
             claude_settings=_settings(),
             evidence_base_url="http://127.0.0.1:8010",
         )
@@ -1065,7 +1161,7 @@ def test_runtime_revalidates_bypassed_request_model_before_workflow(
 ) -> None:
     captured = _patch_runtime_dependencies(monkeypatch)
     agent = AgentRuntime(
-        RuntimeConfig(
+        _runtime_config(
             claude_settings=_settings(),
             evidence_base_url="http://127.0.0.1:8010",
         )
@@ -1090,7 +1186,7 @@ def test_runtime_revalidates_mutated_result_before_public_return(
     object.__setattr__(result, "schema_version", "invalid")
     _patch_runtime_dependencies(monkeypatch, expected_result=result)
     agent = AgentRuntime(
-        RuntimeConfig(
+        _runtime_config(
             claude_settings=_settings(),
             evidence_base_url="http://127.0.0.1:8010",
         )
@@ -1111,7 +1207,7 @@ def test_runtime_blocks_sensitive_markers_in_public_result(
     request = _text_request()
     result = _public_result(request)
     claude_secret = "unit-test-anthropic-secret"
-    evidence_secret = "unit-test-evidence-secret"
+    evidence_secret = "Abcdefghijklmnopqrstuvwxyz0123456789"
     marker = {
         "claude_secret": claude_secret,
         "evidence_secret": evidence_secret,
@@ -1119,7 +1215,7 @@ def test_runtime_blocks_sensitive_markers_in_public_result(
     result.document_results[0].fields[0].value = marker
     _patch_runtime_dependencies(monkeypatch, expected_result=result)
     agent = AgentRuntime(
-        RuntimeConfig(
+        _runtime_config(
             claude_settings=_settings(claude_secret),
             evidence_base_url="http://127.0.0.1:8010",
             evidence_service_token=SecretStr(evidence_secret),
@@ -1179,7 +1275,7 @@ def test_unknown_execution_exception_is_redacted(
         lambda *_args, **_kwargs: (_ for _ in ()).throw(RuntimeError(secret)),
     )
     agent = AgentRuntime(
-        RuntimeConfig(
+        _runtime_config(
             claude_settings=_settings(),
             evidence_base_url="http://127.0.0.1:8010",
         )
@@ -1211,7 +1307,7 @@ def test_runtime_normalizes_provider_errors_at_public_boundary(
 
     monkeypatch.setattr(runtime_module, "run_review_result_v2", fail_run)
     agent = AgentRuntime(
-        RuntimeConfig(
+        _runtime_config(
             claude_settings=_settings(),
             evidence_base_url="http://127.0.0.1:8010",
         )
@@ -1246,7 +1342,7 @@ def test_invalid_external_evidence_url_error_does_not_echo_credentials() -> None
     secret_url = "https://user:private-password@example.invalid"
 
     with pytest.raises(RuntimeConfigurationError) as captured:
-        RuntimeConfig(
+        _runtime_config(
             claude_settings=_settings(),
             evidence_base_url=secret_url,
         )

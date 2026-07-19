@@ -14,7 +14,7 @@ from customs_ai_agent.service.settings import ServiceSettings
 
 ROOT = Path(__file__).parents[1]
 LOCK_PATH = ROOT / "contracts" / "agent" / "service" / "v1" / "openapi.lock.json"
-_LOCK_TOKEN = "Abcdefghijklmnopqrstuvwxyz0123456789-._~+/=XYZ"
+_LOCK_TOKEN = "Abcdefghijklmnopqrstuvwxyz0123456789-._~+/=XYZ"  # noqa: S105
 
 
 class OpenApiDriftError(RuntimeError):

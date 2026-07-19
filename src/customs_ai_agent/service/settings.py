@@ -79,7 +79,7 @@ class ServiceSettings:
     evidence_base_url: str
     evidence_allowed_origins: frozenset[str] = frozenset()
     evidence_service_token: SecretStr | None = None
-    evidence_token_header: str = "Authorization"
+    evidence_token_header: str = "Authorization"  # noqa: S105 - header name, not a secret
     environment: str = "development"
     build_sha: str = "unknown"
     wheel_sha256: str = "unknown"
@@ -88,6 +88,7 @@ class ServiceSettings:
     max_body_bytes: int = 2 * 1024 * 1024
     max_documents: int = 6
     max_text_characters: int = 500_000
+    body_read_timeout_seconds: float = 15.0
     max_concurrency: int = 2
     queue_wait_seconds: float = 1.0
     run_timeout_seconds: float = 420.0
@@ -143,6 +144,8 @@ class ServiceSettings:
             raise ServiceConfigurationError("customs_agent_max_documents_invalid")
         if not 1 <= self.max_text_characters <= 500_000:
             raise ServiceConfigurationError("customs_agent_max_text_characters_invalid")
+        if not 0.1 <= self.body_read_timeout_seconds <= 120:
+            raise ServiceConfigurationError("customs_agent_body_read_timeout_seconds_invalid")
         if not 1 <= self.max_concurrency <= 32:
             raise ServiceConfigurationError("customs_agent_max_concurrency_invalid")
         if not 0.01 <= self.queue_wait_seconds <= 60:
@@ -210,6 +213,13 @@ class ServiceSettings:
                 500_000,
                 minimum=1,
                 maximum=500_000,
+            ),
+            body_read_timeout_seconds=_number(
+                source,
+                "CUSTOMS_AGENT_BODY_READ_TIMEOUT_SECONDS",
+                15,
+                minimum=0.1,
+                maximum=120,
             ),
             max_concurrency=_integer(
                 source,

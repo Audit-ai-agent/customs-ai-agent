@@ -5,6 +5,7 @@ from typing import Any
 
 import pytest
 from fastapi.testclient import TestClient
+from pydantic import SecretStr
 
 
 def test_live_is_downstream_independent_and_ready_is_dependency_aware(
@@ -38,6 +39,43 @@ def test_unready_dependency_is_generic_503(
     assert response.status_code == 503
     assert response.json()["error"]["code"] == "dependency_unready"
     assert "private dependency details" not in response.text
+
+
+def test_unreleased_packaged_data_lock_keeps_service_live_but_never_calls_claude(
+    monkeypatch: pytest.MonkeyPatch,
+    service_settings: Any,
+    auth_headers: dict[str, str],
+    valid_payload: dict[str, Any],
+) -> None:
+    from customs_ai_agent.service.app import create_app
+
+    settings = type(service_settings)(
+        bearer_token=service_settings.bearer_token,
+        evidence_base_url=service_settings.evidence_base_url,
+        evidence_allowed_origins=service_settings.evidence_allowed_origins,
+        evidence_service_token=SecretStr("EvidenceBearer_abcdefghijklmnopqrstuvwxyz0123456789"),
+        environment="test",
+        readiness_ttl_seconds=0.1,
+    )
+    monkeypatch.setattr(
+        "customs_ai_agent.runtime.ClaudeDocumentAnalyzer.from_settings",
+        lambda *_args, **_kwargs: pytest.fail("Claude client must not be constructed"),
+    )
+    monkeypatch.setattr(
+        "customs_ai_agent.adapters.retrieval.urlopen",
+        lambda *_args, **_kwargs: pytest.fail("Data network must not run while lock is unreleased"),
+    )
+    app = create_app(settings)
+    with TestClient(app, raise_server_exceptions=False) as local_client:
+        assert local_client.get("/health/live").status_code == 200
+        assert local_client.get("/health/ready").status_code == 503
+        review = local_client.post(
+            "/internal/agent/v1/reviews",
+            headers=auth_headers,
+            json=valid_payload,
+        )
+    assert review.status_code == 503
+    assert review.json()["error"]["code"] == "dependency_unready"
 
 
 def test_metadata_and_metrics_are_authenticated_and_safe(

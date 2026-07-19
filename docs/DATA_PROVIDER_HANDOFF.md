@@ -2,11 +2,12 @@
 
 ## 현재 판정
 
-Agent의 Evidence HTTP consumer는 provider-owned v1 JSON Schema와 lock을 wheel에 포함하고,
-readiness identity·지원 날짜·snapshot·wire schema를 fail-closed로 검증한다. TASK-0010
-Data candidate `f88456ea46cd4a1e65875dabe0e3318a7d112155`는 runtime identity와
-GET/POST build binding을 구현했다. 다만 실제 로컬 law corpus는 여전히 58개 중 3개만
-적재돼 production readiness 대상이 아니다.
+Agent의 제품 Evidence consumer는 provider-owned retrieval v1 JSON Schema와 readiness v2
+JSON Schema snapshot, 그리고 runtime release lock을 wheel에 포함한다. 제품 경계는
+`GET /internal/rag/v2/health/ready`와 `POST /internal/rag/v2/retrieve`이며 retrieval body만
+기존 v1을 유지한다. readiness의 provider build뿐 아니라 sealed knowledge generation,
+model/index manifest, evaluation report, snapshot과 지원 날짜를 하나의 canonical
+runtime-release identity로 fail-closed 검증한다.
 
 별도의 sealed test-only conformance Provider에서는 실제 HTTP GET/POST 계약을 검증한다.
 실제 팀 Data에서는 Evidence POST 전에 의도대로 차단돼야 하며 Agent가 Mock으로 fallback하지
@@ -14,16 +15,17 @@ GET/POST build binding을 구현했다. 다만 실제 로컬 law corpus는 여�
 
 ## Data Provider candidate가 제공하는 것
 
-기존 `evidence-api-v1.0.0` tag와 frozen v1 response body를 수정하지 않았다. 새
-`evidence-api-v1.1.0` candidate는 다음 runtime identity를 build artifact에 주입하고 typed
-readiness response의 `evidence_contract`로 제공한다.
+기존 `evidence-api-v1.0.0`, `v1.1.0` 계약과 frozen v1 retrieval body를 수정하지 않는다.
+새 `evidence-api-v1.2.0` 경계는 typed readiness의 `evidence_runtime_release`로 다음을
+제공해야 한다.
 
-- contract name과 schema version
-- packaged canonical schema bytes에서 다시 계산한 SHA-256
-- immutable provider release
-- 실제 실행 artifact를 만든 exact build revision
-- OCI image 등 실제 provider artifact digest
-- 필요하면 contract revision과 build revision의 분리
+- exact provider release/revision/build 및 provider source manifest SHA-256
+- retrieval schema version/SHA-256
+- sealed generation ID와 generation/source/seal attestation SHA-256
+- model/index config manifest SHA-256
+- 실제 locked Gold 평가 report SHA-256
+- knowledge snapshot, supported review date
+- 앞선 모든 필드의 canonical JSON SHA-256인 runtime release SHA-256
 
 `.git` checkout이나 사람이 입력한 환경변수만 보고 실행 artifact 신원을 추정해서는 안 된다.
 identity가 누락·오염됐거나 bundled schema hash와 다르면 readiness 503이어야 한다.
@@ -40,24 +42,26 @@ frozen v1 response body는 `additionalProperties: false`이므로 임의 identit
    검증·echo한다.
 3. response body를 바꿔야 한다면 v1을 수정하지 않고 v2 endpoint/schema를 추가한다.
 
-TASK-0010 Agent consumer는 1번 방식을 다음 exact header로 구현한다.
+제품 Agent consumer는 다음 exact header로 GET에서 관측한 release를 POST에 결박한다.
 
 | Header | 값 |
 |---|---|
-| `X-Evidence-Schema-SHA256` | readiness의 `schema_sha256` |
+| `X-Evidence-Schema-SHA256` | readiness의 `retrieval_schema_sha256` |
 | `X-Evidence-Provider-Release` | readiness의 `provider_release` |
 | `X-Evidence-Provider-Revision` | readiness의 `provider_revision` |
 | `X-Evidence-Provider-Build-SHA256` | readiness의 `provider_build_sha256` |
+| `X-Evidence-Knowledge-Generation` | readiness의 `knowledge_generation_id` |
+| `X-Evidence-Generation-Attestation-SHA256` | readiness의 `knowledge_generation_attestation_sha256` |
+| `X-Evidence-Evaluation-SHA256` | readiness의 `evaluation_report_sha256` |
+| `X-Evidence-Runtime-Release-SHA256` | readiness의 `runtime_release_sha256` |
 
-Agent는 각 POST에 네 expected header를 보내고, 각 response의 네 actual header를 body byte보다 먼저
+Agent는 각 POST에 8개 expected header를 보내고, 각 response의 8개 actual header를 body byte보다 먼저
 exact match로 검증한다. 누락·불일치 시 body를 읽지 않고 실패한다. Data는 expected identity와
 실행 build가 다르면 body 처리 전에 HTTP 412를 반환해야 한다.
 
-현재 Agent lock은 Data candidate revision
-`f88456ea46cd4a1e65875dabe0e3318a7d112155`와 provider build SHA-256
-`87f9ec97b0f51ba0da8a0915f81ed0fa2613283b81706627577a200150440053`를 고정한다.
-이 값은 clean commit에서 생성·검증한 local candidate identity이며, 원격 merge와 annotated
-tag 발행을 의미하지 않는다.
+현재 Agent lock은 `release_state=unreleased`다. 실제 sealed generation과 locked Gold
+evaluation report가 아직 없으므로 generation/evaluation hash를 임의 생성하거나 기존 3/58
+snapshot을 released로 표시하지 않는다.
 
 이 candidate에 맞춘 conformance provider 검증은 runtime evaluator의 명시적
 `--provider-conformance`에서만 수행한다. 성공해도 report scope는

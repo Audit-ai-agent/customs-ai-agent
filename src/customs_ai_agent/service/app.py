@@ -1,5 +1,6 @@
 from __future__ import annotations
 
+import asyncio
 import logging
 from contextlib import asynccontextmanager
 from typing import Any, AsyncIterator, Callable
@@ -8,9 +9,18 @@ from uuid import uuid4
 from fastapi import FastAPI, Request
 from fastapi.responses import JSONResponse
 
-from customs_ai_agent.adapters.retrieval import fetch_evidence_readiness
+from customs_ai_agent.adapters.retrieval import fetch_evidence_runtime_readiness
 from customs_ai_agent.contracts import get_schema
-from customs_ai_agent.runtime import AgentRuntime, RuntimeConfig
+from customs_ai_agent.contracts.evidence_runtime_release import (
+    EvidenceRuntimeReleaseLockError,
+    EvidenceRuntimeReleaseUnreleasedError,
+    load_released_evidence_runtime_identity,
+)
+from customs_ai_agent.runtime import (
+    AgentRuntime,
+    RuntimeConfig,
+    RuntimeConfigurationError,
+)
 from customs_ai_agent.service.auth import bearer_authorized
 from customs_ai_agent.service.controller import (
     AgentServiceController,
@@ -35,6 +45,19 @@ _NO_STORE_HEADERS = {
     "X-Content-Type-Options": "nosniff",
 }
 _BEARER_SECURITY: list[dict[str, list[str]]] = [{"ServiceBearer": []}]
+
+
+class _UnavailableRuntime:
+    """Keep liveness observable while production release admission is closed."""
+
+    def review_json(self, _payload: bytes) -> object:
+        raise RuntimeConfigurationError(
+            "runtime_dependency_unready",
+            "The Agent runtime dependency Gate is closed.",
+        )
+
+    def close(self) -> None:
+        return None
 
 
 def _request_id(request: Request) -> str:
@@ -79,11 +102,23 @@ def _authorize(request: Request, settings: ServiceSettings) -> None:
 
 
 def _production_runtime(settings: ServiceSettings) -> ServiceRuntime:
+    # Release admission precedes even loading Claude credentials/settings.
+    try:
+        load_released_evidence_runtime_identity()
+    except EvidenceRuntimeReleaseUnreleasedError:
+        raise RuntimeConfigurationError(
+            "evidence_runtime_release_unreleased",
+            "No sealed Evidence runtime release is approved for production.",
+        ) from None
+    except EvidenceRuntimeReleaseLockError:
+        raise RuntimeConfigurationError(
+            "evidence_runtime_release_lock_invalid",
+            "The Evidence runtime release lock is invalid.",
+        ) from None
     return AgentRuntime(
         RuntimeConfig.from_environment(
             evidence_base_url=settings.evidence_base_url,
             evidence_service_token=settings.evidence_service_token,
-            evidence_token_header=settings.evidence_token_header,
             evidence_allowed_origins=settings.evidence_allowed_origins,
         )
     )
@@ -96,14 +131,12 @@ def _production_readiness_probe(settings: ServiceSettings) -> Callable[[], objec
             if settings.evidence_service_token is not None
             else None
         )
-        return fetch_evidence_readiness(
+        return fetch_evidence_runtime_readiness(
             settings.evidence_base_url,
             service_token=token,
-            token_header=settings.evidence_token_header,
             allowed_origins=settings.evidence_allowed_origins,
             timeout_seconds=settings.readiness_timeout_seconds,
             max_retries=0,
-            contract_identity_mode="required",
         )
 
     return probe
@@ -125,14 +158,31 @@ def create_app(
 
     @asynccontextmanager
     async def lifespan(app: FastAPI) -> AsyncIterator[None]:
-        runtime = make_runtime(active_settings)
+        runtime_available = True
+        try:
+            runtime = make_runtime(active_settings)
+        except RuntimeConfigurationError:
+            # An unreleased Data lock is an expected deployment state. Keep
+            # liveness and generic 503 readiness available without constructing
+            # Claude or accepting a review.
+            runtime = _UnavailableRuntime()
+            runtime_available = False
+            safe_log(LOGGER, logging.WARNING, "runtime_dependency_unready")
+        dependency_probe = make_readiness_probe(active_settings)
+
+        def readiness_probe() -> object:
+            if not runtime_available:
+                raise RuntimeError("runtime unavailable")
+            return dependency_probe()
+
         controller = AgentServiceController(
             settings=active_settings,
             runtime=runtime,
-            readiness_probe=make_readiness_probe(active_settings),
+            readiness_probe=readiness_probe,
             logger=LOGGER,
         )
         app.state.controller = controller
+        app.state.body_admission = asyncio.Semaphore(active_settings.max_concurrency)
         safe_log(LOGGER, logging.INFO, "service_started")
         try:
             yield
@@ -277,6 +327,7 @@ def create_app(
             401: {"content": {"application/json": {"schema": ERROR_RESPONSE_SCHEMA}}},
             403: {"content": {"application/json": {"schema": ERROR_RESPONSE_SCHEMA}}},
             409: {"content": {"application/json": {"schema": ERROR_RESPONSE_SCHEMA}}},
+            408: {"content": {"application/json": {"schema": ERROR_RESPONSE_SCHEMA}}},
             413: {"content": {"application/json": {"schema": ERROR_RESPONSE_SCHEMA}}},
             415: {"content": {"application/json": {"schema": ERROR_RESPONSE_SCHEMA}}},
             422: {"content": {"application/json": {"schema": ERROR_RESPONSE_SCHEMA}}},
@@ -287,9 +338,30 @@ def create_app(
     )
     async def review(request: Request) -> JSONResponse:
         _authorize(request, active_settings)
-        payload = await read_bounded_json_body(request, active_settings)
+        body_admission: asyncio.Semaphore = request.app.state.body_admission
+        try:
+            await asyncio.wait_for(
+                body_admission.acquire(),
+                timeout=active_settings.queue_wait_seconds,
+            )
+        except TimeoutError:
+            raise ServiceHttpError(
+                "service_busy",
+                503,
+                retryable=True,
+                retry_after_seconds=max(1, round(active_settings.queue_wait_seconds)),
+            ) from None
+        try:
+            payload = await read_bounded_json_body(request, active_settings)
+        finally:
+            body_admission.release()
         inspection = inspect_text_request(payload, active_settings)
         controller: AgentServiceController = request.app.state.controller
+        # This is a dependency admission Gate, not a health hint. It runs
+        # before the runtime worker, so an unsealed/mismatched Data release can
+        # never spend Claude tokens.
+        if not await controller.ready():
+            raise ServiceHttpError("dependency_unready", 503, retryable=True)
         outcome, replayed = await controller.submit(
             payload=payload,
             review_run_id=inspection.review_run_id,

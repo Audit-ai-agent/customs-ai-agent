@@ -6,7 +6,9 @@ from typing import Any
 
 from customs_ai_agent.adapters.llm import DEFAULT_CLAUDE_MODEL
 from customs_ai_agent.contracts import schema_sha256
-from customs_ai_agent.contracts.evidence import load_pinned_evidence_contract_identity
+from customs_ai_agent.contracts.evidence_runtime_release import (
+    load_evidence_runtime_release_lock,
+)
 from customs_ai_agent.prompts import (
     DOCUMENT_ANALYSIS_PROMPT_ID,
     DOCUMENT_ANALYSIS_PROMPT_VERSION,
@@ -23,7 +25,7 @@ def build_metadata(settings: ServiceSettings) -> dict[str, Any]:
         package_version = version("customs-ai-agent")
     except PackageNotFoundError:
         package_version = "0.3.0"
-    evidence = load_pinned_evidence_contract_identity()
+    evidence_lock = load_evidence_runtime_release_lock()
     prompt_bytes = load_document_analysis_system_prompt().encode("utf-8")
     return {
         "agent": {
@@ -32,14 +34,21 @@ def build_metadata(settings: ServiceSettings) -> dict[str, Any]:
             "wheel_sha256": settings.wheel_sha256,
         },
         "capabilities": ["text"],
-        "evidence_contract": {
-            "contract": evidence.contract,
-            "provider_build_sha256": evidence.provider_build_sha256,
-            "provider_release": evidence.provider_release,
-            "provider_revision": evidence.provider_revision,
-            "schema_sha256": evidence.schema_sha256,
-            "schema_version": evidence.schema_version,
-        },
+        "evidence_runtime_release": (
+            {
+                "release_state": "unreleased",
+            }
+            if evidence_lock.identity is None
+            else {
+                "evaluation_report_sha256": (evidence_lock.identity.evaluation_report_sha256),
+                "knowledge_generation_id": (evidence_lock.identity.knowledge_generation_id),
+                "provider_release": evidence_lock.identity.provider_release,
+                "provider_revision": evidence_lock.identity.provider_revision,
+                "release_state": "released",
+                "retrieval_schema_sha256": (evidence_lock.identity.retrieval_schema_sha256),
+                "runtime_release_sha256": (evidence_lock.identity.runtime_release_sha256),
+            }
+        ),
         "model": {
             "id": DEFAULT_CLAUDE_MODEL,
             "prompt_id": DOCUMENT_ANALYSIS_PROMPT_ID,

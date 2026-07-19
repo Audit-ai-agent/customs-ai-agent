@@ -20,6 +20,10 @@ streaming body 상한, text-only preflight, admission, 단일 프로세스 singl
 HTTP 오류 변환만 담당한다. 기존 workflow, Claude grounding, Evidence Gate와 outcome 정책은
 변경하지 않는다.
 
+제품 Runtime은 Data의 `/internal/rag/v2/health/ready`와
+`/internal/rag/v2/retrieve`만 사용한다. 기존 v1 readiness/retriever는 CLI·evaluation의
+명시적 compatibility adapter이며 제품 RuntimeConfig에 선택 모드가 없다.
+
 ## API
 
 | Endpoint | 인증 | 의미 |
@@ -39,6 +43,8 @@ OpenAPI endpoint를 런타임에 공개하지 않는다. canonical OpenAPI는
 - `Content-Type`은 `application/json`과 선택적 UTF-8 charset만 허용한다.
 - 압축 body와 중복 Content-Type/Length/Encoding/Authorization header를 거부한다.
 - body는 buffering 중 `CUSTOMS_AGENT_MAX_BODY_BYTES`를 넘는 즉시 413으로 종료한다.
+- body receive는 `CUSTOMS_AGENT_BODY_READ_TIMEOUT_SECONDS` 전체 deadline 안에 끝나야 하고,
+  동시에 body를 읽는 연결 수도 workflow concurrency와 같은 semaphore로 제한한다.
 - strict UTF-8, duplicate JSON key, NaN/Infinity를 거부한다.
 - `review_run_id`와 `review_as_of`는 service profile에서 반드시 명시한다.
 - `image_pages` 또는 `pdf_pages` key는 값이 `null`이어도 nested image decode, OCR, Claude,
@@ -89,14 +95,20 @@ idempotency는 Backend가 소유해야 한다. Backend 구현 전 여러 Agent r
 
 ## Readiness 의미
 
-`/health/ready` 200은 다음만 뜻한다.
+`/health/ready` 200은 다음을 모두 뜻한다.
 
 - service 설정과 wheel-local contract/prompt metadata가 로드됐다.
-- Data readiness가 Agent wheel에 고정된 schema/release/revision/build와 일치한다.
-- Data가 자신의 corpus/store readiness Gate를 통과했다.
+- packaged `runtime-release-v2.lock.json`이 `release_state=released`다.
+- Data readiness의 provider build, source manifest, sealed knowledge generation, model/index
+  manifest, evaluation report, seal attestation, snapshot, 지원 날짜와 canonical runtime release
+  hash가 packaged lock과 정확히 일치한다.
+- retrieval response의 8개 identity header가 body를 읽기 전에 바로 앞 readiness와 일치한다.
+- Data가 자신의 corpus/store/evaluation Release Gate를 통과했다.
 
 Claude API에 과금 probe를 보내지 않는다. 현재 팀 Data가 3/58이면 503이 정확한 결과다.
 conformance Provider의 200을 실제 법령 RAG 품질이나 전체 서비스 release로 표현하지 않는다.
+현재 packaged lock은 의도적으로 `unreleased`이므로 liveness는 200이지만 readiness와 review는
+503이다. 이 상태에서 Claude client나 review workflow를 시작하지 않는다.
 
 ## 결과와 관측성
 

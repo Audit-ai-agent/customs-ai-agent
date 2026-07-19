@@ -150,7 +150,7 @@ class AgentServiceController:
     ) -> None:
         try:
             await asyncio.shield(future)
-        except BaseException:
+        except BaseException:  # noqa: S110 - timed-out worker outcome is intentionally consumed
             pass
         finally:
             duration_ms = round((time.perf_counter() - started) * 1000)

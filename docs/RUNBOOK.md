@@ -22,6 +22,7 @@ EVIDENCE_SERVICE_BASE_URL=<exact URL>
 EVIDENCE_SERVICE_ALLOWED_ORIGINS=<exact HTTPS origin when non-loopback>
 EVIDENCE_SERVICE_TOKEN=<high-entropy Data service bearer>
 EVIDENCE_SERVICE_TOKEN_HEADER=Authorization
+CUSTOMS_AGENT_BODY_READ_TIMEOUT_SECONDS=15
 ```
 
 secret 값 자체를 확인 명령이나 ticket에 붙이지 않는다. 존재 여부, 길이 정책 통과 여부와 secret

@@ -5,7 +5,7 @@ import math
 import re
 from dataclasses import dataclass, field
 from os import PathLike
-from typing import Any, Literal
+from typing import Any
 
 from jsonschema import Draft202012Validator, FormatChecker
 from pydantic import SecretStr, ValidationError
@@ -17,11 +17,16 @@ from customs_ai_agent.adapters.llm import (
 )
 from customs_ai_agent.adapters.ocr import OcrLayoutProvider, OcrLayoutProviderError
 from customs_ai_agent.adapters.retrieval import (
-    HttpRegulationRetriever,
+    ProductionHttpRegulationRetriever,
     RetrievalError,
     validate_evidence_destination,
 )
 from customs_ai_agent.contracts import get_schema
+from customs_ai_agent.contracts.evidence_runtime_release import (
+    EvidenceRuntimeReleaseLockError,
+    EvidenceRuntimeReleaseUnreleasedError,
+    load_released_evidence_runtime_identity,
+)
 from customs_ai_agent.ocr_release import ReleaseLockedOcrProvider
 from customs_ai_agent.runner import run_review_result_v2
 from customs_ai_agent.schemas.models import (
@@ -67,6 +72,7 @@ _SERVICE_REQUEST_VALIDATOR = Draft202012Validator(
     get_schema("backend", "v2", "review-request"),
     format_checker=FormatChecker(),
 )
+_EVIDENCE_BEARER_TOKEN = re.compile(r"^[A-Za-z0-9\-._~+/]+={0,8}$")
 
 
 def _key_safety_token(key: str) -> str:
@@ -211,15 +217,9 @@ class RuntimeConfig:
     evidence_base_url: str
     ocr_layout_provider: OcrLayoutProvider | None = field(default=None, repr=False)
     evidence_service_token: SecretStr | None = field(default=None, repr=False)
-    # This is a public HTTP header name, never a credential value.
-    evidence_token_header: str = "X-Demo-Token"  # noqa: S105
     evidence_allowed_origins: frozenset[str] = field(default_factory=frozenset)
     evidence_timeout_seconds: float = 60.0
     evidence_max_retries: int = 1
-    # The service-facing runtime never permits the non-release compatibility
-    # mode. Evaluation-only callers may compose HttpRegulationRetriever
-    # directly with an explicit optional mode, outside AgentRuntime.
-    evidence_contract_identity_mode: Literal["required"] = "required"
 
     def __post_init__(self) -> None:
         if not isinstance(self.claude_settings, ClaudeSettings):
@@ -253,13 +253,19 @@ class RuntimeConfig:
                     release_error_code,
                     "The configured OCR release Gate is not ready.",
                 )
-        if self.evidence_service_token is not None and not isinstance(
-            self.evidence_service_token,
-            SecretStr,
+        if not isinstance(self.evidence_service_token, SecretStr):
+            raise RuntimeConfigurationError(
+                "evidence_service_token_required",
+                "Production Evidence credentials must be supplied as SecretStr.",
+            )
+        evidence_token = self.evidence_service_token.get_secret_value()
+        if (
+            _EVIDENCE_BEARER_TOKEN.fullmatch(evidence_token) is None
+            or len(set(evidence_token)) < 12
         ):
             raise RuntimeConfigurationError(
                 "evidence_service_token_invalid",
-                "Evidence credentials must be supplied as SecretStr.",
+                "Production Evidence credentials are invalid.",
             )
         if not isinstance(self.evidence_allowed_origins, frozenset) or not all(
             isinstance(origin, str) for origin in self.evidence_allowed_origins
@@ -286,11 +292,6 @@ class RuntimeConfig:
             raise RuntimeConfigurationError(
                 "evidence_retries_invalid",
                 "Evidence retries must be between zero and three.",
-            )
-        if self.evidence_contract_identity_mode != "required":
-            raise RuntimeConfigurationError(
-                "evidence_contract_identity_mode_invalid",
-                "Service Runtime requires Evidence contract identity verification.",
             )
         if not isinstance(self.evidence_base_url, str):
             raise RuntimeConfigurationError(
@@ -320,12 +321,9 @@ class RuntimeConfig:
         env_file: str | PathLike[str] | None = None,
         ocr_layout_provider: OcrLayoutProvider | None = None,
         evidence_service_token: SecretStr | None = None,
-        # This is a public HTTP header name, never a credential value.
-        evidence_token_header: str = "X-Demo-Token",  # noqa: S107
         evidence_allowed_origins: frozenset[str] = frozenset(),
         evidence_timeout_seconds: float = 60.0,
         evidence_max_retries: int = 1,
-        evidence_contract_identity_mode: Literal["required"] = "required",
     ) -> RuntimeConfig:
         """Load only allowlisted Claude settings; Evidence settings stay explicit."""
 
@@ -334,11 +332,9 @@ class RuntimeConfig:
             evidence_base_url=evidence_base_url,
             ocr_layout_provider=ocr_layout_provider,
             evidence_service_token=evidence_service_token,
-            evidence_token_header=evidence_token_header,
             evidence_allowed_origins=evidence_allowed_origins,
             evidence_timeout_seconds=evidence_timeout_seconds,
             evidence_max_retries=evidence_max_retries,
-            evidence_contract_identity_mode=evidence_contract_identity_mode,
         )
 
 
@@ -453,16 +449,26 @@ class AgentRuntime:
             if config.evidence_service_token is not None
             else None
         )
+        try:
+            load_released_evidence_runtime_identity()
+        except EvidenceRuntimeReleaseUnreleasedError:
+            raise RuntimeConfigurationError(
+                "evidence_runtime_release_unreleased",
+                "No sealed Evidence runtime release is approved for production.",
+            ) from None
+        except EvidenceRuntimeReleaseLockError:
+            raise RuntimeConfigurationError(
+                "evidence_runtime_release_lock_invalid",
+                "The Evidence runtime release lock is invalid.",
+            ) from None
         dependency_configuration_failed = False
         try:
-            retriever = HttpRegulationRetriever(
+            retriever = ProductionHttpRegulationRetriever(
                 config.evidence_base_url,
                 service_token=token,
-                token_header=config.evidence_token_header,
                 allowed_origins=config.evidence_allowed_origins,
                 timeout_seconds=config.evidence_timeout_seconds,
                 max_retries=config.evidence_max_retries,
-                contract_identity_mode=config.evidence_contract_identity_mode,
             )
             analyzer = ClaudeDocumentAnalyzer.from_settings(
                 config.claude_settings,
@@ -645,6 +651,10 @@ class AgentRuntime:
         sensitive_markers = self._secret_markers + _input_base64_markers(service_request)
         execution_failure: RuntimeExecutionError | None = None
         try:
+            # Classification/extraction may invoke Claude. Production must
+            # therefore attest the sealed Data dependency before entering the
+            # workflow, even though each later retrieval re-attests independently.
+            self._retriever.preflight(service_request.review_as_of)
             workflow_request = ReviewRunRequestV2.model_validate(
                 service_request.model_dump(mode="python", warnings=False)
             )

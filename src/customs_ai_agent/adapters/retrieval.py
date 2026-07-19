@@ -21,6 +21,13 @@ from customs_ai_agent.contracts.evidence import (
     load_pinned_evidence_schema,
     validate_pinned_evidence_payload,
 )
+from customs_ai_agent.contracts.evidence_runtime_release import (
+    EvidenceRuntimeReleaseIdentity,
+    EvidenceRuntimeReleaseLockError,
+    EvidenceRuntimeReleasePayloadError,
+    load_released_evidence_runtime_identity,
+    parse_evidence_runtime_readiness,
+)
 from customs_ai_agent.fixtures.knowledge import KNOWLEDGE_BASE
 from customs_ai_agent.schemas.models import (
     Coverage,
@@ -69,6 +76,10 @@ EVIDENCE_SCHEMA_SHA256_HEADER = "X-Evidence-Schema-SHA256"
 EVIDENCE_PROVIDER_RELEASE_HEADER = "X-Evidence-Provider-Release"
 EVIDENCE_PROVIDER_REVISION_HEADER = "X-Evidence-Provider-Revision"
 EVIDENCE_PROVIDER_BUILD_SHA256_HEADER = "X-Evidence-Provider-Build-SHA256"
+EVIDENCE_KNOWLEDGE_GENERATION_HEADER = "X-Evidence-Knowledge-Generation"
+EVIDENCE_GENERATION_ATTESTATION_SHA256_HEADER = "X-Evidence-Generation-Attestation-SHA256"
+EVIDENCE_EVALUATION_SHA256_HEADER = "X-Evidence-Evaluation-SHA256"
+EVIDENCE_RUNTIME_RELEASE_SHA256_HEADER = "X-Evidence-Runtime-Release-SHA256"
 _EVIDENCE_IDENTITY_HEADER_FIELDS = (
     (EVIDENCE_SCHEMA_SHA256_HEADER, "schema_sha256"),
     (EVIDENCE_PROVIDER_RELEASE_HEADER, "provider_release"),
@@ -86,6 +97,10 @@ _RESERVED_HEADERS = {
     EVIDENCE_PROVIDER_RELEASE_HEADER.casefold(),
     EVIDENCE_PROVIDER_REVISION_HEADER.casefold(),
     EVIDENCE_PROVIDER_BUILD_SHA256_HEADER.casefold(),
+    EVIDENCE_KNOWLEDGE_GENERATION_HEADER.casefold(),
+    EVIDENCE_GENERATION_ATTESTATION_SHA256_HEADER.casefold(),
+    EVIDENCE_EVALUATION_SHA256_HEADER.casefold(),
+    EVIDENCE_RUNTIME_RELEASE_SHA256_HEADER.casefold(),
     "x-request-id",
 }
 MAX_EVIDENCE_RESPONSE_BYTES = 2 * 1024 * 1024
@@ -241,6 +256,23 @@ def _safe_failure_reason(exc: Exception) -> str:
     return "invalid contract response"
 
 
+def _runtime_release_identity_headers(
+    identity: EvidenceRuntimeReleaseIdentity,
+) -> dict[str, str]:
+    return {
+        EVIDENCE_SCHEMA_SHA256_HEADER: identity.retrieval_schema_sha256,
+        EVIDENCE_PROVIDER_RELEASE_HEADER: identity.provider_release,
+        EVIDENCE_PROVIDER_REVISION_HEADER: identity.provider_revision,
+        EVIDENCE_PROVIDER_BUILD_SHA256_HEADER: identity.provider_build_sha256,
+        EVIDENCE_KNOWLEDGE_GENERATION_HEADER: identity.knowledge_generation_id,
+        EVIDENCE_GENERATION_ATTESTATION_SHA256_HEADER: (
+            identity.knowledge_generation_attestation_sha256
+        ),
+        EVIDENCE_EVALUATION_SHA256_HEADER: identity.evaluation_report_sha256,
+        EVIDENCE_RUNTIME_RELEASE_SHA256_HEADER: identity.runtime_release_sha256,
+    }
+
+
 def _evidence_identity_headers(
     identity: EvidenceContractIdentity,
 ) -> dict[str, str]:
@@ -251,16 +283,39 @@ def _evidence_identity_headers(
 
 
 def _response_header_value(response: Any, header_name: str) -> str | None:
-    """Read one response header without trusting provider exception details."""
+    """Read exactly one response header without trusting provider details."""
 
     try:
+        response_headers = getattr(response, "headers", None)
+        get_all = getattr(response_headers, "get_all", None)
+        if callable(get_all):
+            values = get_all(header_name)
+            if values is None:
+                return None
+            if (
+                not isinstance(values, (list, tuple))
+                or len(values) != 1
+                or not isinstance(values[0], str)
+            ):
+                raise _ResponseIdentityValidationError("runtime release identity mismatch")
+            return values[0]
+        getheaders = getattr(response, "getheaders", None)
+        if callable(getheaders):
+            pairs = getheaders()
+            values = [
+                value
+                for name, value in pairs
+                if isinstance(name, str)
+                and name.casefold() == header_name.casefold()
+                and isinstance(value, str)
+            ]
+            if len(values) != 1:
+                raise _ResponseIdentityValidationError("runtime release identity mismatch")
+            return values[0]
         getheader = getattr(response, "getheader", None)
-        if callable(getheader):
-            value = getheader(header_name)
-        else:
-            response_headers = getattr(response, "headers", None)
-            get_value = getattr(response_headers, "get", None)
-            value = get_value(header_name) if callable(get_value) else None
+        value = getheader(header_name) if callable(getheader) else None
+    except _ResponseIdentityValidationError:
+        raise
     except Exception:
         raise _ResponseIdentityValidationError("contract identity mismatch") from None
     return value if isinstance(value, str) else None
@@ -275,6 +330,17 @@ def _validate_response_identity_headers(
     for header_name, expected_value in _evidence_identity_headers(expected_identity).items():
         if _response_header_value(response, header_name) != expected_value:
             raise _ResponseIdentityValidationError("contract identity mismatch")
+
+
+def _validate_runtime_release_response_headers(
+    response: Any,
+    expected_identity: EvidenceRuntimeReleaseIdentity,
+) -> None:
+    """Reject a generation/build race before reading any Evidence body bytes."""
+
+    for header_name, expected_value in _runtime_release_identity_headers(expected_identity).items():
+        if _response_header_value(response, header_name) != expected_value:
+            raise _ResponseIdentityValidationError("runtime release identity mismatch")
 
 
 def _validate_transport_settings(timeout_seconds: float, max_retries: int) -> None:
@@ -406,6 +472,56 @@ def fetch_supported_review_as_of(
         max_retries=max_retries,
         contract_identity_mode=contract_identity_mode,
     ).supported_review_as_of
+
+
+def fetch_evidence_runtime_readiness(
+    base_url: str,
+    *,
+    service_token: str | None,
+    allowed_origins: set[str] | frozenset[str] | None = None,
+    timeout_seconds: float = 10.0,
+    max_retries: int = 1,
+) -> EvidenceRuntimeReleaseIdentity:
+    """Attest the exact sealed production Data runtime release over HTTP."""
+
+    normalized_base_url = validate_evidence_destination(base_url, allowed_origins)
+    _validate_transport_settings(timeout_seconds, max_retries)
+    try:
+        expected_identity = load_released_evidence_runtime_identity()
+        # Loading the v1 schema verifies the retrieval bytes pinned by the lock.
+        load_pinned_evidence_schema()
+    except (EvidenceContractLockError, EvidenceRuntimeReleaseLockError):
+        raise RetrievalError("Evidence production release lock is unavailable") from None
+    headers = {"Accept": "application/json"}
+    headers.update(_optional_auth_header(service_token, "Authorization"))
+    readiness_url = f"{normalized_base_url}/internal/rag/v2/health/ready"
+    last_error: Exception | None = None
+    for _ in range(max_retries + 1):
+        try:
+            request = Request(  # noqa: S310 - validated exact origin
+                readiness_url,
+                headers=headers,
+                method="GET",
+            )
+            with urlopen(request, timeout=timeout_seconds) as response:
+                payload = _load_strict_json(_read_bounded_response(response))
+            observed_identity = parse_evidence_runtime_readiness(payload)
+            if observed_identity != expected_identity:
+                raise _ReadinessValidationError("runtime release identity mismatch")
+            return observed_identity
+        except (
+            HTTPError,
+            URLError,
+            TimeoutError,
+            EvidenceRuntimeReleasePayloadError,
+            json.JSONDecodeError,
+            ValueError,
+        ) as exc:
+            last_error = exc
+    if last_error is None:
+        raise RetrievalError("Evidence runtime readiness request failed: internal state") from None
+    reason = _safe_failure_reason(last_error)
+    raise RetrievalError(f"Evidence runtime readiness request failed: {reason}") from None
 
 
 @runtime_checkable
@@ -727,6 +843,138 @@ class HttpRegulationRetriever:
                 ):
                     raise RetrievalError(
                         "Evidence Service response snapshot does not match readiness"
+                    )
+                return parsed
+            except _ResponseIdentityValidationError as exc:
+                reason = _safe_failure_reason(exc)
+                raise RetrievalError(f"Evidence Service request failed: {reason}") from None
+            except HTTPError as exc:
+                if exc.code == 412:
+                    raise RetrievalError(
+                        "Evidence Service request failed: HTTP status 412"
+                    ) from None
+                last_error = exc
+            except (
+                URLError,
+                TimeoutError,
+                ValidationError,
+                EvidenceContractPayloadError,
+                json.JSONDecodeError,
+                ValueError,
+            ) as exc:
+                last_error = exc
+        if last_error is None:
+            raise RetrievalError("Evidence Service request failed: internal state") from None
+        reason = _safe_failure_reason(last_error)
+        raise RetrievalError(f"Evidence Service request failed: {reason}") from None
+
+
+class ProductionHttpRegulationRetriever:
+    """V2 production consumer bound to one sealed Data generation.
+
+    This adapter has no compatibility mode and no Mock fallback. The packaged
+    release lock must be ``released`` before construction succeeds.
+    """
+
+    endpoint_path = "/internal/rag/v2/retrieve"
+
+    def __init__(
+        self,
+        base_url: str,
+        *,
+        service_token: str | None,
+        allowed_origins: set[str] | frozenset[str] | None = None,
+        timeout_seconds: float = 60.0,
+        max_retries: int = 1,
+    ) -> None:
+        self._base_url = validate_evidence_destination(base_url, allowed_origins)
+        _validate_transport_settings(timeout_seconds, max_retries)
+        if service_token is None:
+            raise ValueError("Production Evidence bearer token is required")
+        self._auth_header = _optional_auth_header(service_token, "Authorization")
+        try:
+            self._expected_identity = load_released_evidence_runtime_identity()
+            load_pinned_evidence_schema()
+        except EvidenceRuntimeReleaseLockError:
+            raise RetrievalError("Evidence production release lock is unavailable") from None
+        except EvidenceContractLockError:
+            raise RetrievalError("Evidence consumer contract bundle is invalid") from None
+        self.url = f"{self._base_url}{self.endpoint_path}"
+        self._service_token = service_token
+        self._allowed_origins = allowed_origins
+        self.timeout_seconds = timeout_seconds
+        self.max_retries = max_retries
+
+    @property
+    def expected_identity(self) -> EvidenceRuntimeReleaseIdentity:
+        return self._expected_identity
+
+    def preflight(
+        self,
+        review_as_of: date | None = None,
+    ) -> EvidenceRuntimeReleaseIdentity:
+        identity = fetch_evidence_runtime_readiness(
+            self._base_url,
+            service_token=self._service_token,
+            allowed_origins=self._allowed_origins,
+            timeout_seconds=self.timeout_seconds,
+            max_retries=self.max_retries,
+        )
+        if identity != self._expected_identity:
+            raise RetrievalError("Evidence runtime release identity does not match")
+        if review_as_of is not None and review_as_of != identity.supported_review_as_of:
+            raise RetrievalError(
+                "Evidence runtime release does not support the requested review_as_of"
+            )
+        return identity
+
+    def retrieve(self, request: EvidenceRetrievalRequest) -> EvidenceRetrievalResponse:
+        request_payload = request.model_dump(mode="json")
+        try:
+            validate_pinned_evidence_payload(request_payload)
+        except (EvidenceContractLockError, EvidenceContractPayloadError):
+            raise RetrievalError("Evidence request does not satisfy the pinned contract") from None
+
+        # Re-attest for every retrieval. The identity observed by this GET is
+        # the only identity accepted on the immediately following POST.
+        observed_identity = self.preflight(request.review_as_of)
+        payload = json.dumps(
+            request_payload,
+            ensure_ascii=False,
+            allow_nan=False,
+        ).encode("utf-8")
+        headers = {
+            "Accept": "application/json",
+            "Content-Type": "application/json; charset=utf-8",
+            "X-Request-ID": request.request_id,
+            **_runtime_release_identity_headers(observed_identity),
+            **self._auth_header,
+        }
+        last_error: Exception | None = None
+        for _ in range(self.max_retries + 1):
+            try:
+                http_request = Request(  # noqa: S310 - validated exact origin
+                    self.url,
+                    data=payload,
+                    headers=headers,
+                    method="POST",
+                )
+                with urlopen(http_request, timeout=self.timeout_seconds) as response:
+                    # Header identity is deliberately checked before body
+                    # access, so a rollout race cannot expose unbound bytes.
+                    _validate_runtime_release_response_headers(
+                        response,
+                        observed_identity,
+                    )
+                    body = _read_bounded_response(response)
+                response_payload = _load_strict_json(body)
+                validate_pinned_evidence_payload(response_payload)
+                parsed = EvidenceRetrievalResponse.model_validate(response_payload)
+                if parsed.request_id != request.request_id:
+                    raise RetrievalError("Evidence Service response request_id does not match")
+                if parsed.knowledge_snapshot_id != observed_identity.knowledge_snapshot_id:
+                    raise RetrievalError(
+                        "Evidence Service response snapshot does not match runtime release"
                     )
                 return parsed
             except _ResponseIdentityValidationError as exc:

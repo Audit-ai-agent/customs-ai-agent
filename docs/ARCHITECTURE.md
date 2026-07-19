@@ -311,30 +311,28 @@ development diagnostic이며 `release_eligible=false`다.
 
 ```text
 AI Agent
-  -> GET  /internal/rag/v1/health/ready
-  -> POST /internal/rag/v1/retrieve
+  -> GET  /internal/rag/v2/health/ready
+  -> POST /internal/rag/v2/retrieve
 Data Platform
 ```
 
 Agent가 PostgreSQL/Qdrant/Neo4j에 직접 연결하거나 Data repo 모듈을 import하는 것은 금지한다.
-Evidence response는 request ID, item ID, review date, trade type, HS context, coverage, snapshot,
-citation metadata를 검증한다.
+Evidence retrieval body는 provider-owned v1을 유지한다. 다만 제품 Runtime은 v2 endpoint의
+sealed runtime-release identity를 사용하며 request ID, item ID, review date, trade type, HS
+context, coverage, snapshot, citation metadata를 검증한다. v1 endpoint adapter는 명시적인
+evaluation/test compatibility 경계에만 남는다.
 
-모든 HTTP retrieval은 readiness의 `evidence_contract`가 packaged consumer lock의 provider
-release, provider revision, provider build SHA-256, schema SHA-256과 모두 같은지 먼저 확인한다. HTTP retriever의
-기본 모드는 `required`이므로 서비스 Runtime, CLI와 evaluation runner에 동일하게 적용되며
-identity가 없으면 POST를 보내지 않는다. 전환기 `optional`은 명시적인 비릴리스 진단 전용이고,
-서비스용 `AgentRuntime`에서는 거절된다. identity가 광고된 경우에는 optional 진단도 똑같이
-exact match를 요구한다. 요청 `review_as_of`도 readiness의
-`supported_review_as_of`와 같아야 한다. 검증한 네 identity 값은
+모든 제품 HTTP retrieval은 readiness의 `evidence_runtime_release`가 packaged released lock의
+전체 identity와 같아야 한다. 요청 `review_as_of`도 identity의
+`supported_review_as_of`와 같아야 한다. 검증한 identity 값은
 `X-Evidence-Schema-SHA256`, `X-Evidence-Provider-Release`,
-`X-Evidence-Provider-Revision`, `X-Evidence-Provider-Build-SHA256` POST header로 보낸다.
-각 response의 네 header는 body byte를 읽기 전에 exact match여야 한다. 누락·GET A/POST B
+`X-Evidence-Provider-Revision`, `X-Evidence-Provider-Build-SHA256`,
+`X-Evidence-Knowledge-Generation`, `X-Evidence-Generation-Attestation-SHA256`,
+`X-Evidence-Evaluation-SHA256`, `X-Evidence-Runtime-Release-SHA256` POST header로 보낸다.
+각 response의 8개 header는 body byte를 읽기 전에 exact match여야 한다. 누락·GET A/POST B
 불일치와 provider HTTP 412는 안전 오류로 종료하며 불일치 body를 사용하지 않는다. POST 응답의
-snapshot도 바로 앞 readiness snapshot과 같아야 하며 rollout 불일치는 결과를 폐기한다. 현재
-Data candidate는 identity를 광고하고 Agent lock은 exact candidate build를 고정한다. sealed
-test-only Provider의 conformance와 달리 실제 3/58 corpus는 readiness 503으로 fail-closed하며,
-58/58 적재와 실제 RAG 품질 Gate 전에는 HTTP release-ready로 판정하지 않는다.
+snapshot도 바로 앞 readiness identity의 snapshot과 같아야 한다. 현재 packaged lock은
+`release_state=unreleased`이며 실제 sealed generation/evaluation hash를 발명하지 않는다.
 
 현재 provider의 정확한 handoff 조건과 GET–POST build header 계약은
 [`DATA_PROVIDER_HANDOFF.md`](DATA_PROVIDER_HANDOFF.md)에 기록한다. frozen v1 response body를

@@ -112,7 +112,8 @@ jobs:
           uv run --locked --directory "$SDIST_ROOT" pytest -q \
             tests/test_distribution_verifier.py \
             tests/test_packaged_contracts.py \
-            tests/test_evidence_contract_lock.py
+            tests/test_evidence_contract_lock.py \
+            tests/test_evidence_runtime_release_v2.py
       - name: Install attested wheel in a clean runtime environment
         shell: bash
         run: |

@@ -1,5 +1,6 @@
 from __future__ import annotations
 
+import asyncio
 import hashlib
 import json
 import re
@@ -185,11 +186,19 @@ async def read_bounded_json_body(request: Request, settings: ServiceSettings) ->
 
     body = bytearray()
     try:
-        async for chunk in request.stream():
-            if len(body) + len(chunk) > settings.max_body_bytes:
-                body.clear()
-                raise ServiceHttpError("request_too_large", 413)
-            body.extend(chunk)
+        async with asyncio.timeout(settings.body_read_timeout_seconds):
+            async for chunk in request.stream():
+                if len(body) + len(chunk) > settings.max_body_bytes:
+                    body.clear()
+                    raise ServiceHttpError("request_too_large", 413)
+                body.extend(chunk)
+    except TimeoutError:
+        body.clear()
+        raise ServiceHttpError(
+            "request_body_timeout",
+            408,
+            retryable=True,
+        ) from None
     except ClientDisconnect:
         body.clear()
         raise ServiceHttpError("request_invalid", 400) from None

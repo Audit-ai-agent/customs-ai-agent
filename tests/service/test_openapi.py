@@ -12,7 +12,7 @@ from tools.verify_service_openapi import (
 
 def test_service_openapi_matches_frozen_lock() -> None:
     assert (
-        verify_openapi_lock() == "c56c0bb6ebeb9bf74e7a274fd3670a5849793e09c6d34c2cd6c3e6375fcad803"
+        verify_openapi_lock() == "d61ba5f5a579bab1a8f05bcfcd2d6c5f60854b347b9431d64f123bb611b11d6f"
     )
 
 
