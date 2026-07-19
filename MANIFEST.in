@@ -5,11 +5,14 @@ include MANIFEST.in
 include pyproject.toml
 include uv.lock
 include .gitleaks.toml
+include .dockerignore
+include Dockerfile
 
 recursive-include .github *.yml *.yaml
 recursive-include src/customs_ai_agent *.py *.txt *.json
 recursive-include contracts *.md *.json
 recursive-include docs *.md
+recursive-include deploy *.yml *.yaml
 recursive-include evals *.py *.md *.json *.in *.txt
 exclude evals/ocr_benchmark_v1.json
 recursive-include fixtures *.md *.json

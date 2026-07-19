@@ -87,6 +87,8 @@ jobs:
         run: uv run ruff format --check src tests evals tools
       - name: Typecheck
         run: uv run mypy
+      - name: Verify frozen Agent service OpenAPI
+        run: uv run --locked python tools/verify_service_openapi.py
       - name: Test
         run: uv run pytest -q
       - name: Build source distribution
@@ -114,11 +116,13 @@ jobs:
       - name: Install attested wheel in a clean runtime environment
         shell: bash
         run: |
+          RUNTIME_VENV="$RUNNER_TEMP/customs-ai-agent-runtime-venv"
+          echo "AGENT_RUNTIME_VENV=$RUNTIME_VENV" >> "$GITHUB_ENV"
           uv export --locked --no-dev --no-emit-project --no-emit-local \
             --no-sources --format requirements.txt \
             --output-file dist/runtime-requirements.txt
-          uv venv --python 3.11 dist/runtime-venv
-          uv pip install --python dist/runtime-venv/bin/python \
+          uv venv --python 3.11 "$RUNTIME_VENV"
+          uv pip install --python "$RUNTIME_VENV/bin/python" \
             --require-hashes --requirements dist/runtime-requirements.txt
           WHEEL="$GITHUB_WORKSPACE/dist/wheel/customs_ai_agent-0.3.0-py3-none-any.whl"
           WHEEL_SHA="$(sha256sum "$WHEEL" | cut -d' ' -f1)"
@@ -127,17 +131,17 @@ jobs:
             "$WHEEL")"
           printf 'customs-ai-agent @ %s --hash=sha256:%s\n' \
             "$WHEEL_URI" "$WHEEL_SHA" > dist/agent-wheel-requirement.txt
-          uv pip install --python dist/runtime-venv/bin/python --no-deps \
+          uv pip install --python "$RUNTIME_VENV/bin/python" --no-deps \
             --require-hashes --requirements dist/agent-wheel-requirement.txt
-          uv pip check --python dist/runtime-venv/bin/python
+          uv pip check --python "$RUNTIME_VENV/bin/python"
       - name: Verify non-editable import, entry point, prompts, and schemas
         shell: bash
         working-directory: /tmp
         run: |
           WHEEL="$GITHUB_WORKSPACE/dist/wheel/customs_ai_agent-0.3.0-py3-none-any.whl"
           WHEEL_SHA="$(sha256sum "$WHEEL" | cut -d' ' -f1)"
-          PYTHON="$GITHUB_WORKSPACE/dist/runtime-venv/bin/python"
-          CLI="$GITHUB_WORKSPACE/dist/runtime-venv/bin/customs-ai-agent"
+          PYTHON="$AGENT_RUNTIME_VENV/bin/python"
+          CLI="$AGENT_RUNTIME_VENV/bin/customs-ai-agent"
           "$PYTHON" -I "$GITHUB_WORKSPACE/tools/verify_distribution.py" \
             --installed \
             --wheel "$WHEEL" \
@@ -145,3 +149,49 @@ jobs:
             --source-root "$GITHUB_WORKSPACE"
           "$CLI" --help
           "$CLI" list-scenarios
+      - name: Build and smoke-test the non-root Agent service image
+        shell: bash
+        run: |
+          set -euo pipefail
+          WHEEL="$GITHUB_WORKSPACE/dist/wheel/customs_ai_agent-0.3.0-py3-none-any.whl"
+          WHEEL_SHA="$(sha256sum "$WHEEL" | cut -d' ' -f1)"
+          IMAGE="customs-ai-agent:${GITHUB_SHA}"
+          CONTAINER="customs-ai-agent-ci"
+          SERVICE_TOKEN="$(python -c 'import secrets; print(secrets.token_urlsafe(32))')"
+          EVIDENCE_TOKEN="$(python -c 'import secrets; print(secrets.token_urlsafe(32))')"
+          docker build \
+            --build-arg "AGENT_WHEEL=dist/wheel/customs_ai_agent-0.3.0-py3-none-any.whl" \
+            --build-arg "BUILD_SHA=${GITHUB_SHA}" \
+            --build-arg "WHEEL_SHA256=${WHEEL_SHA}" \
+            --tag "$IMAGE" .
+          docker run --detach --name "$CONTAINER" \
+            --read-only --tmpfs /tmp:rw,noexec,nosuid,size=64m \
+            --cap-drop ALL --security-opt no-new-privileges:true \
+            --publish 127.0.0.1:18080:8080 \
+            --env ANTHROPIC_API_KEY=ci-non-secret-placeholder \
+            --env CUSTOMS_AGENT_SERVICE_BEARER_TOKEN="$SERVICE_TOKEN" \
+            --env EVIDENCE_SERVICE_BASE_URL=http://127.0.0.1:8010 \
+            --env EVIDENCE_SERVICE_TOKEN="$EVIDENCE_TOKEN" \
+            "$IMAGE"
+          cleanup() {
+            docker rm --force "$CONTAINER" >/dev/null 2>&1 || true
+          }
+          trap cleanup EXIT
+          for _ in $(seq 1 30); do
+            if curl --fail --silent --show-error \
+              http://127.0.0.1:18080/health/live >/dev/null; then
+              break
+            fi
+            sleep 1
+          done
+          curl --fail --silent --show-error \
+            http://127.0.0.1:18080/health/live >/dev/null
+          READY_STATUS="$(curl --silent --output /tmp/agent-ready.json \
+            --write-out '%{http_code}' http://127.0.0.1:18080/health/ready)"
+          test "$READY_STATUS" = "503"
+          python - <<'PY'
+          import json
+          from pathlib import Path
+          payload = json.loads(Path("/tmp/agent-ready.json").read_text())
+          assert payload["error"]["code"] == "dependency_unready"
+          PY

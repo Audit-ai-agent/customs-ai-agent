@@ -162,6 +162,26 @@ body, subprocess stderr는 민감한 로컬 artifact로 취급하고 공개 결�
 - dependency/SAST/secret scan
 - 공개 포트폴리오의 PII·token·DSN·절대경로 0건
 
+## Text-only Agent service 보안 경계
+
+독립 Agent service는 end-user endpoint가 아니다. private network/TLS gateway 뒤에서
+고엔트로피 service bearer를 요구하고, token은 고정 길이 SHA-256 digest의
+`hmac.compare_digest`로 비교한다. missing/wrong/duplicate Authorization은 body를 읽기 전에
+거부한다.
+
+transport는 `application/json` UTF-8 identity encoding만 허용한다. body는 streaming 중 상한을
+적용하고 duplicate key, NaN/Infinity, visual key와 필수 run/date 누락을 `AgentRuntime` 및 외부
+provider 전에 차단한다. image/PDF의 값이 null이어도 이 text-only release에서 허용하지 않는다.
+
+동시성 semaphore는 timeout 뒤 background에 남은 SDK worker가 끝날 때까지 반환하지 않는다.
+따라서 504 뒤 retry로 concurrency 제한을 우회할 수 없다. 단일 process replay는 bounded
+메모리/TTL 안전장치이지 durable idempotency가 아니다. Backend가 없는 multi-replica 배포는
+exactly-once를 보장하지 않는다.
+
+로그와 process metrics에는 생성된 transport request ID, safe error/status, latency, token count
+집계만 허용한다. 문서, case/review ID, 원문 quote, Evidence text, Authorization과 provider
+credential을 log field/metric label로 추가하지 않는다.
+
 Backend 스택이 아직 정해지지 않았다는 사실은 이 통제를 유예하는 근거가 아니다. Backend 구현을
 시작할 때 Spring/Java 또는 FastAPI/Python 선택과 함께 인증·저장·권한 threat model을 별도 ADR과
 보안 검증으로 추가해야 한다.

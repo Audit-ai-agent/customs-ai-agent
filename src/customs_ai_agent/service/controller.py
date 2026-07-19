@@ -286,7 +286,7 @@ class AgentServiceController:
                     asyncio.shield(future),
                     timeout=self.settings.readiness_timeout_seconds,
                 )
-            except BaseException:
+            except Exception:
                 ready = False
             else:
                 ready = True
@@ -310,20 +310,27 @@ class AgentServiceController:
             if pending:
                 await asyncio.gather(*pending, return_exceptions=True)
         background = tuple(self._background)
+        background_still_running = False
         if background:
             remaining = max(0.0, deadline - time.monotonic())
             _, pending_background = await asyncio.wait(background, timeout=remaining)
             if pending_background:
+                background_still_running = True
                 safe_log(
                     self._logger,
                     logging.ERROR,
                     "shutdown_grace_exhausted",
                     inflight=self.metrics.snapshot()["inflight"],
                 )
-        try:
-            self.runtime.close()
-        except Exception:
-            safe_log(self._logger, logging.ERROR, "runtime_close_failed")
+        if background_still_running:
+            # Closing the Anthropic client while a bounded SDK call still owns it is
+            # unsafe. The orchestrator termination deadline is the final boundary.
+            safe_log(self._logger, logging.ERROR, "runtime_close_deferred")
+        else:
+            try:
+                self.runtime.close()
+            except Exception:
+                safe_log(self._logger, logging.ERROR, "runtime_close_failed")
         self._executor.shutdown(wait=False, cancel_futures=True)
         self._probe_executor.shutdown(wait=False, cancel_futures=True)
         self._closed = True

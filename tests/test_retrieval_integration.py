@@ -1309,6 +1309,32 @@ def test_http_retriever_sends_token_only_in_configured_header(monkeypatch):
     assert secret not in retriever.url
 
 
+def test_http_retriever_sends_bearer_authorization(monkeypatch):
+    secret = "EvidenceBearer_abcdefghijklmnopqrstuvwxyz0123456789"
+    response = _http_test_response("request-http-1")
+    captured = {}
+
+    def fake_urlopen(request, timeout):
+        captured["request"] = request
+        captured["timeout"] = timeout
+        return _HttpBody(json.dumps(response.model_dump(mode="json")).encode("utf-8"))
+
+    monkeypatch.setattr("customs_ai_agent.adapters.retrieval.urlopen", fake_urlopen)
+    retriever = HttpRegulationRetriever(
+        "http://127.0.0.1:8010",
+        service_token=secret,
+        token_header="Authorization",
+        contract_identity_mode="disabled",
+    )
+
+    retriever.retrieve(_http_test_request())
+    request = captured["request"]
+    sent_headers = {name.casefold(): value for name, value in request.header_items()}
+    assert sent_headers["authorization"] == f"Bearer {secret}"
+    assert secret not in request.full_url
+    assert secret not in retriever.url
+
+
 @pytest.mark.parametrize(
     ("token", "header"),
     [
@@ -1316,6 +1342,7 @@ def test_http_retriever_sends_token_only_in_configured_header(monkeypatch):
         ("secret", "X-Demo-Token\r\nInjected"),
         ("secret", "X-Request-ID"),
         ("secret", EVIDENCE_PROVIDER_BUILD_SHA256_HEADER),
+        ("not a token", "Authorization"),
     ],
 )
 def test_http_retriever_rejects_unsafe_token_or_header(token, header):

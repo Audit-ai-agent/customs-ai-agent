@@ -14,6 +14,7 @@ import pytest
 
 from tools.verify_distribution import (
     EXPECTED_CONSOLE_ENTRY_POINT,
+    EXPECTED_SERVICE_CONSOLE_ENTRY_POINT,
     EXPECTED_IMPORT_PACKAGE,
     EXPECTED_VERSION,
     DistributionVerificationError,
@@ -36,6 +37,7 @@ METADATA = (
     f"Version: {EXPECTED_VERSION}\n"
     "Requires-Python: <3.12,>=3.11\n"
     "Requires-Dist: anthropic<1,>=0.117.0\n"
+    "Requires-Dist: fastapi<1,>=0.115\n"
     "Requires-Dist: jsonschema[format]<5,>=4.23\n"
     "Requires-Dist: langgraph<2,>=0.2.0\n"
     "Requires-Dist: pillow<13,>=11.0\n"
@@ -43,6 +45,7 @@ METADATA = (
     "Requires-Dist: pypdfium2<6,>=5.12\n"
     "Requires-Dist: python-dotenv<2,>=1.0\n"
     "Requires-Dist: rapidfuzz<4,>=3.9\n"
+    "Requires-Dist: uvicorn<1,>=0.32\n"
     "\n"
 ).encode()
 
@@ -68,7 +71,10 @@ def _write_wheel(
                 b"Wheel-Version: 1.0\nGenerator: test\nRoot-Is-Purelib: true\nTag: py3-none-any\n"
             ),
             f"{DIST_INFO}/entry_points.txt": (
-                f"[console_scripts]\n{EXPECTED_CONSOLE_ENTRY_POINT}\n".encode()
+                (
+                    f"[console_scripts]\n{EXPECTED_CONSOLE_ENTRY_POINT}\n"
+                    f"{EXPECTED_SERVICE_CONSOLE_ENTRY_POINT}\n"
+                ).encode()
             ),
         }
     )
@@ -132,6 +138,9 @@ def _write_uv_install_tree(
         ).encode(),
         f"{DIST_INFO}/uv_cache.json": b"{}",
         "../../../bin/customs-ai-agent": b'#!/bin/sh\nexec python -m customs_ai_agent "$@"\n',
+        "../../../bin/customs-ai-agent-serve": (
+            b'#!/bin/sh\nexec python -m customs_ai_agent.service "$@"\n'
+        ),
     }
     for name, payload in installer_payloads.items():
         target = site_packages / Path(*name.split("/"))
@@ -203,6 +212,7 @@ def test_project_metadata_limits_runtime_to_python_311_and_next_major_versions()
     assert project["requires-python"] == ">=3.11,<3.12"
     assert set(project["dependencies"]) == {
         "anthropic>=0.117.0,<1",
+        "fastapi>=0.115,<1",
         "jsonschema[format]>=4.23,<5",
         "langgraph>=0.2.0,<2",
         "pillow>=11.0,<13",
@@ -210,6 +220,7 @@ def test_project_metadata_limits_runtime_to_python_311_and_next_major_versions()
         "pydantic>=2.7,<3",
         "python-dotenv>=1.0,<2",
         "rapidfuzz>=3.9,<4",
+        "uvicorn>=0.32,<1",
     }
     assert lock["requires-python"] == "==3.11.*"
     locked_project = next(
@@ -220,6 +231,7 @@ def test_project_metadata_limits_runtime_to_python_311_and_next_major_versions()
         for requirement in locked_project["metadata"]["requires-dist"]
     } == {
         ("anthropic", ">=0.117.0,<1"),
+        ("fastapi", ">=0.115,<1"),
         ("jsonschema", ">=4.23,<5"),
         ("langgraph", ">=0.2.0,<2"),
         ("pillow", ">=11.0,<13"),
@@ -227,6 +239,7 @@ def test_project_metadata_limits_runtime_to_python_311_and_next_major_versions()
         ("pydantic", ">=2.7,<3"),
         ("python-dotenv", ">=1.0,<2"),
         ("rapidfuzz", ">=3.9,<4"),
+        ("uvicorn", ">=0.32,<1"),
     }
 
 
@@ -327,7 +340,9 @@ def test_uv_hashless_direct_url_requires_exact_wheel_and_installed_record(
     )
 
     assert int(result["installed_record_count"]) > 0
-    assert result["console_record"] == "../../../bin/customs-ai-agent"
+    assert result["console_records"] == (
+        "../../../bin/customs-ai-agent,../../../bin/customs-ai-agent-serve"
+    )
 
 
 def test_uv_direct_url_rejects_conflicting_archive_hash(tmp_path: Path) -> None:

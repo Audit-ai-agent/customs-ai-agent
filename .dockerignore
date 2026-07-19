@@ -1,0 +1,6 @@
+*
+!Dockerfile
+!dist/
+!dist/wheel/
+!dist/wheel/*.whl
+!dist/runtime-requirements.txt

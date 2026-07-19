@@ -264,6 +264,28 @@ provider가 필요하며, 현재 OCR release pin이 비어 있으므로 성공 �
 호출한다. Runtime은 자신이 생성한 Anthropic client만 닫는다. `RuntimeConfig`로 주입한 OCR
 provider는 호출자 소유이므로 Runtime이 닫지 않으며 Backend가 별도 lifecycle을 관리한다.
 
+## Text-only internal Production service
+
+OCR을 활성화하지 않는 독립 Agent 배포에는 `customs-ai-agent-serve` entry point를 사용한다.
+이 서비스는 기존 `AgentRuntime.review_json()` 앞에 private ASGI transport를 추가하며 core
+workflow를 대체하지 않는다.
+
+- `POST /internal/agent/v1/reviews`: 실제 Claude text + Evidence HTTP
+- `GET /health/live`: downstream-independent liveness
+- `GET /health/ready`: pinned Evidence dependency-aware readiness
+- 인증된 metadata와 label-free process metrics
+- raw streaming body 상한, text-only preflight, bounded concurrency/queue/deadline
+- process-local single-flight/replay
+- graceful lifespan과 Anthropic client close
+
+`review_run_id`와 `review_as_of`는 이 service profile에서 필수다. image/PDF key는 OCR, Claude,
+Evidence 호출 전에 거부한다. Case/Job/HITL과 복제본 간 durable idempotency는 Backend
+소유이므로 여러 Agent replica에서 exactly-once를 주장하지 않는다.
+
+설계와 운영 기준은 [Production Service](docs/PRODUCTION_SERVICE.md), 장애 대응과 배포 절차는
+[Service Runbook](docs/RUNBOOK.md)을 따른다. 현재 실제 Data 3/58 상태에서는 service code가
+정상이어도 `/health/ready` 503이 올바른 결과다.
+
 required Evidence 경로는 readiness의 schema/release/revision/build SHA-256을 네
 `X-Evidence-*` POST header로 전달하고 response의 같은 네 header를 body보다 먼저 exact match로
 검증한다. 현재 lock은 Data candidate revision
@@ -436,7 +458,7 @@ CUSTOMS_AGENT_CLAUDE_MAX_RETRIES=2
 EVIDENCE_SERVICE_BASE_URL=http://127.0.0.1:8010
 EVIDENCE_SERVICE_ALLOWED_ORIGINS=
 EVIDENCE_SERVICE_TOKEN=
-EVIDENCE_SERVICE_TOKEN_HEADER=X-Demo-Token
+EVIDENCE_SERVICE_TOKEN_HEADER=Authorization
 ```
 
 Agent는 `--env-file`로 지정한 파일만 allowlist 방식으로 읽고 `os.environ`을 변경하지 않는다.
@@ -446,6 +468,10 @@ process 환경값이 있으면 그것이 우선한다. key가 있어도 기본 M
 Anthropic endpoint는 공식 HTTPS endpoint로 고정한다. 임의 base URL, custom auth/header,
 SDK debug logging은 fail-closed한다. 모델 변경은 환경변수만 바꾸는 운영 토글이 아니라 새
 평가셋·ADR·Gate 갱신이 필요한 변경이다.
+
+운영 Agent service는 Data API와의 인증을 `Authorization: Bearer <token>`으로 고정한다.
+`X-Demo-Token` 같은 legacy custom header는 로컬 평가 호환을 위해 명시적으로 선택할 수 있지만
+production service 설정에서는 fail-closed된다.
 
 일반 Agent 설정은 bounded SDK retry를 허용할 수 있지만, 비용 상한을 검증하는 Claude Live
 evaluator는 환경의 retry 값과 무관하게 `max_retries=0`을 강제한다. `--live`,

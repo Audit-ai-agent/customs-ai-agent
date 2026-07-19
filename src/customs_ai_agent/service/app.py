@@ -9,6 +9,7 @@ from fastapi import FastAPI, Request
 from fastapi.responses import JSONResponse
 
 from customs_ai_agent.adapters.retrieval import fetch_evidence_readiness
+from customs_ai_agent.contracts import get_schema
 from customs_ai_agent.runtime import AgentRuntime, RuntimeConfig
 from customs_ai_agent.service.auth import bearer_authorized
 from customs_ai_agent.service.controller import (
@@ -33,6 +34,7 @@ _NO_STORE_HEADERS = {
     "Cache-Control": "no-store",
     "X-Content-Type-Options": "nosniff",
 }
+_BEARER_SECURITY: list[dict[str, list[str]]] = [{"ServiceBearer": []}]
 
 
 def _request_id(request: Request) -> str:
@@ -117,6 +119,7 @@ def create_app(
 
     active_settings = settings or ServiceSettings.from_environment()
     metadata = build_metadata(active_settings)
+    review_result_schema = get_schema("backend", "v2", "review-result")
     make_runtime = runtime_factory or _production_runtime
     make_readiness_probe = readiness_probe_factory or _production_readiness_probe
 
@@ -205,6 +208,7 @@ def create_app(
     @app.get(
         "/internal/agent/v1/metadata",
         summary="Safe build and capability metadata",
+        openapi_extra={"security": _BEARER_SECURITY},
         responses={
             200: {"description": "Non-secret release identity and capabilities."},
             401: {"content": {"application/json": {"schema": ERROR_RESPONSE_SCHEMA}}},
@@ -222,6 +226,7 @@ def create_app(
     @app.get(
         "/internal/agent/v1/metrics",
         summary="Process-local safe metrics",
+        openapi_extra={"security": _BEARER_SECURITY},
         responses={
             200: {"description": "Label-free process metrics without document identifiers."},
             401: {"content": {"application/json": {"schema": ERROR_RESPONSE_SCHEMA}}},
@@ -241,13 +246,34 @@ def create_app(
         "/internal/agent/v1/reviews",
         summary="Execute one text-only Agent review",
         openapi_extra={
+            "security": _BEARER_SECURITY,
             "requestBody": {
                 "required": True,
                 "content": {"application/json": {"schema": TEXT_REVIEW_REQUEST_SCHEMA}},
-            }
+            },
         },
         responses={
-            200: {"description": "A redacted Agent ReviewResult V2."},
+            200: {
+                "description": "A redacted Agent ReviewResult V2.",
+                "content": {
+                    "application/json": {
+                        "schema": review_result_schema,
+                    }
+                },
+                "headers": {
+                    "X-Idempotent-Replay": {
+                        "description": (
+                            "True only when this process replayed the same review_run_id "
+                            "and canonical request."
+                        ),
+                        "schema": {"type": "string", "enum": ["true", "false"]},
+                    },
+                    "X-Request-ID": {
+                        "description": "Opaque per-request correlation identifier.",
+                        "schema": {"type": "string", "format": "uuid"},
+                    },
+                },
+            },
             401: {"content": {"application/json": {"schema": ERROR_RESPONSE_SCHEMA}}},
             403: {"content": {"application/json": {"schema": ERROR_RESPONSE_SCHEMA}}},
             409: {"content": {"application/json": {"schema": ERROR_RESPONSE_SCHEMA}}},
@@ -286,6 +312,21 @@ def create_app(
             content=outcome.result,
         )
 
+    original_openapi = app.openapi
+
+    def service_openapi() -> dict[str, Any]:
+        schema = original_openapi()
+        components = schema.setdefault("components", {})
+        security_schemes = components.setdefault("securitySchemes", {})
+        security_schemes["ServiceBearer"] = {
+            "type": "http",
+            "scheme": "bearer",
+            "bearerFormat": "opaque",
+            "description": "High-entropy internal service credential.",
+        }
+        return schema
+
+    app.openapi = service_openapi  # type: ignore[method-assign]
     return app
 
 

@@ -19,6 +19,27 @@ def test_live_is_downstream_independent_and_ready_is_dependency_aware(
     assert "no-store" in live.headers["cache-control"]
 
 
+def test_unready_dependency_is_generic_503(
+    service_settings: Any,
+    fake_runtime: Any,
+) -> None:
+    from customs_ai_agent.service.app import create_app
+
+    def unavailable() -> object:
+        raise RuntimeError("private dependency details")
+
+    app = create_app(
+        service_settings,
+        runtime_factory=lambda _settings: fake_runtime,
+        readiness_probe_factory=lambda _settings: unavailable,
+    )
+    with TestClient(app, raise_server_exceptions=False) as local_client:
+        response = local_client.get("/health/ready")
+    assert response.status_code == 503
+    assert response.json()["error"]["code"] == "dependency_unready"
+    assert "private dependency details" not in response.text
+
+
 def test_metadata_and_metrics_are_authenticated_and_safe(
     client: TestClient,
     auth_headers: dict[str, str],
@@ -104,6 +125,27 @@ def test_transport_rejects_oversized_body_before_runtime(
     assert response.status_code == 413
     assert response.json()["error"]["code"] == "request_too_large"
     assert fake_runtime.calls == 0
+
+
+def test_chunked_json_body_is_bounded_and_accepted(
+    client: TestClient,
+    auth_headers: dict[str, str],
+    valid_payload: dict[str, Any],
+    fake_runtime: Any,
+) -> None:
+    encoded = json.dumps(valid_payload, separators=(",", ":")).encode()
+
+    def chunks() -> Any:
+        yield encoded[:17]
+        yield encoded[17:]
+
+    response = client.post(
+        "/internal/agent/v1/reviews",
+        headers={**auth_headers, "Content-Type": "application/json"},
+        content=chunks(),
+    )
+    assert response.status_code == 200
+    assert fake_runtime.calls == 1
 
 
 @pytest.mark.parametrize("visual_field", ["image_pages", "pdf_pages"])

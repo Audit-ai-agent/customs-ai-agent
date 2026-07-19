@@ -63,6 +63,7 @@ class _ResponseIdentityValidationError(ValueError):
 
 
 _HEADER_NAME = re.compile(r"^[!#$%&'*+.^_`|~0-9A-Za-z-]+$")
+_BEARER_TOKEN68 = re.compile(r"^[A-Za-z0-9\-._~+/]+={0,8}$")
 _ISO_CALENDAR_DATE = re.compile(r"^\d{4}-\d{2}-\d{2}$")
 EVIDENCE_SCHEMA_SHA256_HEADER = "X-Evidence-Schema-SHA256"
 EVIDENCE_PROVIDER_RELEASE_HEADER = "X-Evidence-Provider-Release"
@@ -212,7 +213,8 @@ def _optional_auth_header(
 ) -> dict[str, str]:
     if not _HEADER_NAME.fullmatch(token_header):
         raise ValueError("Evidence Service token header name is invalid")
-    if token_header.casefold() in _RESERVED_HEADERS:
+    normalized_header = token_header.casefold()
+    if normalized_header in _RESERVED_HEADERS:
         raise ValueError("Evidence Service token header cannot override a protocol header")
     if service_token is None:
         return {}
@@ -220,6 +222,10 @@ def _optional_auth_header(
         raise ValueError("Evidence Service token cannot be blank")
     if "\r" in service_token or "\n" in service_token:
         raise ValueError("Evidence Service token cannot contain line breaks")
+    if normalized_header == "authorization":
+        if _BEARER_TOKEN68.fullmatch(service_token) is None:
+            raise ValueError("Evidence Service bearer token is invalid")
+        return {"Authorization": f"Bearer {service_token}"}
     return {token_header: service_token}
 
 

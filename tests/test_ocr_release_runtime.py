@@ -38,6 +38,7 @@ from customs_ai_agent.schemas.models import (
 _DUMMY_HASH = "0" * 64
 _PADDLE_ENGINE = "PP-StructureV3:customs-paddle-layout-table-v4"
 _DOCLING_ENGINE = "DocumentConverter:default-image-pipeline-offline-v2"
+_SERVICE_ONLY_DEPENDENCIES = frozenset({"fastapi", "uvicorn"})
 
 
 def test_attestation_environment_preserves_architecture_for_lock_markers(
@@ -64,6 +65,13 @@ def test_ocr_environment_roots_cover_agent_runtime_dependencies_and_lock_hashes(
     root = Path(__file__).resolve().parents[1]
     project = tomllib.loads((root / "pyproject.toml").read_text(encoding="utf-8"))
     runtime_dependencies = {
+        _normalized_requirement_name(value) for value in project["project"]["dependencies"]
+    } - _SERVICE_ONLY_DEPENDENCIES
+
+    # OCR providers run in isolated worker environments and never host the ASGI
+    # adapter. Pulling service-only dependencies into both heavyweight model locks
+    # would couple an unapproved OCR release to unrelated HTTP server updates.
+    assert _SERVICE_ONLY_DEPENDENCIES <= {
         _normalized_requirement_name(value) for value in project["project"]["dependencies"]
     }
 

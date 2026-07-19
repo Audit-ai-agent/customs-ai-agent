@@ -103,3 +103,43 @@ def test_readiness_is_cached_and_shutdown_turns_it_off(service_settings: Any) ->
         assert await controller.ready() is False
 
     asyncio.run(scenario())
+
+
+def test_run_timeout_keeps_capacity_consumed_until_worker_finishes(
+    service_settings: Any,
+) -> None:
+    async def scenario() -> None:
+        runtime = FakeRuntime(delay_seconds=1.1)
+        controller = AgentServiceController(
+            settings=settings_with(
+                service_settings,
+                max_concurrency=1,
+                queue_wait_seconds=0.01,
+                run_timeout_seconds=1,
+                shutdown_grace_seconds=2,
+            ),
+            runtime=runtime,
+            readiness_probe=lambda: object(),
+            logger=__import__("logging").getLogger("test-service"),
+        )
+        timed_out, _ = await controller.submit(
+            payload=_payload("run-timeout"),
+            review_run_id="run-timeout",
+            request_hash="c" * 64,
+        )
+        assert timed_out.status_code == 504
+        assert timed_out.error_code == "review_timeout"
+        assert controller.metrics.snapshot()["inflight"] == 1
+
+        busy, _ = await controller.submit(
+            payload=_payload("run-after-timeout"),
+            review_run_id="run-after-timeout",
+            request_hash="d" * 64,
+        )
+        assert busy.status_code == 503
+        assert runtime.calls == 1
+        await controller.shutdown()
+        assert controller.metrics.snapshot()["inflight"] == 0
+        assert runtime.close_calls == 1
+
+    asyncio.run(scenario())

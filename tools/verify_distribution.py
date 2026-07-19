@@ -32,6 +32,7 @@ EXPECTED_REQUIRES_PYTHON: Final = frozenset({">=3.11", "<3.12"})
 EXPECTED_REQUIRES_DIST: Final = frozenset(
     {
         "anthropic<1,>=0.117.0",
+        "fastapi<1,>=0.115",
         "jsonschema[format]<5,>=4.23",
         "langgraph<2,>=0.2.0",
         "pillow<13,>=11.0",
@@ -39,6 +40,7 @@ EXPECTED_REQUIRES_DIST: Final = frozenset(
         "pydantic<3,>=2.7",
         "python-dotenv<2,>=1.0",
         "rapidfuzz<4,>=3.9",
+        "uvicorn<1,>=0.32",
     }
 )
 
@@ -63,6 +65,15 @@ EXPECTED_PROMPT_RESOURCES: Final = frozenset(
     }
 )
 EXPECTED_CONSOLE_ENTRY_POINT: Final = "customs-ai-agent = customs_ai_agent.cli:main"
+EXPECTED_SERVICE_CONSOLE_ENTRY_POINT: Final = (
+    "customs-ai-agent-serve = customs_ai_agent.service.__main__:main"
+)
+EXPECTED_CONSOLE_ENTRY_POINTS: Final = frozenset(
+    {
+        EXPECTED_CONSOLE_ENTRY_POINT,
+        EXPECTED_SERVICE_CONSOLE_ENTRY_POINT,
+    }
+)
 _INSTALLER_OWNED_DIST_INFO_FILES: Final = frozenset(
     {
         "INSTALLER",
@@ -74,7 +85,9 @@ _INSTALLER_OWNED_DIST_INFO_FILES: Final = frozenset(
 _ALLOWED_CONSOLE_RECORD_NAMES: Final = frozenset(
     {
         "../../../bin/customs-ai-agent",
+        "../../../bin/customs-ai-agent-serve",
         "../../Scripts/customs-ai-agent.exe",
+        "../../Scripts/customs-ai-agent-serve.exe",
     }
 )
 
@@ -89,6 +102,16 @@ _WHEEL_REQUIRED_PACKAGE_FILES: Final = frozenset(
         "customs_ai_agent/ocr_release_pin.py",
         "customs_ai_agent/pdf_worker.py",
         "customs_ai_agent/runtime.py",
+        "customs_ai_agent/service/__init__.py",
+        "customs_ai_agent/service/__main__.py",
+        "customs_ai_agent/service/app.py",
+        "customs_ai_agent/service/auth.py",
+        "customs_ai_agent/service/controller.py",
+        "customs_ai_agent/service/errors.py",
+        "customs_ai_agent/service/input.py",
+        "customs_ai_agent/service/metadata.py",
+        "customs_ai_agent/service/settings.py",
+        "customs_ai_agent/service/telemetry.py",
         "customs_ai_agent/contracts/evidence.py",
         "customs_ai_agent/contracts/evidence/v1.lock.json",
         "customs_ai_agent/contracts/evidence/v1.schema.json",
@@ -105,6 +128,8 @@ _SDIST_REQUIRED_FILES: Final = frozenset(
         "pyproject.toml",
         "uv.lock",
         ".gitleaks.toml",
+        ".dockerignore",
+        "Dockerfile",
         ".github/workflows/ci.yml",
         "contracts/evidence/v1.lock.json",
         "contracts/evidence/v1/rag_retrieval_v1.schema.json",
@@ -112,6 +137,7 @@ _SDIST_REQUIRED_FILES: Final = frozenset(
         "contracts/agent/v1/review_result.schema.json",
         "contracts/agent/v2/review_request.schema.json",
         "contracts/agent/v2/review_result.schema.json",
+        "contracts/agent/service/v1/openapi.lock.json",
         "evals/ocr_environments/v1/docling.requirements.in",
         "evals/ocr_environments/v1/docling.requirements.lock.txt",
         "evals/ocr_environments/v1/model-assets.lock.json",
@@ -123,6 +149,8 @@ _SDIST_REQUIRED_FILES: Final = frozenset(
         "evals/run_release_holdout_validation.py",
         "fixtures/trade_documents_images/v1/dataset.lock.json",
         "docs/DATA_PROVIDER_HANDOFF.md",
+        "docs/PRODUCTION_SERVICE.md",
+        "docs/RUNBOOK.md",
         "docs/SECURITY_GATE.md",
         "docs/OCR_RELEASE_FREEZE.md",
         "security/toolchain.lock.toml",
@@ -133,6 +161,7 @@ _SDIST_REQUIRED_FILES: Final = frozenset(
         "tools/run_security_gate.py",
         "tools/verify_ocr_release_freeze.py",
         "tools/verify_distribution.py",
+        "tools/verify_service_openapi.py",
         *{f"src/customs_ai_agent/prompts/{name}" for name in EXPECTED_PROMPT_RESOURCES},
         *{f"src/customs_ai_agent/contracts/{name}" for name in EXPECTED_SCHEMA_RESOURCES},
     }
@@ -156,11 +185,14 @@ _SDIST_ALLOWED_ROOT_FILES: Final = frozenset(
         "setup.cfg",
         "uv.lock",
         ".gitleaks.toml",
+        ".dockerignore",
+        "Dockerfile",
     }
 )
 _SDIST_ALLOWED_ROOT_DIRECTORIES: Final = frozenset(
     {
         "contracts",
+        "deploy",
         "docs",
         "evals",
         "fixtures",
@@ -514,7 +546,7 @@ def verify_wheel(path: Path) -> dict[str, str]:
         for line in entry_points.splitlines()
         if line.strip() and not line.lstrip().startswith("[")
     }
-    if normalized_entry_points != {EXPECTED_CONSOLE_ENTRY_POINT}:
+    if normalized_entry_points != EXPECTED_CONSOLE_ENTRY_POINTS:
         raise DistributionVerificationError("wheel console entry point is invalid")
     _verify_wheel_record(payloads, dist_info_prefix=dist_info_prefix)
     return {
@@ -797,7 +829,7 @@ def _verify_installed_record_against_wheel(
         raise DistributionVerificationError(
             "installed Agent lacks required installer provenance files"
         )
-    if len(console_names) != 1:
+    if len(console_names) != len(EXPECTED_CONSOLE_ENTRY_POINTS):
         raise DistributionVerificationError("installed Agent console launcher inventory is invalid")
 
     installer_payloads: dict[str, bytes] = {}
@@ -814,7 +846,7 @@ def _verify_installed_record_against_wheel(
         )
     return {
         "installed_record_count": str(len(installed_record)),
-        "console_record": next(iter(console_names)),
+        "console_records": ",".join(sorted(console_names)),
     }
 
 
@@ -895,7 +927,7 @@ def verify_installed_distribution(
         for entry in distribution.entry_points
         if entry.group == "console_scripts"
     }
-    if entry_points != {EXPECTED_CONSOLE_ENTRY_POINT}:
+    if entry_points != EXPECTED_CONSOLE_ENTRY_POINTS:
         raise DistributionVerificationError("installed Agent console entry point is invalid")
     schemas = available_schemas()
     if len(schemas) != len(EXPECTED_SCHEMA_RESOURCES):

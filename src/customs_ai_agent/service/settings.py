@@ -11,6 +11,7 @@ from pydantic import SecretStr
 _GIT_SHA = re.compile(r"^[0-9a-f]{40}$")
 _SHA256 = re.compile(r"^[0-9a-f]{64}$")
 _TOKEN = re.compile(r"^[\x21-\x7e]{43,512}$")
+_BEARER_TOKEN68 = re.compile(r"^[A-Za-z0-9\-._~+/]{43,504}={0,8}$")
 _HEADER_NAME = re.compile(r"^[A-Za-z][A-Za-z0-9-]{0,63}$")
 _LOG_LEVELS = frozenset({"CRITICAL", "ERROR", "WARNING", "INFO"})
 
@@ -78,7 +79,7 @@ class ServiceSettings:
     evidence_base_url: str
     evidence_allowed_origins: frozenset[str] = frozenset()
     evidence_service_token: SecretStr | None = None
-    evidence_token_header: str = "X-Demo-Token"
+    evidence_token_header: str = "Authorization"
     environment: str = "development"
     build_sha: str = "unknown"
     wheel_sha256: str = "unknown"
@@ -109,9 +110,21 @@ class ServiceSettings:
             raise ServiceConfigurationError("evidence_service_base_url_missing")
         if _HEADER_NAME.fullmatch(self.evidence_token_header) is None:
             raise ServiceConfigurationError("evidence_service_token_header_invalid")
+        evidence_token = (
+            self.evidence_service_token.get_secret_value()
+            if self.evidence_service_token is not None
+            else None
+        )
+        if self.evidence_token_header.casefold() == "authorization" and evidence_token is not None:
+            if _BEARER_TOKEN68.fullmatch(evidence_token) is None or len(set(evidence_token)) < 12:
+                raise ServiceConfigurationError("evidence_service_token_weak")
         if self.environment not in {"development", "test", "production"}:
             raise ServiceConfigurationError("customs_agent_environment_invalid")
         if self.environment == "production":
+            if self.evidence_token_header.casefold() != "authorization":
+                raise ServiceConfigurationError("production_evidence_auth_must_use_bearer")
+            if evidence_token is None:
+                raise ServiceConfigurationError("evidence_service_token_missing")
             if _GIT_SHA.fullmatch(self.build_sha) is None:
                 raise ServiceConfigurationError("customs_agent_build_sha_invalid")
             if _SHA256.fullmatch(self.wheel_sha256) is None:
@@ -170,7 +183,7 @@ class ServiceSettings:
             evidence_service_token=SecretStr(evidence_token) if evidence_token else None,
             evidence_token_header=source.get(
                 "EVIDENCE_SERVICE_TOKEN_HEADER",
-                "X-Demo-Token",
+                "Authorization",
             ).strip(),
             environment=source.get("CUSTOMS_AGENT_ENVIRONMENT", "development").strip().casefold(),
             build_sha=source.get("CUSTOMS_AGENT_BUILD_SHA", "unknown").strip().casefold(),

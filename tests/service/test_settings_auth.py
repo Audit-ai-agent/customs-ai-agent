@@ -32,6 +32,7 @@ def test_production_settings_require_exact_build_identity() -> None:
         "CUSTOMS_AGENT_SERVICE_BEARER_TOKEN": TEST_TOKEN,
         "EVIDENCE_SERVICE_BASE_URL": "https://evidence.example.test",
         "EVIDENCE_SERVICE_ALLOWED_ORIGINS": "https://evidence.example.test",
+        "EVIDENCE_SERVICE_TOKEN": "EvidenceBearer_abcdefghijklmnopqrstuvwxyz0123456789",
     }
     with pytest.raises(ServiceConfigurationError, match="customs_agent_build_sha_invalid"):
         ServiceSettings.from_environment(source)
@@ -40,6 +41,30 @@ def test_production_settings_require_exact_build_identity() -> None:
     settings = ServiceSettings.from_environment(source)
     assert settings.build_sha == "1" * 40
     assert settings.wheel_sha256 == "2" * 64
+    assert settings.evidence_token_header == "Authorization"
+
+
+def test_production_settings_require_evidence_bearer_auth() -> None:
+    source = {
+        "CUSTOMS_AGENT_ENVIRONMENT": "production",
+        "CUSTOMS_AGENT_BUILD_SHA": "1" * 40,
+        "CUSTOMS_AGENT_WHEEL_SHA256": "2" * 64,
+        "CUSTOMS_AGENT_SERVICE_BEARER_TOKEN": TEST_TOKEN,
+        "EVIDENCE_SERVICE_BASE_URL": "https://evidence.example.test",
+        "EVIDENCE_SERVICE_ALLOWED_ORIGINS": "https://evidence.example.test",
+        "EVIDENCE_SERVICE_TOKEN": "EvidenceBearer_abcdefghijklmnopqrstuvwxyz0123456789",
+        "EVIDENCE_SERVICE_TOKEN_HEADER": "X-Demo-Token",
+    }
+    with pytest.raises(
+        ServiceConfigurationError,
+        match="production_evidence_auth_must_use_bearer",
+    ):
+        ServiceSettings.from_environment(source)
+
+    source["EVIDENCE_SERVICE_TOKEN_HEADER"] = "Authorization"
+    source.pop("EVIDENCE_SERVICE_TOKEN")
+    with pytest.raises(ServiceConfigurationError, match="evidence_service_token_missing"):
+        ServiceSettings.from_environment(source)
 
 
 def test_bearer_comparison_hashes_both_sides_before_constant_time_compare(
