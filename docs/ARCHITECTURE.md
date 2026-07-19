@@ -321,16 +321,21 @@ Evidence response는 request ID, item ID, review date, trade type, HS context, c
 citation metadata를 검증한다.
 
 모든 HTTP retrieval은 readiness의 `evidence_contract`가 packaged consumer lock의 provider
-release, provider revision, schema SHA-256과 모두 같은지 먼저 확인한다. HTTP retriever의
+release, provider revision, provider build SHA-256, schema SHA-256과 모두 같은지 먼저 확인한다. HTTP retriever의
 기본 모드는 `required`이므로 서비스 Runtime, CLI와 evaluation runner에 동일하게 적용되며
 identity가 없으면 POST를 보내지 않는다. 전환기 `optional`은 명시적인 비릴리스 진단 전용이고,
 서비스용 `AgentRuntime`에서는 거절된다. identity가 광고된 경우에는 optional 진단도 똑같이
 exact match를 요구한다. 요청 `review_as_of`도 readiness의
-`supported_review_as_of`와 같아야 한다. POST 응답의 snapshot은 바로 앞 readiness snapshot과
-같아야 하며 rollout 불일치는 결과를 폐기한다. 현재 Data readiness는 identity를 아직 광고하지
-않으므로 HTTP release 경로는 Data 변경 전까지 fail-closed다.
+`supported_review_as_of`와 같아야 한다. 검증한 네 identity 값은
+`X-Evidence-Schema-SHA256`, `X-Evidence-Provider-Release`,
+`X-Evidence-Provider-Revision`, `X-Evidence-Provider-Build-SHA256` POST header로 보낸다.
+각 response의 네 header는 body byte를 읽기 전에 exact match여야 한다. 누락·GET A/POST B
+불일치와 provider HTTP 412는 안전 오류로 종료하며 불일치 body를 사용하지 않는다. POST 응답의
+snapshot도 바로 앞 readiness snapshot과 같아야 하며 rollout 불일치는 결과를 폐기한다. 현재
+Data readiness는 identity를 아직 광고하지 않고 lock의 build digest도 task-local 임시 값이므로
+HTTP release 경로는 Data 변경 전까지 fail-closed다.
 
-현재 provider의 정확한 handoff 조건과 GET–POST build attestation 제안은
+현재 provider의 정확한 handoff 조건과 GET–POST build header 계약은
 [`DATA_PROVIDER_HANDOFF.md`](DATA_PROVIDER_HANDOFF.md)에 기록한다. frozen v1 response body를
 Agent가 독자적으로 확장하거나 Data build identity를 추정하지 않는다.
 
@@ -343,7 +348,7 @@ provider 계약 밖의 값을 수락하지 않는다. network JSON decoder는 �
 다음 상태는 Mock으로 fallback하지 않고 자동 완료를 막는다.
 
 - service/readiness/network 실패
-- Evidence provider release/revision/schema SHA 누락 또는 불일치
+- Evidence provider release/revision/build/schema SHA 누락 또는 불일치
 - readiness가 지원하지 않는 review_as_of
 - readiness와 retrieval response의 knowledge snapshot 불일치
 - schema 또는 request/item ID 불일치

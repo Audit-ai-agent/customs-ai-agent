@@ -39,6 +39,7 @@ def test_provider_owned_contract_snapshot_matches_lock() -> None:
     assert lock["schema_version"] == "1.0"
     assert re.fullmatch(r"evidence-api-v\d+\.\d+\.\d+", lock["provider_release"])
     assert re.fullmatch(r"[0-9a-f]{40}", lock["provider_revision"])
+    assert re.fullmatch(r"[0-9a-f]{64}", lock["provider_build_sha256"])
     assert schema["$defs"]["RetrieveRequest"]["properties"]["schema_version"] == {"const": "1.0"}
 
 
@@ -55,6 +56,7 @@ def test_packaged_runtime_lock_is_exactly_the_checkout_consumer_lock() -> None:
     assert identity.schema_version == lock["schema_version"]
     assert identity.provider_release == lock["provider_release"]
     assert identity.provider_revision == lock["provider_revision"]
+    assert identity.provider_build_sha256 == lock["provider_build_sha256"]
     assert identity.schema_sha256 == lock["sha256"]
 
 

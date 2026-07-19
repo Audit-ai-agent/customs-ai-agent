@@ -53,7 +53,9 @@ from customs_ai_agent.schemas.models import (
 DEFAULT_BASE_URL = "http://127.0.0.1:8010"
 SCENARIO_ID = "evidence_live_exact_hsk10"
 EXPECTED_DOCUMENT_COUNT = 4
-REPORT_SCHEMA_VERSION = "runtime-live-evaluation-report/v1"
+REPORT_SCHEMA_VERSION = "runtime-live-evaluation-report/v2"
+LIVE_PROVIDER_SCOPE = "AGENT_TO_EVIDENCE_LIVE_RELEASE_EVALUATION"
+PROVIDER_CONFORMANCE_SCOPE = "PROVIDER_CONFORMANCE_NOT_RAG_QUALITY"
 RESULT_SCHEMA_VERSION = "2.0"
 TEXT_OUTPUT_SCHEMA_ID = "customs_claude_document_candidate"
 _SAFE_CODE = re.compile(r"^[A-Za-z0-9][A-Za-z0-9._:-]{0,127}$")
@@ -190,15 +192,18 @@ def _base_report(
     readiness_status: str,
     network_status: str,
     failures: Iterable[str],
+    provider_conformance: bool,
     release_ready: bool = False,
     agent_execution_passed: bool = False,
 ) -> dict[str, Any]:
     return {
         "report_schema_version": REPORT_SCHEMA_VERSION,
+        "scope": (PROVIDER_CONFORMANCE_SCOPE if provider_conformance else LIVE_PROVIDER_SCOPE),
         "status": status,
         "readiness_status": readiness_status,
         "network_status": network_status,
         "release_ready": release_ready,
+        "implementation_candidate_ready": False,
         "agent_execution_passed": agent_execution_passed,
         "scenario_sha256": hashlib.sha256(SCENARIO_ID.encode("utf-8")).hexdigest(),
         "contracts": contracts,
@@ -442,6 +447,7 @@ def evaluate(
     env_file: Path,
     base_url: str = DEFAULT_BASE_URL,
     live: bool = False,
+    provider_conformance: bool = False,
     allow_unready_diagnostic: bool = False,
     diagnostic_review_as_of: date | None = None,
 ) -> tuple[int, dict[str, Any]]:
@@ -453,6 +459,7 @@ def evaluate(
             readiness_status="NOT_ATTEMPTED",
             network_status="DISABLED_CONTRACT_PREFLIGHT_FAILED",
             failures=failures,
+            provider_conformance=provider_conformance,
         )
     if not live:
         return 1, _base_report(
@@ -461,6 +468,7 @@ def evaluate(
             readiness_status="NOT_ATTEMPTED",
             network_status="DISABLED_LIVE_FLAG_REQUIRED",
             failures=["live_flag_required"],
+            provider_conformance=provider_conformance,
         )
     if diagnostic_review_as_of is not None and not allow_unready_diagnostic:
         return 1, _base_report(
@@ -469,6 +477,7 @@ def evaluate(
             readiness_status="NOT_ATTEMPTED",
             network_status="DISABLED_DIAGNOSTIC_PREFLIGHT_FAILED",
             failures=["diagnostic_date_without_override"],
+            provider_conformance=provider_conformance,
         )
 
     try:
@@ -483,6 +492,7 @@ def evaluate(
             readiness_status="NOT_ATTEMPTED",
             network_status="DISABLED_CONFIGURATION_PREFLIGHT_FAILED",
             failures=[exc.code],
+            provider_conformance=provider_conformance,
         )
 
     readiness_status = "READY"
@@ -508,6 +518,7 @@ def evaluate(
                 ),
                 network_status="LIVE_READINESS_ONLY",
                 failures=[readiness_failure],
+                provider_conformance=provider_conformance,
             )
         review_as_of = diagnostic_review_as_of
         readiness_status = "UNREADY_503_DIAGNOSTIC"
@@ -518,8 +529,8 @@ def evaluate(
             env_file=env_file,
             **runtime_options,
         )
-        runtime = AgentRuntime(config)
-        result = runtime.review(_explicit_service_request(review_as_of=review_as_of))
+        with AgentRuntime(config) as runtime:
+            result = runtime.review(_explicit_service_request(review_as_of=review_as_of))
         if not isinstance(result, ReviewRunResultV2):
             raise RuntimeLiveEvaluationError("runtime_result_contract_invalid")
     except Exception as exc:
@@ -532,6 +543,7 @@ def evaluate(
             readiness_status=readiness_status,
             network_status="LIVE_AGENT_ATTEMPTED",
             failures=[failure_code],
+            provider_conformance=provider_conformance,
         )
 
     summary = _result_summary(result)
@@ -543,6 +555,7 @@ def evaluate(
         readiness_status=readiness_status,
         network_status="LIVE_AGENT_EXECUTED",
         failures=[],
+        provider_conformance=provider_conformance,
         agent_execution_passed=agent_execution_passed,
     )
     report.update(
@@ -576,7 +589,8 @@ def evaluate(
     ]
     release_ready = not failures
     report["status"] = "PASS" if release_ready else "FAIL"
-    report["release_ready"] = release_ready
+    report["release_ready"] = release_ready and not provider_conformance
+    report["implementation_candidate_ready"] = release_ready and provider_conformance
     report["errors"] = [{"code": _safe_code(code)} for code in sorted(set(failures))]
     return (0 if release_ready else 1), report
 
@@ -603,6 +617,14 @@ def build_parser() -> argparse.ArgumentParser:
         help="Required to permit Evidence and Anthropic API calls.",
     )
     parser.add_argument(
+        "--provider-conformance",
+        action="store_true",
+        help=(
+            "Classify a successful run as provider transport/contract conformance only, "
+            "never as RAG quality or release readiness."
+        ),
+    )
+    parser.add_argument(
         "--allow-unready-diagnostic",
         action="store_true",
         help=(
@@ -625,6 +647,7 @@ def main(argv: list[str] | None = None) -> int:
         env_file=args.env_file,
         base_url=args.base_url,
         live=args.live,
+        provider_conformance=args.provider_conformance,
         allow_unready_diagnostic=args.allow_unready_diagnostic,
         diagnostic_review_as_of=args.diagnostic_review_as_of,
     )

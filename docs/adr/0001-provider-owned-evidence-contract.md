@@ -40,6 +40,7 @@ Checkout의 lock 검사만으로는 실제 HTTP 서버가 그 release를 실행 
     "schema_version": "1.0",
     "provider_release": "evidence-api-v1.0.0",
     "provider_revision": "<40 lowercase hex>",
+    "provider_build_sha256": "<64 lowercase hex>",
     "schema_sha256": "<64 lowercase hex>"
   }
 }
@@ -66,13 +67,23 @@ optional을 구성 단계에서 거절한다. `disabled`는 HTTP transport
 ## Provider와 합의해야 하는 잔여 release 조건
 
 현재 lock의 `provider_revision`은 schema를 가져온 계약 revision이다. 실제 실행 build revision과
-같다는 뜻으로 사용하면 안 된다. Data Platform이 readiness identity를 구현할 때
-`contract_revision`, `provider_build_revision`, release/image digest를 분리하고 Agent lock도
-그 최종 배포 식별자에 맞춰 갱신해야 한다.
+같다는 뜻으로 사용하지 않는다. `provider_build_sha256`은 실행 artifact digest를 위한 별도
+필드다. TASK-0010에서 사용하는
+`e9261a74e0e8044c90c0e275a18002f5155500f8fc088a88430cc050c41eee9d`는 Data 최종 build가
+발행되기 전 consumer 회귀를 구현하기 위한 task-local 임시 값이며 release identity가 아니다.
+Data commit/image digest가 확정되면 두 consumer lock과 evaluation literal을 같은 최종 값으로
+교체하고 Cross-repository Live Gate를 다시 실행한다.
 
-readiness GET과 retrieval POST는 서로 다른 load-balancer target에서 처리될 수 있다. 현재
-snapshot 비교는 corpus rollout 불일치를 막지만, 같은 snapshot을 사용하는 다른 build를
-암호학적으로 증명하지는 못한다. 최종 release 전 Data 제공자 계약에는 readiness가 발급한
-일회성 attestation 또는 POST 응답의 contract/build identity echo를 추가해야 한다. 그때까지
-현재 구현은 identity 누락으로 안전하게 차단되지만 “원자적 build attestation 완료”로
-표시하지 않는다.
+readiness GET과 retrieval POST는 서로 다른 load-balancer target에서 처리될 수 있다. Agent는
+readiness에서 검증한 identity를 다음 네 POST header로 보낸다.
+
+- `X-Evidence-Schema-SHA256`
+- `X-Evidence-Provider-Release`
+- `X-Evidence-Provider-Revision`
+- `X-Evidence-Provider-Build-SHA256`
+
+Data는 처리한 build의 exact identity를 같은 네 response header로 echo해야 한다. Agent는 body
+byte를 읽기 전에 네 값을 exact match로 검증하고 누락·불일치 시 body를 폐기한다. Data가 expected
+identity와 다른 build라면 처리 전에 HTTP 412를 반환한다. 이 transport 결박은 frozen v1 body를
+변경하지 않는다. 다만 task-local 임시 build digest가 Data의 최종 artifact digest로 교체되고
+실제 GET A/POST A Live Gate가 통과하기 전에는 “원자적 build attestation 완료”로 표시하지 않는다.

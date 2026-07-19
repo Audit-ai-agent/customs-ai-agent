@@ -9,6 +9,12 @@ from urllib.request import Request
 import pytest
 
 from evals import run_evidence_live
+from customs_ai_agent.adapters.retrieval import (
+    EVIDENCE_PROVIDER_BUILD_SHA256_HEADER,
+    EVIDENCE_PROVIDER_RELEASE_HEADER,
+    EVIDENCE_PROVIDER_REVISION_HEADER,
+    EVIDENCE_SCHEMA_SHA256_HEADER,
+)
 from customs_ai_agent.contracts.evidence import load_pinned_evidence_contract_identity
 from customs_ai_agent.schemas.models import (
     EvidenceRetrievalResponse,
@@ -90,8 +96,14 @@ def _patch_no_network(
 
 
 class _HttpBody:
-    def __init__(self, payload: dict[str, object]) -> None:
+    def __init__(
+        self,
+        payload: dict[str, object],
+        *,
+        headers: dict[str, str] | None = None,
+    ) -> None:
         self._payload = json.dumps(payload).encode("utf-8")
+        self.headers = _identity_headers() if headers is None else headers
 
     def __enter__(self):
         return self
@@ -101,6 +113,19 @@ class _HttpBody:
 
     def read(self, size: int = -1) -> bytes:
         return self._payload if size < 0 else self._payload[:size]
+
+    def getheader(self, name: str) -> str | None:
+        return self.headers.get(name)
+
+
+def _identity_headers() -> dict[str, str]:
+    identity = load_pinned_evidence_contract_identity()
+    return {
+        EVIDENCE_SCHEMA_SHA256_HEADER: identity.schema_sha256,
+        EVIDENCE_PROVIDER_RELEASE_HEADER: identity.provider_release,
+        EVIDENCE_PROVIDER_REVISION_HEADER: identity.provider_revision,
+        EVIDENCE_PROVIDER_BUILD_SHA256_HEADER: identity.provider_build_sha256,
+    }
 
 
 def _readiness_payload(*, include_identity: bool = True) -> dict[str, object]:
@@ -116,6 +141,7 @@ def _readiness_payload(*, include_identity: bool = True) -> dict[str, object]:
             "schema_version": identity.schema_version,
             "provider_release": identity.provider_release,
             "provider_revision": identity.provider_revision,
+            "provider_build_sha256": identity.provider_build_sha256,
             "schema_sha256": identity.schema_sha256,
         }
     return payload
@@ -809,4 +835,5 @@ def test_contract_drift_blocks_live_network_and_keeps_release_pin_distinct(
         contract["pinned_provider_release_revision"]
         == run_evidence_live.EXPECTED_PINNED_PROVIDER_REVISION
     )
+    assert contract["provider_build_sha256"] == run_evidence_live.EXPECTED_PROVIDER_BUILD_SHA256
     assert contract["provider_repository_head_status"] == "not_observed_http_only"

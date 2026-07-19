@@ -56,8 +56,24 @@ class _ReadinessValidationError(ValueError):
         self.safe_reason = safe_reason
 
 
+class _ResponseIdentityValidationError(ValueError):
+    def __init__(self, safe_reason: str) -> None:
+        super().__init__(safe_reason)
+        self.safe_reason = safe_reason
+
+
 _HEADER_NAME = re.compile(r"^[!#$%&'*+.^_`|~0-9A-Za-z-]+$")
 _ISO_CALENDAR_DATE = re.compile(r"^\d{4}-\d{2}-\d{2}$")
+EVIDENCE_SCHEMA_SHA256_HEADER = "X-Evidence-Schema-SHA256"
+EVIDENCE_PROVIDER_RELEASE_HEADER = "X-Evidence-Provider-Release"
+EVIDENCE_PROVIDER_REVISION_HEADER = "X-Evidence-Provider-Revision"
+EVIDENCE_PROVIDER_BUILD_SHA256_HEADER = "X-Evidence-Provider-Build-SHA256"
+_EVIDENCE_IDENTITY_HEADER_FIELDS = (
+    (EVIDENCE_SCHEMA_SHA256_HEADER, "schema_sha256"),
+    (EVIDENCE_PROVIDER_RELEASE_HEADER, "provider_release"),
+    (EVIDENCE_PROVIDER_REVISION_HEADER, "provider_revision"),
+    (EVIDENCE_PROVIDER_BUILD_SHA256_HEADER, "provider_build_sha256"),
+)
 _RESERVED_HEADERS = {
     "accept",
     "connection",
@@ -65,6 +81,10 @@ _RESERVED_HEADERS = {
     "content-type",
     "host",
     "transfer-encoding",
+    EVIDENCE_SCHEMA_SHA256_HEADER.casefold(),
+    EVIDENCE_PROVIDER_RELEASE_HEADER.casefold(),
+    EVIDENCE_PROVIDER_REVISION_HEADER.casefold(),
+    EVIDENCE_PROVIDER_BUILD_SHA256_HEADER.casefold(),
     "x-request-id",
 }
 MAX_EVIDENCE_RESPONSE_BYTES = 2 * 1024 * 1024
@@ -204,7 +224,7 @@ def _optional_auth_header(
 
 
 def _safe_failure_reason(exc: Exception) -> str:
-    if isinstance(exc, _ReadinessValidationError):
+    if isinstance(exc, (_ReadinessValidationError, _ResponseIdentityValidationError)):
         return exc.safe_reason
     if isinstance(exc, HTTPError):
         return f"HTTP status {exc.code}"
@@ -213,6 +233,42 @@ def _safe_failure_reason(exc: Exception) -> str:
     if isinstance(exc, URLError):
         return "network error"
     return "invalid contract response"
+
+
+def _evidence_identity_headers(
+    identity: EvidenceContractIdentity,
+) -> dict[str, str]:
+    return {
+        header_name: str(getattr(identity, field_name))
+        for header_name, field_name in _EVIDENCE_IDENTITY_HEADER_FIELDS
+    }
+
+
+def _response_header_value(response: Any, header_name: str) -> str | None:
+    """Read one response header without trusting provider exception details."""
+
+    try:
+        getheader = getattr(response, "getheader", None)
+        if callable(getheader):
+            value = getheader(header_name)
+        else:
+            response_headers = getattr(response, "headers", None)
+            get_value = getattr(response_headers, "get", None)
+            value = get_value(header_name) if callable(get_value) else None
+    except Exception:
+        raise _ResponseIdentityValidationError("contract identity mismatch") from None
+    return value if isinstance(value, str) else None
+
+
+def _validate_response_identity_headers(
+    response: Any,
+    expected_identity: EvidenceContractIdentity,
+) -> None:
+    """Reject a rollout/build mismatch before reading any Evidence body bytes."""
+
+    for header_name, expected_value in _evidence_identity_headers(expected_identity).items():
+        if _response_header_value(response, header_name) != expected_value:
+            raise _ResponseIdentityValidationError("contract identity mismatch")
 
 
 def _validate_transport_settings(timeout_seconds: float, max_retries: int) -> None:
@@ -630,6 +686,9 @@ class HttpRegulationRetriever:
             "Content-Type": "application/json; charset=utf-8",
             "X-Request-ID": request.request_id,
         }
+        response_identity = readiness.contract_identity if readiness is not None else None
+        if response_identity is not None:
+            headers.update(_evidence_identity_headers(response_identity))
         headers.update(self._auth_header)
         last_error: Exception | None = None
         for _ in range(self.max_retries + 1):
@@ -645,6 +704,11 @@ class HttpRegulationRetriever:
                     http_request,
                     timeout=self.timeout_seconds,
                 ) as response:
+                    if response_identity is not None:
+                        _validate_response_identity_headers(
+                            response,
+                            response_identity,
+                        )
                     body = _read_bounded_response(response)
                 response_payload = _load_strict_json(body)
                 validate_pinned_evidence_payload(response_payload)
@@ -659,8 +723,16 @@ class HttpRegulationRetriever:
                         "Evidence Service response snapshot does not match readiness"
                     )
                 return parsed
+            except _ResponseIdentityValidationError as exc:
+                reason = _safe_failure_reason(exc)
+                raise RetrievalError(f"Evidence Service request failed: {reason}") from None
+            except HTTPError as exc:
+                if exc.code == 412:
+                    raise RetrievalError(
+                        "Evidence Service request failed: HTTP status 412"
+                    ) from None
+                last_error = exc
             except (
-                HTTPError,
                 URLError,
                 TimeoutError,
                 ValidationError,

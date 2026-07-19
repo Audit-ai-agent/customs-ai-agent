@@ -436,6 +436,7 @@ class AgentRuntime:
 
     __slots__ = (
         "_analyzer",
+        "_closed",
         "_config",
         "_retriever",
         "_secret_markers",
@@ -477,6 +478,7 @@ class AgentRuntime:
         self._config = config
         self._retriever = retriever
         self._analyzer = analyzer
+        self._closed = False
         self._secret_markers = tuple(
             marker
             for marker in (
@@ -486,12 +488,49 @@ class AgentRuntime:
             if marker
         )
 
+    def _assert_open(self) -> None:
+        if self._closed:
+            raise RuntimeExecutionError(
+                "runtime_closed",
+                "The Agent runtime is closed.",
+            )
+
+    def close(self) -> None:
+        """Close the runtime-owned Anthropic client.
+
+        ``RuntimeConfig.ocr_layout_provider`` is injected by the caller and
+        remains caller-owned. Closing the Agent runtime therefore never closes
+        that OCR provider.
+        """
+
+        if self._closed:
+            return
+        self._closed = True
+        close_analyzer = getattr(self._analyzer, "close", None)
+        if not callable(close_analyzer):
+            return
+        try:
+            close_analyzer()
+        except Exception:
+            raise RuntimeExecutionError(
+                "runtime_close_failed",
+                "The Agent runtime could not close its provider client safely.",
+            ) from None
+
+    def __enter__(self) -> AgentRuntime:
+        self._assert_open()
+        return self
+
+    def __exit__(self, *_args: object) -> None:
+        self.close()
+
     def review_json(
         self,
         payload: bytes | bytearray | memoryview,
     ) -> ReviewRunResultV2:
         """Validate a bounded, duplicate-key-free UTF-8 JSON service request."""
 
+        self._assert_open()
         if type(payload) not in {bytes, bytearray, memoryview}:
             raise RuntimeInputError(
                 "review_request_invalid",
@@ -557,6 +596,7 @@ class AgentRuntime:
     ) -> ReviewRunResultV2:
         """Run one real V2 review and return only the redacted public contract."""
 
+        self._assert_open()
         if not isinstance(request, (ServiceReviewRunRequestV2, dict)):
             raise RuntimeInputError(
                 "review_request_invalid",

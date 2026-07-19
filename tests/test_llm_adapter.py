@@ -493,6 +493,65 @@ def test_analyzer_constructor_pins_official_anthropic_endpoint(monkeypatch, tmp_
     assert captured["api_key"] == "file-key"
 
 
+def test_from_settings_analyzer_closes_only_its_anthropic_client(monkeypatch):
+    class Client:
+        def __init__(self) -> None:
+            self.messages = SimpleNamespace()
+            self.close_calls = 0
+
+        def close(self) -> None:
+            self.close_calls += 1
+
+    class CallerOwnedOcr:
+        def __init__(self) -> None:
+            self.close_calls = 0
+
+        def close(self) -> None:
+            self.close_calls += 1
+
+    client = Client()
+    ocr_provider = CallerOwnedOcr()
+    monkeypatch.setattr(
+        "customs_ai_agent.adapters.llm.anthropic.Anthropic",
+        lambda **_kwargs: client,
+    )
+
+    analyzer = ClaudeDocumentAnalyzer.from_settings(
+        ClaudeSettings(api_key=SecretStr("unit-test-key")),
+        ocr_layout_provider=ocr_provider,
+    )
+    analyzer.close()
+    analyzer.close()
+
+    assert client.close_calls == 1
+    assert ocr_provider.close_calls == 0
+    with pytest.raises(LLMConfigurationError) as exc_info:
+        analyzer.analyze({"content_text": "COMMERCIAL INVOICE"})
+    assert exc_info.value.code == "document_analyzer_closed"
+
+
+def test_directly_injected_transport_remains_caller_owned():
+    class CallerOwnedTransport:
+        def __init__(self) -> None:
+            self.close_calls = 0
+
+        def close(self) -> None:
+            self.close_calls += 1
+
+        def create_document_analysis(self, **_kwargs):
+            raise AssertionError("transport must not be called")
+
+    transport = CallerOwnedTransport()
+    analyzer = ClaudeDocumentAnalyzer(
+        transport,
+        ClaudeSettings(api_key=SecretStr("unit-test-key")),
+    )
+
+    analyzer.close()
+
+    assert transport.close_calls == 0
+
+
 def test_release_rejects_unevaluated_model_override(monkeypatch):
     monkeypatch.setenv("ANTHROPIC_API_KEY", "process-key")
     monkeypatch.setenv("CUSTOMS_AGENT_CLAUDE_MODEL", "claude-other")

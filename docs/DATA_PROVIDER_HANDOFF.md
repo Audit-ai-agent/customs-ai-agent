@@ -39,8 +39,28 @@ frozen v1 response body는 `additionalProperties: false`이므로 임의 identit
    검증·echo한다.
 3. response body를 바꿔야 한다면 v1을 수정하지 않고 v2 endpoint/schema를 추가한다.
 
-Agent는 합의된 provider 계약이 발행된 뒤 각 retry response의 actual identity를 exact match로
-검증하고, 누락·불일치 시 body를 폐기해야 한다.
+TASK-0010 Agent consumer는 1번 방식을 다음 exact header로 구현한다.
+
+| Header | 값 |
+|---|---|
+| `X-Evidence-Schema-SHA256` | readiness의 `schema_sha256` |
+| `X-Evidence-Provider-Release` | readiness의 `provider_release` |
+| `X-Evidence-Provider-Revision` | readiness의 `provider_revision` |
+| `X-Evidence-Provider-Build-SHA256` | readiness의 `provider_build_sha256` |
+
+Agent는 각 POST에 네 expected header를 보내고, 각 response의 네 actual header를 body byte보다 먼저
+exact match로 검증한다. 누락·불일치 시 body를 읽지 않고 실패한다. Data는 expected identity와
+실행 build가 다르면 body 처리 전에 HTTP 412를 반환해야 한다.
+
+현재 Agent lock의 `provider_build_sha256`
+`e9261a74e0e8044c90c0e275a18002f5155500f8fc088a88430cc050c41eee9d`는 TASK-0010 회귀용
+임시 값이다. Data 최종 commit/image artifact가 발행되면 그 실제 digest로 교체해야 하며, 현재
+값으로 Live release PASS를 만들면 안 된다.
+
+이 임시 값에 맞춘 conformance provider 검증은 runtime evaluator의 명시적
+`--provider-conformance`에서만 수행한다. 성공해도 report scope는
+`PROVIDER_CONFORMANCE_NOT_RAG_QUALITY`, `release_ready=false`다. 실제 Data release 모드는
+최종 provider digest, 58/58 corpus와 RAG 품질 Gate를 별도로 요구한다.
 
 ## Data readiness 완료 조건
 

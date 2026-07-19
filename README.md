@@ -227,27 +227,26 @@ Claude와 Evidence HTTP 경로만 사용한다.
 from customs_ai_agent import AgentRuntime, AgentRuntimeError, RuntimeConfig
 
 evidence_url = "http://127.0.0.1:8010"
-runtime = AgentRuntime(
-    RuntimeConfig.from_environment(
-        evidence_base_url=evidence_url,
-        evidence_allowed_origins=frozenset({evidence_url}),
-        env_file="../_secrets/.env",
-    )
-)
-
 try:
-    result = runtime.review_json(
-        b"""{
-            "case_id": "case-001",
-            "documents": [{
+    with AgentRuntime(
+        RuntimeConfig.from_environment(
+            evidence_base_url=evidence_url,
+            evidence_allowed_origins=frozenset({evidence_url}),
+            env_file="../_secrets/.env",
+        )
+    ) as runtime:
+        result = runtime.review_json(
+            b"""{
+                "case_id": "case-001",
+                "documents": [{
                     "document_id": "invoice-001",
                     "filename": "invoice.txt",
                     "content_text": "COMMERCIAL INVOICE\\nInvoice No: INV-001"
-            }],
-            "llm_mode": "llm",
-            "review_as_of": "2026-07-10"
-        }"""
-    )
+                }],
+                "llm_mode": "llm",
+                "review_as_of": "2026-07-10"
+            }"""
+        )
 except AgentRuntimeError as exc:
     safe_error_code = exc.code
 else:
@@ -259,6 +258,21 @@ else:
 필수 contract identity가 없으므로 위 호출은 Data가 그 계약을 제공할 때까지 fail-closed한다.
 image/PDF 호출은 추가로 canonical OCR release attestation을 통과한 provider가 필요하며,
 현재 OCR release pin이 비어 있으므로 성공 예제로 표시하지 않는다.
+
+장기 실행 Backend는 `AgentRuntime`을 context manager로 사용하거나 종료 시 `close()`를
+호출한다. Runtime은 자신이 생성한 Anthropic client만 닫는다. `RuntimeConfig`로 주입한 OCR
+provider는 호출자 소유이므로 Runtime이 닫지 않으며 Backend가 별도 lifecycle을 관리한다.
+
+required Evidence 경로는 readiness의 schema/release/revision/build SHA-256을 네
+`X-Evidence-*` POST header로 전달하고 response의 같은 네 header를 body보다 먼저 exact match로
+검증한다. 현재 lock의 build SHA-256은 TASK-0010 transport 회귀용 임시 값이며 Data 최종
+artifact digest가 발행되면 교체해야 한다.
+
+Data의 contract/header 구현만 확인하는 서버를 사용할 때는 runtime Live evaluator에
+`--provider-conformance`를 명시한다. 이 모드의 `status=PASS`는
+`scope=PROVIDER_CONFORMANCE_NOT_RAG_QUALITY`,
+`implementation_candidate_ready=true`, `release_ready=false`로 기록한다. 합성 conformance
+provider의 PASS를 실제 법령 corpus·RAG 품질·서비스 release PASS로 승격하지 않는다.
 
 ## 로컬 text/image/PDF review
 

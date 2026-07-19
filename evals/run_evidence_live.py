@@ -38,6 +38,7 @@ DEFAULT_BASE_URL = "http://127.0.0.1:8010"
 EXPECTED_EVIDENCE_SCHEMA_SHA256 = "531b59ba4e86f78cef20a4fca052996efd8b88c48853ac12113ca76e69cdd69a"
 EXPECTED_PROVIDER_RELEASE = "evidence-api-v1.0.0"
 EXPECTED_PINNED_PROVIDER_REVISION = "a8935007262434523a84e2914271140c5e88489a"
+EXPECTED_PROVIDER_BUILD_SHA256 = "e9261a74e0e8044c90c0e275a18002f5155500f8fc088a88430cc050c41eee9d"
 REPORT_SCHEMA_VERSION = "evidence-live-evaluation-report/v2"
 REPORT_SCOPE = "SYNTHETIC_AGENT_TO_EVIDENCE_HTTP_NOT_RELEASE"
 ALLOWED_SCENARIOS = frozenset({"happy_path", "evidence_live_exact_hsk10"})
@@ -173,6 +174,8 @@ def _contract_preflight(
         failures.append("provider_release_pin_unexpected")
     if lock.get("provider_revision") != EXPECTED_PINNED_PROVIDER_REVISION:
         failures.append("provider_release_revision_pin_unexpected")
+    if lock.get("provider_build_sha256") != EXPECTED_PROVIDER_BUILD_SHA256:
+        failures.append("provider_build_sha256_pin_unexpected")
     if lock.get("canonical_owner") != "customs-data-platform":
         failures.append("canonical_owner_unexpected")
     if lock.get("consumer") != "customs-ai-agent":
@@ -188,6 +191,7 @@ def _contract_preflight(
         ),
         "provider_release": _safe_code(lock.get("provider_release")),
         "pinned_provider_release_revision": _safe_code(lock.get("provider_revision")),
+        "provider_build_sha256": _safe_sha256(lock.get("provider_build_sha256")),
         "provider_repository_head_status": "not_observed_http_only",
     }
     return report, sorted(set(failures))

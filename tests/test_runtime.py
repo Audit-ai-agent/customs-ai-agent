@@ -40,8 +40,22 @@ class _FakeOcrProvider:
 
 
 class _FakeReleaseOcrProvider(_FakeOcrProvider):
+    def __init__(self) -> None:
+        self.close_calls = 0
+
     def assert_service_ready(self) -> None:
         return None
+
+    def close(self) -> None:
+        self.close_calls += 1
+
+
+class _FakeOwnedAnalyzer:
+    def __init__(self) -> None:
+        self.close_calls = 0
+
+    def close(self) -> None:
+        self.close_calls += 1
 
 
 def test_top_level_package_exports_only_service_runtime_api() -> None:
@@ -197,7 +211,7 @@ def _patch_runtime_dependencies(
 ) -> dict[str, Any]:
     captured: dict[str, Any] = {}
     retriever = object()
-    analyzer = object()
+    analyzer = _FakeOwnedAnalyzer()
 
     def fake_retriever(base_url: str, **options: Any) -> object:
         captured["base_url"] = base_url
@@ -794,6 +808,64 @@ def test_runtime_contract_identity_handshake_is_required_by_default(
     )
 
     assert captured["retriever_options"]["contract_identity_mode"] == "required"
+
+
+def test_runtime_context_closes_owned_anthropic_analyzer_but_not_injected_ocr(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    captured = _patch_runtime_dependencies(monkeypatch)
+    monkeypatch.setattr(
+        runtime_module,
+        "ReleaseLockedOcrProvider",
+        _FakeReleaseOcrProvider,
+    )
+    provider = _FakeReleaseOcrProvider()
+    config = RuntimeConfig(
+        claude_settings=_settings(),
+        evidence_base_url="http://127.0.0.1:8010",
+        ocr_layout_provider=provider,
+    )
+
+    with AgentRuntime(config) as runtime:
+        assert runtime.review(_text_request()).schema_version == "2.0"
+
+    analyzer = captured["analyzer"]
+    assert analyzer.close_calls == 1
+    assert provider.close_calls == 0
+
+    runtime.close()
+    assert analyzer.close_calls == 1
+    assert provider.close_calls == 0
+    with pytest.raises(RuntimeExecutionError) as exc_info:
+        runtime.review(_text_request())
+    assert exc_info.value.code == "runtime_closed"
+
+
+def test_runtime_close_failure_is_content_free_and_stays_closed(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    captured = _patch_runtime_dependencies(monkeypatch)
+    private_detail = "private client close detail"
+
+    def fail_close() -> None:
+        raise RuntimeError(private_detail)
+
+    captured["analyzer"].close = fail_close
+    runtime = AgentRuntime(
+        RuntimeConfig(
+            claude_settings=_settings(),
+            evidence_base_url="http://127.0.0.1:8010",
+        )
+    )
+
+    with pytest.raises(RuntimeExecutionError) as captured_error:
+        runtime.close()
+
+    assert captured_error.value.code == "runtime_close_failed"
+    assert private_detail not in str(captured_error.value)
+    runtime.close()
+    with pytest.raises(RuntimeExecutionError, match="runtime_closed"):
+        runtime.review_json(b"{}")
 
 
 def test_service_runtime_rejects_optional_contract_identity_mode() -> None:

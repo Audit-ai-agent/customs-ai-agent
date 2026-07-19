@@ -31,6 +31,7 @@ class EvidenceContractIdentity:
     schema_version: str
     provider_release: str
     provider_revision: str
+    provider_build_sha256: str
     schema_sha256: str
 
     @classmethod
@@ -46,6 +47,7 @@ class EvidenceContractIdentity:
         schema_version = value.get("schema_version")
         provider_release = value.get("provider_release")
         provider_revision = value.get("provider_revision")
+        provider_build_sha256 = value.get("provider_build_sha256")
         schema_sha256 = value.get(sha_field)
         if (
             contract != "evidence-retrieval"
@@ -54,6 +56,8 @@ class EvidenceContractIdentity:
             or _PROVIDER_RELEASE.fullmatch(provider_release) is None
             or not isinstance(provider_revision, str)
             or _GIT_REVISION.fullmatch(provider_revision) is None
+            or not isinstance(provider_build_sha256, str)
+            or _SHA256.fullmatch(provider_build_sha256) is None
             or not isinstance(schema_sha256, str)
             or _SHA256.fullmatch(schema_sha256) is None
         ):
@@ -63,6 +67,7 @@ class EvidenceContractIdentity:
             schema_version=schema_version,
             provider_release=provider_release,
             provider_revision=provider_revision,
+            provider_build_sha256=provider_build_sha256,
             schema_sha256=schema_sha256,
         )
 

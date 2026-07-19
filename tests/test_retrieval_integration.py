@@ -3,7 +3,7 @@ from __future__ import annotations
 import json
 from copy import deepcopy
 from datetime import date
-from urllib.error import URLError
+from urllib.error import HTTPError, URLError
 from urllib.request import Request
 
 from pydantic import ValidationError
@@ -12,6 +12,10 @@ import pytest
 from customs_ai_agent.adapters.retrieval import (
     MAX_EVIDENCE_RESPONSE_BYTES,
     EmptyRegulationRetriever,
+    EVIDENCE_PROVIDER_BUILD_SHA256_HEADER,
+    EVIDENCE_PROVIDER_RELEASE_HEADER,
+    EVIDENCE_PROVIDER_REVISION_HEADER,
+    EVIDENCE_SCHEMA_SHA256_HEADER,
     FailingRegulationRetriever,
     HttpRegulationRetriever,
     PartialRegulationRetriever,
@@ -102,14 +106,32 @@ def _readiness_payload(
             "schema_version": identity.schema_version,
             "provider_release": identity.provider_release,
             "provider_revision": identity.provider_revision,
+            "provider_build_sha256": identity.provider_build_sha256,
             "schema_sha256": identity.schema_sha256,
         }
     return payload
 
 
+def _identity_headers() -> dict[str, str]:
+    identity = load_pinned_evidence_contract_identity()
+    return {
+        EVIDENCE_SCHEMA_SHA256_HEADER: identity.schema_sha256,
+        EVIDENCE_PROVIDER_RELEASE_HEADER: identity.provider_release,
+        EVIDENCE_PROVIDER_REVISION_HEADER: identity.provider_revision,
+        EVIDENCE_PROVIDER_BUILD_SHA256_HEADER: identity.provider_build_sha256,
+    }
+
+
 class _HttpBody:
-    def __init__(self, payload: bytes) -> None:
+    def __init__(
+        self,
+        payload: bytes,
+        *,
+        headers: dict[str, str] | None = None,
+    ) -> None:
         self.payload = payload
+        self.headers = _identity_headers() if headers is None else headers
+        self.read_count = 0
 
     def __enter__(self):
         return self
@@ -118,7 +140,11 @@ class _HttpBody:
         return None
 
     def read(self, size: int = -1) -> bytes:
+        self.read_count += 1
         return self.payload if size < 0 else self.payload[:size]
+
+    def getheader(self, name: str) -> str | None:
+        return self.headers.get(name)
 
 
 class RequirementRetriever:
@@ -1289,6 +1315,7 @@ def test_http_retriever_sends_token_only_in_configured_header(monkeypatch):
         ("secret\r\ninjected: yes", "X-Demo-Token"),
         ("secret", "X-Demo-Token\r\nInjected"),
         ("secret", "X-Request-ID"),
+        ("secret", EVIDENCE_PROVIDER_BUILD_SHA256_HEADER),
     ],
 )
 def test_http_retriever_rejects_unsafe_token_or_header(token, header):
@@ -1413,6 +1440,7 @@ def test_required_readiness_rejects_provider_that_omits_contract_identity(monkey
     [
         ("provider_release", "evidence-api-v1.0.1"),
         ("provider_revision", "b" * 40),
+        ("provider_build_sha256", "b" * 64),
         ("schema_sha256", "b" * 64),
     ],
 )
@@ -1444,10 +1472,13 @@ def test_readiness_rejects_well_formed_contract_identity_mismatch(
 def test_required_http_retrieval_attests_before_every_post(monkeypatch):
     response = _http_test_response("request-http-1")
     methods = []
+    post_headers = []
 
     def fake_urlopen(request, timeout):
         assert timeout == 60.0
         methods.append(request.get_method())
+        if request.get_method() == "POST":
+            post_headers.append({name.casefold(): value for name, value in request.header_items()})
         payload = (
             _readiness_payload(snapshot_id="snapshot-http-v1")
             if request.get_method() == "GET"
@@ -1465,6 +1496,152 @@ def test_required_http_retrieval_attests_before_every_post(monkeypatch):
     assert retriever.retrieve(_http_test_request()) == response
     assert retriever.retrieve(_http_test_request()) == response
     assert methods == ["GET", "POST", "GET", "POST"]
+    expected_headers = {name.casefold(): value for name, value in _identity_headers().items()}
+    assert all(
+        {name: headers[name] for name in expected_headers} == expected_headers
+        for headers in post_headers
+    )
+
+
+def test_required_http_retrieval_rejects_get_post_build_mismatch_before_body_read(
+    monkeypatch,
+):
+    response = _http_test_response("request-http-1")
+    methods = []
+    post_body = _HttpBody(
+        json.dumps(response.model_dump(mode="json")).encode("utf-8"),
+        headers={
+            **_identity_headers(),
+            EVIDENCE_PROVIDER_BUILD_SHA256_HEADER: "b" * 64,
+        },
+    )
+
+    def fake_urlopen(request, timeout):
+        assert timeout == 60.0
+        methods.append(request.get_method())
+        if request.get_method() == "GET":
+            return _HttpBody(
+                json.dumps(_readiness_payload(snapshot_id="snapshot-http-v1")).encode("utf-8")
+            )
+        return post_body
+
+    monkeypatch.setattr("customs_ai_agent.adapters.retrieval.urlopen", fake_urlopen)
+
+    with pytest.raises(
+        RetrievalError,
+        match=r"^Evidence Service request failed: contract identity mismatch$",
+    ):
+        HttpRegulationRetriever(
+            "http://localhost:8010",
+            max_retries=0,
+            contract_identity_mode="required",
+        ).retrieve(_http_test_request())
+
+    assert methods == ["GET", "POST"]
+    assert post_body.read_count == 0
+
+
+def test_required_http_retrieval_rejects_missing_response_identity_before_body_read(
+    monkeypatch,
+):
+    response = _http_test_response("request-http-1")
+    post_body = _HttpBody(
+        json.dumps(response.model_dump(mode="json")).encode("utf-8"),
+        headers={},
+    )
+
+    def fake_urlopen(request, **_kwargs):
+        if request.get_method() == "GET":
+            return _HttpBody(
+                json.dumps(_readiness_payload(snapshot_id="snapshot-http-v1")).encode("utf-8")
+            )
+        return post_body
+
+    monkeypatch.setattr("customs_ai_agent.adapters.retrieval.urlopen", fake_urlopen)
+
+    with pytest.raises(
+        RetrievalError,
+        match=r"^Evidence Service request failed: contract identity mismatch$",
+    ):
+        HttpRegulationRetriever(
+            "http://localhost:8010",
+            max_retries=1,
+        ).retrieve(_http_test_request())
+
+    assert post_body.read_count == 0
+
+
+def test_retrieval_retry_revalidates_identity_and_rejects_build_drift(
+    monkeypatch,
+):
+    response = _http_test_response("request-http-1")
+    methods = []
+    drifted_body = _HttpBody(
+        json.dumps(response.model_dump(mode="json")).encode("utf-8"),
+        headers={
+            **_identity_headers(),
+            EVIDENCE_PROVIDER_BUILD_SHA256_HEADER: "c" * 64,
+        },
+    )
+    post_attempt = 0
+
+    def fake_urlopen(request, **_kwargs):
+        nonlocal post_attempt
+        method = request.get_method()
+        methods.append(method)
+        if method == "GET":
+            return _HttpBody(
+                json.dumps(_readiness_payload(snapshot_id="snapshot-http-v1")).encode("utf-8")
+            )
+        post_attempt += 1
+        if post_attempt == 1:
+            raise URLError("private transient detail")
+        return drifted_body
+
+    monkeypatch.setattr("customs_ai_agent.adapters.retrieval.urlopen", fake_urlopen)
+
+    with pytest.raises(
+        RetrievalError,
+        match=r"^Evidence Service request failed: contract identity mismatch$",
+    ):
+        HttpRegulationRetriever(
+            "http://localhost:8010",
+            max_retries=1,
+        ).retrieve(_http_test_request())
+
+    assert methods == ["GET", "POST", "POST"]
+    assert drifted_body.read_count == 0
+
+
+def test_http_412_is_safe_and_never_reads_provider_error_body(monkeypatch):
+    private_reason = "private rollout detail"
+    methods = []
+
+    def fake_urlopen(request, **_kwargs):
+        methods.append(request.get_method())
+        if request.get_method() == "GET":
+            return _HttpBody(
+                json.dumps(_readiness_payload(snapshot_id="snapshot-http-v1")).encode("utf-8")
+            )
+        raise HTTPError(
+            request.full_url,
+            412,
+            private_reason,
+            hdrs=None,
+            fp=None,
+        )
+
+    monkeypatch.setattr("customs_ai_agent.adapters.retrieval.urlopen", fake_urlopen)
+
+    with pytest.raises(RetrievalError) as captured:
+        HttpRegulationRetriever(
+            "http://localhost:8010",
+            max_retries=1,
+        ).retrieve(_http_test_request())
+
+    assert str(captured.value) == "Evidence Service request failed: HTTP status 412"
+    assert private_reason not in str(captured.value)
+    assert methods == ["GET", "POST"]
 
 
 def test_required_http_retrieval_rejects_snapshot_changed_after_readiness(monkeypatch):

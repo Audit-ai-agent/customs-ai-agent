@@ -664,6 +664,17 @@ class AnthropicMessagesTransport:
 
     def __init__(self, client: Any) -> None:
         self._client = client
+        self._closed = False
+
+    def close(self) -> None:
+        """Close only the Anthropic SDK client owned by this transport."""
+
+        if self._closed:
+            return
+        self._closed = True
+        close_client = getattr(self._client, "close", None)
+        if callable(close_client):
+            close_client()
 
     def create_document_analysis(
         self,
@@ -674,6 +685,11 @@ class AnthropicMessagesTransport:
         user_message: str | list[dict[str, Any]],
         output_schema: dict[str, Any],
     ) -> ClaudeTransportResult:
+        if self._closed:
+            raise LLMConfigurationError(
+                "anthropic_transport_closed",
+                "The Claude transport is closed.",
+            )
         _safe_provider_logging()
         started = time.perf_counter()
         try:
@@ -1361,10 +1377,14 @@ class ClaudeDocumentAnalyzer:
         transport: ClaudeTransport,
         settings: ClaudeSettings,
         ocr_layout_provider: OcrLayoutProvider | None = None,
+        *,
+        _owns_transport: bool = False,
     ) -> None:
         settings = _validated_claude_settings(settings)
         _safe_provider_runtime_environment()
         self._transport = transport
+        self._owns_transport = _owns_transport
+        self._closed = False
         self._settings = settings
         self._ocr_layout_provider = ocr_layout_provider
         self._text_system_prompt = load_document_analysis_system_prompt()
@@ -1412,11 +1432,29 @@ class ClaudeDocumentAnalyzer:
             timeout=settings.timeout_seconds,
             max_retries=settings.max_retries,
         )
-        return cls(
-            AnthropicMessagesTransport(client),
-            settings,
-            ocr_layout_provider=ocr_layout_provider,
-        )
+        transport = AnthropicMessagesTransport(client)
+        try:
+            return cls(
+                transport,
+                settings,
+                ocr_layout_provider=ocr_layout_provider,
+                _owns_transport=True,
+            )
+        except Exception:
+            transport.close()
+            raise
+
+    def close(self) -> None:
+        """Close the internally-created Anthropic transport, never the OCR provider."""
+
+        if self._closed:
+            return
+        self._closed = True
+        if not self._owns_transport:
+            return
+        close_transport = getattr(self._transport, "close", None)
+        if callable(close_transport):
+            close_transport()
 
     def _metadata(
         self,
@@ -1881,6 +1919,11 @@ class ClaudeDocumentAnalyzer:
         )
 
     def analyze(self, document: Mapping[str, Any]) -> DocumentAnalysis:
+        if self._closed:
+            raise LLMConfigurationError(
+                "document_analyzer_closed",
+                "The Claude document analyzer is closed.",
+            )
         has_text = bool(str(document.get("content_text") or "").strip())
         has_images = bool(document.get("image_pages"))
         if has_text == has_images:

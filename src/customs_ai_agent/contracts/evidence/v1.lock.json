@@ -10,5 +10,6 @@
   "sha256": "531b59ba4e86f78cef20a4fca052996efd8b88c48853ac12113ca76e69cdd69a",
   "pinned_on": "2026-07-16",
   "provider_release": "evidence-api-v1.0.0",
-  "provider_revision": "a8935007262434523a84e2914271140c5e88489a"
+  "provider_revision": "a8935007262434523a84e2914271140c5e88489a",
+  "provider_build_sha256": "e9261a74e0e8044c90c0e275a18002f5155500f8fc088a88430cc050c41eee9d"
 }

@@ -80,6 +80,12 @@ def _patch_runtime(
         def __init__(self, config: object) -> None:
             captured["config"] = config
 
+        def __enter__(self):
+            return self
+
+        def __exit__(self, *_args: object) -> None:
+            captured["runtime_exit_count"] = int(captured.get("runtime_exit_count", 0)) + 1
+
         def review(self, request: ServiceReviewRunRequestV2) -> ReviewRunResultV2:
             captured.setdefault("order", []).append("agent_runtime")
             captured["request"] = request
@@ -166,6 +172,8 @@ def test_ready_allowlisted_service_runs_public_runtime_after_readiness(
     assert report["readiness_status"] == "READY"
     assert report["agent_execution_passed"] is True
     assert report["release_ready"] is True
+    assert report["implementation_candidate_ready"] is False
+    assert report["scope"] == run_runtime_live.LIVE_PROVIDER_SCOPE
     assert report["errors"] == []
     assert report["counts"]["document_count"] == 4
     assert report["counts"]["document_completed_count"] == 4
@@ -178,6 +186,7 @@ def test_ready_allowlisted_service_runs_public_runtime_after_readiness(
         }
     ]
     assert captured["order"] == ["readiness", "runtime_config", "agent_runtime"]
+    assert captured["runtime_exit_count"] == 1
     assert readiness_url == base_url
     assert readiness_options["allowed_origins"] == frozenset({base_url})
     assert readiness_options["service_token"] == "private-evidence-test-secret"
@@ -195,6 +204,71 @@ def test_ready_allowlisted_service_runs_public_runtime_after_readiness(
     assert len(request.documents) == run_runtime_live.EXPECTED_DOCUMENT_COUNT
     assert request.llm_mode == "llm"
     assert request.review_as_of == date(2026, 7, 10)
+
+
+def test_provider_conformance_pass_is_never_reported_as_rag_release_ready(
+    monkeypatch: pytest.MonkeyPatch,
+    tmp_path: Path,
+) -> None:
+    base_url = "https://evidence.example"
+    env_file = _env_file(tmp_path, allowed_origins=base_url)
+    result = _live_result("happy_path")
+    captured: dict[str, Any] = {"order": []}
+    monkeypatch.setattr(
+        run_runtime_live,
+        "fetch_supported_review_as_of",
+        lambda *_args, **_kwargs: date(2026, 7, 10),
+    )
+    _patch_runtime(monkeypatch, result, captured)
+
+    exit_code, report = run_runtime_live.evaluate(
+        env_file=env_file,
+        base_url=base_url,
+        live=True,
+        provider_conformance=True,
+    )
+
+    assert exit_code == 0
+    assert report["status"] == "PASS"
+    assert report["scope"] == "PROVIDER_CONFORMANCE_NOT_RAG_QUALITY"
+    assert report["agent_execution_passed"] is True
+    assert report["release_ready"] is False
+    assert report["implementation_candidate_ready"] is True
+    assert report["errors"] == []
+    assert captured["runtime_exit_count"] == 1
+
+
+def test_provider_conformance_scope_is_preserved_when_live_is_disabled(
+    monkeypatch: pytest.MonkeyPatch,
+    tmp_path: Path,
+) -> None:
+    _forbid_live_dependencies(monkeypatch)
+
+    exit_code, report = run_runtime_live.evaluate(
+        env_file=tmp_path / "must-not-be-read.env",
+        live=False,
+        provider_conformance=True,
+    )
+
+    assert exit_code == 1
+    assert report["status"] == "FAIL"
+    assert report["scope"] == "PROVIDER_CONFORMANCE_NOT_RAG_QUALITY"
+    assert report["release_ready"] is False
+    assert report["implementation_candidate_ready"] is False
+
+
+def test_cli_exposes_explicit_provider_conformance_flag(tmp_path: Path) -> None:
+    args = run_runtime_live.build_parser().parse_args(
+        [
+            "--env-file",
+            str(tmp_path / "runtime.env"),
+            "--live",
+            "--provider-conformance",
+        ]
+    )
+
+    assert args.live is True
+    assert args.provider_conformance is True
 
 
 def test_unready_503_diagnostic_executes_agent_and_stays_non_release(
@@ -435,9 +509,18 @@ def test_runtime_exception_is_reduced_to_safe_code(
         def from_environment(cls, **_kwargs: Any) -> object:
             return object()
 
+    exit_calls = 0
+
     class FailingRuntime:
         def __init__(self, _config: object) -> None:
             pass
+
+        def __enter__(self):
+            return self
+
+        def __exit__(self, *_args: object) -> None:
+            nonlocal exit_calls
+            exit_calls += 1
 
         def review(self, _request: ServiceReviewRunRequestV2) -> ReviewRunResultV2:
             raise RuntimeError(private_detail)
@@ -454,3 +537,4 @@ def test_runtime_exception_is_reduced_to_safe_code(
     assert exit_code == 1
     assert report["errors"] == [{"code": "agent_runtime_execution_failed"}]
     assert private_detail not in serialized
+    assert exit_calls == 1
