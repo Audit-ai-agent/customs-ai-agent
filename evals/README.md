@@ -4,6 +4,10 @@
 PII가 포함된 원본은 커밋하지 않고 `_artifacts/datasets/`에 보관하며, 저장소에는 비민감 schema,
 hash lock, 평가 코드와 허용 가능한 partial Gold만 둔다.
 
+완전한 가상데이터의 Case Master, Gold 분리, controlled mutation, 사람 검수, Evidence/RAG,
+sealed holdout과 GitHub 게시 기준은
+[완전한 가상데이터 생성 및 검증 명세](../docs/SYNTHETIC_DATASET_STANDARD.ko.md)를 따른다.
+
 ## 결과의 권위와 freeze
 
 이 문서는 평가 계약과 재현 명령을 설명한다. 변동 중인 “최신” 테스트 수나 wheel hash를 정식

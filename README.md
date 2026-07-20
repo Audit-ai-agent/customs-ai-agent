@@ -589,4 +589,6 @@ V1/V2 함수는 mock scenario와 임의 dependency injection을 허용하는 CLI
 normal, intentional anomaly, adversarial, quarantine을 분리해 보고한다.
 
 세부 구조와 불변식은 [Architecture](docs/ARCHITECTURE.md), 평가 기준은
-[Evaluations](evals/README.md), 취약점 보고는 [Security](SECURITY.md)를 참고한다.
+[Evaluations](evals/README.md), 가상데이터 생성·Gold·holdout 기준은
+[Synthetic Dataset Standard](docs/SYNTHETIC_DATASET_STANDARD.ko.md), 취약점 보고는
+[Security](SECURITY.md)를 참고한다.
