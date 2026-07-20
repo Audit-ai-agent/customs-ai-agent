@@ -131,15 +131,12 @@ _SCENARIO_SECRET_MARKERS = (
     "qdrant_api_key=",
     "sk-ant-",
 )
-_SCENARIO_NON_SYNTHETIC_MARKERS = (
-    "c:/users/",
-    "c:\\users\\",
-    "file://",
-    "http://",
-    "https://",
-    "/home/",
-    "/users/",
-    "/var/",
+_SCENARIO_URI_PATTERN = re.compile(r"(?i)(?<![A-Za-z0-9+.-])[A-Za-z][A-Za-z0-9+.-]*://")
+_SCENARIO_WINDOWS_DRIVE_PATH_PATTERN = re.compile(r"(?i)(?<![A-Za-z0-9])[A-Za-z]:[\\/]")
+_SCENARIO_UNC_OR_DEVICE_PATH_PATTERN = re.compile(r"(?:\\\\|//)")
+_SCENARIO_POSIX_ABSOLUTE_PATH_PATTERN = re.compile(
+    r"(?<![A-Za-z0-9._~+\-])/(?!/)"
+    r"[A-Za-z0-9._~+\-]+(?:/[A-Za-z0-9._~+\-]+)*"
 )
 
 
@@ -621,7 +618,12 @@ def load_scenario_catalog(catalog_path: Path, schema_path: Path) -> dict[str, An
             normalized = value.casefold()
             if any(marker in normalized for marker in _SCENARIO_SECRET_MARKERS):
                 raise InspectorConfigurationError("scenario_catalog_secret_marker_detected")
-            if any(marker in normalized for marker in _SCENARIO_NON_SYNTHETIC_MARKERS):
+            if (
+                _SCENARIO_URI_PATTERN.search(value)
+                or _SCENARIO_WINDOWS_DRIVE_PATH_PATTERN.search(value)
+                or _SCENARIO_UNC_OR_DEVICE_PATH_PATTERN.search(value)
+                or _SCENARIO_POSIX_ABSOLUTE_PATH_PATTERN.search(value)
+            ):
                 raise InspectorConfigurationError("scenario_catalog_non_synthetic_marker_detected")
     return catalog
 

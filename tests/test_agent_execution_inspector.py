@@ -432,6 +432,19 @@ def test_synthetic_scenario_catalog_has_no_credentials_paths_or_external_urls() 
         "https://example.invalid/source",
         "file:///tmp/source.json",
         "C:\\Users\\someone\\source.json",
+        "D:\\secrets\\source.json",
+        "\\\\server\\share\\source.json",
+        "\\\\?\\C:\\device\\source.json",
+        "\\\\.\\C:\\device\\source.json",
+        "/tmp/source.json",
+        "/etc/source.json",
+        "/opt/data/source.json",
+        "/srv/data/source.json",
+        "/mnt/data/source.json",
+        "/volumes/data/source.json",
+        "s3://private-bucket/source.json",
+        "gs://private-bucket/source.json",
+        "custom+transport://private/source.json",
     ],
 )
 def test_scenario_catalog_startup_rejects_external_provenance_and_paths(
@@ -452,6 +465,34 @@ def test_scenario_catalog_startup_rejects_external_provenance_and_paths(
         match="scenario_catalog_non_synthetic_marker_detected",
     ):
         server.load_scenario_catalog(tampered_path, schema_path.resolve())
+
+
+@pytest.mark.parametrize(
+    "legitimate_trade_text",
+    [
+        "B/L NO: BL-2026-001",
+        "CI–PL and PL–B/L cross-check",
+        "DIAGNOSTIC_ONLY_3_OF_58",
+        "HS 0303.54 and date 2026.06.01",
+        "QTY 1200 KG | UNIT PRICE 10",
+    ],
+)
+def test_scenario_catalog_path_guard_allows_legitimate_trade_text(
+    tmp_path: Path,
+    legitimate_trade_text: str,
+) -> None:
+    catalog = _scenario_catalog()
+    catalog["scenarios"][0]["purpose"] += f" {legitimate_trade_text}"
+    legitimate_path = (tmp_path / "legitimate-scenario-catalog.json").resolve()
+    legitimate_path.write_text(
+        json.dumps(catalog, ensure_ascii=False),
+        encoding="utf-8",
+    )
+    _catalog_path, schema_path = _scenario_catalog_paths()
+
+    loaded = server.load_scenario_catalog(legitimate_path, schema_path.resolve())
+
+    assert loaded["scenarios"][0]["purpose"].endswith(legitimate_trade_text)
 
 
 def test_scenario_catalog_startup_rejects_secret_markers(tmp_path: Path) -> None:
