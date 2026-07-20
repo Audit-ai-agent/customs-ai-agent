@@ -192,6 +192,58 @@
       grid-template-columns: 1.3fr 1.3fr 170px 145px;
       gap: 10px;
     }
+    .scenario-picker {
+      margin-bottom: 15px;
+      border: 1px solid #c8d8ef;
+      border-radius: 10px;
+      background: #f7faff;
+    }
+    .scenario-picker-head {
+      display: flex;
+      align-items: flex-end;
+      gap: 10px;
+      padding: 13px;
+      border-bottom: 1px solid #d9e6f5;
+    }
+    .scenario-picker-head label { min-width: 0; flex: 1; }
+    .scenario-picker-head button { flex: 0 0 auto; }
+    .scenario-details {
+      display: grid;
+      grid-template-columns: repeat(3, minmax(0, 1fr));
+      gap: 8px;
+      padding: 12px 13px;
+    }
+    .scenario-detail {
+      min-width: 0;
+      padding: 9px 10px;
+      border: 1px solid #dce6f3;
+      border-radius: 8px;
+      background: #fff;
+    }
+    .scenario-detail .label {
+      display: block;
+      margin-bottom: 4px;
+      color: var(--muted);
+      font-size: 10.5px;
+      font-weight: 750;
+      text-transform: uppercase;
+    }
+    .scenario-detail .value {
+      display: block;
+      overflow-wrap: anywhere;
+      font-size: 12px;
+    }
+    .scenario-load-state {
+      grid-column: 1 / -1;
+      margin: 0;
+      padding: 8px 10px;
+      border-radius: 7px;
+      color: var(--info);
+      background: var(--info-soft);
+      font-size: 11.5px;
+    }
+    .scenario-load-state.warn { color: var(--warn); background: var(--warn-soft); }
+    .scenario-load-state.fail { color: var(--fail); background: var(--fail-soft); }
     label.field { display: block; min-width: 0; }
     label.field > span {
       display: block;
@@ -477,6 +529,7 @@
       .document-meta-grid { grid-template-columns: 1fr 1fr; }
       .document-meta-grid label:last-child { grid-column: 1 / -1; }
       .three-col { grid-template-columns: 1fr; }
+      .scenario-details { grid-template-columns: 1fr; }
     }
     @media (max-width: 700px) {
       .header-inner { padding-inline: 16px; }
@@ -486,6 +539,8 @@
       .document-meta-grid, .two-col { grid-template-columns: 1fr; }
       .document-meta-grid label:last-child { grid-column: auto; }
       .run-button { width: 100%; }
+      .scenario-picker-head { align-items: stretch; flex-direction: column; }
+      .scenario-picker-head button { width: 100%; }
     }
   </style>
 </head>
@@ -537,6 +592,32 @@
       <span class="small muted">1~6개 · 총 500,000자 이하 · 이미지/PDF/OCR 제외</span>
     </div>
     <div class="card-body">
+      <section class="scenario-picker" aria-labelledby="scenario-title">
+        <div class="scenario-picker-head">
+          <label class="field">
+            <span id="scenario-title">미리 만든 가상 테스트 시나리오</span>
+            <select id="scenario-select" disabled>
+              <option value="">시나리오 카탈로그를 불러오는 중…</option>
+            </select>
+          </label>
+          <button id="load-scenario" type="button" disabled>선택 시나리오 입력 불러오기</button>
+        </div>
+        <div class="scenario-details" id="scenario-details">
+          <p class="scenario-load-state" id="scenario-load-state">
+            시나리오를 선택해도 입력은 바뀌지 않습니다. 선택 후 ‘입력 불러오기’를 눌러야
+            편집기에 반영되며, 그 후 ‘실제 Agent 전체 실행’을 별도로 눌러야 Claude로 전송됩니다.
+          </p>
+        </div>
+        <div style="padding:0 13px 12px">
+          <p class="small muted" id="scenario-catalog-notice">
+            합성 시나리오를 준비하고 있습니다. 실거래 문서를 입력하지 마세요.
+          </p>
+          <p class="small muted" id="scenario-expectation-disclaimer">
+            관찰 포인트는 정답 라벨이나 품질 평가 결과가 아닙니다.
+          </p>
+        </div>
+      </section>
+
       <form id="review-form" autocomplete="off">
         <div class="form-grid">
           <label class="field">
@@ -712,8 +793,12 @@ let elapsedTimer = null;
 let submissionGeneration = 0;
 let activeSubmissionGeneration = null;
 let submissionLocked = false;
+let scenarioCatalog = null;
+let loadedScenarioId = null;
+let loadedScenarioModified = false;
 
 const STALE_SUBMISSION = Symbol("stale-submission");
+const SCENARIO_CATALOG_SCHEMA_VERSION = "agent-execution-inspector-scenarios/v1";
 
 function isCurrentSubmission(generation) {
   return (
@@ -880,6 +965,185 @@ function updateDocumentControls() {
   });
 }
 
+function supportedReviewAsOf() {
+  return pathValue(
+    healthPayload,
+    [
+      "dependencies.evidence.supported_review_as_of",
+      "data.evidence_runtime_release.supported_review_as_of",
+      "supported_review_as_of"
+    ],
+    null
+  );
+}
+
+function selectedScenario() {
+  const selectedId = $("scenario-select").value;
+  return asList(scenarioCatalog?.scenarios).find(scenario => scenario.id === selectedId) || null;
+}
+
+function updateScenarioControls(busy = $("run-review").disabled) {
+  const catalogReady = Boolean(scenarioCatalog);
+  $("scenario-select").disabled = busy || !catalogReady;
+  $("load-scenario").disabled =
+    busy || !catalogReady || !selectedScenario() || !supportedReviewAsOf();
+}
+
+function scenarioStateMessage(scenario) {
+  if (!scenario) {
+    return {
+      state: "",
+      message: "시나리오를 선택해도 입력은 바뀌지 않습니다. 선택 후 ‘입력 불러오기’를 눌러야 편집기에 반영됩니다."
+    };
+  }
+  if (loadedScenarioId !== scenario.id) {
+    return {
+      state: "",
+      message: "선택만 된 상태입니다. 현재 수동 입력은 그대로 유지되며 Claude API 호출도 발생하지 않습니다."
+    };
+  }
+  if (loadedScenarioModified) {
+    return {
+      state: "warn",
+      message: "불러온 뒤 입력이 수정되었습니다. 아래 관찰 포인트는 참고용이며 수정된 입력의 예상 결과로 사용할 수 없습니다."
+    };
+  }
+  return {
+    state: "",
+    message: "이 시나리오 입력이 편집기에 반영되었습니다. 아직 실행되지 않았습니다. 내용을 검토한 뒤 실행 버튼을 별도로 누르세요."
+  };
+}
+
+function renderScenarioDetails() {
+  const scenario = selectedScenario();
+  const state = scenarioStateMessage(scenario);
+  if (!scenario) {
+    $("scenario-details").innerHTML =
+      `<p class="scenario-load-state ${escapeHtml(state.state)}" id="scenario-load-state">`
+      + `${escapeHtml(state.message)}</p>`;
+    updateScenarioControls();
+    return;
+  }
+  $("scenario-details").innerHTML =
+    `<div class="scenario-detail"><span class="label">목적</span>`
+    + `<span class="value">${escapeHtml(scenario.purpose)}</span></div>`
+    + `<div class="scenario-detail"><span class="label">주입된 변화</span>`
+    + `<span class="value">${escapeHtml(scenario.injected_variation)}</span></div>`
+    + `<div class="scenario-detail"><span class="label">관찰 포인트</span>`
+    + `<span class="value">${escapeHtml(scenario.expected_checkpoint)}</span></div>`
+    + `<p class="scenario-load-state ${escapeHtml(state.state)}" id="scenario-load-state">`
+    + `${escapeHtml(state.message)}</p>`;
+  updateScenarioControls();
+}
+
+function markLoadedScenarioModified() {
+  if (!loadedScenarioId || loadedScenarioModified) return;
+  loadedScenarioModified = true;
+  renderScenarioDetails();
+}
+
+function validateScenarioForLoad(scenario, reviewAsOf) {
+  if (!scenario || !reviewAsOf) {
+    throw new Error("Data가 지원하는 심사 기준일을 확인한 뒤 시나리오를 불러오세요.");
+  }
+  const payload = {
+    case_id: scenario.case_id,
+    review_run_id: "scenario_load_validation",
+    review_as_of: String(reviewAsOf),
+    trade_type: scenario.trade_type,
+    jurisdiction: "KR",
+    llm_mode: "llm",
+    uploaded_requirement_document_codes:
+      asList(scenario.uploaded_requirement_document_codes).slice(),
+    documents: asList(scenario.documents).map(documentValue => ({
+      document_id: documentValue.document_id,
+      filename: documentValue.filename,
+      declared_type: documentValue.declared_type,
+      content_text: documentValue.content_text
+    }))
+  };
+  validatePayload(payload);
+  return payload;
+}
+
+function loadSelectedScenario() {
+  if (submissionLocked) return;
+  try {
+    const scenario = selectedScenario();
+    const payload = validateScenarioForLoad(scenario, supportedReviewAsOf());
+    const previousIndex = nextDocumentIndex;
+    const seededDocuments = payload.documents.map(documentValue => defaultDocument({
+      type: documentValue.declared_type,
+      documentId: documentValue.document_id,
+      filename: documentValue.filename,
+      contentText: documentValue.content_text
+    }));
+    const editorMarkup = seededDocuments.map(documentEditorMarkup).join("");
+    if (!editorMarkup) {
+      nextDocumentIndex = previousIndex;
+      throw new Error("시나리오에 불러올 문서가 없습니다.");
+    }
+
+    resetExecutionView();
+    showError(null);
+    $("case-id").value = payload.case_id;
+    newRunId();
+    $("review-as-of").value = payload.review_as_of;
+    $("trade-type").value = payload.trade_type;
+    $("requirement-codes").value =
+      payload.uploaded_requirement_document_codes.join(", ");
+    $("document-editors").innerHTML = editorMarkup;
+    loadedScenarioId = scenario.id;
+    loadedScenarioModified = false;
+    updateDocumentControls();
+    updateRequestStats();
+    renderScenarioDetails();
+  } catch (error) {
+    showError(error);
+  }
+}
+
+async function loadScenarioCatalog() {
+  try {
+    const catalog = await apiJson("/api/scenarios", {timeoutMs: 20000});
+    if (
+      catalog.schema_version !== SCENARIO_CATALOG_SCHEMA_VERSION
+      || !Array.isArray(catalog.scenarios)
+      || !catalog.scenarios.length
+    ) {
+      throw new Error("시나리오 카탈로그 계약이 올바르지 않습니다.");
+    }
+    scenarioCatalog = catalog;
+    $("scenario-catalog-notice").textContent = catalog.catalog_notice;
+    $("scenario-expectation-disclaimer").textContent = catalog.expectation_disclaimer;
+    const select = $("scenario-select");
+    select.replaceChildren();
+    const placeholder = document.createElement("option");
+    placeholder.value = "";
+    placeholder.textContent = "시나리오를 선택하세요";
+    select.append(placeholder);
+    for (const scenario of catalog.scenarios) {
+      const option = document.createElement("option");
+      option.value = scenario.id;
+      option.textContent = `${scenario.order}. ${scenario.title}`;
+      select.append(option);
+    }
+    renderScenarioDetails();
+  } catch (_) {
+    scenarioCatalog = null;
+    $("scenario-select").replaceChildren();
+    const unavailable = document.createElement("option");
+    unavailable.value = "";
+    unavailable.textContent = "시나리오 카탈로그를 사용할 수 없음";
+    $("scenario-select").append(unavailable);
+    $("scenario-details").innerHTML =
+      '<p class="scenario-load-state fail" id="scenario-load-state">'
+      + '가상 시나리오를 불러오지 못했습니다. 수동 문서 입력과 실제 Agent 실행 기능은 그대로 사용할 수 있습니다.'
+      + "</p>";
+    updateScenarioControls();
+  }
+}
+
 function utf8Bytes(value) {
   return new TextEncoder().encode(value);
 }
@@ -1016,6 +1280,9 @@ function setBusy(busy) {
   $("review-as-of").disabled = busy;
   $("trade-type").disabled = busy;
   $("requirement-codes").disabled = busy;
+  $("scenario-select").disabled = busy || !scenarioCatalog;
+  $("load-scenario").disabled =
+    busy || !scenarioCatalog || !selectedScenario() || !supportedReviewAsOf();
   document.querySelectorAll(
     ".document-id, .document-filename, .document-type, .document-text"
   ).forEach(element => { element.disabled = busy; });
@@ -1240,15 +1507,7 @@ async function loadHealth() {
       ],
       "diagnostic"
     );
-    const supportedReviewAsOf = pathValue(
-      healthPayload,
-      [
-        "dependencies.evidence.supported_review_as_of",
-        "data.evidence_runtime_release.supported_review_as_of",
-        "supported_review_as_of"
-      ],
-      null
-    );
+    const supportedReviewAsOfValue = supportedReviewAsOf();
     const modelId = pathValue(
       healthPayload,
       ["model_id", "dependencies.claude.model_id"],
@@ -1262,11 +1521,11 @@ async function loadHealth() {
       healthBox("Law coverage", `${text(loaded)} / ${text(expected)}`, Number(loaded) === 3 && Number(expected) === 58 ? "warn" : "fail"),
       healthBox("Scope", scope, "warn"),
       healthBox("Knowledge snapshot", snapshot, snapshot ? "pass" : "fail"),
-      healthBox("Supported as-of", supportedReviewAsOf, supportedReviewAsOf ? "pass" : "warn"),
+      healthBox("Supported as-of", supportedReviewAsOfValue, supportedReviewAsOfValue ? "pass" : "warn"),
       healthBox("Mock fallback", boolText(mockFallback), mockFallback === false ? "pass" : "fail")
     ].join("");
-    if (supportedReviewAsOf) {
-      $("review-as-of").value = String(supportedReviewAsOf);
+    if (supportedReviewAsOfValue) {
+      $("review-as-of").value = String(supportedReviewAsOfValue);
     }
     $("health-caption").textContent =
       "이 상태는 기능 진단 가능 여부이며 Production release 판정이 아닙니다.";
@@ -1278,6 +1537,7 @@ async function loadHealth() {
       "UI는 열렸지만 localhost Inspector 서버의 상태를 확인하지 못했습니다.";
   } finally {
     $("refresh-health").disabled = false;
+    updateScenarioControls();
   }
 }
 
@@ -1939,11 +2199,31 @@ function initializeInputs() {
 
 $("document-editors").addEventListener("click", event => {
   const button = event.target.closest(".remove-document");
-  if (button) removeDocument(button.closest(".document-editor"));
+  if (button) {
+    removeDocument(button.closest(".document-editor"));
+    markLoadedScenarioModified();
+  }
 });
-$("document-editors").addEventListener("input", () => updateRequestStats());
-$("document-editors").addEventListener("change", () => updateRequestStats());
-$("add-document").addEventListener("click", () => addDocument());
+$("document-editors").addEventListener("input", () => {
+  updateRequestStats();
+  markLoadedScenarioModified();
+});
+$("document-editors").addEventListener("change", () => {
+  updateRequestStats();
+  markLoadedScenarioModified();
+});
+$("add-document").addEventListener("click", () => {
+  addDocument();
+  markLoadedScenarioModified();
+});
+$("review-form").addEventListener("input", event => {
+  if (!event.target.closest(".document-editor")) markLoadedScenarioModified();
+});
+$("review-form").addEventListener("change", event => {
+  if (!event.target.closest(".document-editor")) markLoadedScenarioModified();
+});
+$("scenario-select").addEventListener("change", renderScenarioDetails);
+$("load-scenario").addEventListener("click", loadSelectedScenario);
 $("refresh-health").addEventListener("click", loadHealth);
 $("review-form").addEventListener("submit", submitReview);
 document.querySelectorAll(".tab").forEach(button => {
@@ -1957,6 +2237,7 @@ document.querySelectorAll(".tab").forEach(button => {
 
 initializeInputs();
 void loadHealth();
+void loadScenarioCatalog();
 </script>
 </body>
 </html>

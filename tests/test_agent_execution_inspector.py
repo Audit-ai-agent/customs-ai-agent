@@ -2,6 +2,8 @@ from __future__ import annotations
 
 import hashlib
 import json
+import shutil
+import subprocess
 import threading
 import time
 from pathlib import Path
@@ -10,13 +12,37 @@ from typing import Any
 
 import pytest
 from fastapi.testclient import TestClient
+from jsonschema import Draft202012Validator
 
 import customs_ai_agent.adapters.retrieval as retrieval_module
 from customs_ai_agent.contracts.evidence_runtime_release import canonical_json_bytes
+from customs_ai_agent.runner import run_review_v2
+from customs_ai_agent.schemas.models import ReviewRunRequestV2
 from tools.agent_execution_inspector import server
 
 
 TOKEN = "ThreeLawDiagnosticToken-0123456789-ABCDEFGHIJK"
+
+
+def _scenario_catalog_paths() -> tuple[Path, Path]:
+    directory = Path(server.__file__).parent
+    return (
+        directory / "scenario_catalog.json",
+        directory / "scenario_catalog.schema.json",
+    )
+
+
+def _scenario_catalog() -> dict[str, Any]:
+    catalog_path, _schema_path = _scenario_catalog_paths()
+    return json.loads(catalog_path.read_text(encoding="utf-8"))
+
+
+def _scenario_by_id(catalog: dict[str, Any], scenario_id: str) -> dict[str, Any]:
+    return next(scenario for scenario in catalog["scenarios"] if scenario["id"] == scenario_id)
+
+
+def _documents_by_id(scenario: dict[str, Any]) -> dict[str, dict[str, Any]]:
+    return {document["document_id"]: document for document in scenario["documents"]}
 
 
 def _identity_payload() -> dict[str, Any]:
@@ -183,6 +209,374 @@ def test_manifest_rejects_store_count_drift_and_secret_like_fields(tmp_path: Pat
     secret_bearing["service_token"] = TOKEN
     with pytest.raises(server.InspectorExecutionError):
         server.load_diagnostic_manifest(_write_manifest(tmp_path, secret_bearing))
+
+
+def test_synthetic_scenario_catalog_matches_schema_and_service_contract() -> None:
+    catalog_path, schema_path = _scenario_catalog_paths()
+    catalog = json.loads(catalog_path.read_text(encoding="utf-8"))
+    schema = json.loads(schema_path.read_text(encoding="utf-8"))
+
+    Draft202012Validator.check_schema(schema)
+    Draft202012Validator(schema).validate(catalog)
+    loaded = server.load_scenario_catalog(
+        catalog_path.resolve(),
+        schema_path.resolve(),
+    )
+
+    assert loaded == catalog
+    assert catalog["schema_version"] == server.SCENARIO_CATALOG_SCHEMA_VERSION
+    assert "Claude API" in catalog["catalog_notice"]
+    assert "정답 라벨" in catalog["expectation_disclaimer"]
+
+    scenarios = catalog["scenarios"]
+    identifiers = [scenario["id"] for scenario in scenarios]
+    orders = [scenario["order"] for scenario in scenarios]
+    assert identifiers == [
+        "exact_hsk_missing_requirement",
+        "exact_hsk_requirement_submitted",
+        "quantity_mismatch",
+        "invoice_total_mismatch",
+        "origin_mismatch",
+        "missing_hs_code",
+        "prompt_injection_document_data",
+        "duplicate_invoice_document_set",
+    ]
+    assert len(identifiers) == len(set(identifiers))
+    assert orders == sorted(orders)
+    assert len(orders) == len(set(orders))
+
+    for scenario in scenarios:
+        document_ids = [document["document_id"] for document in scenario["documents"]]
+        assert 1 <= len(document_ids) <= server.MAX_DOCUMENTS
+        assert len(document_ids) == len(set(document_ids))
+        assert all(document["content_text"].strip() for document in scenario["documents"])
+        assert (
+            sum(len(document["content_text"]) for document in scenario["documents"])
+            <= server.MAX_TOTAL_TEXT_CHARS
+        )
+        server.ServiceReviewRunRequestV2.model_validate(
+            {
+                "case_id": scenario["case_id"],
+                "documents": scenario["documents"],
+                "llm_mode": "llm",
+                "review_run_id": "catalog_test",
+                "review_as_of": "2026-07-10",
+                "trade_type": scenario["trade_type"],
+                "jurisdiction": "KR",
+                "uploaded_requirement_document_codes": scenario[
+                    "uploaded_requirement_document_codes"
+                ],
+            }
+        )
+
+
+def test_synthetic_scenario_mutations_are_explicit_and_minimal() -> None:
+    catalog = _scenario_catalog()
+    baseline = _scenario_by_id(catalog, "exact_hsk_missing_requirement")
+    baseline_documents = _documents_by_id(baseline)
+    assert list(baseline_documents) == ["doc_inv", "doc_pl", "doc_bl", "doc_co"]
+    assert all(
+        "0303540000" in baseline_documents[document_id]["content_text"]
+        for document_id in ("doc_inv", "doc_co")
+    )
+    assert baseline["uploaded_requirement_document_codes"] == []
+
+    submitted = _scenario_by_id(catalog, "exact_hsk_requirement_submitted")
+    assert submitted["documents"] == baseline["documents"]
+    assert submitted["uploaded_requirement_document_codes"] == ["CCCT_DOC_46E819BB87B27371"]
+    assert "metadata-only" in submitted["injected_variation"]
+
+    quantity = _documents_by_id(_scenario_by_id(catalog, "quantity_mismatch"))
+    assert {
+        document_id
+        for document_id in baseline_documents
+        if quantity[document_id] != baseline_documents[document_id]
+    } == {"doc_pl"}
+    assert "QTY: 1190 KG" in quantity["doc_pl"]["content_text"]
+    assert "QTY: 1200 KG" in baseline_documents["doc_pl"]["content_text"]
+
+    invoice_total = _documents_by_id(_scenario_by_id(catalog, "invoice_total_mismatch"))
+    assert {
+        document_id
+        for document_id in baseline_documents
+        if invoice_total[document_id] != baseline_documents[document_id]
+    } == {"doc_inv"}
+    assert "TOTAL AMOUNT: 11900" in invoice_total["doc_inv"]["content_text"]
+    assert "AMOUNT: 12000" in invoice_total["doc_inv"]["content_text"]
+
+    origin = _documents_by_id(_scenario_by_id(catalog, "origin_mismatch"))
+    assert {
+        document_id
+        for document_id in baseline_documents
+        if origin[document_id] != baseline_documents[document_id]
+    } == {"doc_co"}
+    assert "ORIGIN COUNTRY: Vietnam" in origin["doc_co"]["content_text"]
+    assert "COUNTRY OF ORIGIN: Norway" in origin["doc_inv"]["content_text"]
+
+    missing_hs = _documents_by_id(_scenario_by_id(catalog, "missing_hs_code"))
+    assert {
+        document_id
+        for document_id in baseline_documents
+        if missing_hs[document_id] != baseline_documents[document_id]
+    } == {"doc_inv", "doc_co"}
+    assert not any("0303540000" in document["content_text"] for document in missing_hs.values())
+    assert "HS:" not in missing_hs["doc_inv"]["content_text"]
+    assert "HS CODE:" not in missing_hs["doc_co"]["content_text"]
+
+    injection = _documents_by_id(_scenario_by_id(catalog, "prompt_injection_document_data"))
+    assert {
+        document_id
+        for document_id in baseline_documents
+        if injection[document_id] != baseline_documents[document_id]
+    } == {"doc_inv"}
+    assert injection["doc_inv"]["content_text"].startswith(
+        baseline_documents["doc_inv"]["content_text"]
+    )
+    assert "UNTRUSTED DOCUMENT NOTE" in injection["doc_inv"]["content_text"]
+
+    duplicate = _documents_by_id(_scenario_by_id(catalog, "duplicate_invoice_document_set"))
+    assert set(duplicate) == {*baseline_documents, "doc_inv_duplicate"}
+    assert all(
+        duplicate[document_id] == baseline_documents[document_id]
+        for document_id in baseline_documents
+    )
+    assert duplicate["doc_inv_duplicate"]["declared_type"] == "invoice"
+    assert "INVOICE NO: INV-2026-002" in duplicate["doc_inv_duplicate"]["content_text"]
+
+
+def test_synthetic_scenarios_preserve_deterministic_workflow_meaning() -> None:
+    expected = {
+        "exact_hsk_missing_requirement": ("deterministic", set(), "partial"),
+        "exact_hsk_requirement_submitted": ("deterministic", set(), "partial"),
+        "quantity_mismatch": (
+            "deterministic",
+            {"QTY_MISMATCH_INVOICE_PACKING"},
+            "partial",
+        ),
+        "invoice_total_mismatch": (
+            "deterministic",
+            {"INV_TOTAL_MISMATCH"},
+            "partial",
+        ),
+        "origin_mismatch": ("deterministic", {"ORIGIN_MISMATCH"}, "partial"),
+        "missing_hs_code": (
+            "deterministic",
+            {"HS_CODE_MISSING", "VALIDATION_INPUT_MISSING"},
+            "partial",
+        ),
+        "prompt_injection_document_data": ("deterministic", set(), "partial"),
+        "duplicate_invoice_document_set": (
+            "ambiguous_document_set",
+            {"DUPLICATE_DOCUMENT_TYPE"},
+            "failed",
+        ),
+    }
+    for scenario in _scenario_catalog()["scenarios"]:
+        request = ReviewRunRequestV2.model_validate(
+            {
+                "case_id": scenario["case_id"],
+                "documents": scenario["documents"],
+                "llm_mode": "mock",
+                "review_run_id": f"semantic_{scenario['id']}",
+                "review_as_of": "2026-07-10",
+                "trade_type": scenario["trade_type"],
+                "jurisdiction": "KR",
+                "uploaded_requirement_document_codes": scenario[
+                    "uploaded_requirement_document_codes"
+                ],
+            }
+        )
+        state = run_review_v2(request)
+        pairing_status, issue_codes, retrieval_status = expected[scenario["id"]]
+        assert state["pairing_result"]["document_set_status"] == pairing_status
+        assert {issue["issue_code"] for issue in state["validation_issues"]} == issue_codes
+        assert state["retrieval_status"] == retrieval_status
+        assert state["final_status"] != "completed"
+
+        classified_types = {
+            value["document_type"] for value in state["classified_documents"].values()
+        }
+        assert classified_types == {document["declared_type"] for document in scenario["documents"]}
+
+        if scenario["id"] == "duplicate_invoice_document_set":
+            assert state["rag_evidence"] == []
+            assert {error["code"] for error in state["retrieval_errors"]} == {
+                "AMBIGUOUS_INVOICE_RETRIEVAL_BLOCKED"
+            }
+
+
+def test_synthetic_scenario_catalog_has_no_credentials_paths_or_external_urls() -> None:
+    serialized = json.dumps(
+        _scenario_catalog(),
+        ensure_ascii=False,
+        sort_keys=True,
+    ).casefold()
+    forbidden_literals = (
+        "anthropic_api_key=",
+        "authorization: bearer ",
+        "c:\\users\\",
+        "file://",
+        "http://",
+        "https://",
+        "neo4j://",
+        "postgresql://",
+        "qdrant_api_key=",
+        "sk-ant-",
+    )
+    assert not any(marker in serialized for marker in forbidden_literals)
+
+
+@pytest.mark.parametrize(
+    "unsafe_value",
+    [
+        "https://example.invalid/source",
+        "file:///tmp/source.json",
+        "C:\\Users\\someone\\source.json",
+    ],
+)
+def test_scenario_catalog_startup_rejects_external_provenance_and_paths(
+    tmp_path: Path,
+    unsafe_value: str,
+) -> None:
+    catalog = _scenario_catalog()
+    catalog["scenarios"][0]["purpose"] += f" {unsafe_value}"
+    tampered_path = (tmp_path / "tampered-scenario-catalog.json").resolve()
+    tampered_path.write_text(
+        json.dumps(catalog, ensure_ascii=False),
+        encoding="utf-8",
+    )
+    _catalog_path, schema_path = _scenario_catalog_paths()
+
+    with pytest.raises(
+        server.InspectorConfigurationError,
+        match="scenario_catalog_non_synthetic_marker_detected",
+    ):
+        server.load_scenario_catalog(tampered_path, schema_path.resolve())
+
+
+def test_scenario_catalog_startup_rejects_secret_markers(tmp_path: Path) -> None:
+    catalog = _scenario_catalog()
+    catalog["scenarios"][0]["purpose"] += " sk-ant-" + "synthetic-marker"
+    tampered_path = (tmp_path / "secret-bearing-scenario-catalog.json").resolve()
+    tampered_path.write_text(
+        json.dumps(catalog, ensure_ascii=False),
+        encoding="utf-8",
+    )
+    _catalog_path, schema_path = _scenario_catalog_paths()
+
+    with pytest.raises(
+        server.InspectorConfigurationError,
+        match="scenario_catalog_secret_marker_detected",
+    ):
+        server.load_scenario_catalog(tampered_path, schema_path.resolve())
+
+
+def test_scenario_catalog_endpoint_is_loopback_no_store_and_never_executes(
+    tmp_path: Path,
+) -> None:
+    app, executor = _app(tmp_path)
+    with TestClient(
+        app,
+        base_url="http://127.0.0.1:18021",
+        client=("127.0.0.1", 51001),
+    ) as client:
+        response = client.get("/api/scenarios")
+        forged_host = client.get(
+            "/api/scenarios",
+            headers={"Host": "attacker.example"},
+        )
+        cross_origin = client.get(
+            "/api/scenarios",
+            headers={"Origin": "https://attacker.example"},
+        )
+
+    assert response.status_code == 200
+    assert response.headers["cache-control"] == "no-store"
+    assert response.headers["cross-origin-resource-policy"] == "same-origin"
+    assert response.json()["schema_version"] == server.SCENARIO_CATALOG_SCHEMA_VERSION
+    assert forged_host.status_code == 403
+    assert cross_origin.status_code == 403
+    assert executor.requests == []
+
+    with TestClient(
+        app,
+        base_url="http://127.0.0.1:18021",
+        client=("192.0.2.10", 51001),
+    ) as nonlocal_client:
+        blocked = nonlocal_client.get("/api/scenarios")
+    assert blocked.status_code == 403
+
+
+def test_scenario_picker_selects_without_mutation_or_network_and_loads_explicitly() -> None:
+    html = Path(server.__file__).with_name("inspector.html").read_text(encoding="utf-8")
+    selection_handler = '$("scenario-select").addEventListener("change", renderScenarioDetails);'
+    render_start = html.index("function renderScenarioDetails()")
+    render_end = html.index("function markLoadedScenarioModified()", render_start)
+    load_start = html.index("function loadSelectedScenario()")
+    load_end = html.index("async function loadScenarioCatalog()", load_start)
+    render_source = html[render_start:render_end]
+    load_source = html[load_start:load_end]
+
+    assert selection_handler in html
+    assert 'id="load-scenario" type="button"' in html
+    assert "apiJson(" not in render_source
+    assert "fetch(" not in render_source
+    assert '$("case-id").value =' not in render_source
+    assert '$("document-editors").innerHTML =' not in render_source
+
+    assert load_source.index("if (submissionLocked)") < load_source.index("resetExecutionView();")
+    assert load_source.index("resetExecutionView();") < load_source.index(
+        '$("case-id").value = payload.case_id;'
+    )
+    assert "newRunId();" in load_source
+    assert "supportedReviewAsOf()" in load_source
+    assert "submissionGeneration" not in load_source
+    assert "activeSubmissionGeneration" not in load_source
+    assert "apiJson(" not in load_source
+    assert "fetch(" not in load_source
+    assert "/api/reviews" not in load_source
+    assert "requestSubmit" not in load_source
+    assert ".submit(" not in load_source
+
+    busy_start = html.index("function setBusy(busy)")
+    busy_end = html.index("function updateElapsed()", busy_start)
+    busy_source = html[busy_start:busy_end]
+    assert '$("scenario-select").disabled = busy' in busy_source
+    assert '$("load-scenario").disabled =' in busy_source
+    assert "submissionLocked" in load_source
+    assert "markLoadedScenarioModified();" in html
+    assert "loadedScenarioModified = true;" in html
+
+
+def test_scenario_picker_is_memory_only_escapes_metadata_and_has_valid_javascript(
+    tmp_path: Path,
+) -> None:
+    html = Path(server.__file__).with_name("inspector.html").read_text(encoding="utf-8")
+    lower = html.casefold()
+    assert "localstorage" not in lower
+    assert "sessionstorage" not in lower
+    assert "indexeddb" not in lower
+    assert "${escapeHtml(scenario.purpose)}" in html
+    assert "${escapeHtml(scenario.injected_variation)}" in html
+    assert "${escapeHtml(scenario.expected_checkpoint)}" in html
+    assert '$("scenario-catalog-notice").textContent = catalog.catalog_notice;' in html
+    assert (
+        '$("scenario-expectation-disclaimer").textContent = catalog.expectation_disclaimer;'
+    ) in html
+
+    script = html.split("<script>", 1)[1].split("</script>", 1)[0]
+    script_path = tmp_path / "inspector.js"
+    script_path.write_text(script, encoding="utf-8")
+    node = shutil.which("node")
+    assert node is not None, "Node.js is required to syntax-check the Inspector JavaScript"
+    completed = subprocess.run(
+        [node, "--check", str(script_path)],
+        capture_output=True,
+        check=False,
+        text=True,
+        timeout=20,
+    )
+    assert completed.returncode == 0, completed.stderr
 
 
 def test_identity_overlay_is_process_local_and_always_restored() -> None:

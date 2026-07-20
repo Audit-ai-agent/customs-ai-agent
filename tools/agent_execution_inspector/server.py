@@ -29,6 +29,8 @@ from urllib.parse import urlsplit
 import uvicorn
 from fastapi import FastAPI, Request
 from fastapi.responses import HTMLResponse, JSONResponse
+from jsonschema import Draft202012Validator
+from jsonschema.exceptions import SchemaError
 from pydantic import ValidationError
 
 import customs_ai_agent.adapters.retrieval as retrieval_module
@@ -62,6 +64,8 @@ MAX_PUBLIC_RESULT_BYTES = 8 * 1024 * 1024
 MAX_RUN_RECORDS = 8
 RUN_RECORD_TTL_SECONDS = 15 * 60.0
 RUN_SCHEMA_VERSION = "agent-execution-inspector-run/v1"
+SCENARIO_CATALOG_SCHEMA_VERSION = "agent-execution-inspector-scenarios/v1"
+MAX_SCENARIO_CATALOG_BYTES = 512 * 1024
 LOOPBACK_HOSTS = frozenset({"127.0.0.1", "::1", "localhost"})
 INSPECTOR_HEADER = "X-Agent-Inspector-Request"
 INSPECTOR_HEADER_VALUE = "1"
@@ -119,6 +123,24 @@ _NO_STORE_HEADERS = {
     "X-Content-Type-Options": "nosniff",
     "X-Frame-Options": "DENY",
 }
+_SCENARIO_SECRET_MARKERS = (
+    "anthropic_api_key=",
+    "authorization: bearer ",
+    "neo4j://",
+    "postgresql://",
+    "qdrant_api_key=",
+    "sk-ant-",
+)
+_SCENARIO_NON_SYNTHETIC_MARKERS = (
+    "c:/users/",
+    "c:\\users\\",
+    "file://",
+    "http://",
+    "https://",
+    "/home/",
+    "/users/",
+    "/var/",
+)
 
 
 class InspectorConfigurationError(RuntimeError):
@@ -529,6 +551,81 @@ def load_diagnostic_manifest(path: Path) -> DiagnosticManifest:
     )
 
 
+def load_scenario_catalog(catalog_path: Path, schema_path: Path) -> dict[str, Any]:
+    """Load the curated browser demo catalog and reject unsafe or drifting inputs."""
+
+    catalog = _strict_json_object(
+        _read_regular_file(
+            catalog_path,
+            maximum_bytes=MAX_SCENARIO_CATALOG_BYTES,
+            label="scenario_catalog",
+        )
+    )
+    schema = _strict_json_object(
+        _read_regular_file(
+            schema_path,
+            maximum_bytes=MAX_SCENARIO_CATALOG_BYTES,
+            label="scenario_catalog_schema",
+        )
+    )
+    try:
+        Draft202012Validator.check_schema(schema)
+        validation_errors = list(Draft202012Validator(schema).iter_errors(catalog))
+    except SchemaError:
+        raise InspectorConfigurationError("scenario_catalog_schema_invalid") from None
+    if validation_errors:
+        raise InspectorConfigurationError("scenario_catalog_invalid")
+    if catalog.get("schema_version") != SCENARIO_CATALOG_SCHEMA_VERSION:
+        raise InspectorConfigurationError("scenario_catalog_version_invalid")
+
+    scenarios = catalog.get("scenarios")
+    if not isinstance(scenarios, list):
+        raise InspectorConfigurationError("scenario_catalog_invalid")
+    identifiers = [scenario.get("id") for scenario in scenarios]
+    orders = [scenario.get("order") for scenario in scenarios]
+    if (
+        len(identifiers) != len(set(identifiers))
+        or len(orders) != len(set(orders))
+        or orders != sorted(orders)
+    ):
+        raise InspectorConfigurationError("scenario_catalog_order_invalid")
+
+    for scenario in scenarios:
+        try:
+            ServiceReviewRunRequestV2.model_validate(
+                {
+                    "case_id": scenario["case_id"],
+                    "documents": scenario["documents"],
+                    "llm_mode": "llm",
+                    "review_run_id": "scenario_catalog_validation",
+                    "review_as_of": "2000-01-01",
+                    "trade_type": scenario["trade_type"],
+                    "jurisdiction": "KR",
+                    "uploaded_requirement_document_codes": scenario[
+                        "uploaded_requirement_document_codes"
+                    ],
+                }
+            )
+        except (KeyError, ValidationError):
+            raise InspectorConfigurationError("scenario_catalog_contract_invalid") from None
+
+    pending: list[Any] = [catalog]
+    while pending:
+        value = pending.pop()
+        if isinstance(value, dict):
+            pending.extend(value.keys())
+            pending.extend(value.values())
+        elif isinstance(value, list):
+            pending.extend(value)
+        elif isinstance(value, str):
+            normalized = value.casefold()
+            if any(marker in normalized for marker in _SCENARIO_SECRET_MARKERS):
+                raise InspectorConfigurationError("scenario_catalog_secret_marker_detected")
+            if any(marker in normalized for marker in _SCENARIO_NON_SYNTHETIC_MARKERS):
+                raise InspectorConfigurationError("scenario_catalog_non_synthetic_marker_detected")
+    return catalog
+
+
 _IDENTITY_OVERLAY_LOCK = threading.RLock()
 
 
@@ -838,6 +935,8 @@ def create_app(
     settings: InspectorSettings,
     executor: InspectorExecutor,
     html_path: Path | None = None,
+    scenario_catalog_path: Path | None = None,
+    scenario_catalog_schema_path: Path | None = None,
 ) -> FastAPI:
     selected_html = html_path or Path(__file__).with_name("inspector.html")
     if selected_html.is_symlink() or not selected_html.is_file():
@@ -851,6 +950,12 @@ def create_app(
         html = html_bytes.decode("utf-8")
     except UnicodeDecodeError:
         raise InspectorConfigurationError("inspector_html_invalid") from None
+    catalog = load_scenario_catalog(
+        (scenario_catalog_path or Path(__file__).with_name("scenario_catalog.json")).resolve(),
+        (
+            scenario_catalog_schema_path or Path(__file__).with_name("scenario_catalog.schema.json")
+        ).resolve(),
+    )
 
     app = FastAPI(
         title="Local Agent Execution Inspector",
@@ -860,6 +965,7 @@ def create_app(
     )
     app.state.inspector_settings = settings
     app.state.executor = executor
+    app.state.scenario_catalog = catalog
     app.state.execution_admission = asyncio.Semaphore(1)
     app.state.background_tasks = set()
     app.state.run_records = {}
@@ -936,6 +1042,10 @@ def create_app(
                 "release_ready": False,
             }
         return JSONResponse(payload, headers=_NO_STORE_HEADERS)
+
+    @app.get("/api/scenarios")
+    async def scenarios() -> JSONResponse:
+        return JSONResponse(app.state.scenario_catalog, headers=_NO_STORE_HEADERS)
 
     @app.get("/api/runs/{run_id}")
     async def run_status(request: Request, run_id: str) -> JSONResponse:
