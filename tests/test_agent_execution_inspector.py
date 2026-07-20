@@ -137,6 +137,8 @@ def _app(
     executor: _FakeExecutor | None = None,
     *,
     run_timeout_seconds: float = 300.0,
+    max_run_records: int = server.MAX_RUN_RECORDS,
+    run_record_ttl_seconds: float = server.RUN_RECORD_TTL_SECONDS,
 ):
     html = (tmp_path / "inspector.html").resolve()
     html.write_text("<!doctype html><title>Inspector</title>", encoding="utf-8")
@@ -146,6 +148,8 @@ def _app(
             host="127.0.0.1",
             port=18021,
             run_timeout_seconds=run_timeout_seconds,
+            max_run_records=max_run_records,
+            run_record_ttl_seconds=run_record_ttl_seconds,
         ),
         executor=selected,
         html_path=html,
@@ -217,6 +221,12 @@ def test_local_app_accepts_only_explicit_bounded_text_requests(tmp_path: Path) -
         )
         assert accepted.status_code == 200
         assert accepted.headers["cache-control"] == "no-store"
+        accepted_run = accepted.json()
+        assert accepted_run["schema_version"] == server.RUN_SCHEMA_VERSION
+        assert accepted_run["status"] == "succeeded"
+        assert accepted_run["terminal"] is True
+        assert accepted_run["result"]["summary"]["status"] == "needs_review"
+        assert len(accepted_run["run_id"]) == 32
 
         too_many = client.post(
             "/api/reviews",
@@ -294,7 +304,7 @@ def test_local_app_rejects_forged_host_and_cross_origin(tmp_path: Path) -> None:
     assert same_origin.status_code == 200
 
 
-def test_timeout_keeps_single_flight_admission_until_worker_finishes(
+def test_timeout_run_can_be_retrieved_after_worker_finishes_and_keeps_single_flight(
     tmp_path: Path,
 ) -> None:
     started = threading.Event()
@@ -317,7 +327,16 @@ def test_timeout_keeps_single_flight_admission_until_worker_finishes(
     ) as client:
         first = client.post("/api/reviews", json=_request_payload(), headers=headers)
         assert started.is_set()
-        assert first.status_code == 504
+        assert first.status_code == 202
+        first_run = first.json()
+        assert first_run["status"] == "running"
+        assert first_run["terminal"] is False
+        run_id = first_run["run_id"]
+
+        pending = client.get(f"/api/runs/{run_id}", headers=headers)
+        assert pending.status_code == 200
+        assert pending.json()["status"] == "running"
+        assert "result" not in pending.json()
 
         while_worker_lives = client.post(
             "/api/reviews",
@@ -333,6 +352,67 @@ def test_timeout_keeps_single_flight_admission_until_worker_finishes(
                 break
             time.sleep(0.02)
         assert not app.state.execution_admission.locked()
+
+        completed = client.get(f"/api/runs/{run_id}", headers=headers)
+        assert completed.status_code == 200
+        completed_run = completed.json()
+        assert completed_run["status"] == "succeeded"
+        assert completed_run["terminal"] is True
+        assert completed_run["result"]["summary"]["status"] == "needs_review"
+
+
+def test_run_status_requires_header_and_terminal_records_expire(
+    tmp_path: Path,
+) -> None:
+    app, _executor = _app(tmp_path)
+    headers = {server.INSPECTOR_HEADER: server.INSPECTOR_HEADER_VALUE}
+    with TestClient(
+        app,
+        base_url="http://127.0.0.1:18021",
+        client=("127.0.0.1", 51001),
+    ) as client:
+        created = client.post("/api/reviews", json=_request_payload(), headers=headers)
+        run_id = created.json()["run_id"]
+
+        missing_header = client.get(f"/api/runs/{run_id}")
+        assert missing_header.status_code == 403
+
+        record = app.state.run_records[run_id]
+        assert record.completed_monotonic is not None
+        record.completed_monotonic -= server.RUN_RECORD_TTL_SECONDS + 1
+        expired = client.get(f"/api/runs/{run_id}", headers=headers)
+        assert expired.status_code == 404
+
+
+def test_run_registry_persists_only_bounded_public_state_not_request_input(
+    tmp_path: Path,
+) -> None:
+    app, _executor = _app(tmp_path)
+    payload = _request_payload()
+    payload["documents"][0]["content_text"] += "\nUNIQUE-RAW-INPUT-MARKER"
+    headers = {server.INSPECTOR_HEADER: server.INSPECTOR_HEADER_VALUE}
+    with TestClient(
+        app,
+        base_url="http://127.0.0.1:18021",
+        client=("127.0.0.1", 51001),
+    ) as client:
+        created = client.post("/api/reviews", json=payload, headers=headers)
+        run_id = created.json()["run_id"]
+        record = app.state.run_records[run_id]
+
+        assert set(record.__slots__) == {
+            "run_id",
+            "created_monotonic",
+            "completion",
+            "status",
+            "completed_monotonic",
+            "result",
+            "error_code",
+        }
+        public_json = json.dumps(record.public_payload(), sort_keys=True)
+        assert "UNIQUE-RAW-INPUT-MARKER" not in public_json
+        assert TOKEN not in public_json
+        assert len(public_json.encode("utf-8")) <= server.MAX_PUBLIC_RESULT_BYTES
 
 
 def test_server_refuses_forbidden_output_even_from_executor(tmp_path: Path) -> None:
@@ -356,8 +436,30 @@ def test_server_refuses_forbidden_output_even_from_executor(tmp_path: Path) -> N
             json=_request_payload(),
             headers={server.INSPECTOR_HEADER: server.INSPECTOR_HEADER_VALUE},
         )
-    assert response.status_code == 502
+    assert response.status_code == 200
+    assert response.json()["status"] == "failed"
+    assert "result" not in response.json()
     assert "must-not-leak" not in response.text
+
+
+def test_ui_clears_previous_result_before_reading_or_submitting_next_input() -> None:
+    html = Path(server.__file__).with_name("inspector.html").read_text(encoding="utf-8")
+    reset_start = html.index("function resetExecutionView()")
+    submit_start = html.index("async function submitReview(event)")
+    submit_end = html.index("function newRunId()", submit_start)
+    reset_source = html[reset_start:submit_start]
+    submit_source = html[submit_start:submit_end]
+
+    assert '$("results").classList.remove("on")' in reset_source
+    assert "lastResponseEnvelope = null" in reset_source
+    assert '"panel-rag"' in reset_source
+    assert '"panel-findings"' in reset_source
+    assert '"panel-xai"' in reset_source
+    assert "replaceChildren()" in reset_source
+    assert submit_source.index("resetExecutionView();") < submit_source.index(
+        "const payload = readForm(true);"
+    )
+    assert "await awaitCompletedRun(run)" in submit_source
 
 
 def test_actual_executor_preflights_data_before_constructing_claude(

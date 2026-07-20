@@ -587,6 +587,7 @@
         <span>
           실제 Claude와 3법령 진단 Evidence를 실행하고 있습니다.
           완료된 공개 audit만 표시합니다. 경과 <b id="elapsed">00:00</b>
+          <span class="small muted" id="active-run-id"></span>
         </span>
       </div>
       <div class="error-box" id="run-error" role="alert"></div>
@@ -646,6 +647,7 @@ const MAX_TOTAL_CHARACTERS = 500000;
 const MAX_BODY_BYTES = 2 * 1024 * 1024;
 const ID_PATTERN = /^[A-Za-z0-9][A-Za-z0-9._:-]*$/;
 const CODE_PATTERN = /^[A-Za-z0-9][A-Za-z0-9._:-]*$/;
+const INSPECTOR_RUN_ID_PATTERN = /^[0-9a-f]{32}$/;
 const DOCUMENT_TYPES = [
   ["invoice", "Commercial Invoice (CI)"],
   ["packing_list", "Packing List (PL)"],
@@ -1023,6 +1025,33 @@ function showError(error) {
   $("run-error").classList.toggle("on", Boolean(error));
 }
 
+function resetExecutionView() {
+  lastInputPayload = null;
+  lastResponseEnvelope = null;
+  lastInputDigests = new Map();
+  $("results").classList.remove("on");
+  $("active-run-id").textContent = "";
+  [
+    "summary-grid",
+    "result-identity",
+    "timeline",
+    "panel-input",
+    "panel-documents",
+    "panel-pairing",
+    "panel-validation",
+    "panel-models",
+    "panel-rag",
+    "panel-findings",
+    "panel-xai",
+    "panel-raw"
+  ].forEach(id => $(id).replaceChildren());
+  const tabs = Array.from(document.querySelectorAll(".tab"));
+  tabs.forEach((tab, index) => tab.classList.toggle("on", index === 0));
+  document.querySelectorAll(".panel").forEach((panel, index) => {
+    panel.classList.toggle("on", index === 0);
+  });
+}
+
 async function apiJson(url, options = {}) {
   const controller = new AbortController();
   const timeoutId = window.setTimeout(
@@ -1034,6 +1063,9 @@ async function apiJson(url, options = {}) {
       method: options.method || "GET",
       headers: {
         "Accept": "application/json",
+        ...(options.inspectorRequest ? {
+          "X-Agent-Inspector-Request": "1"
+        } : {}),
         ...(options.body ? {
           "Content-Type": "application/json",
           "X-Agent-Inspector-Request": "1"
@@ -1069,6 +1101,49 @@ async function apiJson(url, options = {}) {
     throw error;
   } finally {
     window.clearTimeout(timeoutId);
+  }
+}
+
+function delay(milliseconds) {
+  return new Promise(resolve => window.setTimeout(resolve, milliseconds));
+}
+
+async function awaitCompletedRun(initialRun) {
+  let run = asObject(initialRun);
+  while (true) {
+    if (
+      run.schema_version !== "agent-execution-inspector-run/v1"
+      || !INSPECTOR_RUN_ID_PATTERN.test(String(run.run_id || ""))
+    ) {
+      throw new Error("서버가 올바른 Inspector run 식별자를 반환하지 않았습니다.");
+    }
+    $("active-run-id").textContent = ` · Run ${run.run_id}`;
+    if (run.status === "succeeded" && run.terminal === true) {
+      const envelope = asObject(run.result);
+      if (!Object.keys(envelope).length) {
+        throw new Error("완료된 Inspector run에 공개 결과가 없습니다.");
+      }
+      return envelope;
+    }
+    if (run.status === "failed" && run.terminal === true) {
+      const safeError = asObject(run.error);
+      throw new Error(
+        `${safeError.code || "review_execution_failed"}: `
+        + `${safeError.message || "Inspector run이 안전하게 실패했습니다."}`
+      );
+    }
+    if (run.status !== "running" || run.terminal !== false) {
+      throw new Error("Inspector run 상태가 올바르지 않습니다.");
+    }
+    const requestedDelay = Number(run.poll_after_ms);
+    const pollDelay = Number.isFinite(requestedDelay)
+      ? Math.min(2000, Math.max(250, requestedDelay))
+      : 500;
+    await delay(pollDelay);
+    run = await apiJson(`/api/runs/${encodeURIComponent(run.run_id)}`, {
+      inspectorRequest: true,
+      timeoutMs: 30000
+    });
   }
 }
 
@@ -1775,6 +1850,7 @@ async function captureInputDigests(payload) {
 
 async function submitReview(event) {
   event.preventDefault();
+  resetExecutionView();
   showError(null);
   const payload = readForm(true);
   try {
@@ -1787,11 +1863,12 @@ async function submitReview(event) {
   lastInputPayload = payload;
   setBusy(true);
   try {
-    const envelope = await apiJson("/api/reviews", {
+    const run = await apiJson("/api/reviews", {
       method: "POST",
       body: payload,
-      timeoutMs: 600000
+      timeoutMs: 660000
     });
+    const envelope = await awaitCompletedRun(run);
     renderExecution(envelope);
     newRunId();
   } catch (error) {

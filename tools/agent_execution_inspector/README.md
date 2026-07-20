@@ -95,6 +95,17 @@ Agent worktree에서 실행한다.
 브라우저에서 `http://127.0.0.1:8021`을 연다. CI·PL·B/L·C/O 텍스트를 붙여 넣고
 `실제 Agent 전체 실행`을 선택한다.
 
+각 실행은 서버가 생성한 추측 불가능한 32자리 run ID를 사용한다. 동기 응답 제한인
+`--run-timeout-seconds` 안에 끝나지 않아도 실행은 취소하거나 유실하지 않는다. UI가
+`GET /api/runs/{run_id}`를 polling하여 worker 종료 후 공개 결과를 가져온다.
+
+- 동시에 하나의 실행만 허용한다.
+- 서버는 입력 request나 secret을 run registry에 저장하지 않는다.
+- 완료 run에는 안전성·크기 검사를 통과한 공개 envelope만 메모리에 저장한다.
+- 완료 run은 15분 후 제거하며 최대 8개만 보존한다.
+- 새 실행을 누르는 즉시 이전 결과 영역을 숨기고 비운다. 새 실행이 실패해도 이전
+  Evidence·Finding·XAI를 현재 결과처럼 표시하지 않는다.
+
 ## 화면에서 확인할 항목
 
 1. 상단 고정 경계: 실제 Claude, 실제 Evidence HTTP, 3/58 진단, OCR 미사용

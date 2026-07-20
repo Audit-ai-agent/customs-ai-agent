@@ -16,10 +16,11 @@ import ipaddress
 import json
 import re
 import threading
+import time
 import uuid
 from collections.abc import Callable, Iterator, Mapping
 from contextlib import contextmanager
-from dataclasses import dataclass
+from dataclasses import dataclass, field
 from datetime import date
 from pathlib import Path
 from typing import Any, Protocol
@@ -57,6 +58,10 @@ MAX_DOCUMENTS = 6
 MAX_TOTAL_TEXT_CHARS = 500_000
 MAX_MANIFEST_BYTES = 256 * 1024
 MAX_TOKEN_BYTES = 1024
+MAX_PUBLIC_RESULT_BYTES = 8 * 1024 * 1024
+MAX_RUN_RECORDS = 8
+RUN_RECORD_TTL_SECONDS = 15 * 60.0
+RUN_SCHEMA_VERSION = "agent-execution-inspector-run/v1"
 LOOPBACK_HOSTS = frozenset({"127.0.0.1", "::1", "localhost"})
 INSPECTOR_HEADER = "X-Agent-Inspector-Request"
 INSPECTOR_HEADER_VALUE = "1"
@@ -167,6 +172,8 @@ class InspectorSettings:
     max_documents: int = MAX_DOCUMENTS
     max_total_text_chars: int = MAX_TOTAL_TEXT_CHARS
     run_timeout_seconds: float = 300.0
+    max_run_records: int = MAX_RUN_RECORDS
+    run_record_ttl_seconds: float = RUN_RECORD_TTL_SECONDS
 
     def __post_init__(self) -> None:
         if self.host not in LOOPBACK_HOSTS:
@@ -181,6 +188,42 @@ class InspectorSettings:
             raise InspectorConfigurationError("invalid_text_limit")
         if not 1 <= self.run_timeout_seconds <= 600:
             raise InspectorConfigurationError("invalid_run_timeout")
+        if not 1 <= self.max_run_records <= MAX_RUN_RECORDS:
+            raise InspectorConfigurationError("invalid_run_record_limit")
+        if not 1 <= self.run_record_ttl_seconds <= 3600:
+            raise InspectorConfigurationError("invalid_run_record_ttl")
+
+
+@dataclass(slots=True)
+class InspectorRunRecord:
+    """Bounded in-memory record containing public output, never request input."""
+
+    run_id: str
+    created_monotonic: float
+    completion: asyncio.Event = field(default_factory=asyncio.Event)
+    status: str = "running"
+    completed_monotonic: float | None = None
+    result: dict[str, Any] | None = None
+    error_code: str | None = None
+
+    def public_payload(self) -> dict[str, Any]:
+        payload: dict[str, Any] = {
+            "schema_version": RUN_SCHEMA_VERSION,
+            "run_id": self.run_id,
+            "status": self.status,
+            "terminal": self.status in {"succeeded", "failed"},
+            "poll_after_ms": 500,
+        }
+        if self.status == "succeeded" and self.result is not None:
+            payload["result"] = self.result
+        elif self.status == "failed":
+            payload["error"] = {
+                "code": self.error_code or "review_execution_failed",
+                "message": "The local diagnostic run could not be completed.",
+                "retryable": True,
+            }
+        _assert_safe_public_value(payload)
+        return payload
 
 
 class InspectorExecutor(Protocol):
@@ -287,6 +330,49 @@ def _assert_safe_public_value(value: Any, *, depth: int = 0) -> None:
             _assert_safe_public_value(item, depth=depth + 1)
         return
     raise InspectorExecutionError("public_output_type_invalid")
+
+
+def _assert_bounded_public_result(value: dict[str, Any]) -> None:
+    _assert_safe_public_value(value)
+    try:
+        encoded = json.dumps(
+            value,
+            ensure_ascii=False,
+            allow_nan=False,
+            separators=(",", ":"),
+        ).encode("utf-8")
+    except (TypeError, ValueError, RecursionError):
+        raise InspectorExecutionError("public_output_serialization_failed") from None
+    if len(encoded) > MAX_PUBLIC_RESULT_BYTES:
+        raise InspectorExecutionError("public_output_size_exceeded")
+
+
+def _prune_run_records(
+    records: dict[str, InspectorRunRecord],
+    *,
+    settings: InspectorSettings,
+    now: float | None = None,
+    reserve_slot: bool = False,
+) -> None:
+    observed_now = time.monotonic() if now is None else now
+    expired = [
+        run_id
+        for run_id, record in records.items()
+        if record.completed_monotonic is not None
+        and observed_now - record.completed_monotonic >= settings.run_record_ttl_seconds
+    ]
+    for run_id in expired:
+        records.pop(run_id, None)
+
+    while reserve_slot and len(records) >= settings.max_run_records:
+        terminal = [record for record in records.values() if record.completed_monotonic is not None]
+        if not terminal:
+            break
+        oldest = min(
+            terminal,
+            key=lambda record: record.completed_monotonic or record.created_monotonic,
+        )
+        records.pop(oldest.run_id, None)
 
 
 def _reject_duplicate_keys(pairs: list[tuple[str, Any]]) -> dict[str, Any]:
@@ -776,6 +862,44 @@ def create_app(
     app.state.executor = executor
     app.state.execution_admission = asyncio.Semaphore(1)
     app.state.background_tasks = set()
+    app.state.run_records = {}
+
+    def track_background(task: asyncio.Task[Any]) -> None:
+        app.state.background_tasks.add(task)
+        task.add_done_callback(app.state.background_tasks.discard)
+
+    async def expire_run(run_id: str, completed_monotonic: float) -> None:
+        await asyncio.sleep(settings.run_record_ttl_seconds)
+        records: dict[str, InspectorRunRecord] = app.state.run_records
+        record = records.get(run_id)
+        if record is not None and record.completed_monotonic == completed_monotonic:
+            records.pop(run_id, None)
+
+    async def execute_run(
+        record: InspectorRunRecord,
+        parsed: ServiceReviewRunRequestV2,
+        admission: asyncio.Semaphore,
+    ) -> None:
+        try:
+            envelope = await asyncio.to_thread(executor.execute, parsed)
+            _assert_bounded_public_result(envelope)
+        except asyncio.CancelledError:
+            record.status = "failed"
+            record.error_code = "review_execution_cancelled"
+            raise
+        except Exception:
+            record.status = "failed"
+            record.error_code = "review_execution_failed"
+        else:
+            record.result = envelope
+            record.status = "succeeded"
+        finally:
+            completed_monotonic = time.monotonic()
+            record.completed_monotonic = completed_monotonic
+            record.completion.set()
+            admission.release()
+            expiry = asyncio.create_task(expire_run(record.run_id, completed_monotonic))
+            track_background(expiry)
 
     @app.middleware("http")
     async def local_boundary(request: Request, call_next: Callable[..., Any]) -> Any:
@@ -813,6 +937,19 @@ def create_app(
             }
         return JSONResponse(payload, headers=_NO_STORE_HEADERS)
 
+    @app.get("/api/runs/{run_id}")
+    async def run_status(request: Request, run_id: str) -> JSONResponse:
+        if request.headers.get(INSPECTOR_HEADER) != INSPECTOR_HEADER_VALUE:
+            return _safe_error("inspector_header_required", 403)
+        if re.fullmatch(r"[0-9a-f]{32}", run_id) is None:
+            return _safe_error("run_not_found", 404)
+        records: dict[str, InspectorRunRecord] = request.app.state.run_records
+        _prune_run_records(records, settings=settings)
+        record = records.get(run_id)
+        if record is None:
+            return _safe_error("run_not_found", 404)
+        return JSONResponse(record.public_payload(), headers=_NO_STORE_HEADERS)
+
     @app.post("/api/reviews")
     async def review(request: Request) -> JSONResponse:
         if request.headers.get(INSPECTOR_HEADER) != INSPECTOR_HEADER_VALUE:
@@ -848,36 +985,33 @@ def create_app(
         if admission.locked():
             return _safe_error("inspector_busy", 503, retryable=True)
         await admission.acquire()
-        worker: asyncio.Task[dict[str, Any]] | None = None
+        records: dict[str, InspectorRunRecord] = request.app.state.run_records
+        _prune_run_records(records, settings=settings, reserve_slot=True)
+        if len(records) >= settings.max_run_records:
+            admission.release()
+            return _safe_error("inspector_run_capacity", 503, retryable=True)
+
+        record = InspectorRunRecord(
+            run_id=uuid.uuid4().hex,
+            created_monotonic=time.monotonic(),
+        )
+        records[record.run_id] = record
+        worker = asyncio.create_task(execute_run(record, parsed, admission))
+        track_background(worker)
         try:
-            try:
-                worker = asyncio.create_task(asyncio.to_thread(executor.execute, parsed))
-                envelope = await asyncio.wait_for(
-                    asyncio.shield(worker),
-                    timeout=settings.run_timeout_seconds,
-                )
-                _assert_safe_public_value(envelope)
-            except TimeoutError:
-                return _safe_error("review_timeout", 504, retryable=True)
-            except Exception:
-                return _safe_error("review_execution_failed", 502, retryable=True)
-        finally:
-            if worker is None or worker.done():
-                admission.release()
-            else:
-
-                async def release_after_worker() -> None:
-                    try:
-                        await worker
-                    except BaseException:
-                        return
-                    finally:
-                        admission.release()
-
-                background = asyncio.create_task(release_after_worker())
-                request.app.state.background_tasks.add(background)
-                background.add_done_callback(request.app.state.background_tasks.discard)
-        return JSONResponse(envelope, headers=_NO_STORE_HEADERS)
+            await asyncio.wait_for(
+                asyncio.shield(record.completion.wait()),
+                timeout=settings.run_timeout_seconds,
+            )
+        except TimeoutError:
+            status_code = 200 if record.completion.is_set() else 202
+        else:
+            status_code = 200
+        return JSONResponse(
+            record.public_payload(),
+            status_code=status_code,
+            headers=_NO_STORE_HEADERS,
+        )
 
     return app
 
