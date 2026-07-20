@@ -15,6 +15,7 @@ from typing import Any, Mapping
 from customs_ai_agent.adapters.llm import (
     DEFAULT_CLAUDE_MODEL,
     ClaudeDocumentAnalyzer,
+    ClaudeSettings,
     DocumentAnalysis,
     LLMError,
 )
@@ -32,18 +33,16 @@ from customs_ai_agent.schemas.models import ReviewRunRequest
 
 EXPECTED_GOLD_SHA256_BY_ID = {
     "claude-text-synthetic-v1": (
-        "2e8b95b850d7a4ea208ca49903982bdd44244d732bda9b11dc946056784a3a09"
+        "1e300058f6d01330e82002d04e1a3238f42aaceeb9dc5716653a2aa1c67634e0"
     ),
     "claude-text-adversarial-v1": (
-        "8e4da60e14b783fcc43e17cf388a45818d552e798f0406c3729b24d4ec8b8081"
+        "b4416cbad6df9fba62f2f636c4267a348bf5f11a1d3b78771aee8b16786db661"
     ),
 }
 EXPECTED_CANDIDATE_SCHEMA_SHA256 = (
     "049d9c0a4782945f6b6716d1f9d8ad02a407e88ce7fa0beaa2e2cd5575312b5c"
 )
-EXPECTED_PROMPT_SHA256 = (
-    "58794169eff72ca4727dc59d5d002807424677024016402f9fb0686d542ec8af"
-)
+EXPECTED_PROMPT_SHA256 = "93c7ba900a631f82473c9d480360404c2f93442ecfd2e48a110a1519f0262cb5"
 
 
 def _sha256(path: Path) -> str:
@@ -60,9 +59,20 @@ def _candidate_schema_sha256() -> str:
 
 
 def _prompt_sha256() -> str:
-    return hashlib.sha256(
-        load_document_analysis_system_prompt().encode("utf-8")
-    ).hexdigest()
+    return hashlib.sha256(load_document_analysis_system_prompt().encode("utf-8")).hexdigest()
+
+
+def _live_settings(env_file: Path) -> ClaudeSettings:
+    """Load the pinned configuration and disable all SDK-level retries."""
+
+    configured = ClaudeSettings.from_environment(env_file)
+    return ClaudeSettings(
+        api_key=configured.api_key,
+        model=configured.model,
+        max_tokens=configured.max_tokens,
+        timeout_seconds=configured.timeout_seconds,
+        max_retries=0,
+    )
 
 
 def _field_map(items: list[dict[str, Any]]) -> dict[str, str]:
@@ -74,9 +84,7 @@ def _compare_fields(
     expected: dict[str, str],
 ) -> dict[str, int]:
     exact = sum(actual.get(name) == value for name, value in expected.items())
-    wrong = sum(
-        name in actual and actual[name] != value for name, value in expected.items()
-    )
+    wrong = sum(name in actual and actual[name] != value for name, value in expected.items())
     missing = sum(name not in actual for name in expected)
     hallucinated = sum(name not in expected for name in actual)
     return {
@@ -86,6 +94,47 @@ def _compare_fields(
         "missing": missing,
         "hallucinated": hallucinated,
     }
+
+
+def _field_difference_codes(
+    actual: dict[str, str],
+    expected: dict[str, str],
+    *,
+    document_id: str,
+    scope: str,
+) -> list[dict[str, str]]:
+    """Return value-free field diagnostics safe to retain in an evaluation report."""
+
+    diagnostics: list[dict[str, str]] = []
+    for name in sorted(expected):
+        if name not in actual:
+            diagnostics.append(
+                {
+                    "document_id": document_id,
+                    "scope": scope,
+                    "field_name": name,
+                    "code": "expected_field_missing",
+                }
+            )
+        elif actual[name] != expected[name]:
+            diagnostics.append(
+                {
+                    "document_id": document_id,
+                    "scope": scope,
+                    "field_name": name,
+                    "code": "expected_field_value_mismatch",
+                }
+            )
+    for name in sorted(set(actual) - set(expected)):
+        diagnostics.append(
+            {
+                "document_id": document_id,
+                "scope": scope,
+                "field_name": name,
+                "code": "field_not_declared_by_gold",
+            }
+        )
+    return diagnostics
 
 
 def _add(left: dict[str, int], right: dict[str, int]) -> dict[str, int]:
@@ -98,6 +147,10 @@ def evaluate(
     gold_path: Path,
     max_documents: int,
     run_workflow: bool,
+    live: bool = False,
+    max_calls: int = 0,
+    max_total_input_tokens: int = 0,
+    max_total_output_tokens: int = 0,
 ) -> tuple[int, dict[str, Any]]:
     gold = json.loads(gold_path.read_text(encoding="utf-8"))
     gold_sha256 = _sha256(gold_path)
@@ -126,10 +179,13 @@ def evaluate(
             "prompt_sha256": prompt_sha256,
             "expected_prompt_sha256": EXPECTED_PROMPT_SHA256,
             "status": "FAIL",
-            "failures": [
-                {"document_id": "preflight", "code": code}
-                for code in preflight_failures
-            ],
+            "call_accounting": {
+                "attempted": 0,
+                "succeeded": 0,
+                "retried": 0,
+            },
+            "cost_budget": {"configured_max_retries": 0},
+            "failures": [{"document_id": "preflight", "code": code} for code in preflight_failures],
             "redaction": {
                 "api_key": "OMITTED",
                 "document_text": "OMITTED",
@@ -141,7 +197,96 @@ def evaluate(
     scenario = get_scenario(str(gold["scenario_id"]))
     documents = scenario["documents"][:max_documents]
     expected_documents = gold["documents"]
-    analyzer = ClaudeDocumentAnalyzer.from_environment(env_file)
+    estimated_input_tokens = sum(
+        (
+            len(str(document.get("content_text") or ""))
+            + len(load_document_analysis_system_prompt())
+            + 2
+        )
+        // 3
+        for document in documents
+    )
+    budget_failures: list[str] = []
+    if not live:
+        budget_failures.append("live_flag_required")
+    if max_calls < len(documents):
+        budget_failures.append("max_calls_budget_too_small")
+    if max_total_input_tokens < estimated_input_tokens:
+        budget_failures.append("input_token_budget_too_small")
+    if max_total_output_tokens <= 0:
+        budget_failures.append("output_token_budget_required")
+    if budget_failures:
+        return 1, {
+            "schema_version": "1.0",
+            "scope": "SYNTHETIC_TEXT_ONLY_NOT_PDF_OCR_OR_RELEASE",
+            "gold_set_id": gold["gold_set_id"],
+            "gold_set_sha256": gold_sha256,
+            "candidate_schema_sha256": candidate_schema_sha256,
+            "prompt_sha256": prompt_sha256,
+            "status": "FAIL",
+            "provider_called": False,
+            "call_accounting": {
+                "attempted": 0,
+                "succeeded": 0,
+                "retried": 0,
+            },
+            "failures": [
+                {"document_id": "preflight", "code": code} for code in sorted(set(budget_failures))
+            ],
+            "cost_budget": {
+                "max_calls": max_calls,
+                "max_total_input_tokens": max_total_input_tokens,
+                "max_total_output_tokens": max_total_output_tokens,
+                "estimated_input_tokens": estimated_input_tokens,
+                "configured_max_retries": 0,
+            },
+            "redaction": {
+                "api_key": "OMITTED",
+                "document_text": "OMITTED",
+                "extracted_values": "OMITTED",
+                "prompt": "OMITTED",
+                "raw_response": "OMITTED",
+            },
+        }
+    settings = _live_settings(env_file)
+    if settings.max_tokens * len(documents) > max_total_output_tokens:
+        return 1, {
+            "schema_version": "1.0",
+            "scope": "SYNTHETIC_TEXT_ONLY_NOT_PDF_OCR_OR_RELEASE",
+            "gold_set_id": gold["gold_set_id"],
+            "gold_set_sha256": gold_sha256,
+            "candidate_schema_sha256": candidate_schema_sha256,
+            "prompt_sha256": prompt_sha256,
+            "status": "FAIL",
+            "provider_called": False,
+            "call_accounting": {
+                "attempted": 0,
+                "succeeded": 0,
+                "retried": 0,
+            },
+            "failures": [
+                {
+                    "document_id": "preflight",
+                    "code": "configured_output_ceiling_exceeds_budget",
+                }
+            ],
+            "cost_budget": {
+                "max_calls": max_calls,
+                "max_total_input_tokens": max_total_input_tokens,
+                "max_total_output_tokens": max_total_output_tokens,
+                "estimated_input_tokens": estimated_input_tokens,
+                "configured_max_output_tokens_per_call": settings.max_tokens,
+                "configured_max_retries": settings.max_retries,
+            },
+            "redaction": {
+                "api_key": "OMITTED",
+                "document_text": "OMITTED",
+                "extracted_values": "OMITTED",
+                "prompt": "OMITTED",
+                "raw_response": "OMITTED",
+            },
+        }
+    analyzer = ClaudeDocumentAnalyzer.from_settings(settings)
     analyses: dict[str, DocumentAnalysis] = {}
     field_totals = {
         "expected": 0,
@@ -160,7 +305,19 @@ def evaluate(
     }
     calls: list[dict[str, Any]] = []
     failures: list[dict[str, str]] = []
+    field_diagnostics: list[dict[str, str]] = []
     workflow_summary: dict[str, Any] | None = None
+    main_calls_attempted = 0
+
+    def analyze_once(document: Mapping[str, Any]) -> DocumentAnalysis:
+        nonlocal main_calls_attempted
+        if main_calls_attempted >= max_calls:
+            raise LLMError(
+                "call_budget_exceeded",
+                "The live evaluation call budget is exhausted.",
+            )
+        main_calls_attempted += 1
+        return analyzer.analyze(document)
 
     if run_workflow:
         if max_documents != 4:
@@ -168,7 +325,7 @@ def evaluate(
 
         class RecordingAnalyzer:
             def analyze(self, document: Mapping[str, Any]) -> DocumentAnalysis:
-                result = analyzer.analyze(document)
+                result = analyze_once(document)
                 analyses[str(document["document_id"])] = result
                 return result
 
@@ -207,7 +364,7 @@ def evaluate(
         analysis = analyses.get(document_id)
         if analysis is None and not run_workflow:
             try:
-                analysis = analyzer.analyze(document)
+                analysis = analyze_once(document)
             except LLMError as exc:
                 failures.append({"document_id": document_id, "code": exc.code})
                 continue
@@ -216,19 +373,37 @@ def evaluate(
         expected = expected_documents[document_id]
         candidate = analysis.candidate.model_dump(mode="json")
         type_correct += int(candidate["document_type"] == expected["document_type"])
+        actual_document_fields = _field_map(candidate["fields"])
+        field_diagnostics.extend(
+            _field_difference_codes(
+                actual_document_fields,
+                expected["fields"],
+                document_id=document_id,
+                scope="document",
+            )
+        )
         field_totals = _add(
             field_totals,
-            _compare_fields(_field_map(candidate["fields"]), expected["fields"]),
+            _compare_fields(actual_document_fields, expected["fields"]),
         )
 
         actual_lines = candidate["line_items"]
         expected_lines = expected["line_items"]
         paired_count = min(len(actual_lines), len(expected_lines))
         for index in range(paired_count):
+            actual_line_fields = _field_map(actual_lines[index]["fields"])
+            field_diagnostics.extend(
+                _field_difference_codes(
+                    actual_line_fields,
+                    expected_lines[index],
+                    document_id=document_id,
+                    scope=f"line_item_{index + 1}",
+                )
+            )
             field_totals = _add(
                 field_totals,
                 _compare_fields(
-                    _field_map(actual_lines[index]["fields"]),
+                    actual_line_fields,
                     expected_lines[index],
                 ),
             )
@@ -261,6 +436,12 @@ def evaluate(
         )
 
     documents_attempted = len(documents)
+    if main_calls_attempted > max_calls:
+        failures.append({"document_id": "budget", "code": "call_budget_exceeded"})
+    if usage["input_tokens"] > max_total_input_tokens:
+        failures.append({"document_id": "budget", "code": "input_token_budget_exceeded"})
+    if usage["output_tokens"] > max_total_output_tokens:
+        failures.append({"document_id": "budget", "code": "output_token_budget_exceeded"})
     passed = (
         not failures
         and gold_sha256 == expected_gold_sha256
@@ -311,8 +492,22 @@ def evaluate(
         "document_type_correct": type_correct,
         "field_metrics": field_totals,
         "usage": usage,
+        "cost_budget": {
+            "max_calls": max_calls,
+            "max_total_input_tokens": max_total_input_tokens,
+            "max_total_output_tokens": max_total_output_tokens,
+            "estimated_input_tokens": estimated_input_tokens,
+            "configured_max_output_tokens_per_call": settings.max_tokens,
+            "configured_max_retries": settings.max_retries,
+        },
+        "call_accounting": {
+            "attempted": main_calls_attempted,
+            "succeeded": len(calls),
+            "retried": 0,
+        },
         "calls": calls,
         "failures": failures,
+        "field_diagnostics": field_diagnostics,
         "workflow": workflow_summary,
         "status": "PASS" if passed else "FAIL",
         "redaction": {
@@ -343,6 +538,14 @@ def build_parser() -> argparse.ArgumentParser:
             "with an explicitly labelled Mock RegulationRetriever."
         ),
     )
+    parser.add_argument(
+        "--live",
+        action="store_true",
+        help="Required to permit Anthropic API calls.",
+    )
+    parser.add_argument("--max-calls", type=int, required=True)
+    parser.add_argument("--max-total-input-tokens", type=int, required=True)
+    parser.add_argument("--max-total-output-tokens", type=int, required=True)
     parser.add_argument("--out", type=Path)
     return parser
 
@@ -355,6 +558,10 @@ def main() -> int:
             gold_path=args.gold,
             max_documents=args.max_documents,
             run_workflow=args.workflow,
+            live=args.live,
+            max_calls=args.max_calls,
+            max_total_input_tokens=args.max_total_input_tokens,
+            max_total_output_tokens=args.max_total_output_tokens,
         )
     except LLMError as exc:
         exit_code = 1

@@ -1,0 +1,298 @@
+{
+  "$defs": {
+    "BBox": {
+      "properties": {
+        "page": {
+          "minimum": 1,
+          "title": "Page",
+          "type": "integer"
+        },
+        "x1": {
+          "minimum": 0,
+          "title": "X1",
+          "type": "number"
+        },
+        "x2": {
+          "minimum": 0,
+          "title": "X2",
+          "type": "number"
+        },
+        "y1": {
+          "minimum": 0,
+          "title": "Y1",
+          "type": "number"
+        },
+        "y2": {
+          "minimum": 0,
+          "title": "Y2",
+          "type": "number"
+        }
+      },
+      "required": [
+        "page",
+        "x1",
+        "y1",
+        "x2",
+        "y2"
+      ],
+      "title": "BBox",
+      "type": "object"
+    },
+    "OcrLayoutPage": {
+      "additionalProperties": false,
+      "properties": {
+        "height_px": {
+          "maximum": 2576,
+          "minimum": 1,
+          "title": "Height Px",
+          "type": "integer"
+        },
+        "image_sha256": {
+          "pattern": "^[a-f0-9]{64}$",
+          "title": "Image Sha256",
+          "type": "string"
+        },
+        "page_number": {
+          "minimum": 1,
+          "title": "Page Number",
+          "type": "integer"
+        },
+        "spans": {
+          "items": {
+            "$ref": "#/$defs/OcrLayoutSpan"
+          },
+          "maxItems": 20000,
+          "minItems": 1,
+          "title": "Spans",
+          "type": "array"
+        },
+        "width_px": {
+          "maximum": 2576,
+          "minimum": 1,
+          "title": "Width Px",
+          "type": "integer"
+        }
+      },
+      "required": [
+        "page_number",
+        "image_sha256",
+        "width_px",
+        "height_px",
+        "spans"
+      ],
+      "title": "OcrLayoutPage",
+      "type": "object"
+    },
+    "OcrLayoutSpan": {
+      "additionalProperties": false,
+      "description": "One provider-neutral OCR/layout observation.\n\nSpan IDs are local stable references within one immutable ledger. Claude\nmay map business fields to these observations, but it cannot create or\nmodify them.",
+      "properties": {
+        "bbox": {
+          "$ref": "#/$defs/BBox"
+        },
+        "column_index": {
+          "anyOf": [
+            {
+              "minimum": 0,
+              "type": "integer"
+            },
+            {
+              "type": "null"
+            }
+          ],
+          "default": null,
+          "title": "Column Index"
+        },
+        "column_span": {
+          "anyOf": [
+            {
+              "maximum": 100,
+              "minimum": 1,
+              "type": "integer"
+            },
+            {
+              "type": "null"
+            }
+          ],
+          "default": null,
+          "title": "Column Span"
+        },
+        "confidence": {
+          "maximum": 1,
+          "minimum": 0,
+          "title": "Confidence",
+          "type": "number"
+        },
+        "page": {
+          "minimum": 1,
+          "title": "Page",
+          "type": "integer"
+        },
+        "reading_order": {
+          "minimum": 0,
+          "title": "Reading Order",
+          "type": "integer"
+        },
+        "role": {
+          "default": "text",
+          "enum": [
+            "text",
+            "heading",
+            "label",
+            "value",
+            "table",
+            "table_row",
+            "table_cell"
+          ],
+          "title": "Role",
+          "type": "string"
+        },
+        "row_index": {
+          "anyOf": [
+            {
+              "minimum": 0,
+              "type": "integer"
+            },
+            {
+              "type": "null"
+            }
+          ],
+          "default": null,
+          "title": "Row Index"
+        },
+        "row_span": {
+          "anyOf": [
+            {
+              "maximum": 100,
+              "minimum": 1,
+              "type": "integer"
+            },
+            {
+              "type": "null"
+            }
+          ],
+          "default": null,
+          "title": "Row Span"
+        },
+        "span_id": {
+          "maxLength": 128,
+          "minLength": 1,
+          "pattern": "^[A-Za-z0-9][A-Za-z0-9._:-]*$",
+          "title": "Span Id",
+          "type": "string"
+        },
+        "table_id": {
+          "anyOf": [
+            {
+              "maxLength": 128,
+              "minLength": 1,
+              "pattern": "^[A-Za-z0-9][A-Za-z0-9._:-]*$",
+              "type": "string"
+            },
+            {
+              "type": "null"
+            }
+          ],
+          "default": null,
+          "title": "Table Id"
+        },
+        "text": {
+          "maxLength": 12000,
+          "minLength": 1,
+          "title": "Text",
+          "type": "string"
+        }
+      },
+      "required": [
+        "span_id",
+        "page",
+        "reading_order",
+        "text",
+        "bbox",
+        "confidence"
+      ],
+      "title": "OcrLayoutSpan",
+      "type": "object"
+    }
+  },
+  "$id": "https://schemas.customs.local/agent/internal/v2/ocr-layout-ledger.schema.json",
+  "$schema": "https://json-schema.org/draft/2020-12/schema",
+  "additionalProperties": false,
+  "description": "Agent-internal model/OCR boundary. This is not a Backend request/result contract.",
+  "properties": {
+    "document_id": {
+      "maxLength": 128,
+      "minLength": 1,
+      "pattern": "^[A-Za-z0-9][A-Za-z0-9._:-]*$",
+      "title": "Document Id",
+      "type": "string"
+    },
+    "engine_id": {
+      "maxLength": 128,
+      "minLength": 1,
+      "title": "Engine Id",
+      "type": "string"
+    },
+    "engine_version": {
+      "maxLength": 128,
+      "minLength": 1,
+      "title": "Engine Version",
+      "type": "string"
+    },
+    "ledger_id": {
+      "pattern": "^ocr_[a-f0-9]{64}$",
+      "title": "Ledger Id",
+      "type": "string"
+    },
+    "model_assets_lock_sha256": {
+      "default": "0000000000000000000000000000000000000000000000000000000000000000",
+      "pattern": "^[a-f0-9]{64}$",
+      "title": "Model Assets Lock Sha256",
+      "type": "string"
+    },
+    "model_id": {
+      "default": "unattested-model-set",
+      "maxLength": 256,
+      "minLength": 1,
+      "title": "Model Id",
+      "type": "string"
+    },
+    "pages": {
+      "items": {
+        "$ref": "#/$defs/OcrLayoutPage"
+      },
+      "maxItems": 5,
+      "minItems": 1,
+      "title": "Pages",
+      "type": "array"
+    },
+    "provider_id": {
+      "maxLength": 128,
+      "minLength": 1,
+      "title": "Provider Id",
+      "type": "string"
+    },
+    "reading_order_policy_id": {
+      "const": "worker-emitted-sequence/v1",
+      "default": "worker-emitted-sequence/v1",
+      "title": "Reading Order Policy Id",
+      "type": "string"
+    },
+    "schema_version": {
+      "const": "2.0",
+      "default": "2.0",
+      "title": "Schema Version",
+      "type": "string"
+    }
+  },
+  "required": [
+    "ledger_id",
+    "document_id",
+    "provider_id",
+    "engine_id",
+    "engine_version",
+    "pages"
+  ],
+  "title": "Customs AI Agent internal V2 ocr-layout-ledger",
+  "type": "object"
+}

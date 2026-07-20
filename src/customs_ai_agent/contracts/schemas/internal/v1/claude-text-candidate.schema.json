@@ -1,0 +1,101 @@
+{
+  "$defs": {
+    "ClaudeFieldCandidate": {
+      "additionalProperties": false,
+      "description": "One verbatim field candidate produced by Claude.\n\nMissing fields are omitted from the enclosing list. Empty strings are never\na substitute for a missing value.",
+      "properties": {
+        "name": {
+          "title": "Name",
+          "type": "string"
+        },
+        "source_quote": {
+          "title": "Source Quote",
+          "type": "string"
+        },
+        "value": {
+          "title": "Value",
+          "type": "string"
+        }
+      },
+      "required": [
+        "name",
+        "value",
+        "source_quote"
+      ],
+      "title": "ClaudeFieldCandidate",
+      "type": "object"
+    },
+    "ClaudeLineItemCandidate": {
+      "additionalProperties": false,
+      "description": "A line item in source order.\n\nThe model does not create an item ID. The Agent assigns a stable ID from the\nowning document and source order after grounding succeeds.",
+      "properties": {
+        "fields": {
+          "items": {
+            "$ref": "#/$defs/ClaudeFieldCandidate"
+          },
+          "title": "Fields",
+          "type": "array"
+        },
+        "source_quote": {
+          "title": "Source Quote",
+          "type": "string"
+        }
+      },
+      "required": [
+        "source_quote",
+        "fields"
+      ],
+      "title": "ClaudeLineItemCandidate",
+      "type": "object"
+    }
+  },
+  "$id": "https://schemas.customs.local/agent/internal/v1/claude-text-candidate.schema.json",
+  "$schema": "https://json-schema.org/draft/2020-12/schema",
+  "additionalProperties": false,
+  "description": "Agent-internal model/OCR boundary. This is not a Backend request/result contract.",
+  "properties": {
+    "classification_source_quote": {
+      "title": "Classification Source Quote",
+      "type": "string"
+    },
+    "document_type": {
+      "enum": [
+        "bill_of_lading",
+        "invoice",
+        "packing_list",
+        "certificate_of_origin",
+        "unknown"
+      ],
+      "title": "Document Type",
+      "type": "string"
+    },
+    "fields": {
+      "items": {
+        "$ref": "#/$defs/ClaudeFieldCandidate"
+      },
+      "title": "Fields",
+      "type": "array"
+    },
+    "line_items": {
+      "items": {
+        "$ref": "#/$defs/ClaudeLineItemCandidate"
+      },
+      "title": "Line Items",
+      "type": "array"
+    },
+    "schema_version": {
+      "const": "1.0",
+      "title": "Schema Version",
+      "type": "string"
+    }
+  },
+  "required": [
+    "schema_version",
+    "document_type",
+    "classification_source_quote",
+    "fields",
+    "line_items"
+  ],
+  "title": "Customs AI Agent internal V1 claude-text-candidate",
+  "type": "object"
+}

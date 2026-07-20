@@ -1,9 +1,11 @@
 from __future__ import annotations
 
 import hashlib
+import re
 
 
 MAX_EVIDENCE_ITEM_ID_LENGTH = 128
+_EVIDENCE_HTTP_REQUEST_ID = re.compile(r"^[A-Za-z0-9][A-Za-z0-9._-]{0,127}$")
 
 
 def stable_line_item_id(document_id: str, line_number: int) -> str:
@@ -17,31 +19,25 @@ def stable_line_item_id(document_id: str, line_number: int) -> str:
         return candidate
     digest = hashlib.sha256(document_id.encode("utf-8")).hexdigest()[:32]
     separator = "_"
-    prefix_length = (
-        MAX_EVIDENCE_ITEM_ID_LENGTH - len(separator) - len(digest) - len(suffix)
-    )
+    prefix_length = MAX_EVIDENCE_ITEM_ID_LENGTH - len(separator) - len(digest) - len(suffix)
     if prefix_length < 1:
         raise ValueError("line item suffix leaves no room for an ID prefix")
     return f"{document_id[:prefix_length]}{separator}{digest}{suffix}"
 
 
 def stable_retrieval_request_id(review_run_id: str, retry_count: int) -> str:
-    """Create a deterministic Evidence request ID within the v1 128-char bound."""
+    """Create a deterministic ID accepted by the Evidence HTTP request boundary."""
 
     if retry_count < 0:
         raise ValueError("retry_count cannot be negative")
-    suffix = f":retrieve:{retry_count}"
+    suffix = f"-retrieve-{retry_count}"
     candidate = f"{review_run_id}{suffix}"
-    if len(candidate) <= MAX_EVIDENCE_ITEM_ID_LENGTH:
+    if _EVIDENCE_HTTP_REQUEST_ID.fullmatch(candidate):
         return candidate
-    digest = hashlib.sha256(review_run_id.encode("utf-8")).hexdigest()[:32]
-    separator = ":"
-    prefix_length = (
-        MAX_EVIDENCE_ITEM_ID_LENGTH - len(separator) - len(digest) - len(suffix)
-    )
-    if prefix_length < 1:
-        raise ValueError("retrieval suffix leaves no room for an ID prefix")
-    return f"{review_run_id[:prefix_length]}{separator}{digest}{suffix}"
+    digest = hashlib.sha256(
+        f"evidence-retrieval-request-v1\0{review_run_id}\0{retry_count}".encode(),
+    ).hexdigest()
+    return f"retrieval-{digest}"
 
 
 __all__ = [

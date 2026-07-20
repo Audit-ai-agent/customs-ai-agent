@@ -22,10 +22,17 @@ Extraction rules:
 - Return only fields allowed for the selected document type.
 
 Allowed document fields:
-- bill_of_lading: bl_no, shipper, consignee, vessel, voyage_no, port_of_loading,
-  port_of_discharge, container_numbers, seal_numbers, packages, gross_weight_kg
-- invoice: invoice_no, invoice_date, seller, buyer, incoterms, currency, total_amount
-- packing_list: packing_no, seller, buyer, container_numbers, packages
+- bill_of_lading: bl_no, shipment_id, shipper, consignee, notify_party, vessel, voyage_no,
+  port_of_loading, port_of_discharge, place_of_delivery, container_numbers, seal_numbers,
+  packages, package_type, shipping_marks, gross_weight_kg, measurement_cbm, freight_terms,
+  freight_prepaid, freight_collect, on_board_date
+- invoice: invoice_no, invoice_date, shipment_id, departure_date, vessel, voyage_no,
+  port_of_loading, port_of_discharge, seller, seller_address, buyer, buyer_address, consignee,
+  incoterms, currency, total_amount, country_of_origin, payment_terms, shipping_marks, packages
+- packing_list: packing_no, invoice_no, invoice_date, bl_no, shipment_id, departure_date, vessel,
+  voyage_no, port_of_loading, port_of_discharge, seller, buyer, consignee, country_of_origin,
+  shipping_marks, container_numbers, seal_numbers, packages, total_net_weight_kg,
+  total_gross_weight_kg, total_measurement_cbm
 - certificate_of_origin: certificate_no, exporter, importer, origin_country, hs_codes,
   goods_description, issue_date
 - unknown: no fields and no line items
@@ -34,7 +41,8 @@ Allowed invoice line-item fields:
 description, hs_code, quantity, unit_price, amount, origin_country
 
 Allowed packing-list line-item fields:
-description, quantity, net_weight_kg, gross_weight_kg, package_count
+item_no, description, quantity, unit, net_weight_kg, gross_weight_kg, package_count, package_type,
+measurement_cbm
 
 For a known document type, classification_source_quote must be a verbatim heading or identifying
 span. For unknown, classification_source_quote must be an empty string.

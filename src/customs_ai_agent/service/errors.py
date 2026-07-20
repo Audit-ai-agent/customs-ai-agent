@@ -1,0 +1,39 @@
+from __future__ import annotations
+
+from dataclasses import dataclass
+
+
+_MESSAGES = {
+    "authentication_invalid": "Service authentication failed.",
+    "authentication_required": "Service authentication is required.",
+    "content_encoding_unsupported": "The request content encoding is not supported.",
+    "content_length_invalid": "The request content length is invalid.",
+    "dependency_unready": "A required service dependency is not ready.",
+    "idempotency_conflict": "The review run identifier is already bound to another request.",
+    "internal_error": "The request could not be processed.",
+    "request_invalid": "The review request is invalid.",
+    "request_body_timeout": "The review request body exceeded the receive deadline.",
+    "request_too_large": "The review request exceeds the service limit.",
+    "required_field_missing": "A required service field is missing.",
+    "review_execution_failed": "The review could not be completed.",
+    "review_timeout": "The review exceeded the service execution deadline.",
+    "service_busy": "The service is at its configured processing capacity.",
+    "service_draining": "The service is shutting down.",
+    "unsupported_media_type": "The request media type is not supported.",
+    "visual_input_not_supported": "This service release accepts text documents only.",
+}
+
+
+@dataclass(frozen=True, slots=True)
+class ServiceHttpError(Exception):
+    code: str
+    status_code: int
+    retryable: bool = False
+    retry_after_seconds: int | None = None
+
+    @property
+    def public_message(self) -> str:
+        return _MESSAGES.get(self.code, _MESSAGES["internal_error"])
+
+
+__all__ = ["ServiceHttpError"]

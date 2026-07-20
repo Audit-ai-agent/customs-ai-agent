@@ -1,0 +1,15 @@
+title = "customs-ai-agent secret scanning"
+
+[extend]
+useDefault = true
+
+[[allowlists]]
+description = "Ignored local environments, caches, and build outputs are not release inputs."
+paths = [
+  '''(^|[\\/])\.venv[\\/]''',
+  '''(^|[\\/])venv[\\/]''',
+  '''(^|[\\/])(?:build|dist|htmlcov|outputs)[\\/]''',
+  '''(^|[\\/])\.(?:pytest|mypy|ruff)_cache[\\/]''',
+  '''(^|[\\/])\.pytest[^\\/]*[\\/]''',
+  '''(^|[\\/])pytest-cache-files-[^\\/]+[\\/]''',
+]

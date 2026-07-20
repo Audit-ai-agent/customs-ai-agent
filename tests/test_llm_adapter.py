@@ -47,8 +47,7 @@ def _invoice_payload(**overrides):
         "line_items": [
             {
                 "source_quote": (
-                    "ITEM: Stainless bolts | HS: 7318.15 | "
-                    "QTY: 1200 KG | AMOUNT: 12000"
+                    "ITEM: Stainless bolts | HS: 7318.15 | QTY: 1200 KG | AMOUNT: 12000"
                 ),
                 "fields": [
                     {
@@ -122,7 +121,7 @@ def test_analyzer_uses_versioned_prompt_and_strict_json_schema():
     analysis, transport = _analyze()
 
     assert analysis.candidate.document_type == "invoice"
-    assert analysis.metadata.prompt_version == "1.1.0"
+    assert analysis.metadata.prompt_version == "1.2.0"
     assert analysis.metadata.model_id == "claude-sonnet-5"
     request = transport.calls[0]
     assert "untrusted" in request["system_prompt"].casefold()
@@ -160,9 +159,7 @@ def test_duplicate_line_quotes_map_to_distinct_source_occurrences():
     line = _invoice_payload()["line_items"][0]["source_quote"]
     text = INVOICE_TEXT + line + "\n"
     payload = _invoice_payload()
-    payload["line_items"].append(
-        json.loads(json.dumps(payload["line_items"][0]))
-    )
+    payload["line_items"].append(json.loads(json.dumps(payload["line_items"][0])))
 
     analysis, _ = _analyze(payload=payload, text=text)
     extracted = analysis_to_extracted_document(
@@ -183,9 +180,7 @@ def test_duplicate_line_quotes_map_to_distinct_source_occurrences():
 
 def test_line_item_occurrence_count_is_validated_before_mapping():
     payload = _invoice_payload()
-    payload["line_items"].append(
-        json.loads(json.dumps(payload["line_items"][0]))
-    )
+    payload["line_items"].append(json.loads(json.dumps(payload["line_items"][0])))
 
     with pytest.raises(LLMOutputValidationError) as exc_info:
         _analyze(payload=payload, text=INVOICE_TEXT)
@@ -196,12 +191,8 @@ def test_line_item_occurrence_count_is_validated_before_mapping():
 def test_line_item_source_order_is_validated_before_mapping():
     payload = _invoice_payload()
     second = json.loads(json.dumps(payload["line_items"][0]))
-    second["source_quote"] = second["source_quote"].replace(
-        "Stainless bolts", "Copper nuts"
-    )
-    second["fields"][0].update(
-        {"value": "Copper nuts", "source_quote": "Copper nuts"}
-    )
+    second["source_quote"] = second["source_quote"].replace("Stainless bolts", "Copper nuts")
+    second["fields"][0].update({"value": "Copper nuts", "source_quote": "Copper nuts"})
     text = INVOICE_TEXT + second["source_quote"] + "\n"
     payload["line_items"] = [second, payload["line_items"][0]]
 
@@ -225,9 +216,7 @@ def test_line_item_source_order_is_validated_before_mapping():
             "field_not_allowed",
         ),
         (
-            lambda payload: payload["fields"][0].update(
-                {"source_quote": "NOT IN THE DOCUMENT"}
-            ),
+            lambda payload: payload["fields"][0].update({"source_quote": "NOT IN THE DOCUMENT"}),
             "source_quote_not_grounded",
         ),
         (
@@ -237,9 +226,7 @@ def test_line_item_source_order_is_validated_before_mapping():
             "candidate_value_not_grounded",
         ),
         (
-            lambda payload: payload["fields"][1].update(
-                {"source_quote": "12000"}
-            ),
+            lambda payload: payload["fields"][1].update({"source_quote": "12000"}),
             "source_quote_ambiguous",
         ),
     ],
@@ -288,9 +275,7 @@ def test_prompt_injection_is_only_untrusted_document_data():
         ("12", "12000", "candidate_value_not_grounded"),
     ],
 )
-def test_grounding_requires_exact_source_span_and_value_boundary(
-    value, quote, error_code
-):
+def test_grounding_requires_exact_source_span_and_value_boundary(value, quote, error_code):
     payload = _invoice_payload()
     payload["fields"][0].update({"value": value, "source_quote": quote})
 
@@ -392,6 +377,74 @@ def test_unsafe_provider_environment_fails_before_client_creation(
     assert exc_info.value.code == error_code
 
 
+@pytest.mark.parametrize(
+    "values",
+    [
+        {"api_key": SecretStr("   ")},
+        {
+            "api_key": SecretStr("unit-test-key"),
+            "model": "claude-unevaluated",
+        },
+    ],
+)
+def test_direct_claude_settings_enforce_release_invariants(values):
+    with pytest.raises(ValidationError):
+        ClaudeSettings(**values)
+
+
+def test_from_settings_rechecks_unsafe_process_environment_before_client(
+    monkeypatch,
+):
+    settings = ClaudeSettings(api_key=SecretStr("unit-test-key"))
+    client_calls = 0
+
+    def forbidden_client(**_kwargs):
+        nonlocal client_calls
+        client_calls += 1
+        raise AssertionError("Anthropic client must not be constructed")
+
+    monkeypatch.setenv("ANTHROPIC_BASE_URL", "https://attacker.invalid")
+    monkeypatch.setattr(
+        "customs_ai_agent.adapters.llm.anthropic.Anthropic",
+        forbidden_client,
+    )
+
+    with pytest.raises(LLMConfigurationError) as exc_info:
+        ClaudeDocumentAnalyzer.from_settings(settings)
+
+    assert exc_info.value.code == "unsafe_anthropic_transport_override"
+    assert client_calls == 0
+
+
+def test_from_settings_revalidates_bypassed_settings_before_client(
+    monkeypatch,
+):
+    settings = ClaudeSettings.model_construct(
+        api_key=SecretStr(" "),
+        model="claude-unevaluated",
+        max_tokens=8192,
+        timeout_seconds=90.0,
+        max_retries=2,
+    )
+    client_calls = 0
+
+    def forbidden_client(**_kwargs):
+        nonlocal client_calls
+        client_calls += 1
+        raise AssertionError("Anthropic client must not be constructed")
+
+    monkeypatch.setattr(
+        "customs_ai_agent.adapters.llm.anthropic.Anthropic",
+        forbidden_client,
+    )
+
+    with pytest.raises(LLMConfigurationError) as exc_info:
+        ClaudeDocumentAnalyzer.from_settings(settings)
+
+    assert exc_info.value.code == "invalid_claude_configuration"
+    assert client_calls == 0
+
+
 def test_sdk_debug_logger_fails_before_provider_call(monkeypatch):
     monkeypatch.delenv("ANTHROPIC_LOG", raising=False)
 
@@ -438,6 +491,65 @@ def test_analyzer_constructor_pins_official_anthropic_endpoint(monkeypatch, tmp_
 
     assert captured["base_url"] == ANTHROPIC_API_BASE_URL
     assert captured["api_key"] == "file-key"
+
+
+def test_from_settings_analyzer_closes_only_its_anthropic_client(monkeypatch):
+    class Client:
+        def __init__(self) -> None:
+            self.messages = SimpleNamespace()
+            self.close_calls = 0
+
+        def close(self) -> None:
+            self.close_calls += 1
+
+    class CallerOwnedOcr:
+        def __init__(self) -> None:
+            self.close_calls = 0
+
+        def close(self) -> None:
+            self.close_calls += 1
+
+    client = Client()
+    ocr_provider = CallerOwnedOcr()
+    monkeypatch.setattr(
+        "customs_ai_agent.adapters.llm.anthropic.Anthropic",
+        lambda **_kwargs: client,
+    )
+
+    analyzer = ClaudeDocumentAnalyzer.from_settings(
+        ClaudeSettings(api_key=SecretStr("unit-test-key")),
+        ocr_layout_provider=ocr_provider,
+    )
+    analyzer.close()
+    analyzer.close()
+
+    assert client.close_calls == 1
+    assert ocr_provider.close_calls == 0
+    with pytest.raises(LLMConfigurationError) as exc_info:
+        analyzer.analyze({"content_text": "COMMERCIAL INVOICE"})
+    assert exc_info.value.code == "document_analyzer_closed"
+
+
+def test_directly_injected_transport_remains_caller_owned():
+    class CallerOwnedTransport:
+        def __init__(self) -> None:
+            self.close_calls = 0
+
+        def close(self) -> None:
+            self.close_calls += 1
+
+        def create_document_analysis(self, **_kwargs):
+            raise AssertionError("transport must not be called")
+
+    transport = CallerOwnedTransport()
+    analyzer = ClaudeDocumentAnalyzer(
+        transport,
+        ClaudeSettings(api_key=SecretStr("unit-test-key")),
+    )
+
+    analyzer.close()
+
+    assert transport.close_calls == 0
 
 
 def test_release_rejects_unevaluated_model_override(monkeypatch):
@@ -525,14 +637,14 @@ def test_wire_identifiers_reject_header_unsafe_characters(overrides):
         ReviewRunRequest.model_validate(values)
 
 
-def test_sdk_transport_maps_response_and_omits_sampling_and_manual_thinking():
+def test_sdk_transport_maps_response_disables_thinking_and_omits_sampling():
     class FakeMessages:
         def __init__(self):
             self.kwargs = None
 
         def create(self, **kwargs):
-                self.kwargs = kwargs
-                return SimpleNamespace(
+            self.kwargs = kwargs
+            return SimpleNamespace(
                 _request_id="req_sdk12345",
                 id="msg_sdk12345",
                 model="claude-sonnet-5",
@@ -555,7 +667,8 @@ def test_sdk_transport_maps_response_and_omits_sampling_and_manual_thinking():
     assert result.input_tokens == 10
     assert result.output_tokens == 20
     assert messages.kwargs["output_config"]["format"]["type"] == "json_schema"
-    for forbidden in ("temperature", "top_p", "top_k", "thinking", "tools"):
+    assert messages.kwargs["thinking"] == {"type": "disabled"}
+    for forbidden in ("temperature", "top_p", "top_k", "tools"):
         assert forbidden not in messages.kwargs
 
 
@@ -567,9 +680,7 @@ def test_sdk_transport_maps_response_and_omits_sampling_and_manual_thinking():
         ({"model": "claude-other"}, "provider_model_mismatch"),
     ],
 )
-def test_sdk_transport_rejects_untrusted_or_mismatched_metadata(
-    overrides, error_code
-):
+def test_sdk_transport_rejects_untrusted_or_mismatched_metadata(overrides, error_code):
     class FakeMessages:
         def create(self, **_kwargs):
             values = {
@@ -588,9 +699,7 @@ def test_sdk_transport_rejects_untrusted_or_mismatched_metadata(
             values.update(overrides)
             return SimpleNamespace(**values)
 
-    transport = AnthropicMessagesTransport(
-        SimpleNamespace(messages=FakeMessages())
-    )
+    transport = AnthropicMessagesTransport(SimpleNamespace(messages=FakeMessages()))
 
     with pytest.raises(LLMProviderError) as exc_info:
         transport.create_document_analysis(
@@ -611,9 +720,7 @@ def test_sdk_transport_redacts_unknown_provider_exception():
         def create(self, **_kwargs):
             raise RuntimeError(canary)
 
-    transport = AnthropicMessagesTransport(
-        SimpleNamespace(messages=FailingMessages())
-    )
+    transport = AnthropicMessagesTransport(SimpleNamespace(messages=FailingMessages()))
 
     with pytest.raises(LLMProviderError) as exc_info:
         transport.create_document_analysis(

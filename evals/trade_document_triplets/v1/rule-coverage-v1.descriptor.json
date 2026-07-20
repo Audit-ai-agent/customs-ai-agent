@@ -1,0 +1,63 @@
+{
+  "schema_version": "trade-document-rule-coverage-descriptor/v1",
+  "descriptor_id": "trade-document-triplets-rule-coverage-v1",
+  "dataset_id": "trade_document_triplets",
+  "dataset_version": "source-v1",
+  "evaluation_version": "rule-coverage-v1",
+  "scope": "public_registered_synthetic_development_diagnostic",
+  "release_eligible": false,
+  "selection": {
+    "case_pool": "all_registered_public_synthetic_cases",
+    "case_count": 30,
+    "positive_case_count": 29,
+    "negative_control_case_count": 1,
+    "membership_embedded": false,
+    "release_split_membership_consulted": false,
+    "seed": "trade-document-triplets-rule-coverage-v1-public-development"
+  },
+  "finding_grain": [
+    "issue_code",
+    "source_document_id",
+    "target_document_id"
+  ],
+  "positive_operator_ids": [
+    "pl_invoice_number_mismatch",
+    "pl_invoice_date_mismatch",
+    "pl_seller_mismatch",
+    "bl_consignee_mismatch",
+    "pl_vessel_mismatch",
+    "bl_voyage_mismatch",
+    "bl_port_of_loading_mismatch",
+    "bl_port_of_discharge_mismatch",
+    "pl_package_mismatch",
+    "bl_gross_weight_mismatch",
+    "bl_measurement_mismatch",
+    "ci_amount_mismatch",
+    "pl_container_mismatch",
+    "pl_seal_mismatch",
+    "bl_freight_both_present",
+    "bl_freight_neither_present",
+    "co_origin_mismatch",
+    "co_exporter_mismatch",
+    "co_importer_mismatch",
+    "co_hs_code_mismatch",
+    "pl_consignee_mismatch",
+    "pl_departure_date_mismatch",
+    "ci_port_of_loading_mismatch",
+    "ci_port_of_discharge_mismatch",
+    "pl_country_of_origin_mismatch",
+    "pl_shipping_marks_mismatch",
+    "pl_line_quantity_mismatch",
+    "pl_line_net_gross_invalid",
+    "pl_line_item_unmatched"
+  ],
+  "negative_control_operator_ids": [
+    "pl_extra_item_ambiguous_not_scored"
+  ],
+  "policy": {
+    "allowed_use": "development_diagnostic_only",
+    "release_claim_allowed": false,
+    "model_or_rule_selection_claim_allowed": false,
+    "sealed_unseen_release_bundle_required_for_release": true
+  }
+}

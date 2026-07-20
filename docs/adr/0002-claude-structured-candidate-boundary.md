@@ -2,6 +2,7 @@
 
 - Status: Accepted
 - Date: 2026-07-17
+- Scope: Historical `0.2.x` text-candidate baseline; `0.3.x` adds a stricter vision/OCR boundary
 
 ## Context
 
@@ -10,7 +11,8 @@ whole workflow with an LLM would allow a non-deterministic model to invent legal
 or completion status. Merely placing a Claude call before the old rules would also leave schema,
 grounding, provenance, fallback, and mixed Mock/Live execution undefined.
 
-The current request contract contains text, not PDF/image bytes or OCR/layout blocks.
+At the time of this decision, the current request contract contained text, not PDF/image bytes or
+OCR/layout blocks.
 
 ## Decision
 
@@ -53,5 +55,57 @@ sent.
 - Model call audit is limited to safe model/prompt/request/message/usage/latency metadata; failures
   keep safe codes and bounded provider metadata, never exception bodies.
 - Package version is raised to `0.2.0` so Backend cannot confuse this wheel with Mock-only `0.1.0`.
-- PDF/image OCR, layout provenance, real bbox, Backend pinning, and full system release remain
-  separate work and must not be inferred from the synthetic text evaluation.
+- For the `0.2.x` baseline, PDF/image OCR, layout provenance, real bbox, Backend pinning, and full
+  system release remained separate work and could not be inferred from the synthetic text
+  evaluation.
+
+## Successor implementation status
+
+TASK-0009 targets a `0.3.0` release candidate. It preserves the V1 text-only request/result wire
+contract and this decision's authority boundary while adding a separate V2 image/PDF contract,
+independent OCR/layout ledgers, Claude Vision candidates and bounded crop reconciliation. Claude
+still cannot create legal Evidence, findings, severity or final outcome.
+
+This historical ADR does not claim that the new image path has passed release evaluation. A
+provider can be selected only by an exact-commit-wheel run of the canonical locked 60-document
+CI/PL/B/L and 20-document C/O benchmark plus the hardened combiner. Pre-freeze test counts, wheel
+hashes and smoke reports are diagnostic history, not final release evidence.
+
+The user-approved c28 text Claude Live run is retained as historical evidence: it scored 64/64
+against normal Gold SHA-256
+`7cfe2cf8e2b88e55f80398425e6866d52bfa85e0886ec8a4b5862f736e01c7e5` and 21/21
+against adversarial Gold
+`b4416cbad6df9fba62f2f636c4267a348bf5f11a1d3b78771aee8b16786db661`. A later
+exact-commit diagnostic against the ISO-6346-corrected normal Gold
+`1e300058f6d01330e82002d04e1a3238f42aaceeb9dc5716653a2aa1c67634e0` and the same
+adversarial Gold scored 64/64 and 21/21 with zero wrong, missing, or hallucinated fields.
+That result remains synthetic text-only diagnostic evidence, not an OCR, image, Evidence, or
+release PASS. Its exact commit and checksums are owned by the external Artifact manifest rather
+than copied into this ADR.
+
+The public c28 `AgentRuntime -> Claude -> Evidence HTTP` execution also predates mandatory runtime
+contract identity. The current Agent requires `evidence_contract` in readiness, while the current
+Data Provider does not return it and has only 3 of 58 expected law records. Current execution is
+therefore blocked before retrieval POST and there is no successful current Agent–Data Live E2E.
+The historical image diagnostic also used Gold that was later invalidated; the current evaluator
+stops before OCR, Claude and Data until a human-reviewed replacement is pinned. A one-document OCR
+smoke selected no provider because both Paddle and Docling failed the configured thresholds.
+TASK-0009 does not change Backend, Frontend or Data Platform source. Backend framework selection
+remains deferred, and legacy files in `project/_engineering/archive` remain `reference-only`
+unless separately promoted and revalidated.
+
+The successor OCR runtime uses internal ledger schema 2.0 and
+`reading_order_policy_id=worker-emitted-sequence/v1`. The worker emits that policy, the edge adapter
+requires the exact value, and the canonical ledger hash binds both the policy and the ordered
+spans. Internal/v1 remains a historical compatibility resource only; a pre-policy v1 ledger or
+checkpoint is not current runtime provenance. OCR Gold text uses
+`renderer-bbox-yx/v1`: renderer word bbox top-left y/x with source index as tie-break. Prediction
+text uses ledger `reading_order`; geometry must not reorder provider predictions.
+
+A non-release, unsealed CI/PL/B/L/C/O one-document-per-type ordering audit produced 0% CER for worker/source order
+against Gold bbox-yx order on all four documents. Counterfactual renderer-array CER was
+23.31%, 19.30%, 29.58%, and 21.19% (24% micro), while OCR-line geometry resort was 36.55% micro.
+Table row/cell F1 remained zero on all four documents. No durable Artifact Run was produced, so
+this is a development ordering-contract diagnostic, not an authoritative or production OCR
+benchmark. Historical v1 CER 22.17% and separate rendered-v2 CER observations 17.07%/0% use
+different input hashes and must not be presented as a before/after improvement.

@@ -1,0 +1,27 @@
+{
+  "canonical_json_bytes": 41938,
+  "canonical_sha256": "d61ba5f5a579bab1a8f05bcfcd2d6c5f60854b347b9431d64f123bb611b11d6f",
+  "generator": {
+    "fastapi": "0.139.2",
+    "openapi": "3.1.0",
+    "service_api_version": "1.0.0"
+  },
+  "paths": {
+    "/health/live": [
+      "get"
+    ],
+    "/health/ready": [
+      "get"
+    ],
+    "/internal/agent/v1/metadata": [
+      "get"
+    ],
+    "/internal/agent/v1/metrics": [
+      "get"
+    ],
+    "/internal/agent/v1/reviews": [
+      "post"
+    ]
+  },
+  "schema_version": "customs-agent-service-openapi-lock/v1"
+}

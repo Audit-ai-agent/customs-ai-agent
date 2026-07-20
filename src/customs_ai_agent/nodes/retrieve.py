@@ -6,27 +6,32 @@ from typing import Any
 from customs_ai_agent.adapters.retrieval import RegulationRetriever
 from customs_ai_agent.identifiers import stable_retrieval_request_id
 from customs_ai_agent.nodes.common import audit
+from customs_ai_agent.nodes.normalize import is_valid_hs_code
 from customs_ai_agent.schemas.models import (
     EvidenceRetrievalRequest,
     EvidenceRetrievalResponse,
+    RagEvidence,
     RetrievalErrorDetail,
+    RetrievalItemResult,
     RetrievalQueryItem,
 )
 
 
 def _invoice_items(state: dict[str, Any]) -> list[dict[str, Any]]:
-    for doc in (state.get("normalized_documents") or {}).values():
-        if doc.get("document_type") == "invoice":
-            return doc.get("line_items") or []
+    pairing_result = state.get("pairing_result") or {}
+    invoice_document_id = pairing_result.get("invoice_document_id")
+    if not isinstance(invoice_document_id, str) or not invoice_document_id:
+        return []
+    document = (state.get("normalized_documents") or {}).get(invoice_document_id)
+    if isinstance(document, dict) and document.get("document_type") == "invoice":
+        return document.get("line_items") or []
     return []
 
 
 def _query_item(item: dict[str, Any], destination_country: str) -> RetrievalQueryItem:
     origin_country = item.get("origin_country")
     if not (
-        isinstance(origin_country, str)
-        and len(origin_country) == 2
-        and origin_country.isalpha()
+        isinstance(origin_country, str) and len(origin_country) == 2 and origin_country.isalpha()
     ):
         origin_country = None
     return RetrievalQueryItem(
@@ -47,9 +52,115 @@ def _coverage(results: list[dict[str, Any]]) -> str:
     return "partial"
 
 
-def _context_errors(
-    state: dict[str, Any], results: list[dict[str, Any]]
-) -> list[dict[str, Any]]:
+def _is_ascii_hs_code(value: object, *, length: int) -> bool:
+    return (
+        isinstance(value, str)
+        and len(value) == length
+        and all("0" <= character <= "9" for character in value)
+    )
+
+
+def _hs_result_matches_query(
+    query: RetrievalQueryItem,
+    result: RetrievalItemResult,
+) -> bool:
+    """Bind a successful Evidence resolution to the exact requested HS scope.
+
+    `model_construct` can bypass every Pydantic validator, so this boundary
+    deliberately rechecks primitive types, status values and candidate formats.
+    A 10-digit exact result must equal the requested HSK10. A unique descendant
+    is valid only for a requested 6-digit HS code and must retain that prefix.
+    """
+
+    resolution = getattr(result, "hs_resolution", None)
+    resolved_hsk10 = getattr(result, "resolved_hsk10", None)
+    candidate_hsk10s = getattr(result, "candidate_hsk10s", None)
+    if (
+        not isinstance(resolution, str)
+        or resolution
+        not in {
+            "exact",
+            "unique_descendant",
+            "ambiguous",
+            "invalid",
+            "missing",
+        }
+        or not isinstance(candidate_hsk10s, list)
+        or any(not _is_ascii_hs_code(code, length=10) for code in candidate_hsk10s)
+        or len(candidate_hsk10s) != len(set(candidate_hsk10s))
+    ):
+        return False
+
+    requested_hs = query.hs_code
+    if resolution == "exact":
+        if not isinstance(requested_hs, str) or not isinstance(resolved_hsk10, str):
+            return False
+        return (
+            _is_ascii_hs_code(requested_hs, length=10)
+            and _is_ascii_hs_code(resolved_hsk10, length=10)
+            and resolved_hsk10 == requested_hs
+            and (not candidate_hsk10s or candidate_hsk10s == [resolved_hsk10])
+        )
+    if resolution == "unique_descendant":
+        if not isinstance(requested_hs, str) or not isinstance(resolved_hsk10, str):
+            return False
+        return (
+            _is_ascii_hs_code(requested_hs, length=6)
+            and _is_ascii_hs_code(resolved_hsk10, length=10)
+            and resolved_hsk10.startswith(requested_hs)
+            and (not candidate_hsk10s or candidate_hsk10s == [resolved_hsk10])
+        )
+    return resolved_hsk10 is None
+
+
+def _response_envelope_is_well_formed(response: EvidenceRetrievalResponse) -> bool:
+    snapshot_id = getattr(response, "knowledge_snapshot_id", None)
+    status = getattr(response, "status", None)
+    return (
+        getattr(response, "schema_version", None) == "1.0"
+        and isinstance(getattr(response, "request_id", None), str)
+        and bool(response.request_id.strip())
+        and isinstance(status, str)
+        and status in {"ok", "partial", "failed"}
+        and (snapshot_id is None or (isinstance(snapshot_id, str) and bool(snapshot_id.strip())))
+        and isinstance(getattr(response, "results", None), list)
+        and isinstance(getattr(response, "errors", None), list)
+    )
+
+
+def _result_envelope_is_well_formed(result: object) -> bool:
+    coverage = getattr(result, "coverage", None)
+    return (
+        isinstance(result, RetrievalItemResult)
+        and isinstance(getattr(result, "item_id", None), str)
+        and bool(result.item_id.strip())
+        and isinstance(coverage, str)
+        and coverage in {"complete", "partial", "unknown"}
+        and isinstance(getattr(result, "requirements_found", None), bool)
+        and isinstance(getattr(result, "evidence", None), list)
+        and isinstance(getattr(result, "errors", None), list)
+    )
+
+
+def _is_qualified_requirement_finding(
+    evidence: dict[str, Any],
+    *,
+    item_id: str,
+    resolved_hsk10: str | None,
+) -> bool:
+    try:
+        parsed = RagEvidence.model_validate(evidence)
+    except Exception:
+        return False
+    return (
+        parsed.source_type == "customs_requirement"
+        and parsed.eligibility == "finding"
+        and parsed.item_id == item_id
+        and parsed.matched_hs_code == resolved_hsk10
+    )
+
+
+def _context_errors(state: dict[str, Any], results: list[dict[str, Any]]) -> list[dict[str, Any]]:
     errors: list[dict[str, Any]] = []
     review_as_of = date.fromisoformat(state["review_as_of"])
     for result in results:
@@ -57,7 +168,13 @@ def _context_errors(
         for evidence in result.get("evidence") or []:
             code = None
             message = None
-            if evidence.get("trade_type") != state["trade_type"]:
+            if (
+                evidence.get("eligibility") == "finding"
+                and evidence.get("source_type") != "customs_requirement"
+            ):
+                code = "EVIDENCE_FINDING_SOURCE_NOT_STRUCTURED"
+                message = "Only structured customs requirement evidence can support a finding."
+            elif evidence.get("trade_type") != state["trade_type"]:
                 code = "EVIDENCE_TRADE_TYPE_MISMATCH"
                 message = "Evidence trade_type did not match the review request."
             elif (
@@ -66,6 +183,15 @@ def _context_errors(
             ):
                 code = "EVIDENCE_HS_MISMATCH"
                 message = "Customs requirement evidence did not match the resolved HSK10."
+            elif evidence.get("eligibility") == "finding" and not (
+                _is_qualified_requirement_finding(
+                    evidence,
+                    item_id=result["item_id"],
+                    resolved_hsk10=resolved_hsk10,
+                )
+            ):
+                code = "EVIDENCE_FINDING_PROVENANCE_INCOMPLETE"
+                message = "Finding evidence did not contain complete structured provenance."
             else:
                 valid_from = evidence.get("valid_from")
                 valid_to = evidence.get("valid_to")
@@ -86,6 +212,25 @@ def _context_errors(
                         retryable=False,
                     ).model_dump(mode="json")
                 )
+        qualified_requirement_found = any(
+            _is_qualified_requirement_finding(
+                evidence,
+                item_id=result["item_id"],
+                resolved_hsk10=resolved_hsk10,
+            )
+            for evidence in result.get("evidence") or []
+        )
+        if bool(result.get("requirements_found")) != qualified_requirement_found:
+            errors.append(
+                RetrievalErrorDetail(
+                    code="EVIDENCE_REQUIREMENTS_FOUND_MISMATCH",
+                    message=(
+                        f"{result['item_id']}: requirements_found did not match "
+                        "qualified structured requirement evidence."
+                    ),
+                    retryable=False,
+                ).model_dump(mode="json")
+            )
     return errors
 
 
@@ -96,10 +241,13 @@ def _failed_update(
     code: str,
     message: str,
     request: EvidenceRetrievalRequest | None = None,
+    retryable: bool = True,
 ) -> dict[str, Any]:
-    error = RetrievalErrorDetail(code=code, message=message, retryable=True).model_dump(
-        mode="json"
-    )
+    error = RetrievalErrorDetail(
+        code=code,
+        message=message,
+        retryable=retryable,
+    ).model_dump(mode="json")
     return {
         "retrieval_request_id": request_id,
         "retrieval_request": request.model_dump(mode="json") if request else {},
@@ -129,10 +277,52 @@ def retrieve_regulations(
         str(state["review_run_id"]),
         int(state.get("retry_count") or 0),
     )
+    document_type_conflicts = (state.get("pairing_result") or {}).get(
+        "document_type_conflicts"
+    ) or []
+    if any(
+        conflict.get("document_type") == "invoice"
+        for conflict in document_type_conflicts
+        if isinstance(conflict, dict)
+    ):
+        return _failed_update(
+            state,
+            request_id=request_id,
+            code="AMBIGUOUS_INVOICE_RETRIEVAL_BLOCKED",
+            message=(
+                "Regulatory retrieval was not called because the Case contains "
+                "multiple invoice candidates."
+            ),
+            retryable=False,
+        )
+    invoice_items = _invoice_items(state)
+    invalid_hs_item_ids = sorted(
+        str(item.get("item_id") or "unknown")
+        for item in invoice_items
+        if (
+            (
+                item.get("hs_code") is not None
+                or (
+                    (item.get("raw_fields") or {}).get("hs_code") is not None
+                    and str((item.get("raw_fields") or {}).get("hs_code")).strip()
+                )
+            )
+            and not is_valid_hs_code(item.get("hs_code"))
+        )
+    )
+    if invalid_hs_item_ids:
+        return _failed_update(
+            state,
+            request_id=request_id,
+            code="INVALID_HS_CODE_RETRIEVAL_BLOCKED",
+            message=(
+                "Regulatory retrieval was not called because invoice items have "
+                f"invalid HS codes: {', '.join(invalid_hs_item_ids)}."
+            ),
+            retryable=False,
+        )
     try:
-        query_items = [
-            _query_item(item, state["jurisdiction"]) for item in _invoice_items(state)
-        ]
+        query_items = [_query_item(item, state["jurisdiction"]) for item in invoice_items]
     except Exception:
         return _failed_update(
             state,
@@ -195,6 +385,17 @@ def retrieve_regulations(
             request=request,
         )
 
+    if not _response_envelope_is_well_formed(response) or any(
+        not _result_envelope_is_well_formed(result) for result in response.results
+    ):
+        return _failed_update(
+            state,
+            request_id=request_id,
+            code="INVALID_RETRIEVAL_RESPONSE",
+            message="Evidence response failed the local response envelope.",
+            request=request,
+        )
+
     if response.request_id != request_id:
         return _failed_update(
             state,
@@ -215,10 +416,32 @@ def retrieve_regulations(
             request=request,
         )
 
-    results = [result.model_dump(mode="json") for result in response.results]
-    evidence = [item for result in results for item in result["evidence"]]
-    response_errors = [error.model_dump(mode="json") for error in response.errors]
-    context_errors = _context_errors(state, results)
+    query_by_item_id = {item.item_id: item for item in query_items}
+    if any(
+        not _hs_result_matches_query(query_by_item_id[result.item_id], result)
+        for result in response.results
+    ):
+        return _failed_update(
+            state,
+            request_id=request_id,
+            code="HS_RESULT_MISMATCH",
+            message="Evidence HS resolution did not match the requested item HS scope.",
+            request=request,
+        )
+
+    try:
+        results = [result.model_dump(mode="json") for result in response.results]
+        evidence = [item for result in results for item in result["evidence"]]
+        response_errors = [error.model_dump(mode="json") for error in response.errors]
+        context_errors = _context_errors(state, results)
+    except Exception:
+        return _failed_update(
+            state,
+            request_id=request_id,
+            code="INVALID_RETRIEVAL_RESPONSE",
+            message="Evidence response could not be safely normalized.",
+            request=request,
+        )
     effective_status = "failed" if context_errors else response.status
     retrieval_coverage = "unknown" if context_errors else _coverage(results)
     fail_closed = (
@@ -226,16 +449,15 @@ def retrieve_regulations(
         or retrieval_coverage != "complete"
         or not response.knowledge_snapshot_id
         or any(result["errors"] for result in results)
+        or any(result["hs_resolution"] not in {"exact", "unique_descendant"} for result in results)
         or any(
-            result["hs_resolution"] not in {"exact", "unique_descendant"}
-            for result in results
-        )
-        or any(
-            result["requirements_found"]
-            and not any(
-                candidate.get("eligibility") == "finding"
-                and candidate.get("required_document_code")
-                and candidate.get("required_document_name")
+            bool(result["requirements_found"])
+            != any(
+                _is_qualified_requirement_finding(
+                    candidate,
+                    item_id=result["item_id"],
+                    resolved_hsk10=result["resolved_hsk10"],
+                )
                 for candidate in result["evidence"]
             )
             for result in results

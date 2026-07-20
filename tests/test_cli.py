@@ -1,4 +1,6 @@
 import json
+import subprocess
+import sys
 from datetime import date
 from types import SimpleNamespace
 
@@ -47,14 +49,10 @@ def test_run_cli_accepts_explicit_review_date():
 @pytest.mark.parametrize("value", ["07/10/2026", "20260710", "2026-W28-5"])
 def test_run_cli_rejects_non_iso_review_date(value):
     with pytest.raises(SystemExit):
-        build_parser().parse_args(
-            ["run", "--scenario", "happy_path", "--review-as-of", value]
-        )
+        build_parser().parse_args(["run", "--scenario", "happy_path", "--review-as-of", value])
 
 
-def test_run_cli_injects_http_retriever_and_preserves_retrieval_output(
-    monkeypatch, tmp_path
-):
+def test_run_cli_injects_http_retriever_and_preserves_retrieval_output(monkeypatch, tmp_path):
     sentinel = object()
     captured = {}
 
@@ -102,7 +100,11 @@ def test_run_cli_injects_http_retriever_and_preserves_retrieval_output(
     assert exit_code == 0
     assert captured == {
         "url": "http://localhost:8010",
-        "options": {"service_token": None, "token_header": "X-Demo-Token"},
+        "options": {
+            "service_token": None,
+            "token_header": "X-Demo-Token",
+            "contract_identity_mode": "required",
+        },
         "retriever": sentinel,
     }
     assert written["retrieval_status"] == "ok"
@@ -139,9 +141,7 @@ def test_run_cli_uses_env_url_token_and_provider_review_date(monkeypatch):
     monkeypatch.setenv("EVIDENCE_SERVICE_TOKEN", "local-test-secret")
     monkeypatch.setenv("EVIDENCE_SERVICE_TOKEN_HEADER", "X-Demo-Token")
     monkeypatch.setattr("customs_ai_agent.cli.HttpRegulationRetriever", fake_http_retriever)
-    monkeypatch.setattr(
-        "customs_ai_agent.cli.fetch_supported_review_as_of", fake_supported_date
-    )
+    monkeypatch.setattr("customs_ai_agent.cli.fetch_supported_review_as_of", fake_supported_date)
     monkeypatch.setattr("customs_ai_agent.cli.run_review", fake_run_review)
     _patch_public_result(monkeypatch)
 
@@ -149,6 +149,7 @@ def test_run_cli_uses_env_url_token_and_provider_review_date(monkeypatch):
     options = {
         "service_token": "local-test-secret",
         "token_header": "X-Demo-Token",
+        "contract_identity_mode": "required",
     }
     assert captured == {
         "retriever": ("http://127.0.0.1:8010", options),
@@ -191,17 +192,20 @@ def test_run_cli_explicit_url_and_date_override_environment(monkeypatch):
     monkeypatch.setattr("customs_ai_agent.cli.run_review", fake_run_review)
     _patch_public_result(monkeypatch)
 
-    assert main(
-        [
-            "run",
-            "--scenario",
-            "happy_path",
-            "--rag-url",
-            "http://localhost:8010",
-            "--review-as-of",
-            "2026-07-09",
-        ]
-    ) == 0
+    assert (
+        main(
+            [
+                "run",
+                "--scenario",
+                "happy_path",
+                "--rag-url",
+                "http://localhost:8010",
+                "--review-as-of",
+                "2026-07-09",
+            ]
+        )
+        == 0
+    )
     assert captured == {
         "url": "http://localhost:8010",
         "date": date(2026, 7, 9),
@@ -209,7 +213,7 @@ def test_run_cli_explicit_url_and_date_override_environment(monkeypatch):
     }
 
 
-def test_run_cli_does_not_fall_back_to_mock_when_readiness_fails(monkeypatch):
+def test_run_cli_does_not_fall_back_to_mock_when_readiness_fails(monkeypatch, capsys):
     monkeypatch.setenv("EVIDENCE_SERVICE_BASE_URL", "http://127.0.0.1:8010")
     monkeypatch.setattr(
         "customs_ai_agent.cli.HttpRegulationRetriever",
@@ -226,11 +230,16 @@ def test_run_cli_does_not_fall_back_to_mock_when_readiness_fails(monkeypatch):
         lambda *_args, **_kwargs: pytest.fail("review must not run after readiness failure"),
     )
 
-    with pytest.raises(RetrievalError, match="readiness request failed"):
-        main(["run", "--scenario", "happy_path"])
+    assert main(["run", "--scenario", "happy_path"]) == 1
+    error = json.loads(capsys.readouterr().err)
+    assert error == {
+        "error_code": "retrieval_error",
+        "message": "The command could not be completed safely.",
+        "status": "error",
+    }
 
 
-def test_unavailable_llm_mode_fails_before_live_rag_network(monkeypatch):
+def test_unavailable_llm_mode_fails_before_live_rag_network(monkeypatch, capsys):
     monkeypatch.delenv("ANTHROPIC_API_KEY", raising=False)
     monkeypatch.setenv("EVIDENCE_SERVICE_BASE_URL", "http://127.0.0.1:8010")
     monkeypatch.setattr(
@@ -238,8 +247,70 @@ def test_unavailable_llm_mode_fails_before_live_rag_network(monkeypatch):
         lambda *_args, **_kwargs: pytest.fail("unavailable LLM mode must not call Data"),
     )
 
-    with pytest.raises(RuntimeError, match="ANTHROPIC_API_KEY is required"):
-        main(["run", "--scenario", "happy_path", "--llm-mode", "llm"])
+    assert main(["run", "--scenario", "happy_path", "--llm-mode", "llm"]) == 1
+    error = json.loads(capsys.readouterr().err)
+    assert error == {
+        "error_code": "anthropic_api_key_missing",
+        "message": "The command could not be completed safely.",
+        "status": "error",
+    }
+
+
+def test_cli_subprocess_never_leaks_missing_manifest_path_or_traceback(tmp_path):
+    secret_marker = "workspace-private-customer-123"
+    missing_manifest = tmp_path / secret_marker / "manifest.json"
+    completed = subprocess.run(
+        [
+            sys.executable,
+            "-m",
+            "customs_ai_agent",
+            "review",
+            "--manifest",
+            str(missing_manifest),
+            "--out",
+            str(tmp_path / "result.json"),
+        ],
+        stdin=subprocess.DEVNULL,
+        stdout=subprocess.PIPE,
+        stderr=subprocess.PIPE,
+        timeout=30,
+        check=False,
+        text=True,
+        encoding="utf-8",
+        errors="strict",
+    )
+
+    assert completed.returncode == 1
+    assert completed.stdout == ""
+    error = json.loads(completed.stderr)
+    assert error == {
+        "error_code": "review_manifest_unreadable",
+        "message": "The command could not be completed safely.",
+        "status": "error",
+    }
+    assert secret_marker not in completed.stderr
+    assert str(tmp_path) not in completed.stderr
+    assert "Traceback" not in completed.stderr
+
+
+def test_cli_unexpected_exception_is_reduced_to_internal_error(monkeypatch, capsys):
+    secret_marker = "C:/private/workspace/customer-123/raw-document.pdf"
+    monkeypatch.setattr(
+        "customs_ai_agent.cli._cmd_list_scenarios",
+        lambda: (_ for _ in ()).throw(RuntimeError(secret_marker)),
+    )
+
+    assert main(["list-scenarios"]) == 1
+
+    captured = capsys.readouterr()
+    assert captured.out == ""
+    assert json.loads(captured.err) == {
+        "error_code": "internal_error",
+        "message": "The command could not be completed safely.",
+        "status": "error",
+    }
+    assert secret_marker not in captured.err
+    assert "Traceback" not in captured.err
 
 
 def test_single_explicit_env_file_configures_evidence_without_global_mutation(
@@ -288,24 +359,26 @@ def test_single_explicit_env_file_configures_evidence_without_global_mutation(
         }
 
     monkeypatch.setattr("customs_ai_agent.cli.HttpRegulationRetriever", fake_retriever)
-    monkeypatch.setattr(
-        "customs_ai_agent.cli.fetch_supported_review_as_of", fake_ready
-    )
+    monkeypatch.setattr("customs_ai_agent.cli.fetch_supported_review_as_of", fake_ready)
     monkeypatch.setattr("customs_ai_agent.cli.run_review", fake_run)
     _patch_public_result(monkeypatch)
 
-    assert main(
-        [
-            "run",
-            "--scenario",
-            "happy_path",
-            "--env-file",
-            str(env_file),
-        ]
-    ) == 0
+    assert (
+        main(
+            [
+                "run",
+                "--scenario",
+                "happy_path",
+                "--env-file",
+                str(env_file),
+            ]
+        )
+        == 0
+    )
     options = {
         "service_token": "file-only-token",
         "token_header": "X-Local-Token",
+        "contract_identity_mode": "required",
     }
     assert captured == {
         "retriever": ("http://127.0.0.1:8010", options),
@@ -316,9 +389,7 @@ def test_single_explicit_env_file_configures_evidence_without_global_mutation(
     assert "EVIDENCE_SERVICE_TOKEN" not in __import__("os").environ
 
 
-def test_cli_output_omits_internal_documents_and_model_candidates(
-    monkeypatch, tmp_path
-):
+def test_cli_output_omits_internal_documents_and_model_candidates(monkeypatch, tmp_path):
     for name in (
         "EVIDENCE_SERVICE_BASE_URL",
         "EVIDENCE_SERVICE_TOKEN",
@@ -327,15 +398,18 @@ def test_cli_output_omits_internal_documents_and_model_candidates(
         monkeypatch.delenv(name, raising=False)
     output = tmp_path / "public-review.json"
 
-    assert main(
-        [
-            "run",
-            "--scenario",
-            "happy_path",
-            "--out",
-            str(output),
-        ]
-    ) == 0
+    assert (
+        main(
+            [
+                "run",
+                "--scenario",
+                "happy_path",
+                "--out",
+                str(output),
+            ]
+        )
+        == 0
+    )
     payload = json.loads(output.read_text(encoding="utf-8"))
     serialized = json.dumps(payload)
 

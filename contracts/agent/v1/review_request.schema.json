@@ -1,0 +1,188 @@
+{
+  "$defs": {
+    "DocumentInput": {
+      "additionalProperties": false,
+      "properties": {
+        "content_text": {
+          "maxLength": 200000,
+          "minLength": 1,
+          "title": "Content Text",
+          "type": "string"
+        },
+        "declared_type": {
+          "anyOf": [
+            {
+              "enum": [
+                "bill_of_lading",
+                "invoice",
+                "packing_list",
+                "certificate_of_origin",
+                "unknown"
+              ],
+              "type": "string"
+            },
+            {
+              "type": "null"
+            }
+          ],
+          "default": null,
+          "title": "Declared Type"
+        },
+        "document_id": {
+          "maxLength": 128,
+          "minLength": 1,
+          "pattern": "^[A-Za-z0-9][A-Za-z0-9._:-]*$",
+          "title": "Document Id",
+          "type": "string"
+        },
+        "filename": {
+          "maxLength": 255,
+          "minLength": 1,
+          "title": "Filename",
+          "type": "string"
+        },
+        "requirement_document_codes": {
+          "items": {
+            "type": "string"
+          },
+          "title": "Requirement Document Codes",
+          "type": "array"
+        }
+      },
+      "required": [
+        "document_id",
+        "filename",
+        "content_text"
+      ],
+      "title": "DocumentInput",
+      "type": "object"
+    }
+  },
+  "$id": "https://schemas.customs.local/agent/v1/review-request.schema.json",
+  "$schema": "https://json-schema.org/draft/2020-12/schema",
+  "additionalProperties": false,
+  "description": "V1 preserves the text-only ReviewRunRequest wire contract.",
+  "oneOf": [
+    {
+      "properties": {
+        "documents": {
+          "type": "null"
+        },
+        "scenario_id": {
+          "minLength": 1,
+          "type": "string"
+        }
+      },
+      "required": [
+        "scenario_id"
+      ]
+    },
+    {
+      "properties": {
+        "documents": {
+          "maxItems": 20,
+          "minItems": 1,
+          "type": "array"
+        },
+        "scenario_id": {
+          "type": "null"
+        }
+      },
+      "required": [
+        "documents"
+      ]
+    }
+  ],
+  "properties": {
+    "case_id": {
+      "anyOf": [
+        {
+          "maxLength": 128,
+          "minLength": 1,
+          "type": "string"
+        },
+        {
+          "type": "null"
+        }
+      ],
+      "default": null,
+      "title": "Case Id"
+    },
+    "documents": {
+      "anyOf": [
+        {
+          "items": {
+            "$ref": "#/$defs/DocumentInput"
+          },
+          "maxItems": 20,
+          "minItems": 1,
+          "type": "array"
+        },
+        {
+          "type": "null"
+        }
+      ],
+      "default": null,
+      "title": "Documents"
+    },
+    "jurisdiction": {
+      "const": "KR",
+      "default": "KR",
+      "title": "Jurisdiction",
+      "type": "string"
+    },
+    "llm_mode": {
+      "default": "mock",
+      "enum": [
+        "mock",
+        "llm"
+      ],
+      "title": "Llm Mode",
+      "type": "string"
+    },
+    "review_as_of": {
+      "format": "date",
+      "title": "Review As Of",
+      "type": "string"
+    },
+    "review_run_id": {
+      "maxLength": 128,
+      "minLength": 1,
+      "pattern": "^[A-Za-z0-9][A-Za-z0-9._:-]*$",
+      "title": "Review Run Id",
+      "type": "string"
+    },
+    "scenario_id": {
+      "anyOf": [
+        {
+          "maxLength": 128,
+          "minLength": 1,
+          "type": "string"
+        },
+        {
+          "type": "null"
+        }
+      ],
+      "default": null,
+      "title": "Scenario Id"
+    },
+    "trade_type": {
+      "default": "import",
+      "enum": [
+        "import",
+        "export"
+      ],
+      "title": "Trade Type",
+      "type": "string"
+    },
+    "uploaded_requirement_document_codes": {
+      "items": {
+        "type": "string"
+      },
+      "title": "Uploaded Requirement Document Codes",
+      "type": "array"
+    }
+  },
+  "title": "Customs AI Agent V1 review request",
+  "type": "object"
+}

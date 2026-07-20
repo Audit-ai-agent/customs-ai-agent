@@ -56,9 +56,7 @@ def test_low_confidence_self_correction_runs_once():
     assert state["final_status"] == "needs_review"
     assert "GROSS_WEIGHT_MISMATCH" not in _issue_codes(state)
     correction_events = [
-        event
-        for event in state["audit_trail"]
-        if event["stage"] == "self_correct_extraction"
+        event for event in state["audit_trail"] if event["stage"] == "self_correct_extraction"
     ]
     assert len(correction_events) == 1
     assert correction_events[0]["metadata"]["changed_fields"] == 1

@@ -1,0 +1,111 @@
+{
+  "$id": "https://example.invalid/customs-ai-agent/trade-document-extraction-gold-v1.schema.json",
+  "$schema": "https://json-schema.org/draft/2020-12/schema",
+  "additionalProperties": false,
+  "properties": {
+    "schema_version": {
+      "const": "trade-document-extraction-gold/v1"
+    },
+    "dataset_id": {
+      "const": "trade_document_triplets"
+    },
+    "dataset_version": {
+      "const": "source-v1"
+    },
+    "case_id": {
+      "pattern": "^trade-triplet-[0-9]{4}$",
+      "type": "string"
+    },
+    "source_case_sha256": {
+      "pattern": "^[0-9a-f]{64}$",
+      "type": "string"
+    },
+    "gold_scope": {
+      "const": "source_exact_raw_values_only"
+    },
+    "documents": {
+      "items": {
+        "additionalProperties": false,
+        "properties": {
+          "document_id": {
+            "minLength": 1,
+            "type": "string"
+          },
+          "document_type": {
+            "enum": [
+              "commercial_invoice",
+              "packing_list",
+              "bill_of_lading"
+            ]
+          },
+          "source_relative_path": {
+            "pattern": "^raw/",
+            "type": "string"
+          },
+          "source_file_sha256": {
+            "pattern": "^[0-9a-f]{64}$",
+            "type": "string"
+          },
+          "source_record_index_zero_based": {
+            "minimum": 0,
+            "type": "integer"
+          },
+          "source_record_sha256": {
+            "pattern": "^[0-9a-f]{64}$",
+            "type": "string"
+          },
+          "fields": {
+            "items": {
+              "additionalProperties": false,
+              "properties": {
+                "field_id": {
+                  "minLength": 1,
+                  "type": "string"
+                },
+                "json_pointer": {
+                  "pattern": "^/",
+                  "type": "string"
+                },
+                "raw_value": {
+                  "type": "string"
+                }
+              },
+              "required": [
+                "field_id",
+                "json_pointer",
+                "raw_value"
+              ],
+              "type": "object"
+            },
+            "minItems": 1,
+            "type": "array"
+          }
+        },
+        "required": [
+          "document_id",
+          "document_type",
+          "source_relative_path",
+          "source_file_sha256",
+          "source_record_index_zero_based",
+          "source_record_sha256",
+          "fields"
+        ],
+        "type": "object"
+      },
+      "maxItems": 3,
+      "minItems": 3,
+      "type": "array"
+    }
+  },
+  "required": [
+    "schema_version",
+    "dataset_id",
+    "dataset_version",
+    "case_id",
+    "source_case_sha256",
+    "gold_scope",
+    "documents"
+  ],
+  "title": "Source-exact extraction gold",
+  "type": "object"
+}

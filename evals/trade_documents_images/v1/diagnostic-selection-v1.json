@@ -1,0 +1,430 @@
+{
+  "adjudication": {
+    "initial_gate_status": "blocked_pending_independent_reviews",
+    "mutable_worklist_is_separate_from_selection": true,
+    "required_independent_review_count_per_case": 2,
+    "schema": "evals/trade_documents_images/v1/schemas/diagnostic-adjudication.schema.json",
+    "workflow": "evals/trade_documents_images/v1/diagnostic-adjudication-workflow.md"
+  },
+  "cases": [
+    {
+      "case_id": "0097",
+      "documents": {
+        "bill_of_lading": {
+          "byte_size": 97737,
+          "height_px": 1414,
+          "relative_path": "bill_of_lading/BL_0097.jpg",
+          "sha256": "e2c9622c3069547a5b1c59a629262b6ababec149a1c0b80aa90ab96d028d50ae",
+          "width_px": 1000
+        },
+        "commercial_invoice": {
+          "byte_size": 86794,
+          "height_px": 1414,
+          "relative_path": "commercial_invoice/CI_0097.jpg",
+          "sha256": "bcd15c28f8ce3576d02dd1073d9b4f449f59c6a0be1bb846c919effbf603e57d",
+          "width_px": 1000
+        },
+        "packing_list": {
+          "byte_size": 84705,
+          "height_px": 1414,
+          "relative_path": "packing_list/PL_0097.jpg",
+          "sha256": "d62f33be91e66b6ed1d9a28e5d288f378a712659d42e9f44c75928c44398d57a",
+          "width_px": 1000
+        }
+      },
+      "rank_sha256": "005980db46a2f5093345d469992fe54b36b944387c008166afd121b22657003f",
+      "triplet_fingerprint_sha256": "cf88d63a230e2d73f6687e53fa9e66371a4ea040aca35d0994fed154dd2b33c5"
+    },
+    {
+      "case_id": "0984",
+      "documents": {
+        "bill_of_lading": {
+          "byte_size": 108853,
+          "height_px": 1414,
+          "relative_path": "bill_of_lading/BL_0984.jpg",
+          "sha256": "bfcf712a6a22db9bd3671a0116255f057eeebecf2b5dd292ba27da04a40e0597",
+          "width_px": 1000
+        },
+        "commercial_invoice": {
+          "byte_size": 101268,
+          "height_px": 1414,
+          "relative_path": "commercial_invoice/CI_0984.jpg",
+          "sha256": "a8fcc5dbda310cff46a5bdb41440fceae8ec02e7cc3800771908f7d24d700943",
+          "width_px": 1000
+        },
+        "packing_list": {
+          "byte_size": 100175,
+          "height_px": 1414,
+          "relative_path": "packing_list/PL_0984.jpg",
+          "sha256": "d176ad2e77d71d38c848a0f52c6dc7aa00ca70c8d1511b78bbcc7ca606140674",
+          "width_px": 1000
+        }
+      },
+      "rank_sha256": "0060b731e02e9f91f887ec1293df4af11d0fea032f53135a67ae879d70404c23",
+      "triplet_fingerprint_sha256": "1663dc168a6fda284d5cefed5c2620e150e2ec6bf2aa293f0d30b605d4cda85b"
+    },
+    {
+      "case_id": "0311",
+      "documents": {
+        "bill_of_lading": {
+          "byte_size": 103938,
+          "height_px": 1414,
+          "relative_path": "bill_of_lading/BL_0311.jpg",
+          "sha256": "35ce36efd5220523854e26723c7d0772b84ee1d65b22d787d7c21ea576929857",
+          "width_px": 1000
+        },
+        "commercial_invoice": {
+          "byte_size": 95119,
+          "height_px": 1414,
+          "relative_path": "commercial_invoice/CI_0311.jpg",
+          "sha256": "97f4ae3bf92b5884cf972cbf2f11965a6cbd5ec45acd7ce86bab5c5341eb36a1",
+          "width_px": 1000
+        },
+        "packing_list": {
+          "byte_size": 94363,
+          "height_px": 1414,
+          "relative_path": "packing_list/PL_0311.jpg",
+          "sha256": "cd9ad7d94efe6b9650a83aa3c8a9b27844a640d5f58077725f963a0990fef0a5",
+          "width_px": 1000
+        }
+      },
+      "rank_sha256": "00802a7b3a6187f0dd1c1a3acbb6462f072ded96b8a5f2b1fdcdd79a319eb85b",
+      "triplet_fingerprint_sha256": "c3a0a4d9edff456eefa00b4bec484f60a4ee47b73413955319b773972ffdd100"
+    },
+    {
+      "case_id": "0974",
+      "documents": {
+        "bill_of_lading": {
+          "byte_size": 98053,
+          "height_px": 1414,
+          "relative_path": "bill_of_lading/BL_0974.jpg",
+          "sha256": "410624bc5c762434d8ccf82266ca3e6bdecefcd8f1e77c58312a439bdf7e3c7e",
+          "width_px": 1000
+        },
+        "commercial_invoice": {
+          "byte_size": 87608,
+          "height_px": 1414,
+          "relative_path": "commercial_invoice/CI_0974.jpg",
+          "sha256": "dc5923aefe6df79f41416df06ebe6a5df0ce988f98f37e2e0f55f5d339e3d638",
+          "width_px": 1000
+        },
+        "packing_list": {
+          "byte_size": 84727,
+          "height_px": 1414,
+          "relative_path": "packing_list/PL_0974.jpg",
+          "sha256": "ea84640607dd0f0550e3f45cc0a348e9e83853eb7b42817246e051efb13ab06b",
+          "width_px": 1000
+        }
+      },
+      "rank_sha256": "0111e0d1bbc7e34de12bb7de2f2c8cbcd26a4c7a7308e7f85b7f5f1bba166661",
+      "triplet_fingerprint_sha256": "f94d0bc4a946fdf2e3d3af3f11a8a1e182a827b0d1b2c6120d75072c5478a737"
+    },
+    {
+      "case_id": "0092",
+      "documents": {
+        "bill_of_lading": {
+          "byte_size": 88121,
+          "height_px": 1414,
+          "relative_path": "bill_of_lading/BL_0092.jpg",
+          "sha256": "b6d780188eeffb66849cb643f6482a04d27cd13ca8ccf427351882ebd1804e5a",
+          "width_px": 1000
+        },
+        "commercial_invoice": {
+          "byte_size": 76635,
+          "height_px": 1414,
+          "relative_path": "commercial_invoice/CI_0092.jpg",
+          "sha256": "b7bc910c88397d3db9bab69d672e7fbf3fddedbddc90fead3bae6f1874e49a2f",
+          "width_px": 1000
+        },
+        "packing_list": {
+          "byte_size": 72987,
+          "height_px": 1414,
+          "relative_path": "packing_list/PL_0092.jpg",
+          "sha256": "1b55db905d686ea49d2627d22fd0ca50e3ebc17af4a456e45d221ad67cb808af",
+          "width_px": 1000
+        }
+      },
+      "rank_sha256": "0120037fca6359541dfcf60fdd4fc7dccbbffa1f3bc9408a21537f65af5ff7d0",
+      "triplet_fingerprint_sha256": "3bfc3bcec804ce3ee967efddc7ec0772632f74a2aebe6f36248eb6d5fe86de23"
+    },
+    {
+      "case_id": "0804",
+      "documents": {
+        "bill_of_lading": {
+          "byte_size": 105962,
+          "height_px": 1414,
+          "relative_path": "bill_of_lading/BL_0804.jpg",
+          "sha256": "477f0b4ddb9efabc78bcdf5fd6ef2eed580d8bb218ba9b90ba8df4cc2728b9ec",
+          "width_px": 1000
+        },
+        "commercial_invoice": {
+          "byte_size": 99375,
+          "height_px": 1414,
+          "relative_path": "commercial_invoice/CI_0804.jpg",
+          "sha256": "5b59e1026a19faf63e1f9ca38521665e7ad02c2fb0b312abddc5327a8fb668bc",
+          "width_px": 1000
+        },
+        "packing_list": {
+          "byte_size": 97353,
+          "height_px": 1414,
+          "relative_path": "packing_list/PL_0804.jpg",
+          "sha256": "403926a5984a139d43663b4161a0ba5b3f614a86642d025fbaaf457f47ea9509",
+          "width_px": 1000
+        }
+      },
+      "rank_sha256": "0156f50d738fd5a00c204bbd84dcd17574da01f968a91ae70829ea7d81f82e78",
+      "triplet_fingerprint_sha256": "57b57010c1313ecc58b92eacf99138ef30d544029962f2f8a8eaaeebf1fe7c7b"
+    },
+    {
+      "case_id": "0591",
+      "documents": {
+        "bill_of_lading": {
+          "byte_size": 96633,
+          "height_px": 1414,
+          "relative_path": "bill_of_lading/BL_0591.jpg",
+          "sha256": "f0981ea69e8947446744cab1a122f8c5d24ea44842dea5a39594aaed5d006cd4",
+          "width_px": 1000
+        },
+        "commercial_invoice": {
+          "byte_size": 86304,
+          "height_px": 1414,
+          "relative_path": "commercial_invoice/CI_0591.jpg",
+          "sha256": "be9214ccb7ef887c6309b40ec47c7570f3b43177f76bef6a0798e995fb1c23e2",
+          "width_px": 1000
+        },
+        "packing_list": {
+          "byte_size": 84473,
+          "height_px": 1414,
+          "relative_path": "packing_list/PL_0591.jpg",
+          "sha256": "57b850c4da8c04c18ffaa619a61dcada025652f2dc75ecdc1aa2a5f2228fad97",
+          "width_px": 1000
+        }
+      },
+      "rank_sha256": "0162e00b8eabeb1a292b149e1996dae9f137a69b890e2cb2b4e11a8f60937007",
+      "triplet_fingerprint_sha256": "26a654fa4ec2d9901cd8f4e831f1e2852280e299436b56e2a7859ae781c15057"
+    },
+    {
+      "case_id": "0029",
+      "documents": {
+        "bill_of_lading": {
+          "byte_size": 81436,
+          "height_px": 1414,
+          "relative_path": "bill_of_lading/BL_0029.jpg",
+          "sha256": "4c7c8ae66665732ea2ddb5ac7347ccb9648c1f7bf2873ad71d5bcfbd3001e4b0",
+          "width_px": 1000
+        },
+        "commercial_invoice": {
+          "byte_size": 67772,
+          "height_px": 1414,
+          "relative_path": "commercial_invoice/CI_0029.jpg",
+          "sha256": "cef060fcbbf1e0c12d3f9990597ec2112b13a49a5c14d25e9abc2af08ea132ff",
+          "width_px": 1000
+        },
+        "packing_list": {
+          "byte_size": 64536,
+          "height_px": 1414,
+          "relative_path": "packing_list/PL_0029.jpg",
+          "sha256": "40be7c404842ce101c5772e3e1161de998a6cd0ff7931ab18682bf363f470955",
+          "width_px": 1000
+        }
+      },
+      "rank_sha256": "0168bc15208df2d53165b0ccee4138828b0724d021c7d68fcb83ca0b0eeb8faf",
+      "triplet_fingerprint_sha256": "f2a99eeaca414f0bedae9e09ab59b1ba294108987f15539b2c5f9e12ab0336e6"
+    },
+    {
+      "case_id": "0372",
+      "documents": {
+        "bill_of_lading": {
+          "byte_size": 89146,
+          "height_px": 1414,
+          "relative_path": "bill_of_lading/BL_0372.jpg",
+          "sha256": "dda12642a0bcc7b202f4488a50afbb9a83c5251f56495deb76008994b6d0b424",
+          "width_px": 1000
+        },
+        "commercial_invoice": {
+          "byte_size": 78983,
+          "height_px": 1414,
+          "relative_path": "commercial_invoice/CI_0372.jpg",
+          "sha256": "fbecc2a6578197152136bf1ca9bc4e16282cbbc2b38c71a207a479f89d8a48d7",
+          "width_px": 1000
+        },
+        "packing_list": {
+          "byte_size": 74725,
+          "height_px": 1414,
+          "relative_path": "packing_list/PL_0372.jpg",
+          "sha256": "51f7de78a4ee9bcfe66d315ec306e558d92d216ee86d50e4ca20da0ca378b9ec",
+          "width_px": 1000
+        }
+      },
+      "rank_sha256": "016a3a4ea2b2684320291fa5544a0b6b7a29dc07b511c73e413c533112d1a338",
+      "triplet_fingerprint_sha256": "b0eb89e394eed313fdd5c2174811c894a1acb03c71f593da94a792c9a5a60416"
+    },
+    {
+      "case_id": "0788",
+      "documents": {
+        "bill_of_lading": {
+          "byte_size": 82649,
+          "height_px": 1414,
+          "relative_path": "bill_of_lading/BL_0788.jpg",
+          "sha256": "b05b76458cea6020d6727bb48e0aae5e12e4978ae108389a8bca2cc5497897aa",
+          "width_px": 1000
+        },
+        "commercial_invoice": {
+          "byte_size": 68519,
+          "height_px": 1414,
+          "relative_path": "commercial_invoice/CI_0788.jpg",
+          "sha256": "0fb21b438022d2798fc4d9f4a8ddbdd2fa8f26e98c973632a44dd10e0abf3ead",
+          "width_px": 1000
+        },
+        "packing_list": {
+          "byte_size": 65586,
+          "height_px": 1414,
+          "relative_path": "packing_list/PL_0788.jpg",
+          "sha256": "655b1f6eb6660e8323f0088686aa3ad7ae2530ee3e84609948b94119f2f1e855",
+          "width_px": 1000
+        }
+      },
+      "rank_sha256": "01ac8f3dd1b66ba72d15824603d244e9d47d94b30bfc886b653f3a9ff35fbb47",
+      "triplet_fingerprint_sha256": "d8518f15d4a6a15fe79da7694badc562541e0db2a561aa5d21e3dbcd6249fb8c"
+    },
+    {
+      "case_id": "0250",
+      "documents": {
+        "bill_of_lading": {
+          "byte_size": 87463,
+          "height_px": 1414,
+          "relative_path": "bill_of_lading/BL_0250.jpg",
+          "sha256": "73b3b8e49fcd87602d10d141160cc347bbe6c37ac04134814fbcb8a643b14720",
+          "width_px": 1000
+        },
+        "commercial_invoice": {
+          "byte_size": 76401,
+          "height_px": 1414,
+          "relative_path": "commercial_invoice/CI_0250.jpg",
+          "sha256": "c0232e2a90b52c4168a6f350d0b91cfadb04b35f102394f09c5ca422d18e5838",
+          "width_px": 1000
+        },
+        "packing_list": {
+          "byte_size": 73739,
+          "height_px": 1414,
+          "relative_path": "packing_list/PL_0250.jpg",
+          "sha256": "59b6e251923145a260aeb0ef4ad5a3f4abda71215a211516aa1eeb444f82daed",
+          "width_px": 1000
+        }
+      },
+      "rank_sha256": "01b7fcbb90cc9473056321a814b0b7274da7a8462022a93f3df343825b9c9fa3",
+      "triplet_fingerprint_sha256": "5d062767ee041b4f6d05010fa63d4b6b3ca6bf4a659531b65f4fff94f3b46483"
+    },
+    {
+      "case_id": "0982",
+      "documents": {
+        "bill_of_lading": {
+          "byte_size": 98677,
+          "height_px": 1414,
+          "relative_path": "bill_of_lading/BL_0982.jpg",
+          "sha256": "fd2fcd0d5ad5543dff25d0b854291b9ede3622be925829adbcc62e9e5dc88d30",
+          "width_px": 1000
+        },
+        "commercial_invoice": {
+          "byte_size": 87973,
+          "height_px": 1414,
+          "relative_path": "commercial_invoice/CI_0982.jpg",
+          "sha256": "7391c8edc5bd14a3745de5eb6889110330970f27bbb01ec740a2c752e00524c1",
+          "width_px": 1000
+        },
+        "packing_list": {
+          "byte_size": 86261,
+          "height_px": 1414,
+          "relative_path": "packing_list/PL_0982.jpg",
+          "sha256": "3ac0893e6c603f0f8204e5ecc6c8c5650acc3e9e77daa677fe41ace9c1fb9720",
+          "width_px": 1000
+        }
+      },
+      "rank_sha256": "01c545ba0cc813bd2ffdcc8d1971dcbc01718a97a2881ff49ce8757f54161506",
+      "triplet_fingerprint_sha256": "054967c070f569cdb62486239dc1d0c15712dc36086a0e0b43e761f8319fdebd"
+    }
+  ],
+  "correction_provenance": [
+    {
+      "case_id": "0001",
+      "completed_review_count": 1,
+      "correction_status": "prior_claim_invalidated_by_direct_visual_reaudit",
+      "gold_eligible": false,
+      "prior_claim_id": "packing_list_bl_suffix_claim_invalidated",
+      "required_independent_review_count": 2,
+      "review": {
+        "annotation_reference": "fixtures/trade_documents_images/v1/dataset.lock.json#invalidated_annotation_claims/0001",
+        "conclusion": "invalid_prior_claim",
+        "independent_review_attested": true,
+        "review_id": "correction-0001-visual-review-1",
+        "reviewed_document_sha256": [
+          "97329336e979d85b0945ffcaf0449baf06ba1ee8c5b5ab27f0c7f6fc872305f8"
+        ],
+        "reviewer_id": "local-visual-reviewer-1",
+        "scope": "correction_reaudit"
+      },
+      "review_status": "pending_second_review"
+    },
+    {
+      "case_id": "0041",
+      "completed_review_count": 1,
+      "correction_status": "prior_claim_invalidated_by_direct_visual_reaudit",
+      "gold_eligible": false,
+      "prior_claim_id": "packing_list_bl_separated_suffix_claim_invalidated",
+      "required_independent_review_count": 2,
+      "review": {
+        "annotation_reference": "fixtures/trade_documents_images/v1/dataset.lock.json#invalidated_annotation_claims/0041",
+        "conclusion": "invalid_prior_claim",
+        "independent_review_attested": true,
+        "review_id": "correction-0041-visual-review-1",
+        "reviewed_document_sha256": [
+          "5f54b4bf83c601a37a498da951fa97151d34de2395401715be1d0e00d1c10e94"
+        ],
+        "reviewer_id": "local-visual-reviewer-1",
+        "scope": "correction_reaudit"
+      },
+      "review_status": "pending_second_review"
+    },
+    {
+      "case_id": "0500",
+      "completed_review_count": 1,
+      "correction_status": "prior_claim_invalidated_by_direct_visual_reaudit",
+      "gold_eligible": false,
+      "prior_claim_id": "packing_list_bl_ee_suffix_claim_invalidated",
+      "required_independent_review_count": 2,
+      "review": {
+        "annotation_reference": "fixtures/trade_documents_images/v1/dataset.lock.json#invalidated_annotation_claims/0500",
+        "conclusion": "invalid_prior_claim",
+        "independent_review_attested": true,
+        "review_id": "correction-0500-visual-review-1",
+        "reviewed_document_sha256": [
+          "1258b0b12ceb852a35ba83450c445fd78c57348cd2664d84128194c610a3d2e1"
+        ],
+        "reviewer_id": "local-visual-reviewer-1",
+        "scope": "correction_reaudit"
+      },
+      "review_status": "pending_second_review"
+    }
+  ],
+  "dataset_id": "trade_documents_images",
+  "dataset_version": "source-v1",
+  "descriptor_contains_business_values": false,
+  "gold_eligible": false,
+  "initial_gate_status": "blocked_pending_independent_reviews",
+  "schema_version": "trade-image-diagnostic-selection/v1",
+  "selection_algorithm": {
+    "name": "sha256_ranked_triplet_fingerprint",
+    "rank_formula": "sha256(selection_id + ':' + sha256(canonical document metadata))",
+    "selection_count": 12,
+    "unit": "triplet_case",
+    "version": "v1"
+  },
+  "selection_id": "trade-images-hash-ranked-diagnostic-v1",
+  "selection_role": "diagnostic_candidate_not_gold",
+  "source_images_may_contain_business_values": true,
+  "source_integrity": {
+    "checksums_sha256": "f720c8a58dfc2563c4425539fb51230eac9f036385fa3df21fae415a4be8ce1a",
+    "inventory_sha256": "fff84fc91c8dd545ee6f14bdf77c00974e12b297e69b54c9ea05c3221453e947",
+    "manifest_sha256": "a1ebe0e18953b6712f044ee4d7dd3ede8ad426ae73ed3158dd0eab38e2111965"
+  }
+}

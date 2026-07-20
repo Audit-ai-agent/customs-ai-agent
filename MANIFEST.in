@@ -1,0 +1,39 @@
+include README.md
+include SECURITY.md
+include CONTRIBUTING.md
+include MANIFEST.in
+include pyproject.toml
+include uv.lock
+include .gitleaks.toml
+include .dockerignore
+include Dockerfile
+
+recursive-include .github *.yml *.yaml
+recursive-include src/customs_ai_agent *.py *.txt *.json
+recursive-include contracts *.md *.json
+recursive-include docs *.md
+recursive-include deploy *.yml *.yaml
+recursive-include evals *.py *.md *.json *.in *.txt
+exclude evals/ocr_benchmark_v1.json
+recursive-include fixtures *.md *.json
+recursive-include prompts *.md
+recursive-include security *.toml
+recursive-include tests *.py
+include tests/fixtures/evidence_runtime_v2/README.md
+include tests/fixtures/evidence_runtime_v2/provider-runtime-lock.json
+recursive-include tools *.py
+
+prune build
+prune dist
+prune outputs
+prune _artifacts
+prune .venv
+prune .pytest_cache
+prune .mypy_cache
+prune .ruff_cache
+
+global-exclude .env .env.*
+global-exclude *.pem *.key *.p12 *.pfx *.jks
+global-exclude *.pdf *.png *.jpg *.jpeg *.webp *.bmp *.gif *.tif *.tiff
+global-exclude *.py[cod]
+global-exclude __pycache__

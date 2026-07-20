@@ -1,0 +1,102 @@
+{
+  "providers": {
+    "docling": {
+      "assets": [
+        {
+          "asset_id": "docling-project/docling-layout-heron",
+          "file_count": 6,
+          "revision": "8f39ad3c0b4c58e9c2d2c84a38465abf757272d8",
+          "total_bytes": 171764371,
+          "tree_sha256": "2d37b300e4399eb3eb83f1b6df70257fc6da95e78a2af2ef4ead80a3895cd7db"
+        },
+        {
+          "asset_id": "docling-project/docling-models",
+          "file_count": 8,
+          "revision": "fc0f2d45e2218ea24bce5045f58a389aed16dc23",
+          "total_bytes": 358236323,
+          "tree_sha256": "65a041fb02a6c49f35a1d7220a996cf542e92988e69ac635bce17f1bd3f3b087"
+        }
+      ],
+      "cache_layout": "huggingface_hub_snapshot",
+      "engine_id": "DocumentConverter:default-image-pipeline-offline-v2"
+    },
+    "paddle": {
+      "assets": [
+        {
+          "asset_id": "PaddlePaddle/PP-DocLayout-S",
+          "file_count": 6,
+          "revision": "8ac289e66575bb9bba6e15c53719d8b15cc9b3b2",
+          "total_bytes": 5159947,
+          "tree_sha256": "bdf5646e4504914d1e53889ffdc2feb684e55195a402f91b701d666fb383fb93"
+        },
+        {
+          "asset_id": "PaddlePaddle/PP-OCRv5_mobile_det",
+          "file_count": 6,
+          "revision": "0d63e78e2b680928f6b1747d76a08db6e645efb7",
+          "total_bytes": 4944306,
+          "tree_sha256": "be39075a3e11cd9496961d0a31b3ed2b8ea268cd9e615ccd95e71dfa133b6ada"
+        },
+        {
+          "asset_id": "PaddlePaddle/en_PP-OCRv5_mobile_rec",
+          "file_count": 6,
+          "revision": "267c36e24c331595590fe7bd72bde2436fd286f2",
+          "total_bytes": 8012929,
+          "tree_sha256": "a867159ee41560a69940fbe1eff4125539c4e5bbbd68399ef15c45993bdec78b"
+        },
+        {
+          "asset_id": "PaddlePaddle/PP-LCNet_x1_0_table_cls",
+          "file_count": 6,
+          "revision": "2fa6323e7dab88fa883081db1460995f46af2922",
+          "total_bytes": 6864864,
+          "tree_sha256": "64a108d75ff180f508df6c8657e867594223865b77f9ada7f15f0c9bf1284526"
+        },
+        {
+          "asset_id": "PaddlePaddle/SLANeXt_wired",
+          "file_count": 6,
+          "revision": "763069fcda6a065f2171753205a32bf899a88d15",
+          "total_bytes": 365752316,
+          "tree_sha256": "6793604781e1ca2223728fa2eb16c31e2ad76cb89fe2fa1a64734290e7cd89c1"
+        },
+        {
+          "asset_id": "PaddlePaddle/SLANet_plus",
+          "file_count": 6,
+          "revision": "bae6e5f8c3c4e7da0c0b7639fdf3228fe76184e2",
+          "total_bytes": 8006029,
+          "tree_sha256": "769f3d67d7b5fd5a6ad1f93a265c922b5beea1806a8a86d1a494e85e7b95f157"
+        },
+        {
+          "asset_id": "PaddlePaddle/RT-DETR-L_wired_table_cell_det",
+          "file_count": 6,
+          "revision": "e2bd53c06b3a815d86acbf5c6779dada58819cfe",
+          "total_bytes": 129945728,
+          "tree_sha256": "1b5cd336dcd27f94d97c16bcecebd0acb41c997db7509b01cc54273d671058ca"
+        },
+        {
+          "asset_id": "PaddlePaddle/RT-DETR-L_wireless_table_cell_det",
+          "file_count": 6,
+          "revision": "25ca86356a601c877476bb0dcc5fd09153d9d64d",
+          "total_bytes": 129946466,
+          "tree_sha256": "82d5050a5f247c12b34b6d748b38c754c7a24bd5e8c81611afd23c114e00e5f9"
+        },
+        {
+          "asset_id": "PaddlePaddle/PP-LCNet_x1_0_doc_ori",
+          "file_count": 6,
+          "revision": "d3b95a6dff5fe8a94f2748e12b61cb26818a0df8",
+          "total_bytes": 6870359,
+          "tree_sha256": "f5aa381ebaa8b6c5265bc352e7c4f4ca714165849b244e92f28c425e6bc0cd6f"
+        },
+        {
+          "asset_id": "PaddlePaddle/PP-LCNet_x1_0_textline_ori",
+          "file_count": 6,
+          "revision": "cd237a44b0e359d4fe38310a416203cf7403faa5",
+          "total_bytes": 6856668,
+          "tree_sha256": "173bdef1a9147187e8608265707847fe01973bed70d2e2eab39bf5610c8bcd99"
+        }
+      ],
+      "cache_layout": "paddlex_official_models",
+      "engine_id": "PP-StructureV3:customs-paddle-layout-table-v4"
+    }
+  },
+  "schema_version": "ocr-model-assets-lock/v1",
+  "tree_hash_algorithm": "sha256(relative_posix_path + NUL + decimal_size + NUL + file_sha256 + LF), sorted by relative_posix_path"
+}

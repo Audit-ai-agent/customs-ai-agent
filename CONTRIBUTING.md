@@ -18,6 +18,10 @@ uv run pytest -q
 uv build --wheel
 ```
 
+PR 전 Safety Gate도 [고정 도구와 로컬 재현 절차](docs/SECURITY_GATE.md)에 따라 secret,
+dependency, Python SAST 세 검사를 모두 실행한다. API key나 token 값은 명령 인자·로그·
+PR 첨부 파일에 넣지 않는다.
+
 PR 설명에는 문제·의도·대안·선택 이유·영향 계약·실행 명령·결과·남은 위험을 기록한다.
 실제 문서, 개인정보, 거래정보, token, `.env`, 실행 결과 전체는 커밋하지 않는다.
 

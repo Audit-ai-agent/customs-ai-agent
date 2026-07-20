@@ -3,6 +3,7 @@ from customs_ai_agent.adapters.llm import (
     ClaudeDocumentAnalyzer,
     ClaudeSettings,
     ClaudeTransportResult,
+    CropReadBudget,
     DocumentAnalysis,
     DocumentAnalyzer,
     LLMConfigurationError,
@@ -14,9 +15,28 @@ from customs_ai_agent.adapters.llm import (
     build_document_analyzer,
     ensure_llm_mode_available,
     validate_grounded_candidate,
+    validate_vision_candidate,
+)
+from customs_ai_agent.adapters.images import (
+    ImageInputError,
+    PdfRasterizationResult,
+    PdfRasterizer,
+    PdfRasterizerError,
+    RasterizedPdfPage,
+    image_page_from_file,
+    image_pages_from_pdf_file,
+    pdf_pages_from_pdf_file,
+)
+from customs_ai_agent.adapters.ocr import (
+    OcrLayoutProvider,
+    OcrLayoutProviderError,
+    build_ocr_layout_provider,
+    index_ocr_spans,
+    validate_ocr_layout_ledger,
 )
 
 from customs_ai_agent.adapters.retrieval import (
+    EvidenceReadiness,
     EmptyRegulationRetriever,
     FailingRegulationRetriever,
     HttpRegulationRetriever,
@@ -24,12 +44,14 @@ from customs_ai_agent.adapters.retrieval import (
     PartialRegulationRetriever,
     RegulationRetriever,
     RetrievalError,
+    fetch_evidence_readiness,
     fetch_supported_review_as_of,
     validate_evidence_base_url,
 )
 
 __all__ = [
     "EmptyRegulationRetriever",
+    "EvidenceReadiness",
     "FailingRegulationRetriever",
     "HttpRegulationRetriever",
     "MockRegulationRetriever",
@@ -40,6 +62,7 @@ __all__ = [
     "ClaudeDocumentAnalyzer",
     "ClaudeSettings",
     "ClaudeTransportResult",
+    "CropReadBudget",
     "DocumentAnalysis",
     "DocumentAnalyzer",
     "LLMConfigurationError",
@@ -50,7 +73,22 @@ __all__ = [
     "analysis_to_extracted_document",
     "build_document_analyzer",
     "ensure_llm_mode_available",
+    "fetch_evidence_readiness",
     "fetch_supported_review_as_of",
     "validate_grounded_candidate",
+    "validate_vision_candidate",
     "validate_evidence_base_url",
+    "ImageInputError",
+    "PdfRasterizationResult",
+    "PdfRasterizer",
+    "PdfRasterizerError",
+    "RasterizedPdfPage",
+    "image_page_from_file",
+    "image_pages_from_pdf_file",
+    "pdf_pages_from_pdf_file",
+    "OcrLayoutProvider",
+    "OcrLayoutProviderError",
+    "build_ocr_layout_provider",
+    "index_ocr_spans",
+    "validate_ocr_layout_ledger",
 ]

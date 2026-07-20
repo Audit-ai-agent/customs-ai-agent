@@ -14,7 +14,9 @@ htmlcov/
 venv/
 build/
 dist/
+customs_ai_agent-[0-9]*/
 *.whl
+security/.gitleaks-report-*.json
 
 # Runtime output and local configuration
 outputs/

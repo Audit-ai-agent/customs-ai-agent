@@ -1,0 +1,457 @@
+{
+  "$defs": {
+    "DocumentInputV2": {
+      "additionalProperties": false,
+      "description": "Additive multimodal input used only by the V2 Backend contract.",
+      "oneOf": [
+        {
+          "properties": {
+            "content_text": {
+              "minLength": 1,
+              "type": "string"
+            },
+            "image_pages": {
+              "maxItems": 0,
+              "type": "array"
+            },
+            "pdf_pages": {
+              "type": "null"
+            }
+          },
+          "required": [
+            "content_text"
+          ]
+        },
+        {
+          "properties": {
+            "content_text": {
+              "type": "null"
+            },
+            "image_pages": {
+              "minItems": 1,
+              "type": "array"
+            },
+            "pdf_pages": {
+              "type": "null"
+            }
+          },
+          "required": [
+            "image_pages"
+          ]
+        },
+        {
+          "properties": {
+            "content_text": {
+              "type": "null"
+            },
+            "image_pages": {
+              "maxItems": 0,
+              "type": "array"
+            },
+            "pdf_pages": {
+              "type": "object"
+            }
+          },
+          "required": [
+            "pdf_pages"
+          ]
+        }
+      ],
+      "properties": {
+        "content_text": {
+          "anyOf": [
+            {
+              "maxLength": 200000,
+              "minLength": 1,
+              "type": "string"
+            },
+            {
+              "type": "null"
+            }
+          ],
+          "default": null,
+          "title": "Content Text"
+        },
+        "declared_type": {
+          "anyOf": [
+            {
+              "enum": [
+                "bill_of_lading",
+                "invoice",
+                "packing_list",
+                "certificate_of_origin",
+                "unknown"
+              ],
+              "type": "string"
+            },
+            {
+              "type": "null"
+            }
+          ],
+          "default": null,
+          "title": "Declared Type"
+        },
+        "document_id": {
+          "maxLength": 128,
+          "minLength": 1,
+          "pattern": "^[A-Za-z0-9][A-Za-z0-9._:-]*$",
+          "title": "Document Id",
+          "type": "string"
+        },
+        "filename": {
+          "maxLength": 255,
+          "minLength": 1,
+          "not": {
+            "enum": [
+              ".",
+              ".."
+            ]
+          },
+          "pattern": "^[^/\\\\:\\s\\x00-\\x1f\\x7f](?:[^/\\\\:\\x00-\\x1f\\x7f]*[^/\\\\:\\s\\x00-\\x1f\\x7f])?$",
+          "title": "Filename",
+          "type": "string"
+        },
+        "image_pages": {
+          "items": {
+            "$ref": "#/$defs/ImagePageInput"
+          },
+          "maxItems": 5,
+          "title": "Image Pages",
+          "type": "array"
+        },
+        "pdf_pages": {
+          "anyOf": [
+            {
+              "$ref": "#/$defs/PdfPagesInput"
+            },
+            {
+              "type": "null"
+            }
+          ],
+          "default": null
+        },
+        "requirement_document_codes": {
+          "items": {
+            "maxLength": 128,
+            "minLength": 1,
+            "pattern": "^[A-Za-z0-9][A-Za-z0-9._:-]*$",
+            "type": "string"
+          },
+          "maxItems": 100,
+          "title": "Requirement Document Codes",
+          "type": "array",
+          "uniqueItems": true
+        }
+      },
+      "required": [
+        "document_id",
+        "filename"
+      ],
+      "title": "DocumentInputV2",
+      "type": "object"
+    },
+    "ImagePageInput": {
+      "additionalProperties": false,
+      "description": "One validated, already-rasterized page supplied to Claude Vision.\n\n`data_base64` is part of the in-memory wire request but is excluded from repr.\nThe model verifies bytes, media type, dimensions and hash before any provider\nor Evidence Service call.",
+      "properties": {
+        "byte_length": {
+          "maximum": 5242880,
+          "minimum": 1,
+          "title": "Byte Length",
+          "type": "integer"
+        },
+        "data_base64": {
+          "maxLength": 6990508,
+          "minLength": 4,
+          "title": "Data Base64",
+          "type": "string"
+        },
+        "height_px": {
+          "maximum": 2576,
+          "minimum": 1,
+          "title": "Height Px",
+          "type": "integer"
+        },
+        "media_type": {
+          "enum": [
+            "image/jpeg",
+            "image/png",
+            "image/webp"
+          ],
+          "title": "Media Type",
+          "type": "string"
+        },
+        "page_number": {
+          "maximum": 50,
+          "minimum": 1,
+          "title": "Page Number",
+          "type": "integer"
+        },
+        "provenance": {
+          "$ref": "#/$defs/ImagePageProvenance"
+        },
+        "sha256": {
+          "pattern": "^[a-f0-9]{64}$",
+          "title": "Sha256",
+          "type": "string"
+        },
+        "width_px": {
+          "maximum": 2576,
+          "minimum": 1,
+          "title": "Width Px",
+          "type": "integer"
+        }
+      },
+      "required": [
+        "page_number",
+        "media_type",
+        "data_base64",
+        "byte_length",
+        "sha256",
+        "width_px",
+        "height_px",
+        "provenance"
+      ],
+      "title": "ImagePageInput",
+      "type": "object"
+    },
+    "ImagePageProvenance": {
+      "additionalProperties": false,
+      "description": "Trace the validated page bytes back to their immutable source.",
+      "properties": {
+        "original_exif_orientation": {
+          "anyOf": [
+            {
+              "maximum": 8,
+              "minimum": 1,
+              "type": "integer"
+            },
+            {
+              "type": "null"
+            }
+          ],
+          "default": null,
+          "title": "Original Exif Orientation"
+        },
+        "raster_dpi": {
+          "anyOf": [
+            {
+              "maximum": 600,
+              "minimum": 72,
+              "type": "integer"
+            },
+            {
+              "type": "null"
+            }
+          ],
+          "default": null,
+          "title": "Raster Dpi"
+        },
+        "rasterizer_id": {
+          "anyOf": [
+            {
+              "maxLength": 128,
+              "minLength": 1,
+              "type": "string"
+            },
+            {
+              "type": "null"
+            }
+          ],
+          "default": null,
+          "title": "Rasterizer Id"
+        },
+        "rasterizer_version": {
+          "anyOf": [
+            {
+              "maxLength": 128,
+              "minLength": 1,
+              "type": "string"
+            },
+            {
+              "type": "null"
+            }
+          ],
+          "default": null,
+          "title": "Rasterizer Version"
+        },
+        "source_media_type": {
+          "enum": [
+            "image/jpeg",
+            "image/png",
+            "image/webp",
+            "application/pdf"
+          ],
+          "title": "Source Media Type",
+          "type": "string"
+        },
+        "source_page_number": {
+          "minimum": 1,
+          "title": "Source Page Number",
+          "type": "integer"
+        },
+        "source_sha256": {
+          "pattern": "^[a-f0-9]{64}$",
+          "title": "Source Sha256",
+          "type": "string"
+        },
+        "transforms": {
+          "items": {
+            "enum": [
+              "exif_transpose",
+              "metadata_strip",
+              "pdf_rasterize"
+            ],
+            "type": "string"
+          },
+          "maxItems": 4,
+          "title": "Transforms",
+          "type": "array"
+        }
+      },
+      "required": [
+        "source_media_type",
+        "source_sha256",
+        "source_page_number"
+      ],
+      "title": "ImagePageProvenance",
+      "type": "object"
+    },
+    "PdfPagesInput": {
+      "additionalProperties": false,
+      "description": "Normalized, rasterized PDF modality for the public V2 request.\n\nThe Backend wire never carries a raw PDF, local path, or URL.  A trusted\nedge adapter validates and rasterizes the ephemeral PDF first, then sends\nthese source-bound pages.  This makes PDF an explicit modality without\nexpanding the core Agent's filesystem or network authority.",
+      "properties": {
+        "page_count": {
+          "maximum": 5,
+          "minimum": 1,
+          "title": "Page Count",
+          "type": "integer"
+        },
+        "pages": {
+          "items": {
+            "$ref": "#/$defs/ImagePageInput"
+          },
+          "maxItems": 5,
+          "minItems": 1,
+          "title": "Pages",
+          "type": "array"
+        },
+        "raster_dpi": {
+          "maximum": 600,
+          "minimum": 72,
+          "title": "Raster Dpi",
+          "type": "integer"
+        },
+        "rasterizer_id": {
+          "maxLength": 128,
+          "minLength": 1,
+          "pattern": "^[A-Za-z0-9][A-Za-z0-9._:+-]*$",
+          "title": "Rasterizer Id",
+          "type": "string"
+        },
+        "rasterizer_version": {
+          "maxLength": 128,
+          "minLength": 1,
+          "pattern": "^[A-Za-z0-9][A-Za-z0-9._+-]*$",
+          "title": "Rasterizer Version",
+          "type": "string"
+        },
+        "source_pdf_byte_length": {
+          "maximum": 20971520,
+          "minimum": 1,
+          "title": "Source Pdf Byte Length",
+          "type": "integer"
+        },
+        "source_pdf_sha256": {
+          "pattern": "^[a-f0-9]{64}$",
+          "title": "Source Pdf Sha256",
+          "type": "string"
+        }
+      },
+      "required": [
+        "source_pdf_sha256",
+        "source_pdf_byte_length",
+        "page_count",
+        "rasterizer_id",
+        "rasterizer_version",
+        "raster_dpi",
+        "pages"
+      ],
+      "title": "PdfPagesInput",
+      "type": "object"
+    }
+  },
+  "$id": "https://schemas.customs.local/agent/v2/review-request.schema.json",
+  "$schema": "https://json-schema.org/draft/2020-12/schema",
+  "additionalProperties": false,
+  "description": "Service-only V2 request with an explicit case, bounded text/direct-image/source-bound PDF-page documents, and llm_mode=llm. Scenario fixtures, mock execution, raw PDFs, paths, and URLs are not part of the Backend wire.",
+  "properties": {
+    "case_id": {
+      "maxLength": 128,
+      "minLength": 1,
+      "pattern": "^[A-Za-z0-9][A-Za-z0-9._:-]*$",
+      "title": "Case Id",
+      "type": "string"
+    },
+    "documents": {
+      "items": {
+        "$ref": "#/$defs/DocumentInputV2"
+      },
+      "maxItems": 20,
+      "minItems": 1,
+      "title": "Documents",
+      "type": "array"
+    },
+    "jurisdiction": {
+      "const": "KR",
+      "default": "KR",
+      "title": "Jurisdiction",
+      "type": "string"
+    },
+    "llm_mode": {
+      "const": "llm",
+      "title": "Llm Mode",
+      "type": "string"
+    },
+    "review_as_of": {
+      "format": "date",
+      "title": "Review As Of",
+      "type": "string"
+    },
+    "review_run_id": {
+      "maxLength": 128,
+      "minLength": 1,
+      "pattern": "^[A-Za-z0-9][A-Za-z0-9._:-]*$",
+      "title": "Review Run Id",
+      "type": "string"
+    },
+    "trade_type": {
+      "default": "import",
+      "enum": [
+        "import",
+        "export"
+      ],
+      "title": "Trade Type",
+      "type": "string"
+    },
+    "uploaded_requirement_document_codes": {
+      "items": {
+        "maxLength": 128,
+        "minLength": 1,
+        "pattern": "^[A-Za-z0-9][A-Za-z0-9._:-]*$",
+        "type": "string"
+      },
+      "maxItems": 100,
+      "title": "Uploaded Requirement Document Codes",
+      "type": "array",
+      "uniqueItems": true
+    }
+  },
+  "required": [
+    "case_id",
+    "documents",
+    "llm_mode"
+  ],
+  "title": "Customs AI Agent V2 review request",
+  "type": "object"
+}

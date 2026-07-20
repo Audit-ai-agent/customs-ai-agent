@@ -3,6 +3,7 @@ from __future__ import annotations
 import hashlib
 import json
 import re
+from importlib.resources import files
 from pathlib import Path
 
 from jsonschema import Draft202012Validator, FormatChecker
@@ -11,6 +12,10 @@ from customs_ai_agent.schemas.models import (
     EvidenceRetrievalRequest,
     EvidenceRetrievalResponse,
     RetrievalItemResult,
+)
+from customs_ai_agent.contracts.evidence import (
+    load_pinned_evidence_contract_identity,
+    load_pinned_evidence_schema,
 )
 
 
@@ -34,9 +39,37 @@ def test_provider_owned_contract_snapshot_matches_lock() -> None:
     assert lock["schema_version"] == "1.0"
     assert re.fullmatch(r"evidence-api-v\d+\.\d+\.\d+", lock["provider_release"])
     assert re.fullmatch(r"[0-9a-f]{40}", lock["provider_revision"])
-    assert schema["$defs"]["RetrieveRequest"]["properties"]["schema_version"] == {
-        "const": "1.0"
-    }
+    assert re.fullmatch(r"[0-9a-f]{64}", lock["provider_build_sha256"])
+    assert schema["$defs"]["RetrieveRequest"]["properties"]["schema_version"] == {"const": "1.0"}
+
+
+def test_packaged_runtime_lock_is_exactly_the_checkout_consumer_lock() -> None:
+    checkout_bytes = LOCK_PATH.read_bytes()
+    packaged_bytes = (
+        files("customs_ai_agent.contracts").joinpath("evidence", "v1.lock.json").read_bytes()
+    )
+    lock = json.loads(checkout_bytes)
+    identity = load_pinned_evidence_contract_identity()
+
+    assert packaged_bytes == checkout_bytes
+    assert identity.contract == lock["contract"]
+    assert identity.schema_version == lock["schema_version"]
+    assert identity.provider_release == lock["provider_release"]
+    assert identity.provider_revision == lock["provider_revision"]
+    assert identity.provider_build_sha256 == lock["provider_build_sha256"]
+    assert identity.schema_sha256 == lock["sha256"]
+
+
+def test_packaged_runtime_schema_is_exactly_the_hash_pinned_consumer_snapshot() -> None:
+    lock, checkout_schema = _locked_contract()
+    checkout_bytes = (ROOT / lock["consumer_snapshot_path"]).read_bytes()
+    packaged_bytes = (
+        files("customs_ai_agent.contracts").joinpath("evidence", "v1.schema.json").read_bytes()
+    )
+
+    assert packaged_bytes == checkout_bytes
+    assert hashlib.sha256(packaged_bytes).hexdigest() == lock["sha256"]
+    assert load_pinned_evidence_schema() == checkout_schema
 
 
 def test_agent_wire_examples_validate_against_locked_provider_schema() -> None:

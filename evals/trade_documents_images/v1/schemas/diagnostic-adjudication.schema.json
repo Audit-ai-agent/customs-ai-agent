@@ -1,0 +1,289 @@
+{
+  "$id": "https://example.invalid/customs-ai-agent/trade-image-diagnostic-adjudication-v1.schema.json",
+  "$schema": "https://json-schema.org/draft/2020-12/schema",
+  "additionalProperties": false,
+  "allOf": [
+    {
+      "if": {
+        "properties": {
+          "status": {
+            "const": "pending_first_review"
+          }
+        }
+      },
+      "then": {
+        "properties": {
+          "gold_eligible": {
+            "const": false
+          },
+          "reviews": {
+            "maxItems": 0
+          }
+        }
+      }
+    },
+    {
+      "if": {
+        "properties": {
+          "status": {
+            "const": "pending_second_review"
+          }
+        }
+      },
+      "then": {
+        "properties": {
+          "gold_eligible": {
+            "const": false
+          },
+          "reviews": {
+            "maxItems": 1,
+            "minItems": 1
+          }
+        }
+      }
+    },
+    {
+      "if": {
+        "properties": {
+          "status": {
+            "enum": [
+              "consensus_requires_resolution",
+              "disagreement_requires_adjudicator",
+              "adjudicated"
+            ]
+          }
+        }
+      },
+      "then": {
+        "properties": {
+          "reviews": {
+            "minItems": 2
+          }
+        }
+      }
+    },
+    {
+      "if": {
+        "properties": {
+          "status": {
+            "const": "adjudicated"
+          }
+        }
+      },
+      "then": {
+        "properties": {
+          "gold_eligible": {
+            "const": true
+          }
+        },
+        "required": [
+          "resolution"
+        ]
+      }
+    },
+    {
+      "if": {
+        "properties": {
+          "status": {
+            "enum": [
+              "consensus_requires_resolution",
+              "disagreement_requires_adjudicator"
+            ]
+          }
+        }
+      },
+      "then": {
+        "properties": {
+          "gold_eligible": {
+            "const": false
+          }
+        }
+      }
+    },
+    {
+      "if": {
+        "properties": {
+          "status": {
+            "const": "excluded"
+          }
+        }
+      },
+      "then": {
+        "properties": {
+          "gold_eligible": {
+            "const": false
+          },
+          "reviews": {
+            "minItems": 2
+          }
+        },
+        "required": [
+          "resolution"
+        ]
+      }
+    }
+  ],
+  "properties": {
+    "schema_version": {
+      "const": "trade-image-diagnostic-adjudication/v1"
+    },
+    "selection_id": {
+      "minLength": 1,
+      "type": "string"
+    },
+    "case_id": {
+      "pattern": "^[0-9]{4}$",
+      "type": "string"
+    },
+    "triplet_fingerprint_sha256": {
+      "pattern": "^[0-9a-f]{64}$",
+      "type": "string"
+    },
+    "required_independent_review_count": {
+      "const": 2
+    },
+    "status": {
+      "enum": [
+        "pending_first_review",
+        "pending_second_review",
+        "consensus_requires_resolution",
+        "disagreement_requires_adjudicator",
+        "adjudicated",
+        "excluded"
+      ]
+    },
+    "gold_eligible": {
+      "type": "boolean"
+    },
+    "reviews": {
+      "items": {
+        "additionalProperties": false,
+        "properties": {
+          "review_id": {
+            "minLength": 1,
+            "type": "string"
+          },
+          "reviewer_id": {
+            "minLength": 1,
+            "type": "string"
+          },
+          "independent_review_attested": {
+            "const": true
+          },
+          "scope": {
+            "enum": [
+              "diagnostic_full_triplet",
+              "correction_reaudit"
+            ]
+          },
+          "conclusion": {
+            "enum": [
+              "source_matches_manifest_observation",
+              "source_discrepancy_confirmed",
+              "invalid_prior_claim",
+              "unreadable_or_insufficient"
+            ]
+          },
+          "reviewed_document_sha256": {
+            "items": {
+              "pattern": "^[0-9a-f]{64}$",
+              "type": "string"
+            },
+            "minItems": 1,
+            "type": "array",
+            "uniqueItems": true
+          },
+          "annotation_reference": {
+            "minLength": 1,
+            "type": "string"
+          }
+        },
+        "required": [
+          "review_id",
+          "reviewer_id",
+          "independent_review_attested",
+          "scope",
+          "conclusion",
+          "reviewed_document_sha256",
+          "annotation_reference"
+        ],
+        "type": "object"
+      },
+      "maxItems": 2,
+      "type": "array"
+    },
+    "resolution": {
+      "additionalProperties": false,
+      "allOf": [
+        {
+          "if": {
+            "properties": {
+              "method": {
+                "const": "independent_adjudicator"
+              }
+            },
+            "required": [
+              "method"
+            ]
+          },
+          "then": {
+            "properties": {
+              "independent_adjudicator_attested": {
+                "const": true
+              }
+            },
+            "required": [
+              "adjudicator_id",
+              "independent_adjudicator_attested"
+            ]
+          }
+        }
+      ],
+      "properties": {
+        "adjudicator_id": {
+          "minLength": 1,
+          "type": "string"
+        },
+        "method": {
+          "enum": [
+            "two_reviewer_consensus",
+            "independent_adjudicator"
+          ]
+        },
+        "final_conclusion": {
+          "enum": [
+            "source_matches_manifest_observation",
+            "source_discrepancy_confirmed",
+            "invalid_prior_claim",
+            "unreadable_or_insufficient"
+          ]
+        },
+        "reference": {
+          "minLength": 1,
+          "type": "string"
+        },
+        "independent_adjudicator_attested": {
+          "type": "boolean"
+        }
+      },
+      "required": [
+        "method",
+        "final_conclusion",
+        "reference"
+      ],
+      "type": "object"
+    }
+  },
+  "required": [
+    "schema_version",
+    "selection_id",
+    "case_id",
+    "triplet_fingerprint_sha256",
+    "required_independent_review_count",
+    "status",
+    "gold_eligible",
+    "reviews"
+  ],
+  "title": "Two-reviewer diagnostic adjudication",
+  "type": "object"
+}
