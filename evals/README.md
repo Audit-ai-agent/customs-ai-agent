@@ -118,12 +118,14 @@ Evidence Live/Release PASS가 아니다. 역사 redacted report SHA-256은
 Evidence consumer snapshot의 고정 SHA-256은
 `531b59ba4e86f78cef20a4fca052996efd8b88c48853ac12113ca76e69cdd69a`다. evaluator는 실제 local
 schema bytes, lock SHA, 이 기대 SHA가 모두 같은지 API 호출 전에 확인한다. lock의 release
-metadata는 local candidate `evidence-api-v1.1.0`,
-`facf9e051812523914bbd599be9391fc58cfa05e`와 build SHA-256
-`4d120bf7356c21527e37eceaa50fd102a3de95d1880450101b9fe220e2bb49d0`다.
+metadata는 merged Data `main`의 release candidate `evidence-api-v1.1.0`,
+`8012f8ae5f530a4917b6d2790ee89a7e01fb5ee6`와 build SHA-256
+`df63a6d1bcfdcf5f1e2652684e6b0248d2daf1fe170ebc225a1400597f679cd7`다.
 
-이 candidate pin은 clean Data commit `facf9e0...`에서 생성·검증한
-`provider-build.json`과 일치한다. evaluator 자체는 HTTP-only 경계를 지키므로 실행 중 provider
+이 candidate pin은 Data PR #1의 실제 merge commit `8012f8a...` clean tree에서
+생성·검증한 `provider-build.json`과 일치한다. release 이름은 계약 식별자이며 이번
+병합 작업에서 tag나 배포를 만들었다는 뜻은 아니다. evaluator 자체는 HTTP-only 경계를
+지키므로 실행 중 provider
 Git HEAD를 읽지 않으며 report에
 `provider_repository_head_status=not_observed_http_only`로 구분한다. Git revision과 build
 document의 결박은 별도의 cross-repository contract Gate가 담당한다.
