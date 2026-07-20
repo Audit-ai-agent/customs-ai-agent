@@ -459,7 +459,50 @@ def test_ui_clears_previous_result_before_reading_or_submitting_next_input() -> 
     assert submit_source.index("resetExecutionView();") < submit_source.index(
         "const payload = readForm(true);"
     )
-    assert "await awaitCompletedRun(run)" in submit_source
+    assert "await awaitCompletedRun(run, generation)" in submit_source
+
+
+def test_ui_serializes_overlapping_submissions_and_generation_guards_every_await() -> None:
+    html = Path(server.__file__).with_name("inspector.html").read_text(encoding="utf-8")
+    await_run_start = html.index("async function awaitCompletedRun(")
+    await_run_end = html.index("async function loadHealth()", await_run_start)
+    submit_start = html.index("async function submitReview(event)")
+    submit_end = html.index("function newRunId()", submit_start)
+    await_run_source = html[await_run_start:await_run_end]
+    submit_source = html[submit_start:submit_end]
+
+    lock_guard = submit_source.index("if (submissionLocked)")
+    lock_set = submit_source.index("submissionLocked = true;")
+    generation_set = submit_source.index("const generation = ++submissionGeneration;")
+    busy_set = submit_source.index("setBusy(true);")
+    first_await = submit_source.index("await ")
+    reset = submit_source.index("resetExecutionView();")
+    assert lock_guard < lock_set < generation_set < busy_set < first_await
+    assert lock_guard < reset
+
+    assert submit_source.count("await ") == 3
+    assert submit_source.count("requireCurrentSubmission(generation);") >= 4
+    assert submit_source.index(
+        "requireCurrentSubmission(generation);",
+        submit_source.index("await captureInputDigests(payload)"),
+    ) < submit_source.index("lastInputDigests = inputDigests;")
+    assert submit_source.index(
+        "requireCurrentSubmission(generation);",
+        submit_source.index('await apiJson("/api/reviews"'),
+    ) < submit_source.index("const envelope = await awaitCompletedRun")
+    assert "if (isCurrentSubmission(generation) && error !== STALE_SUBMISSION)" in submit_source
+    assert "finally {\n    if (isCurrentSubmission(generation)) {" in submit_source
+
+    assert await_run_source.count("await ") == 2
+    assert await_run_source.count("requireCurrentSubmission(generation);") >= 3
+    assert await_run_source.index(
+        "requireCurrentSubmission(generation);",
+        await_run_source.index("await delay(pollDelay);"),
+    ) < await_run_source.index("const nextRun = await apiJson")
+    assert await_run_source.index(
+        "requireCurrentSubmission(generation);",
+        await_run_source.index("const nextRun = await apiJson"),
+    ) < await_run_source.index("run = nextRun;")
 
 
 def test_actual_executor_preflights_data_before_constructing_claude(

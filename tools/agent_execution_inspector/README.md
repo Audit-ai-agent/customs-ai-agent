@@ -99,7 +99,9 @@ Agent worktree에서 실행한다.
 `--run-timeout-seconds` 안에 끝나지 않아도 실행은 취소하거나 유실하지 않는다. UI가
 `GET /api/runs/{run_id}`를 polling하여 worker 종료 후 공개 결과를 가져온다.
 
-- 동시에 하나의 실행만 허용한다.
+- 브라우저와 서버 모두 동시에 하나의 실행만 허용한다. 브라우저는 첫 `await` 전에
+  입력을 잠그고 단조 증가 generation을 검사하므로 중복 제출이나 늦게 도착한 이전
+  응답이 현재 결과·오류·busy 상태를 덮어쓰지 못한다.
 - 서버는 입력 request나 secret을 run registry에 저장하지 않는다.
 - 완료 run에는 안전성·크기 검사를 통과한 공개 envelope만 메모리에 저장한다.
 - 완료 run은 15분 후 제거하며 최대 8개만 보존한다.

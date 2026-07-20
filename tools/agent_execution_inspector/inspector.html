@@ -709,6 +709,24 @@ let lastInputDigests = new Map();
 let healthPayload = null;
 let runningStartedAt = 0;
 let elapsedTimer = null;
+let submissionGeneration = 0;
+let activeSubmissionGeneration = null;
+let submissionLocked = false;
+
+const STALE_SUBMISSION = Symbol("stale-submission");
+
+function isCurrentSubmission(generation) {
+  return (
+    submissionLocked
+    && activeSubmissionGeneration === generation
+  );
+}
+
+function requireCurrentSubmission(generation) {
+  if (!isCurrentSubmission(generation)) {
+    throw STALE_SUBMISSION;
+  }
+}
 
 function pathValue(value, paths, fallback = null) {
   for (const path of paths) {
@@ -1108,9 +1126,10 @@ function delay(milliseconds) {
   return new Promise(resolve => window.setTimeout(resolve, milliseconds));
 }
 
-async function awaitCompletedRun(initialRun) {
+async function awaitCompletedRun(initialRun, generation) {
   let run = asObject(initialRun);
   while (true) {
+    requireCurrentSubmission(generation);
     if (
       run.schema_version !== "agent-execution-inspector-run/v1"
       || !INSPECTOR_RUN_ID_PATTERN.test(String(run.run_id || ""))
@@ -1140,10 +1159,13 @@ async function awaitCompletedRun(initialRun) {
       ? Math.min(2000, Math.max(250, requestedDelay))
       : 500;
     await delay(pollDelay);
-    run = await apiJson(`/api/runs/${encodeURIComponent(run.run_id)}`, {
+    requireCurrentSubmission(generation);
+    const nextRun = await apiJson(`/api/runs/${encodeURIComponent(run.run_id)}`, {
       inspectorRequest: true,
       timeoutMs: 30000
     });
+    requireCurrentSubmission(generation);
+    run = nextRun;
   }
 }
 
@@ -1850,31 +1872,43 @@ async function captureInputDigests(payload) {
 
 async function submitReview(event) {
   event.preventDefault();
-  resetExecutionView();
-  showError(null);
-  const payload = readForm(true);
-  try {
-    validatePayload(payload);
-    lastInputDigests = await captureInputDigests(payload);
-  } catch (error) {
-    showError(error);
+  if (submissionLocked) {
     return;
   }
-  lastInputPayload = payload;
+  submissionLocked = true;
+  const generation = ++submissionGeneration;
+  activeSubmissionGeneration = generation;
   setBusy(true);
+  resetExecutionView();
+  showError(null);
   try {
+    const payload = readForm(true);
+    validatePayload(payload);
+    const inputDigests = await captureInputDigests(payload);
+    requireCurrentSubmission(generation);
+    lastInputDigests = inputDigests;
+    lastInputPayload = payload;
     const run = await apiJson("/api/reviews", {
       method: "POST",
       body: payload,
       timeoutMs: 660000
     });
-    const envelope = await awaitCompletedRun(run);
+    requireCurrentSubmission(generation);
+    const envelope = await awaitCompletedRun(run, generation);
+    requireCurrentSubmission(generation);
     renderExecution(envelope);
+    requireCurrentSubmission(generation);
     newRunId();
   } catch (error) {
-    showError(error);
+    if (isCurrentSubmission(generation) && error !== STALE_SUBMISSION) {
+      showError(error);
+    }
   } finally {
-    setBusy(false);
+    if (isCurrentSubmission(generation)) {
+      setBusy(false);
+      submissionLocked = false;
+      activeSubmissionGeneration = null;
+    }
   }
 }
 
