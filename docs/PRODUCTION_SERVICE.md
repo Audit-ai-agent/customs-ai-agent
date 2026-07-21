@@ -8,21 +8,31 @@
 
 ```text
 Backend or trusted service
-  -> POST /internal/agent/v1/reviews
+  -> POST /internal/agent/v2/reviews
 AI Agent
   -> Claude text structured extraction
+  -> bounded Gap/Tool coordination
   -> Evidence readiness/retrieval HTTP
-  -> redacted ReviewResult V2
+  -> citation-verified narrative and grounded Case answer
+  -> redacted ReviewResult V3
 ```
 
-Agent의 유일한 제품 실행 엔진은 `AgentRuntime.review_json(raw_bytes)`다. ASGI 계층은 인증,
+V3 제품 심사의 유일한 비신뢰 입력 경계는 `AgentRuntime.review_v3_json(raw_bytes)`이다.
+legacy `/internal/agent/v1` transport의 `AgentRuntime.review_json(raw_bytes)`는 Agent
+Request/Result schema `2.0`을 사용하며 하위 호환 계약으로 유지한다. 즉 endpoint
+version `v1`과 payload schema `2.0`을 같은 버전으로 표현하지 않는다. ASGI 계층은 인증,
 streaming body 상한, text-only preflight, admission, 단일 프로세스 single-flight/replay 및
-HTTP 오류 변환만 담당한다. 기존 workflow, Claude grounding, Evidence Gate와 outcome 정책은
-변경하지 않는다.
+HTTP 오류 변환만 담당한다. Claude는 분류·추출, bounded 조사 제안, 사용자 표현만
+담당하며 Evidence·Finding·severity·outcome을 생성하거나 변경할 권한이 없다.
+서술과 Case Chat은 코드가 선택한 typed claim과 FactLedger ID를 정확히 인용해야 하고,
+인용·의미 검증에 실패하면 1회 재시도 후 결정론적 템플릿으로 대체한다.
 
-제품 Runtime은 Data의 `/internal/rag/v2/health/ready`와
-`/internal/rag/v2/retrieve`만 사용한다. 기존 v1 readiness/retriever는 CLI·evaluation의
-명시적 compatibility adapter이며 제품 RuntimeConfig에 선택 모드가 없다.
+ReviewResult V2를 반환하는 legacy 제품 경로는 Data의
+`/internal/rag/v2/health/ready`와 `/internal/rag/v2/retrieve`를 사용한다. ReviewResult V3
+제품 경로는 `ProductionHttpRegulationRetrieverV3`를 통해
+`/internal/rag/v3/health/ready`와 `/internal/rag/v3/retrieve`만 사용한다. 기존 Evidence v1
+readiness/retriever는 CLI·evaluation의 명시적 compatibility adapter이며 제품
+RuntimeConfig에 이를 선택하는 모드는 없다.
 
 ## API
 
@@ -101,8 +111,8 @@ timeout 뒤의 새 요청으로 concurrency 상한을 우회할 수 없다.
   막기 위해 제거하지 않고, 단일 결과가 budget보다 크면 replay cache에 넣지 않는다.
 
 이 보장은 container 재시작 또는 여러 replica 사이에서는 유지되지 않는다. durable Case/Job
-idempotency는 Backend가 소유해야 한다. Backend 구현 전 여러 Agent replica를 active-active로
-사용해 exactly-once를 주장해서는 안 된다.
+idempotency는 `customs-backend`가 소유한다. Agent 단독의 process-local cache를 여러
+replica의 exactly-once 보장으로 표현해서는 안 된다.
 
 ## Readiness 의미
 
@@ -179,8 +189,9 @@ Dockerfile frontend와 Python base의 기본값은 multi-platform manifest SHA-2
 ## 명시적 비범위
 
 - OCR/image/PDF
-- Frontend, 제품 Backend, 사용자 인증, HITL
-- Operational DB와 Case/Job 저장
+- Frontend·Backend·사용자 인증·HITL·Operational DB·Case/Job 영속화의 소유
+  (이 기능은 형제 `customs-frontend`/`customs-backend` 제품 경계이며 Agent package에
+  복제하지 않는다.)
 - 58법령 수집 및 실제 RAG 품질
 - 자동 세관 승인 또는 법적 최종 판단
 

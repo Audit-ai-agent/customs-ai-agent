@@ -20,6 +20,28 @@ from customs_ai_agent.schemas.v3 import ServiceReviewRunRequestV3, canonical_jso
 from tools.agent_execution_inspector import run_v3_conformance as runner
 
 
+_REAL_TRACKED_SOURCE_INPUT_IDENTITY = runner._tracked_source_input_identity
+
+
+@pytest.fixture(autouse=True)
+def _tracked_source_fixture(monkeypatch: pytest.MonkeyPatch) -> None:
+    def identity(_path: Path, raw: bytes, request: ServiceReviewRunRequestV3):
+        return {
+            "repository_id": "customs-ai-agent",
+            "repository_history_roots_sha256": "3" * 64,
+            "repository_path_base": "agent-checkout-root",
+            "tracked_relative_path": "tests/unit-generated.request.json",
+            "git_object_format": "sha1",
+            "repository_head_oid": "1" * 40,
+            "git_blob_oid": "2" * 40,
+            "raw_bytes_sha256": hashlib.sha256(raw).hexdigest(),
+            "canonical_request_sha256": canonical_json_sha256(request),
+            "canonicalization": "customs-ai-agent/canonical-json-v1",
+        }
+
+    monkeypatch.setattr(runner, "_tracked_source_input_identity", identity)
+
+
 def _result():
     scenario = get_scenario("happy_path")
     request = ServiceReviewRunRequestV3(
@@ -67,6 +89,142 @@ def test_checked_in_v3_positive_control_is_schema_valid_hash_frozen_and_test_onl
         for assertion in document.verification_assertions
     ]
     assert assertions and all(assertion.method == "test_issuer" for assertion in assertions)
+
+    source = _REAL_TRACKED_SOURCE_INPUT_IDENTITY(path, raw, request)
+    repository = Path(runner.__file__).resolve().parents[2]
+    expected_commit = subprocess.run(
+        ["git", "-C", str(repository), "rev-parse", "HEAD"],
+        capture_output=True,
+        text=True,
+        check=True,
+    ).stdout.strip()
+    assert source["repository_id"] == "customs-ai-agent"
+    assert source["repository_path_base"] == "agent-checkout-root"
+    assert source["repository_head_oid"] == expected_commit
+    assert source["git_object_format"] == "sha1"
+    assert source["git_blob_oid"] == "d1ae078bfd7fbab9f655d9e2b241e2f6ae80fd7a"
+    assert len(source["repository_history_roots_sha256"]) == 64
+    assert source["tracked_relative_path"] == (
+        "tools/agent_execution_inspector/clean_text_production_candidate_v3.request.json"
+    )
+    assert source["raw_bytes_sha256"] == (
+        "bb5c87b544a9a46c6261832fd24b25b988b9f1fd56ba07f3bdb815c00e674567"
+    )
+    assert source["canonical_request_sha256"] == (
+        "7c68df85e2d38a42a094c89df14f328a189beeb736b40900de963cd865152e4f"
+    )
+    assert source["canonicalization"] == "customs-ai-agent/canonical-json-v1"
+
+
+def test_tracked_source_identity_rejects_untracked_or_modified_request(
+    tmp_path: Path,
+) -> None:
+    source = Path(runner.__file__).parent / "clean_text_production_candidate_v3.request.json"
+    raw = source.read_bytes()
+    request = ServiceReviewRunRequestV3.model_validate_json(raw)
+    copied = tmp_path / "untracked-request.json"
+    copied.write_bytes(raw)
+    with pytest.raises(ValueError, match="outside_expected_agent_repository"):
+        _REAL_TRACKED_SOURCE_INPUT_IDENTITY(copied, raw, request)
+
+
+def test_source_identity_rejects_same_fixture_in_arbitrary_non_ascii_git_repository(
+    tmp_path: Path,
+) -> None:
+    source = Path(runner.__file__).parent / "clean_text_production_candidate_v3.request.json"
+    raw = source.read_bytes()
+    request = ServiceReviewRunRequestV3.model_validate_json(raw)
+    arbitrary = tmp_path / "임의-저장소"
+    arbitrary.mkdir()
+    copied = arbitrary / source.name
+    copied.write_bytes(raw)
+    subprocess.run(["git", "init", "-q", str(arbitrary)], check=True)
+    subprocess.run(["git", "-C", str(arbitrary), "add", copied.name], check=True)
+    subprocess.run(
+        [
+            "git",
+            "-C",
+            str(arbitrary),
+            "-c",
+            "user.name=Test",
+            "-c",
+            "user.email=test@example.invalid",
+            "commit",
+            "-qm",
+            "fixture",
+        ],
+        check=True,
+    )
+    with pytest.raises(ValueError, match="outside_expected_agent_repository"):
+        _REAL_TRACKED_SOURCE_INPUT_IDENTITY(copied, raw, request)
+
+
+def test_arbitrary_repository_source_is_rejected_before_credential_or_network_use(
+    monkeypatch: pytest.MonkeyPatch,
+    tmp_path: Path,
+) -> None:
+    request, _result_value = _result()
+    arbitrary = tmp_path / "other-repository"
+    arbitrary.mkdir()
+    request_path = arbitrary / "request.json"
+    request_path.write_text(
+        json.dumps(request.model_dump(mode="json")),
+        encoding="utf-8",
+    )
+    subprocess.run(["git", "init", "-q", str(arbitrary)], check=True)
+    subprocess.run(["git", "-C", str(arbitrary), "add", request_path.name], check=True)
+    subprocess.run(
+        [
+            "git",
+            "-C",
+            str(arbitrary),
+            "-c",
+            "user.name=Test",
+            "-c",
+            "user.email=test@example.invalid",
+            "commit",
+            "-qm",
+            "request",
+        ],
+        check=True,
+    )
+    identity_path = tmp_path / "identity.json"
+    identity_path.write_text("{}", encoding="utf-8")
+    monkeypatch.setattr(
+        runner,
+        "load_conformance_identity",
+        lambda _path: SimpleNamespace(
+            base_runtime_release=SimpleNamespace(supported_review_as_of=request.review_as_of)
+        ),
+    )
+    monkeypatch.setattr(
+        runner,
+        "_tracked_source_input_identity",
+        _REAL_TRACKED_SOURCE_INPUT_IDENTITY,
+    )
+    monkeypatch.setattr(
+        runner,
+        "_read_token",
+        lambda _path: pytest.fail("credential must not be read for an arbitrary repository"),
+    )
+    monkeypatch.setattr(
+        runner,
+        "_non_release_runtime",
+        lambda **_kwargs: pytest.fail("network runtime must not be constructed"),
+    )
+
+    report = runner.run_conformance(
+        base_url="http://127.0.0.1:9999",
+        identity_path=identity_path,
+        request_path=request_path,
+        token_path=tmp_path / "token.txt",
+        env_file=tmp_path / ".env",
+        output_dir=tmp_path / "out",
+    )
+
+    assert report["failure_stage"] == "source_input_validation"
+    assert report["error_code"] == "source_input_validation"
+    assert "source_input" not in report
 
 
 def test_conformance_runner_uses_serialized_agent_v3_boundary_and_redacts_artifact(
@@ -133,6 +291,8 @@ def test_conformance_runner_uses_serialized_agent_v3_boundary_and_redacts_artifa
     encoded = (tmp_path / "out" / "report.json").read_text(encoding="utf-8")
     assert "private-token-value" not in encoded
     assert "COMMERCIAL INVOICE" not in encoded
+    assert report["source_input"]["raw_bytes_sha256"] == hashlib.sha256(raw_request).hexdigest()
+    assert report["checks"]["tracked_source_canonical_hash_matches_result"] is True
     assert (tmp_path / "out" / "junit.xml").is_file()
 
 
@@ -210,6 +370,18 @@ def test_conformance_runner_rejects_review_date_not_bound_to_provider_identity(
         "failure_stage": "evidence_preflight",
         "error_code": "evidence_review_date_mismatch",
         "error_type": "contract_validation",
+        "source_input": {
+            "repository_id": "customs-ai-agent",
+            "repository_history_roots_sha256": "3" * 64,
+            "repository_path_base": "agent-checkout-root",
+            "tracked_relative_path": "tests/unit-generated.request.json",
+            "git_object_format": "sha1",
+            "repository_head_oid": "1" * 40,
+            "git_blob_oid": "2" * 40,
+            "raw_bytes_sha256": hashlib.sha256(request_path.read_bytes()).hexdigest(),
+            "canonical_request_sha256": canonical_json_sha256(request),
+            "canonicalization": "customs-ai-agent/canonical-json-v1",
+        },
     }
     assert "private-canary" not in (tmp_path / "out" / "report.json").read_text(encoding="utf-8")
 

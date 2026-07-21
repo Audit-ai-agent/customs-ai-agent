@@ -13,8 +13,8 @@ from customs_ai_agent.agentic import (
     BoundedToolPolicyError,
     BoundedToolResult,
     DeterministicReevaluationResult,
+    _grounded_claim_synthesis,
     _rewrite_report,
-    _semantically_invariant_rewrite,
     activate_bounded_plan,
     answer_grounded_question,
     build_fact_ledger,
@@ -383,13 +383,21 @@ def test_narrative_renderer_rejects_a_false_claim_even_with_valid_citation_ids()
     _request_value, result_v2, _result = _v3_result()
     facts = build_fact_ledger(result_v2)
     canonical = deterministic_narrative(result_v2, facts)
-    claims = [
-        *canonical.summary,
-        *canonical.document_consistency,
-        *canonical.regulatory_review,
-        *canonical.required_actions,
+    rewrites = [
+        {
+            "section": section,
+            "source_claim_id": claim.claim_id,
+            "text": claim.text,
+            "citations": [item.model_dump(mode="json") for item in claim.citations],
+        }
+        for section in (
+            "summary",
+            "document_consistency",
+            "regulatory_review",
+            "required_actions",
+        )
+        for claim in getattr(canonical, section)
     ]
-    rewrites = [{"claim_id": claim.claim_id, "text": claim.text} for claim in claims]
     rewrites[0]["text"] += " 세관이 통관을 승인했습니다."
     call = StructuredAgenticResult(
         value={"rewrites": rewrites},
@@ -406,6 +414,110 @@ def test_narrative_renderer_rejects_a_false_claim_even_with_valid_citation_ids()
         _rewrite_report(canonical, rewrites, call=call)
 
 
+def test_narrative_renderer_accepts_only_typed_code_owned_frame_and_exact_citations() -> None:
+    _request_value, result_v2, _result = _v3_result()
+    canonical = deterministic_narrative(result_v2, build_fact_ledger(result_v2))
+    values = [
+        {
+            "section": section,
+            "source_claim_id": claim.claim_id,
+            "text": f"요약하면, {claim.text}" if section == "summary" else claim.text,
+            "citations": [item.model_dump(mode="json") for item in claim.citations],
+        }
+        for section in (
+            "summary",
+            "document_consistency",
+            "regulatory_review",
+            "required_actions",
+        )
+        for claim in getattr(canonical, section)
+    ]
+    call = StructuredAgenticResult(
+        value={"claims": values},
+        model_id="claude-test",
+        prompt_sha256="a" * 64,
+        output_schema_sha256="b" * 64,
+        request_id="request-1",
+        message_id="message-1",
+        input_tokens=10,
+        output_tokens=10,
+        latency_ms=1,
+    )
+    report = _rewrite_report(canonical, values, call=call)
+    assert report.generation_mode == "claude"
+    assert report.summary[0].text.startswith("요약하면, ")
+
+    unknown = [dict(item) for item in values]
+    unknown[0]["source_claim_id"] = "claim_" + "f" * 64
+    with pytest.raises(ValueError, match="unknown typed claim"):
+        _rewrite_report(canonical, unknown, call=call)
+
+    wrong_citation = [dict(item) for item in values]
+    wrong_citation[0]["citations"] = [
+        {"kind": "outcome", "reference_id": "unknown-ledger-reference"}
+    ]
+    with pytest.raises(ValueError, match="citations"):
+        _rewrite_report(canonical, wrong_citation, call=call)
+
+
+def test_invalid_narrative_and_chat_each_make_exactly_two_claude_calls_then_fallback() -> None:
+    request, result_v2, baseline = _v3_result()
+
+    class InvalidTypedOutputAnalyzer:
+        def __init__(self) -> None:
+            self.calls: dict[str, int] = {}
+
+        def run_bounded_agentic_task(self, *_args, **kwargs):
+            task_id = kwargs["task_id"]
+            self.calls[task_id] = self.calls.get(task_id, 0) + 1
+            value = (
+                {"suggestions": []} if task_id == "customs_review_coordinator" else {"claims": []}
+            )
+            return StructuredAgenticResult(
+                value=value,
+                model_id=baseline.runtime_release.model_id,
+                prompt_sha256=(
+                    baseline.runtime_release.chat_prompt_sha256
+                    if task_id == "customs_case_answer"
+                    else "a" * 64
+                ),
+                output_schema_sha256=(
+                    baseline.runtime_release.chat_schema_sha256
+                    if task_id == "customs_case_answer"
+                    else "b" * 64
+                ),
+                request_id=f"request-{task_id}-{self.calls[task_id]}",
+                message_id=f"message-{task_id}-{self.calls[task_id]}",
+                input_tokens=10,
+                output_tokens=10,
+                latency_ms=1,
+            )
+
+    narrative_analyzer = InvalidTypedOutputAnalyzer()
+    result = to_review_run_result_v3(
+        result_v2,
+        request,
+        evidence_runtime_v3_sha256="e" * 64,
+        analyzer=narrative_analyzer,  # type: ignore[arg-type]
+    )
+    assert narrative_analyzer.calls["customs_review_coordinator"] == 1
+    assert narrative_analyzer.calls["customs_narrative_report"] == 2
+    assert result.narrative_report.generation_mode == "deterministic_fallback"
+
+    chat_analyzer = InvalidTypedOutputAnalyzer()
+    answer = answer_grounded_question(
+        GroundedQuestionV1(
+            question_id="question_" + "9" * 64,
+            question="현재 심사 결과 상태는 무엇인가요?",
+            review_result=result,
+        ),
+        analyzer=chat_analyzer,  # type: ignore[arg-type]
+    )
+    assert chat_analyzer.calls == {"customs_case_answer": 2}
+    assert answer.status == "answered"
+    assert answer.generation_mode == "deterministic_fallback"
+
+
 @pytest.mark.parametrize(
     "candidate",
     [
@@ -419,8 +531,13 @@ def test_material_claim_rewrite_rejects_role_direction_negation_and_number_swaps
     candidate: str,
 ) -> None:
     canonical = "수출자는 수입자에게 100 USD를 지급했습니다."
-    assert _semantically_invariant_rewrite(canonical, canonical)
-    assert not _semantically_invariant_rewrite(canonical, candidate)
+    assert _grounded_claim_synthesis(canonical, canonical, section="answer")
+    assert _grounded_claim_synthesis(
+        canonical,
+        f"확인된 Case 근거에 따르면, {canonical}",
+        section="answer",
+    )
+    assert not _grounded_claim_synthesis(canonical, candidate, section="answer")
 
 
 def _active_profile() -> SimpleNamespace:

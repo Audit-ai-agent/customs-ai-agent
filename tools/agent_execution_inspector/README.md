@@ -201,6 +201,15 @@ High/Critical Finding의 Evidence 결박, test issuer에 대한 사람 검토 di
 아니다. 실패 보고서는 원본 예외 메시지 대신 allowlist 기반 `failure_stage`,
 `error_code`, `error_type`만 기록한다.
 
+요청 JSON은 반드시 실행 중인 Agent checkout의 `HEAD`에 정확히 추적된 파일이어야
+한다. untracked/수정된 복사본은 credential이나 외부 API를 사용하기 전에 거부한다.
+`report.json.source_input`은 원문 대신 코드가 고정한 Agent 저장소 ID, history-root
+identity hash, Agent checkout 기준 상대경로, Git object format, exact HEAD/blob object ID,
+raw-byte SHA-256, V3 canonical request SHA-256를 기록한다. 다른 Git 저장소에 같은
+fixture를 commit해도 Agent checkout source로 인정하지 않는다. 따라서 민감한
+문서 내용을 artifact에 복제하지 않고도 각 실행이 어떤 검토된 source를
+사용했는지 독립적으로 확인할 수 있다.
+
 ## 종료
 
 Inspector와 진단 서버 프로세스를 먼저 종료한 뒤 Data stack에는 다음만 사용한다.

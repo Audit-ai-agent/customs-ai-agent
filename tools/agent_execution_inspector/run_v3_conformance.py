@@ -10,8 +10,10 @@ Only a redacted machine summary and JUnit result are written.
 from __future__ import annotations
 
 import argparse
+import hashlib
 import json
 import re
+import subprocess
 import sys
 from pathlib import Path
 from typing import Any, Sequence
@@ -43,6 +45,7 @@ from customs_ai_agent.runtime import (
 from customs_ai_agent.schemas.v3 import (
     ReviewRunResultV3,
     ServiceReviewRunRequestV3,
+    canonical_json_sha256,
     review_result_v3_sha256,
 )
 
@@ -51,6 +54,8 @@ from tools.agent_execution_inspector.evidence_v3_conformance import (
 )
 
 
+_EXPECTED_AGENT_REPOSITORY_ROOT = Path(__file__).resolve().parents[2]
+_EXPECTED_AGENT_REPOSITORY_ID = "customs-ai-agent"
 _MAX_INPUT_BYTES = 32 * 1024 * 1024
 _EXPECTED_DOCUMENT_TYPES = {
     "invoice",
@@ -85,6 +90,8 @@ def _safe_failure(exc: Exception, *, stage: str) -> _ConformanceFailure:
         return _ConformanceFailure(stage, "identity_validation", "contract_validation")
     if stage == "request_validation":
         return _ConformanceFailure(stage, "request_validation", "input_validation")
+    if stage == "source_input_validation":
+        return _ConformanceFailure(stage, "source_input_validation", "provenance_validation")
     if stage == "service_token_validation":
         return _ConformanceFailure(stage, "service_token_validation", "credential_validation")
     if isinstance(exc, LLMConfigurationError):
@@ -149,6 +156,100 @@ def load_conformance_identity(path: Path) -> EvidenceRuntimeReleaseIdentityV3:
     if not isinstance(payload, dict):
         raise ValueError("identity_invalid")
     return EvidenceRuntimeReleaseIdentityV3.from_mapping(payload)
+
+
+def _git_bytes(repository: Path, *arguments: str) -> bytes:
+    command = ["git", "-C", str(repository), *arguments]
+    completed = subprocess.run(
+        command,
+        capture_output=True,
+        timeout=10,
+        check=False,
+    )
+    if completed.returncode != 0:
+        raise ValueError("tracked_source_git_command_failed")
+    return completed.stdout
+
+
+def _git_ascii(repository: Path, *arguments: str) -> str:
+    try:
+        return _git_bytes(repository, *arguments).decode("ascii").strip()
+    except UnicodeError:
+        raise ValueError("tracked_source_git_ascii_invalid") from None
+
+
+def _tracked_source_input_identity(
+    request_path: Path,
+    request_bytes: bytes,
+    request: ServiceReviewRunRequestV3,
+) -> dict[str, str]:
+    """Bind one conformance run to an unchanged Git-tracked request source.
+
+    No raw document text is returned. The relative path identifies the reviewed
+    fixture; Git commit/blob object IDs prove its repository contents; raw-byte
+    SHA-256 distinguishes checkout bytes; and the canonical request SHA-256 binds
+    the parsed V3 meaning. Dirty, untracked, symlinked-out, or filtered bytes are
+    rejected before credentials, Claude, or Evidence are used.
+    """
+
+    resolved = request_path.resolve(strict=True)
+    root = _EXPECTED_AGENT_REPOSITORY_ROOT.resolve(strict=True)
+    try:
+        relative = resolved.relative_to(root)
+    except ValueError:
+        raise ValueError("tracked_source_outside_expected_agent_repository") from None
+    if _git_ascii(root, "rev-parse", "--is-inside-work-tree") != "true":
+        raise ValueError("expected_agent_repository_invalid")
+    if _git_bytes(root, "rev-parse", "--show-prefix").strip(b"\r\n"):
+        raise ValueError("expected_agent_repository_root_mismatch")
+    relative_posix = relative.as_posix()
+    tracked = _git_bytes(
+        root,
+        "ls-files",
+        "-z",
+        "--error-unmatch",
+        "--",
+        relative_posix,
+    )
+    expected_tracked = relative_posix.encode("utf-8") + b"\x00"
+    if tracked != expected_tracked:
+        raise ValueError("tracked_source_path_mismatch")
+    object_format = _git_ascii(root, "rev-parse", "--show-object-format")
+    oid_length = {"sha1": 40, "sha256": 64}.get(object_format)
+    if oid_length is None:
+        raise ValueError("tracked_source_git_object_format_unsupported")
+    commit_oid = _git_ascii(root, "rev-parse", "--verify", "HEAD^{commit}")
+    blob_oid = _git_ascii(root, "rev-parse", "--verify", f"HEAD:{relative_posix}")
+    oid_pattern = rf"[a-f0-9]{{{oid_length}}}"
+    if not all(re.fullmatch(oid_pattern, value) for value in (commit_oid, blob_oid)):
+        raise ValueError("tracked_source_object_id_invalid")
+    history_roots = sorted(
+        value
+        for value in _git_ascii(root, "rev-list", "--max-parents=0", "HEAD").splitlines()
+        if value
+    )
+    if not history_roots or any(
+        re.fullmatch(oid_pattern, value) is None for value in history_roots
+    ):
+        raise ValueError("tracked_source_repository_history_invalid")
+    history_identity = hashlib.sha256(
+        (object_format + "\x00" + "\x00".join(history_roots)).encode("ascii")
+    ).hexdigest()
+    blob_bytes = _git_bytes(root, "cat-file", "blob", blob_oid)
+    if request_bytes != blob_bytes:
+        raise ValueError("tracked_source_bytes_do_not_match_head_blob")
+    return {
+        "repository_id": _EXPECTED_AGENT_REPOSITORY_ID,
+        "repository_history_roots_sha256": history_identity,
+        "repository_path_base": "agent-checkout-root",
+        "tracked_relative_path": relative_posix,
+        "git_object_format": object_format,
+        "repository_head_oid": commit_oid,
+        "git_blob_oid": blob_oid,
+        "raw_bytes_sha256": hashlib.sha256(request_bytes).hexdigest(),
+        "canonical_request_sha256": canonical_json_sha256(request),
+        "canonicalization": "customs-ai-agent/canonical-json-v1",
+    }
 
 
 def _read_token(path: Path) -> str:
@@ -489,6 +590,7 @@ def run_conformance(
     report: dict[str, Any]
     passed = False
     reason_code: str | None = None
+    source_input_identity: dict[str, str] | None = None
     stage = "identity_validation"
     try:
         identity = load_conformance_identity(identity_path)
@@ -496,6 +598,12 @@ def run_conformance(
         request_bytes = request_path.read_bytes()
         request_payload = _strict_json_object(request_bytes, label="request")
         request = ServiceReviewRunRequestV3.model_validate(request_payload)
+        stage = "source_input_validation"
+        source_input_identity = _tracked_source_input_identity(
+            request_path,
+            request_bytes,
+            request,
+        )
         if request.review_as_of != identity.base_runtime_release.supported_review_as_of:
             raise _ConformanceFailure(
                 "evidence_preflight",
@@ -525,6 +633,9 @@ def run_conformance(
             retriever=runtime._retriever_v3,
             identity=identity,
         )
+        checks["tracked_source_canonical_hash_matches_result"] = (
+            source_input_identity["canonical_request_sha256"] == result.input_manifest_sha256
+        )
         passed = all(checks.values())
         reason_code = None if passed else "result_assertion_failed"
         report = {
@@ -548,6 +659,7 @@ def run_conformance(
             "action_count": len(result.action_trace),
             "result_sha256": result.result_sha256,
             "input_manifest_sha256": result.input_manifest_sha256,
+            "source_input": source_input_identity,
             "runtime_release": result.runtime_release.model_dump(mode="json", warnings=False),
         }
         if not passed:
@@ -572,6 +684,8 @@ def run_conformance(
             "error_code": failure.code,
             "error_type": failure.error_type,
         }
+        if source_input_identity is not None:
+            report["source_input"] = source_input_identity
     finally:
         if runtime is not None:
             try:
@@ -590,6 +704,8 @@ def run_conformance(
                     "error_code": reason_code,
                     "error_type": "runtime",
                 }
+                if source_input_identity is not None:
+                    report["source_input"] = source_input_identity
     encoded = json.dumps(
         report,
         ensure_ascii=False,

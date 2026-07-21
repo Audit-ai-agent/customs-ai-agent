@@ -219,22 +219,37 @@ _COORDINATOR_OUTPUT_SCHEMA: dict[str, Any] = {
         }
     },
 }
+_NARRATIVE_SECTIONS = (
+    "summary",
+    "document_consistency",
+    "regulatory_review",
+    "required_actions",
+)
 _SAFE_REWRITE_SCHEMA: dict[str, Any] = {
     "type": "object",
     "additionalProperties": False,
-    "required": ["claim_id", "text"],
+    "required": ["section", "source_claim_id", "text", "citations"],
     "properties": {
-        "claim_id": {"type": "string", "pattern": r"^claim_[a-f0-9]{64}$"},
+        "section": {"type": "string", "enum": list(_NARRATIVE_SECTIONS)},
+        "source_claim_id": {"type": "string", "pattern": r"^claim_[a-f0-9]{64}$"},
         "text": {"type": "string", "minLength": 1, "maxLength": 4000},
+        "citations": {
+            "type": "array",
+            "minItems": 1,
+            "maxItems": 100,
+            "uniqueItems": True,
+            "items": _CITATION_SCHEMA,
+        },
     },
 }
 _NARRATIVE_OUTPUT_SCHEMA: dict[str, Any] = {
     "type": "object",
     "additionalProperties": False,
-    "required": ["rewrites"],
+    "required": ["claims"],
     "properties": {
-        "rewrites": {
+        "claims": {
             "type": "array",
+            "minItems": 1,
             "maxItems": 320,
             "items": _SAFE_REWRITE_SCHEMA,
         },
@@ -243,9 +258,32 @@ _NARRATIVE_OUTPUT_SCHEMA: dict[str, Any] = {
 _ANSWER_OUTPUT_SCHEMA: dict[str, Any] = {
     "type": "object",
     "additionalProperties": False,
-    "required": ["text"],
+    "required": ["claims"],
     "properties": {
-        "text": {"type": "string", "minLength": 1, "maxLength": 8000},
+        "claims": {
+            "type": "array",
+            "minItems": 1,
+            "maxItems": 20,
+            "items": {
+                "type": "object",
+                "additionalProperties": False,
+                "required": ["source_claim_id", "text", "citations"],
+                "properties": {
+                    "source_claim_id": {
+                        "type": "string",
+                        "pattern": r"^answer_claim_[a-f0-9]{64}$",
+                    },
+                    "text": {"type": "string", "minLength": 1, "maxLength": 4000},
+                    "citations": {
+                        "type": "array",
+                        "minItems": 1,
+                        "maxItems": 100,
+                        "uniqueItems": True,
+                        "items": _CITATION_SCHEMA,
+                    },
+                },
+            },
+        },
     },
 }
 
@@ -784,18 +822,28 @@ def _call_audit(task_id: str, call: StructuredAgenticResult) -> AgenticCallAudit
     )
 
 
-def _semantically_invariant_rewrite(canonical: str, candidate: str) -> bool:
-    """Allow only a byte-for-byte canonical material claim.
+_SAFE_CLAIM_FRAMES: dict[str, tuple[str, ...]] = {
+    "summary": ("", "요약하면, ", "사전심사 요약: "),
+    "document_consistency": ("", "문서 정합성 확인 결과, ", "문서 검토 결과: "),
+    "regulatory_review": ("", "규정 근거 검토 결과, ", "규정 검토 결과: "),
+    "required_actions": ("", "필요 조치: ", "담당자 조치 사항: "),
+    "answer": ("", "확인된 Case 근거에 따르면, ", "근거 확인 결과: "),
+}
 
-    A bag-of-words or even token-order comparison cannot prove that punctuation,
-    negation, or numeric attribution remained equivalent. Claude therefore has no
-    authority to rewrite material claim text; it may only return the exact
-    program-authored sentence for section assembly and call audit.
+
+def _grounded_claim_synthesis(canonical: str, candidate: str, *, section: str) -> bool:
+    """Accept bounded presentation synthesis without granting factual authority.
+
+    The code-authored material sentence must remain byte-for-byte present. Claude
+    may only choose one code-owned, non-material framing phrase for the declared
+    claim type. This permits a useful user-facing presentation while making role,
+    amount, negation, Evidence, Finding, severity, and outcome changes impossible.
     """
 
     if not candidate.strip() or len(candidate) > 4000:
         return False
-    return candidate == canonical
+    frames = _SAFE_CLAIM_FRAMES.get(section)
+    return frames is not None and candidate in {f"{frame}{canonical}" for frame in frames}
 
 
 def _rewrite_report(
@@ -807,31 +855,44 @@ def _rewrite_report(
     if not isinstance(values, list):
         raise ValueError("narrative rewrite collection is invalid")
     canonical_claims = {
-        claim.claim_id: claim
-        for claim in (
-            *canonical.summary,
-            *canonical.document_consistency,
-            *canonical.regulatory_review,
-            *canonical.required_actions,
-        )
+        claim.claim_id: (section, claim)
+        for section in _NARRATIVE_SECTIONS
+        for claim in getattr(canonical, section)
     }
-    rewrites: dict[str, str] = {}
+    rewrites: dict[str, tuple[str, str]] = {}
     for value in values:
         if not isinstance(value, dict):
             raise ValueError("narrative rewrite is invalid")
-        claim_id = value.get("claim_id")
+        section = value.get("section")
+        claim_id = value.get("source_claim_id")
         text = value.get("text")
-        if not isinstance(claim_id, str) or not isinstance(text, str) or claim_id in rewrites:
+        citations = value.get("citations")
+        if (
+            not isinstance(section, str)
+            or not isinstance(claim_id, str)
+            or not isinstance(text, str)
+            or not isinstance(citations, list)
+            or claim_id in rewrites
+        ):
             raise ValueError("narrative rewrite identity is invalid")
         source = canonical_claims.get(claim_id)
-        if source is None or not _semantically_invariant_rewrite(source.text, text):
+        if source is None or source[0] != section:
+            raise ValueError("narrative rewrite references an unknown typed claim")
+        source_claim = source[1]
+        try:
+            candidate_citations = [CitationReferenceV1.model_validate(item) for item in citations]
+        except Exception as exc:
+            raise ValueError("narrative rewrite citation is invalid") from exc
+        if candidate_citations != source_claim.citations:
+            raise ValueError("narrative rewrite changed canonical citations")
+        if not _grounded_claim_synthesis(source_claim.text, text, section=section):
             raise ValueError("narrative rewrite changed canonical claim semantics")
-        rewrites[claim_id] = text
+        rewrites[claim_id] = (section, text)
     if set(rewrites) != set(canonical_claims):
         raise ValueError("narrative rewrite must cover every canonical claim exactly once")
 
     def project(claims: list[NarrativeClaimV1]) -> list[NarrativeClaimV1]:
-        return [_claim(rewrites[claim.claim_id], claim.citations) for claim in claims]
+        return [_claim(rewrites[claim.claim_id][1], claim.citations) for claim in claims]
 
     return NarrativeReportV1(
         summary=project(canonical.summary),
@@ -851,16 +912,19 @@ def claude_narrative(
     release_approved: bool = False,
 ) -> tuple[NarrativeReportV1, StructuredAgenticResult]:
     canonical = deterministic_narrative(result, facts, release_approved=release_approved)
+    canonical_claims = [
+        {
+            "section": section,
+            "source_claim_id": claim.claim_id,
+            "canonical_text": claim.text,
+            "citations": [item.model_dump(mode="json") for item in claim.citations],
+            "allowed_frames": list(_SAFE_CLAIM_FRAMES[section]),
+        }
+        for section in _NARRATIVE_SECTIONS
+        for claim in getattr(canonical, section)
+    ]
     context = {
-        "canonical_claims": [
-            {"claim_id": claim.claim_id, "text": claim.text}
-            for claim in (
-                *canonical.summary,
-                *canonical.document_consistency,
-                *canonical.regulatory_review,
-                *canonical.required_actions,
-            )
-        ],
+        "canonical_claims": canonical_claims,
         "disclaimer": ("This is a customs pre-review aid and is not a customs clearance decision."),
     }
     call = analyzer.run_bounded_agentic_task(
@@ -870,7 +934,7 @@ def claude_narrative(
         output_schema=_NARRATIVE_OUTPUT_SCHEMA,
         max_tokens=4096,
     )
-    report = _rewrite_report(canonical, call.value.get("rewrites"), call=call)
+    report = _rewrite_report(canonical, call.value.get("claims"), call=call)
     return report, call
 
 
@@ -1788,7 +1852,46 @@ def to_review_run_result_v3(
     return ReviewRunResultV3.model_validate(payload)
 
 
-def _deterministic_grounded_answer(question: GroundedQuestionV1) -> GroundedAnswerV1:
+@dataclass(frozen=True, slots=True)
+class _AnswerClaim:
+    claim_id: str
+    text: str
+    citations: tuple[CitationReferenceV1, ...]
+
+
+@dataclass(frozen=True, slots=True)
+class _GroundedAnswerPlan:
+    status: Literal["answered", "insufficient_evidence", "out_of_scope"]
+    claims: tuple[_AnswerClaim, ...] = ()
+    refusal_text: str | None = None
+
+
+def _answer_claim(text: str, citations: Iterable[CitationReferenceV1]) -> _AnswerClaim:
+    frozen_citations = tuple(citations)
+    payload = {
+        "text": text,
+        "citations": [item.model_dump(mode="json") for item in frozen_citations],
+    }
+    return _AnswerClaim(
+        claim_id=stable_object_id("answer_claim", payload),
+        text=text,
+        citations=frozen_citations,
+    )
+
+
+def _bounded_answer_claims(claims: Iterable[_AnswerClaim]) -> tuple[_AnswerClaim, ...]:
+    selected: list[_AnswerClaim] = []
+    rendered_size = 0
+    for claim in claims:
+        additional = len(claim.text) + (1 if selected else 0)
+        if len(selected) >= 20 or rendered_size + additional > 7600:
+            break
+        selected.append(claim)
+        rendered_size += additional
+    return tuple(selected)
+
+
+def _deterministic_grounded_answer_plan(question: GroundedQuestionV1) -> _GroundedAnswerPlan:
     result = question.review_result
     lowered = question.question.casefold()
     out_of_scope_tokens = (
@@ -1801,11 +1904,9 @@ def _deterministic_grounded_answer(question: GroundedQuestionV1) -> GroundedAnsw
         "요리",
     )
     if any(token in lowered for token in out_of_scope_tokens):
-        return GroundedAnswerV1(
-            question_id=question.question_id,
-            answer="이 질문은 현재 통관 Case와 인용된 근거의 범위를 벗어납니다.",
+        return _GroundedAnswerPlan(
             status="out_of_scope",
-            generation_mode="deterministic_fallback",
+            refusal_text="이 질문은 현재 통관 Case와 인용된 근거의 범위를 벗어납니다.",
         )
     question_tokens = {
         token.casefold()
@@ -1828,77 +1929,183 @@ def _deterministic_grounded_answer(question: GroundedQuestionV1) -> GroundedAnsw
     )
     case_intent = issue_intent or regulation_intent or outcome_intent or field_intent
     if not case_intent:
-        return GroundedAnswerV1(
-            question_id=question.question_id,
-            answer="이 질문은 현재 통관 Case의 문서·규정·심사 결과 범위를 벗어납니다.",
+        return _GroundedAnswerPlan(
             status="out_of_scope",
-            generation_mode="deterministic_fallback",
+            refusal_text="이 질문은 현재 통관 Case의 문서·규정·심사 결과 범위를 벗어납니다.",
         )
-    if issue_intent and result.regulatory_findings:
-        finding = result.regulatory_findings[0]
-        reference = next(
-            entry
+    claims: list[_AnswerClaim] = []
+    if issue_intent:
+        finding_entries = {
+            entry.reference_id: entry
             for entry in result.fact_ledger.entries
-            if entry.kind == "finding" and entry.label == finding.finding_code
-        )
-        citations = [_citation("finding", reference.reference_id)]
-        citations.extend(_citation("evidence", item) for item in finding.evidence_ids)
-        answer = f"{finding.finding_code}: {finding.message}"
-    elif issue_intent and result.validation_issues:
-        issue = result.validation_issues[0]
-        reference = next(
-            entry
+            if entry.kind == "finding"
+        }
+        for finding_index, finding in enumerate(result.regulatory_findings):
+            reference_id = stable_object_id(
+                "finding",
+                {"index": finding_index, "finding": finding.model_dump(mode="json")},
+            )
+            if reference_id not in finding_entries:
+                continue
+            citations = [_citation("finding", reference_id)]
+            citations.extend(_citation("evidence", item) for item in finding.evidence_ids)
+            claims.append(_answer_claim(f"{finding.finding_code}: {finding.message}", citations))
+        issue_entries = {
+            entry.reference_id: entry
             for entry in result.fact_ledger.entries
-            if entry.kind == "issue" and entry.label == issue.issue_code
-        )
-        citations = [_citation("issue", reference.reference_id)]
-        answer = f"{issue.issue_code}: {issue.message}"
+            if entry.kind == "issue"
+        }
+        for issue_index, issue in enumerate(result.validation_issues):
+            reference_id = stable_object_id(
+                "issue",
+                {"index": issue_index, "issue": issue.model_dump(mode="json")},
+            )
+            if reference_id in issue_entries:
+                claims.append(
+                    _answer_claim(
+                        f"{issue.issue_code}: {issue.message}",
+                        [_citation("issue", reference_id)],
+                    )
+                )
     elif regulation_intent and result.rag_evidence:
-        evidence = result.rag_evidence[0]
-        citations = [_citation("evidence", evidence.evidence_id)]
-        answer = f"{evidence.title}: {evidence.text[:1000]}"
+        for evidence in result.rag_evidence:
+            claims.append(
+                _answer_claim(
+                    f"{evidence.title}: {evidence.text[:1000]}",
+                    [_citation("evidence", evidence.evidence_id)],
+                )
+            )
     elif outcome_intent:
         reference = next(entry for entry in result.fact_ledger.entries if entry.kind == "outcome")
-        citations = [_citation("outcome", reference.reference_id)]
-        answer = f"현재 사전심사 상태는 {result.review_disposition}입니다."
+        claims.append(
+            _answer_claim(
+                f"현재 사전심사 상태는 {result.review_disposition}입니다.",
+                [_citation("outcome", reference.reference_id)],
+            )
+        )
     elif field_intent:
+        specific_tokens = question_tokens.difference({"문서", "품목", "송장", "선하", "hsk", "hs"})
         matching = [
             entry
             for entry in result.fact_ledger.entries
             if entry.kind == "field_source"
-            and any(token in f"{entry.label} {entry.value}".casefold() for token in question_tokens)
+            and (
+                not specific_tokens
+                or any(
+                    token in f"{entry.label} {entry.value}".casefold() for token in specific_tokens
+                )
+            )
         ]
         if not matching:
-            return GroundedAnswerV1(
-                question_id=question.question_id,
-                answer="현재 Review Result에 질문과 직접 연결되는 문서 필드 근거가 없습니다.",
+            return _GroundedAnswerPlan(
                 status="insufficient_evidence",
-                generation_mode="deterministic_fallback",
+                refusal_text=(
+                    "현재 Review Result에 질문과 직접 연결되는 문서 필드 근거가 없습니다."
+                ),
             )
-        reference = matching[0]
-        citations = [_citation("field_source", reference.reference_id)]
-        answer = f"{reference.label}: {reference.value}"
-    else:
-        return GroundedAnswerV1(
-            question_id=question.question_id,
-            answer="현재 Review Result에 질문에 답할 수 있는 문서·규정 근거가 없습니다.",
+        claims.extend(
+            _answer_claim(
+                f"{reference.label}: {reference.value}",
+                [_citation("field_source", reference.reference_id)],
+            )
+            for reference in matching
+        )
+    selected = _bounded_answer_claims(claims)
+    if not selected:
+        return _GroundedAnswerPlan(
             status="insufficient_evidence",
+            refusal_text=("현재 Review Result에 질문에 답할 수 있는 문서·규정 근거가 없습니다."),
+        )
+    return _GroundedAnswerPlan(status="answered", claims=selected)
+
+
+def _render_answer_plan(
+    question_id: str,
+    plan: _GroundedAnswerPlan,
+) -> GroundedAnswerV1:
+    if plan.status != "answered":
+        assert plan.refusal_text is not None
+        return GroundedAnswerV1(
+            question_id=question_id,
+            answer=plan.refusal_text,
+            status=plan.status,
             generation_mode="deterministic_fallback",
         )
+    citations = [citation for claim in plan.claims for citation in claim.citations]
+    unique_citations = list(dict.fromkeys((item.kind, item.reference_id) for item in citations))
+    return GroundedAnswerV1(
+        question_id=question_id,
+        answer="\n".join(claim.text for claim in plan.claims),
+        status="answered",
+        citations=[_citation(kind, reference_id) for kind, reference_id in unique_citations],
+        generation_mode="deterministic_fallback",
+    )
+
+
+def _deterministic_grounded_answer(question: GroundedQuestionV1) -> GroundedAnswerV1:
+    plan = _deterministic_grounded_answer_plan(question)
+    answer = _render_answer_plan(question.question_id, plan)
+    result = question.review_result
     valid = {(item.kind, item.reference_id) for item in result.fact_ledger.entries}
-    if any((item.kind, item.reference_id) not in valid for item in citations):
+    if any((item.kind, item.reference_id) not in valid for item in answer.citations):
         return GroundedAnswerV1(
             question_id=question.question_id,
             answer="인용 검증을 통과하지 못해 답변을 제공할 수 없습니다.",
             status="insufficient_evidence",
             generation_mode="deterministic_fallback",
         )
+    return answer
+
+
+def _rewrite_grounded_answer(
+    plan: _GroundedAnswerPlan,
+    values: Any,
+    *,
+    question_id: str,
+    call: StructuredAgenticResult,
+) -> GroundedAnswerV1:
+    if plan.status != "answered" or not isinstance(values, list):
+        raise ValueError("Case answer claim collection is invalid")
+    canonical = {claim.claim_id: claim for claim in plan.claims}
+    rewritten: dict[str, str] = {}
+    for value in values:
+        if not isinstance(value, dict):
+            raise ValueError("Case answer claim is invalid")
+        claim_id = value.get("source_claim_id")
+        text = value.get("text")
+        citations = value.get("citations")
+        if (
+            not isinstance(claim_id, str)
+            or not isinstance(text, str)
+            or not isinstance(citations, list)
+            or claim_id in rewritten
+        ):
+            raise ValueError("Case answer claim identity is invalid")
+        source = canonical.get(claim_id)
+        if source is None:
+            raise ValueError("Case answer references an unknown canonical claim")
+        try:
+            candidate_citations = tuple(
+                CitationReferenceV1.model_validate(item) for item in citations
+            )
+        except Exception as exc:
+            raise ValueError("Case answer citation is invalid") from exc
+        if candidate_citations != source.citations:
+            raise ValueError("Case answer changed canonical citations")
+        if not _grounded_claim_synthesis(source.text, text, section="answer"):
+            raise ValueError("Case answer changed canonical claim semantics")
+        rewritten[claim_id] = text
+    if set(rewritten) != set(canonical):
+        raise ValueError("Case answer must cover every canonical claim exactly once")
+    citations = [citation for claim in plan.claims for citation in claim.citations]
+    unique_citations = list(dict.fromkeys((item.kind, item.reference_id) for item in citations))
     return GroundedAnswerV1(
-        question_id=question.question_id,
-        answer=answer,
+        question_id=question_id,
+        answer="\n".join(rewritten[claim.claim_id] for claim in plan.claims),
         status="answered",
-        citations=citations,
-        generation_mode="deterministic_fallback",
+        citations=[_citation(kind, reference_id) for kind, reference_id in unique_citations],
+        generation_mode="claude",
+        model_call=_call_audit(CASE_ANSWER_PROMPT_ID, call),
     )
 
 
@@ -1907,14 +2114,22 @@ def answer_grounded_question(
     *,
     analyzer: ClaudeDocumentAnalyzer | None = None,
 ) -> GroundedAnswerV1:
+    plan = _deterministic_grounded_answer_plan(question)
     fallback = _deterministic_grounded_answer(question)
     if analyzer is None or fallback.status != "answered":
         return fallback
     context = {
         "question": question.question,
-        "canonical_answer": fallback.answer,
+        "canonical_claims": [
+            {
+                "source_claim_id": claim.claim_id,
+                "canonical_text": claim.text,
+                "citations": [item.model_dump(mode="json") for item in claim.citations],
+                "allowed_frames": list(_SAFE_CLAIM_FRAMES["answer"]),
+            }
+            for claim in plan.claims
+        ],
         "fixed_status": fallback.status,
-        "fixed_citations": [item.model_dump(mode="json") for item in fallback.citations],
     }
     for _attempt in range(2):
         try:
@@ -1932,19 +2147,11 @@ def answer_grounded_question(
                 or call.output_schema_sha256 != runtime_release.chat_schema_sha256
             ):
                 raise ValueError("Case answer release identity mismatch")
-            text = call.value.get("text")
-            if not isinstance(text, str) or not _semantically_invariant_rewrite(
-                fallback.answer,
-                text,
-            ):
-                raise ValueError("Case answer rewrite changed canonical claim semantics")
-            return GroundedAnswerV1(
+            return _rewrite_grounded_answer(
+                plan,
+                call.value.get("claims"),
                 question_id=question.question_id,
-                answer=text,
-                status=fallback.status,
-                citations=fallback.citations,
-                generation_mode="claude",
-                model_call=_call_audit(CASE_ANSWER_PROMPT_ID, call),
+                call=call,
             )
         except (LLMError, ValueError):
             continue
