@@ -160,7 +160,7 @@ def load_conformance_identity(path: Path) -> EvidenceRuntimeReleaseIdentityV3:
 
 def _git_bytes(repository: Path, *arguments: str) -> bytes:
     command = ["git", "-C", str(repository), *arguments]
-    completed = subprocess.run(
+    completed = subprocess.run(  # noqa: S603 - fixed Git argv over the code-owned checkout
         command,
         capture_output=True,
         timeout=10,

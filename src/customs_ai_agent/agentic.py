@@ -2024,7 +2024,8 @@ def _render_answer_plan(
     plan: _GroundedAnswerPlan,
 ) -> GroundedAnswerV1:
     if plan.status != "answered":
-        assert plan.refusal_text is not None
+        if plan.refusal_text is None:
+            raise ValueError("grounded answer refusal text is missing")
         return GroundedAnswerV1(
             question_id=question_id,
             answer=plan.refusal_text,
