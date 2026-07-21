@@ -171,8 +171,10 @@ Release wheel/sdist는 일반 `uv build`가 아니라 exact clean Git commit을 
 build manifest가 포함된다. verifier는 package payload를 해당 Git object와 byte-for-byte 비교하고
 Docker build는 manifest commit과 `BUILD_SHA`가 다르면 중단한다.
 
-Base image tag도 실제 release pipeline에서 digest로 고정해야 한다. Dockerfile 기본 tag는
-개발 편의를 위한 것이며 digest 없는 build를 최종 release attestation으로 사용하지 않는다.
+Dockerfile frontend와 Python base의 기본값은 multi-platform manifest SHA-256 digest로
+고정한다. 다른 플랫폼 또는 patch image를 사용하려면 검토된 exact digest를
+`PYTHON_IMAGE` build argument로 명시하고 새 source/wheel/container release identity로
+다시 검증해야 한다. digest 없는 build는 release evidence로 인정하지 않는다.
 
 ## 명시적 비범위
 

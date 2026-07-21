@@ -778,6 +778,22 @@ def test_ci_hash_pins_wheel_install_and_supplies_archive_to_verifier() -> None:
     assert '--wheel "$WHEEL"' in workflow
 
 
+def test_agent_container_build_frontend_and_base_image_are_digest_pinned() -> None:
+    dockerfile = (ROOT / "Dockerfile").read_text(encoding="utf-8")
+    lines = dockerfile.splitlines()
+
+    assert lines[0] == (
+        "# syntax=docker/dockerfile:1.7@sha256:"
+        "a57df69d0ea827fb7266491f2813635de6f17269be881f696fbfdf2d83dda33e"
+    )
+    python_image = next(line for line in lines if line.startswith("ARG PYTHON_IMAGE="))
+    assert python_image == (
+        "ARG PYTHON_IMAGE=python:3.11.15-slim-bookworm@sha256:"
+        "b18992999dbe963a45a8a4da40ac2b1975be1a776d939d098c647482bcad5cba"
+    )
+    assert "FROM ${PYTHON_IMAGE}" in lines
+
+
 @pytest.mark.parametrize(
     "member_name",
     [
