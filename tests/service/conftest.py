@@ -43,6 +43,15 @@ class FakeRuntime:
             time.sleep(self.delay_seconds)
         return FakeResult()
 
+    def review_v3_json(self, payload: bytes) -> FakeResult:
+        return self.review_json(payload)
+
+    def revision_v3_json(self, payload: bytes) -> FakeResult:
+        return self.review_json(payload)
+
+    def answer_v3_json(self, payload: bytes) -> FakeResult:
+        return self.review_json(payload)
+
     def close(self) -> None:
         self.close_calls += 1
 

@@ -106,6 +106,25 @@ def _has_value(field: dict[str, Any] | None) -> bool:
 
 def extraction_completion_blockers(state: dict[str, Any]) -> list[str]:
     blockers: list[str] = []
+    for conflict in state.get("declared_document_type_conflicts") or []:
+        document_id = conflict.get("document_id") or "unknown"
+        blockers.append(f"{document_id}:declared_document_type_mismatch")
+    pairing = state.get("pairing_result") or {}
+    if pairing.get("document_type_conflicts"):
+        blockers.append("pairing_document_type_conflict")
+    if pairing.get("missing_required_document_types"):
+        blockers.append("pairing_required_document_missing")
+    if pairing.get("line_item_pairing_ambiguities"):
+        blockers.append("line_item_pairing_ambiguous")
+    if pairing.get("unmatched_invoice_item_ids"):
+        blockers.append("invoice_line_item_unmatched")
+    if pairing and pairing.get("document_set_status") != "deterministic":
+        blockers.append("document_set_not_deterministic")
+    if pairing and pairing.get("line_item_pairing_status") not in {
+        "deterministic",
+        "deterministic_with_unscored_packing_extras",
+    }:
+        blockers.append("line_item_pairing_not_deterministic")
     present_document_types = {
         str(document.get("document_type") or "unknown")
         for document in (state.get("extracted_documents") or {}).values()
@@ -197,7 +216,11 @@ def retrieval_completion_blockers(state: dict[str, Any]) -> list[str]:
     return sorted(set(blockers))
 
 
-def determine_outcome(state: dict[str, Any]) -> tuple[ReviewStatus, bool, list[str]]:
+def determine_outcome(
+    state: dict[str, Any],
+    *,
+    extraction_release_approved: bool = False,
+) -> tuple[ReviewStatus, bool, list[str]]:
     issues = state.get("validation_issues") or []
     findings = state.get("regulatory_findings") or []
     reviewed_items = [*issues, *findings]
@@ -207,7 +230,7 @@ def determine_outcome(state: dict[str, Any]) -> tuple[ReviewStatus, bool, list[s
     ]
 
     has_critical_finding = any(item.get("severity") == "critical" for item in reviewed_items)
-    llm_is_uncalibrated = state.get("llm_mode") == "llm"
+    llm_is_uncalibrated = state.get("llm_mode") == "llm" and not extraction_release_approved
     if has_critical_finding:
         blockers.append("critical_finding")
         # Until a separate HITL approval contract exists, a Claude-derived
@@ -228,7 +251,7 @@ def determine_outcome(state: dict[str, Any]) -> tuple[ReviewStatus, bool, list[s
         blockers.append("self_correction_performed")
     if llm_is_uncalibrated:
         blockers.append("llm_extraction_uncalibrated")
-    if average_confidence < 0.90:
+    if average_confidence < 0.90 and not extraction_release_approved:
         blockers.append("extraction_confidence_below_threshold")
 
     blockers = sorted(set(blockers))

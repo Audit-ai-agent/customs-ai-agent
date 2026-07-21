@@ -23,10 +23,11 @@ from customs_ai_agent.schemas.models import (
     ReviewRunResult,
     ServiceReviewRunRequestV2,
 )
+from customs_ai_agent.schemas.v3 import ServiceReviewRunRequestV3, ReviewRunResultV3
 
 
 SchemaScope = Literal["backend", "internal", "local"]
-SchemaVersion = Literal["v1", "v2"]
+SchemaVersion = Literal["v1", "v2", "v3"]
 SchemaKind = Literal[
     "review-request",
     "review-result",
@@ -43,6 +44,8 @@ _RESOURCE_PATHS: dict[SchemaKey, str] = {
     ("backend", "v1", "review-result"): "schemas/backend/v1/review-result.schema.json",
     ("backend", "v2", "review-request"): "schemas/backend/v2/review-request.schema.json",
     ("backend", "v2", "review-result"): "schemas/backend/v2/review-result.schema.json",
+    ("backend", "v3", "review-request"): "schemas/backend/v3/review-request.schema.json",
+    ("backend", "v3", "review-result"): "schemas/backend/v3/review-result.schema.json",
     (
         "internal",
         "v1",
@@ -218,13 +221,22 @@ def _strict_object_definitions(schema: dict[str, Any]) -> None:
 
 
 def _backend_request_schema(version: SchemaVersion) -> dict[str, Any]:
-    request_model = ReviewRunRequest if version == "v1" else ServiceReviewRunRequestV2
+    request_models: dict[SchemaVersion, type[BaseModel]] = {
+        "v1": ReviewRunRequest,
+        "v2": ServiceReviewRunRequestV2,
+        "v3": ServiceReviewRunRequestV3,
+    }
+    request_model = request_models[version]
     schema = copy.deepcopy(request_model.model_json_schema(mode="validation"))
     schema["$schema"] = "https://json-schema.org/draft/2020-12/schema"
     schema["$id"] = f"https://schemas.customs.local/agent/{version}/review-request.schema.json"
     schema["title"] = f"Customs AI Agent {version.upper()} review request"
     _strict_object_definitions(schema)
-    document_definition = "DocumentInput" if version == "v1" else "DocumentInputV2"
+    document_definition = (
+        "DocumentInput"
+        if version == "v1"
+        else ("TextDocumentInputV3" if version == "v3" else "DocumentInputV2")
+    )
     document_schema = schema["$defs"][document_definition]
     document_schema["additionalProperties"] = False
     if version == "v1":
@@ -277,17 +289,25 @@ def _backend_request_schema(version: SchemaVersion) -> dict[str, Any]:
             },
         },
     ]
-    schema["description"] = (
-        "Service-only V2 request with an explicit case, bounded text/direct-image/"
-        "source-bound PDF-page documents, and llm_mode=llm. Scenario fixtures, mock "
-        "execution, raw PDFs, paths, and URLs are not part of the Backend wire."
-    )
+    if version == "v2":
+        schema["description"] = (
+            "Service-only V2 request with an explicit case, bounded text/direct-image/"
+            "source-bound PDF-page documents, and llm_mode=llm. Scenario fixtures, mock "
+            "execution, raw PDFs, paths, and URLs are not part of the Backend wire."
+        )
+    else:
+        schema["description"] = (
+            "Additive V3 request with independently asserted supporting-document metadata. "
+            "The text-first service transport rejects image and PDF modalities before Claude."
+        )
     return schema
 
 
 def _result_model(version: SchemaVersion) -> type[BaseModel]:
     if version == "v1":
         return ReviewRunResult
+    if version == "v3":
+        return ReviewRunResultV3
     try:
         from customs_ai_agent.schemas.models import ReviewRunResultV2
     except ImportError:
@@ -301,10 +321,11 @@ def _backend_result_schema(version: SchemaVersion) -> dict[str, Any]:
     schema["$id"] = f"https://schemas.customs.local/agent/{version}/review-result.schema.json"
     schema["title"] = f"Customs AI Agent {version.upper()} review result"
     _strict_object_definitions(schema)
+    wire_versions = {"v1": "1.0", "v2": "2.0", "v3": "3.0"}
     schema["description"] = (
-        f"Public, redacted Agent review result contract {'1.0' if version == 'v1' else '2.0'}."
+        f"Public, redacted Agent review result contract {wire_versions[version]}."
     )
-    if version == "v2":
+    if version in {"v2", "v3"}:
         model_call_schema = schema.get("$defs", {}).get("ModelCallRecordV2")
         if isinstance(model_call_schema, dict):
             required = list(model_call_schema.get("required") or [])

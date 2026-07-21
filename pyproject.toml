@@ -10,6 +10,7 @@ readme = "README.md"
 requires-python = ">=3.11,<3.12"
 dependencies = [
   "anthropic>=0.117.0,<1",
+  "cryptography>=48.0.1,<49",
   "fastapi>=0.115,<1",
   "jsonschema[format]>=4.23,<5",
   "langgraph>=0.2.0,<2",
@@ -40,11 +41,20 @@ customs-ai-agent-serve = "customs_ai_agent.service.__main__:main"
 where = ["src"]
 
 [tool.setuptools.package-data]
-customs_ai_agent = ["build-manifest.json", "prompts/*.txt"]
+customs_ai_agent = [
+  "build-manifest.json",
+  "assertion-trust-store-v1.lock.json",
+  "prompts/*.txt",
+  "release-profile-v1.lock.json",
+  "reviewer-trust-store-v1.lock.json",
+]
 "customs_ai_agent.contracts" = [
   "evidence/*.json",
+  "evidence/v3/*.json",
+  "service/v1/*.json",
   "schemas/backend/v1/*.json",
   "schemas/backend/v2/*.json",
+  "schemas/backend/v3/*.json",
   "schemas/internal/v1/*.json",
   "schemas/internal/v2/*.json",
   "schemas/local/v1/*.json",

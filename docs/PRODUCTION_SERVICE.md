@@ -33,6 +33,10 @@ HTTP 오류 변환만 담당한다. 기존 workflow, Claude grounding, Evidence 
 | `GET /internal/agent/v1/metadata` | Bearer | Agent build/wheel, text capability, model/prompt/schema/Data pin |
 | `GET /internal/agent/v1/metrics` | Bearer | ID label이 없는 process-local 집계 |
 | `POST /internal/agent/v1/reviews` | Bearer | text-only ReviewResult V2 실행 |
+| `GET /internal/agent/v2/metadata` | Bearer | V3 release·trust-store·실행 제한 identity |
+| `POST /internal/agent/v2/reviews` | Bearer | text-only bounded adaptive ReviewResult V3 실행 |
+| `POST /internal/agent/v2/revisions` | Bearer | parent request/result에 결박된 불변 child Run |
+| `POST /internal/agent/v2/answers` | Bearer | 현재 Run Evidence에 결박된 Case 질의 |
 
 OpenAPI endpoint를 런타임에 공개하지 않는다. canonical OpenAPI는
 `contracts/agent/service/v1/openapi.lock.json`의 hash·크기·route로 고정하고
@@ -47,9 +51,13 @@ OpenAPI endpoint를 런타임에 공개하지 않는다. canonical OpenAPI는
   동시에 body를 읽는 연결 수도 workflow concurrency와 같은 semaphore로 제한한다.
 - strict UTF-8, duplicate JSON key, NaN/Infinity를 거부한다.
 - `review_run_id`와 `review_as_of`는 service profile에서 반드시 명시한다.
-- `image_pages` 또는 `pdf_pages` key는 값이 `null`이어도 nested image decode, OCR, Claude,
-  Evidence 호출 전에 422 `visual_input_not_supported`로 거부한다.
-- Service document/text 상한은 core 상한보다 같거나 작아야 한다.
+- V1은 `image_pages`/`pdf_pages` key 자체를 거부한다. V3는 Backend의 표준
+  `model_dump` 호환을 위해 `image_pages=[]`, `pdf_pages=null`만 text placeholder로 수용하고,
+  하나라도 실제 visual payload가 있으면 Claude 호출 전 422로 거부한다. 권장
+  canonical wire는 두 필드를 아예 생략한다.
+- V3 text-first 계약은 body 2 MiB, primary 문서 6개, run 전체 text 500,000자로
+  고정한다. Production 설정이 이 값과 다르면 시작을 거부하며, review와
+  revision의 parent/child 요청에 동일한 제한을 적용한다.
 - Mock/scenario 실행은 service route에 존재하지 않는다.
 
 ## 인증과 네트워크
@@ -100,6 +108,10 @@ idempotency는 Backend가 소유해야 한다. Backend 구현 전 여러 Agent r
 
 `/health/ready` 200은 다음을 모두 뜻한다.
 
+- 런타임 소유 supporting-document assertion verifier가 구성되어 있고, 요청자가 자가 선언한
+  connector/human 문자열이 아니라 Agent가 소유한 active Ed25519 trust root로 Case·문서
+  전체 claims·Data policy·결정 lineage에 결박된 서명 영수증을 검증한다.
+
 - service 설정과 wheel-local contract/prompt metadata가 로드됐다.
 - packaged `runtime-release-v2.lock.json`이 `release_state=released`다.
 - Data readiness의 provider build, source manifest, sealed knowledge generation, model/index
@@ -110,8 +122,9 @@ idempotency는 Backend가 소유해야 한다. Backend 구현 전 여러 Agent r
 
 Claude API에 과금 probe를 보내지 않는다. 현재 팀 Data가 3/58이면 503이 정확한 결과다.
 conformance Provider의 200을 실제 법령 RAG 품질이나 전체 서비스 release로 표현하지 않는다.
-현재 packaged lock은 의도적으로 `unreleased`이므로 liveness는 200이지만 readiness와 review는
-503이다. 이 상태에서 Claude client나 review workflow를 시작하지 않는다.
+현재 Data release lock과 assertion trust-store는 의도적으로 `unreleased`이므로 liveness는
+200이지만 readiness와 review는 503이다. 이 상태에서 Claude client나 review workflow를
+시작하지 않는다.
 
 Evidence timeout은 socket idle timeout의 합이 아니라 한 operation의 절대 wall-clock
 deadline이다. readiness GET, retrieval POST, retry, header 검증, 최대 2 MiB의 64 KiB chunk

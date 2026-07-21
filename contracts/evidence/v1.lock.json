@@ -8,8 +8,8 @@
   "consumer_snapshot_path": "contracts/evidence/v1/rag_retrieval_v1.schema.json",
   "packaged_snapshot_path": "customs_ai_agent/contracts/evidence/v1.schema.json",
   "sha256": "531b59ba4e86f78cef20a4fca052996efd8b88c48853ac12113ca76e69cdd69a",
-  "pinned_on": "2026-07-20",
-  "provider_release": "evidence-api-v1.1.0",
-  "provider_revision": "8012f8ae5f530a4917b6d2790ee89a7e01fb5ee6",
-  "provider_build_sha256": "df63a6d1bcfdcf5f1e2652684e6b0248d2daf1fe170ebc225a1400597f679cd7"
+  "pinned_on": "2026-07-22",
+  "provider_release": "evidence-api-v1.2.0",
+  "provider_revision": "a0db83a7c69f792f0801dc7bd63ef74692a30d03",
+  "provider_build_sha256": "113ddb6e7485dda8e4f0d3268e6a0cc14a6245fcd95fad022841ccd4c07eceb0"
 }

@@ -1,6 +1,7 @@
 from __future__ import annotations
 
 import json
+import hashlib
 import re
 from dataclasses import dataclass
 from importlib import resources
@@ -9,8 +10,16 @@ from importlib import resources
 BUILD_MANIFEST_CONTRACT = "customs-ai-agent-build-manifest"
 BUILD_MANIFEST_SCHEMA_VERSION = "1.0"
 SOURCE_SNAPSHOT_ALGORITHM = "git-archive-files-sha256-v1"
+CODE_SNAPSHOT_ALGORITHM = "package-code-files-sha256-v1"
 _GIT_SHA = re.compile(r"^[a-f0-9]{40}$")
 _SHA256 = re.compile(r"^[a-f0-9]{64}$")
+_CODE_SNAPSHOT_EXCLUDED = frozenset(
+    {
+        "build-manifest.json",
+        "release-profile-v1.lock.json",
+        "reviewer-trust-store-v1.lock.json",
+    }
+)
 
 
 class BuildManifestError(RuntimeError):
@@ -21,6 +30,38 @@ class BuildManifestError(RuntimeError):
 class BuildManifest:
     git_sha: str
     source_snapshot_sha256: str
+
+
+def package_code_snapshot_sha256() -> str:
+    """Hash executable/package assets without self-referential release overlays."""
+
+    root = resources.files("customs_ai_agent")
+    members: list[tuple[str, bytes]] = []
+
+    def visit(node: resources.abc.Traversable, prefix: str) -> None:
+        for child in sorted(node.iterdir(), key=lambda item: item.name):
+            relative = f"{prefix}/{child.name}" if prefix else child.name
+            if child.is_dir():
+                if child.name != "__pycache__":
+                    visit(child, relative)
+                continue
+            if child.name.endswith((".pyc", ".pyo")) or relative in _CODE_SNAPSHOT_EXCLUDED:
+                continue
+            members.append((relative.replace("\\", "/"), child.read_bytes()))
+
+    visit(root, "")
+    if not members:
+        raise BuildManifestError("code_snapshot_empty")
+    digest = hashlib.sha256()
+    digest.update(f"{CODE_SNAPSHOT_ALGORITHM}\0".encode("ascii"))
+    for relative, payload in members:
+        digest.update(relative.encode("utf-8"))
+        digest.update(b"\0")
+        digest.update(str(len(payload)).encode("ascii"))
+        digest.update(b"\0")
+        digest.update(payload)
+        digest.update(b"\0")
+    return digest.hexdigest()
 
 
 def load_packaged_build_manifest(*, required: bool) -> BuildManifest | None:
@@ -78,5 +119,7 @@ def load_packaged_build_manifest(*, required: bool) -> BuildManifest | None:
 __all__ = [
     "BuildManifest",
     "BuildManifestError",
+    "CODE_SNAPSHOT_ALGORITHM",
     "load_packaged_build_manifest",
+    "package_code_snapshot_sha256",
 ]

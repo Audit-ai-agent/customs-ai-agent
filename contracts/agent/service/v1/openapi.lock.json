@@ -1,10 +1,10 @@
 {
-  "canonical_json_bytes": 41938,
-  "canonical_sha256": "d61ba5f5a579bab1a8f05bcfcd2d6c5f60854b347b9431d64f123bb611b11d6f",
+  "canonical_json_bytes": 261033,
+  "canonical_sha256": "17199315855410ae9c5221259a492488d95ed58a21f46c89c11ec69030feccb6",
   "generator": {
     "fastapi": "0.139.2",
     "openapi": "3.1.0",
-    "service_api_version": "1.0.0"
+    "service_api_version": "2.0.0"
   },
   "paths": {
     "/health/live": [
@@ -20,6 +20,18 @@
       "get"
     ],
     "/internal/agent/v1/reviews": [
+      "post"
+    ],
+    "/internal/agent/v2/answers": [
+      "post"
+    ],
+    "/internal/agent/v2/metadata": [
+      "get"
+    ],
+    "/internal/agent/v2/reviews": [
+      "post"
+    ],
+    "/internal/agent/v2/revisions": [
       "post"
     ]
   },

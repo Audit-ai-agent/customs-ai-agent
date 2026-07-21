@@ -29,6 +29,11 @@ def _validated_evidence(evidence: Any) -> RagEvidence | None:
 def compliance_review(state: dict[str, Any]) -> dict[str, Any]:
     raw_evidence = state.get("rag_evidence") or []
     uploaded = _uploaded_requirement_codes(state)
+    verified_by_item = {
+        str(item_id): {str(code) for code in codes}
+        for item_id, codes in (state.get("verified_requirement_documents_by_item") or {}).items()
+        if isinstance(codes, (list, tuple, set))
+    }
     findings: list[dict[str, Any]] = []
     requires_human = state.get("requires_human_review", False)
     rejected = 0
@@ -74,7 +79,7 @@ def compliance_review(state: dict[str, Any]) -> dict[str, Any]:
             requires_human = True
             rejected += 1
             continue
-        if required_code in uploaded:
+        if required_code in uploaded or required_code in verified_by_item.get(item_id, set()):
             continue
         requirement_key = (item_id, required_code)
         grouped.setdefault(requirement_key, []).append(evidence)

@@ -39,6 +39,16 @@ _IDENTITY_FIELDS = (
     "runtime_release_sha256",
 )
 _HASH_INPUT_FIELDS = _IDENTITY_FIELDS[:-1]
+_PROVIDER_RUNTIME_LOCK_FIELDS = {
+    "contract",
+    "schema_version",
+    "provider_release",
+    "provider_revision",
+    "provider_build_sha256",
+    "provider_source_manifest_sha256",
+    "retrieval_schema_sha256",
+    "readiness_schema_sha256",
+}
 
 
 class EvidenceRuntimeReleaseLockError(RuntimeError):
@@ -195,8 +205,101 @@ class EvidenceRuntimeReleaseLock:
     identity: EvidenceRuntimeReleaseIdentity | None
 
 
+@dataclass(frozen=True, slots=True)
+class EvidenceProviderRuntimeIdentity:
+    """Exact non-secret identity of the Data provider build shipped with this Agent."""
+
+    contract: Literal["evidence-runtime-release-provider-lock"]
+    schema_version: Literal["1.0"]
+    provider_release: str
+    provider_revision: str
+    provider_build_sha256: str
+    provider_source_manifest_sha256: str
+    retrieval_schema_sha256: str
+    readiness_schema_sha256: str
+
+    @classmethod
+    def from_mapping(cls, value: Any) -> EvidenceProviderRuntimeIdentity:
+        if not isinstance(value, dict) or set(value) != _PROVIDER_RUNTIME_LOCK_FIELDS:
+            raise ValueError("Evidence provider runtime identity is invalid")
+        if (
+            value.get("contract") != "evidence-runtime-release-provider-lock"
+            or value.get("schema_version") != "1.0"
+            or value.get("provider_release") != _EXPECTED_PROVIDER_RELEASE
+        ):
+            raise ValueError("Evidence provider runtime identity is invalid")
+        revision = value.get("provider_revision")
+        if not isinstance(revision, str) or _GIT_REVISION.fullmatch(revision) is None:
+            raise ValueError("Evidence provider runtime identity is invalid")
+        for field_name in (
+            "provider_build_sha256",
+            "provider_source_manifest_sha256",
+            "retrieval_schema_sha256",
+            "readiness_schema_sha256",
+        ):
+            field_value = value.get(field_name)
+            if not isinstance(field_value, str) or _SHA256.fullmatch(field_value) is None:
+                raise ValueError("Evidence provider runtime identity is invalid")
+
+        # Data computes the build digest over its canonical provider-build projection.
+        build_payload = {
+            "contract": "evidence-retrieval",
+            "schema_version": "1.0",
+            "provider_release": value["provider_release"],
+            "provider_revision": revision,
+            "schema_sha256": value["retrieval_schema_sha256"],
+            "source_manifest_sha256": value["provider_source_manifest_sha256"],
+        }
+        if (
+            hashlib.sha256(canonical_json_bytes(build_payload)).hexdigest()
+            != value["provider_build_sha256"]
+        ):
+            raise ValueError("Evidence provider runtime build digest is invalid")
+        return cls(
+            contract="evidence-runtime-release-provider-lock",
+            schema_version="1.0",
+            provider_release=value["provider_release"],
+            provider_revision=revision,
+            provider_build_sha256=value["provider_build_sha256"],
+            provider_source_manifest_sha256=value["provider_source_manifest_sha256"],
+            retrieval_schema_sha256=value["retrieval_schema_sha256"],
+            readiness_schema_sha256=value["readiness_schema_sha256"],
+        )
+
+    def to_wire(self) -> dict[str, str]:
+        return asdict(self)
+
+
 def _read_resource_bytes(name: str) -> bytes:
     return files("customs_ai_agent.contracts").joinpath("evidence", name).read_bytes()
+
+
+@lru_cache(maxsize=1)
+def load_pinned_evidence_provider_runtime_identity() -> EvidenceProviderRuntimeIdentity:
+    """Load and byte-bind the exact Data provider build pin from the Agent wheel."""
+
+    try:
+        payload = _strict_json_object(_read_resource_bytes("provider-runtime-lock.json"))
+        identity = EvidenceProviderRuntimeIdentity.from_mapping(payload)
+        if (
+            hashlib.sha256(_read_resource_bytes("v1.schema.json")).hexdigest()
+            != identity.retrieval_schema_sha256
+            or hashlib.sha256(_read_resource_bytes("runtime-release-v2.schema.json")).hexdigest()
+            != identity.readiness_schema_sha256
+        ):
+            raise ValueError
+        return identity
+    except (
+        FileNotFoundError,
+        OSError,
+        TypeError,
+        UnicodeError,
+        ValueError,
+        json.JSONDecodeError,
+    ):
+        raise EvidenceRuntimeReleaseLockError(
+            "The packaged Evidence provider runtime identity is invalid."
+        ) from None
 
 
 @lru_cache(maxsize=1)
@@ -260,6 +363,13 @@ def load_evidence_runtime_release_lock() -> EvidenceRuntimeReleaseLock:
             or hashlib.sha256(retrieval_schema_bytes).hexdigest() != retrieval_schema_sha256
         ):
             raise ValueError
+        provider_identity = load_pinned_evidence_provider_runtime_identity()
+        if (
+            payload["provider_release"] != provider_identity.provider_release
+            or retrieval_schema_sha256 != provider_identity.retrieval_schema_sha256
+            or schema_sha256 != provider_identity.readiness_schema_sha256
+        ):
+            raise ValueError
         release_state = payload["release_state"]
         if release_state == "unreleased":
             if (
@@ -277,6 +387,10 @@ def load_evidence_runtime_release_lock() -> EvidenceRuntimeReleaseLock:
             identity.provider_release != payload["provider_release"]
             or identity.retrieval_schema_version != payload["retrieval_schema_version"]
             or identity.retrieval_schema_sha256 != payload["retrieval_schema_sha256"]
+            or identity.provider_revision != provider_identity.provider_revision
+            or identity.provider_build_sha256 != provider_identity.provider_build_sha256
+            or identity.provider_source_manifest_sha256
+            != provider_identity.provider_source_manifest_sha256
         ):
             raise ValueError
         return EvidenceRuntimeReleaseLock(release_state="released", identity=identity)
@@ -324,6 +438,7 @@ def parse_evidence_runtime_readiness(payload: object) -> EvidenceRuntimeReleaseI
 
 
 __all__ = [
+    "EvidenceProviderRuntimeIdentity",
     "EvidenceRuntimeReleaseIdentity",
     "EvidenceRuntimeReleaseLock",
     "EvidenceRuntimeReleaseLockError",
@@ -332,6 +447,7 @@ __all__ = [
     "canonical_json_bytes",
     "load_evidence_runtime_release_lock",
     "load_evidence_runtime_release_schema",
+    "load_pinned_evidence_provider_runtime_identity",
     "load_released_evidence_runtime_identity",
     "parse_evidence_runtime_readiness",
 ]

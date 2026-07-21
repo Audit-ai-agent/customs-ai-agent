@@ -17,6 +17,7 @@ class ReviewState(TypedDict, total=False):
     model_calls: list[dict[str, Any]]
     model_errors: list[dict[str, Any]]
     model_conflicts: list[dict[str, Any]]
+    declared_document_type_conflicts: list[dict[str, Any]]
     extracted_documents: dict[str, dict[str, Any]]
     normalized_documents: dict[str, dict[str, Any]]
     pairing_result: dict[str, Any]

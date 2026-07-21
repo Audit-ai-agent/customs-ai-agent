@@ -40,6 +40,7 @@ EXPECTED_REQUIRES_PYTHON: Final = frozenset({">=3.11", "<3.12"})
 EXPECTED_REQUIRES_DIST: Final = frozenset(
     {
         "anthropic<1,>=0.117.0",
+        "cryptography<49,>=48.0.1",
         "fastapi<1,>=0.115",
         "jsonschema[format]<5,>=4.23",
         "langgraph<2,>=0.2.0",
@@ -58,6 +59,8 @@ EXPECTED_SCHEMA_RESOURCES: Final = frozenset(
         "schemas/backend/v1/review-result.schema.json",
         "schemas/backend/v2/review-request.schema.json",
         "schemas/backend/v2/review-result.schema.json",
+        "schemas/backend/v3/review-request.schema.json",
+        "schemas/backend/v3/review-result.schema.json",
         "schemas/internal/v1/claude-crop-read-candidate.schema.json",
         "schemas/internal/v1/claude-text-candidate.schema.json",
         "schemas/internal/v1/claude-vision-candidate.schema.json",
@@ -70,6 +73,9 @@ EXPECTED_PROMPT_RESOURCES: Final = frozenset(
     {
         "document_analysis_v1.txt",
         "document_vision_analysis_v1.txt",
+        "review_coordinator_v1.txt",
+        "narrative_report_v1.txt",
+        "case_answer_v1.txt",
     }
 )
 EXPECTED_CONSOLE_ENTRY_POINT: Final = "customs-ai-agent = customs_ai_agent.cli:main"
@@ -110,6 +116,12 @@ _WHEEL_REQUIRED_PACKAGE_FILES: Final = frozenset(
         "customs_ai_agent/ocr_release_pin.py",
         "customs_ai_agent/pdf_worker.py",
         "customs_ai_agent/runtime.py",
+        "customs_ai_agent/agentic.py",
+        "customs_ai_agent/assertion_trust.py",
+        "customs_ai_agent/release_profile.py",
+        "customs_ai_agent/release-profile-v1.lock.json",
+        "customs_ai_agent/assertion-trust-store-v1.lock.json",
+        "customs_ai_agent/reviewer-trust-store-v1.lock.json",
         "customs_ai_agent/service/__init__.py",
         "customs_ai_agent/service/__main__.py",
         "customs_ai_agent/service/app.py",
@@ -122,10 +134,17 @@ _WHEEL_REQUIRED_PACKAGE_FILES: Final = frozenset(
         "customs_ai_agent/service/telemetry.py",
         "customs_ai_agent/contracts/evidence.py",
         "customs_ai_agent/contracts/evidence_runtime_release.py",
+        "customs_ai_agent/contracts/evidence_v3.py",
+        "customs_ai_agent/contracts/evidence/provider-runtime-lock.json",
         "customs_ai_agent/contracts/evidence/runtime-release-v2.lock.json",
         "customs_ai_agent/contracts/evidence/runtime-release-v2.schema.json",
         "customs_ai_agent/contracts/evidence/v1.lock.json",
         "customs_ai_agent/contracts/evidence/v1.schema.json",
+        "customs_ai_agent/contracts/evidence/v3/rag_retrieval_v3.schema.json",
+        "customs_ai_agent/contracts/evidence/v3/readiness_v3.schema.json",
+        "customs_ai_agent/contracts/evidence/v3/requirement_policy_v1.schema.json",
+        "customs_ai_agent/contracts/evidence/v3/runtime-release-v3.lock.json",
+        "customs_ai_agent/contracts/service/v1/openapi.lock.json",
         *{f"customs_ai_agent/prompts/{name}" for name in EXPECTED_PROMPT_RESOURCES},
         *{f"customs_ai_agent/contracts/{name}" for name in EXPECTED_SCHEMA_RESOURCES},
     }
@@ -142,6 +161,7 @@ _SDIST_REQUIRED_FILES: Final = frozenset(
         ".dockerignore",
         "Dockerfile",
         ".github/workflows/ci.yml",
+        "contracts/evidence/provider-runtime-lock.json",
         "contracts/evidence/v1.lock.json",
         "contracts/evidence/v1/rag_retrieval_v1.schema.json",
         "contracts/evidence/runtime-release-v2.lock.json",
@@ -150,6 +170,8 @@ _SDIST_REQUIRED_FILES: Final = frozenset(
         "contracts/agent/v1/review_result.schema.json",
         "contracts/agent/v2/review_request.schema.json",
         "contracts/agent/v2/review_result.schema.json",
+        "contracts/agent/v3/review_request.schema.json",
+        "contracts/agent/v3/review_result.schema.json",
         "contracts/agent/service/v1/openapi.lock.json",
         "evals/ocr_environments/v1/docling.requirements.in",
         "evals/ocr_environments/v1/docling.requirements.lock.txt",
@@ -166,6 +188,7 @@ _SDIST_REQUIRED_FILES: Final = frozenset(
         "docs/RUNBOOK.md",
         "docs/SECURITY_GATE.md",
         "docs/OCR_RELEASE_FREEZE.md",
+        "docs/AUTOMATIC_COMPLETION_RELEASE.md",
         "security/toolchain.lock.toml",
         "tests/test_packaged_contracts.py",
         "tests/test_evidence_runtime_release_v2.py",
@@ -181,7 +204,14 @@ _SDIST_REQUIRED_FILES: Final = frozenset(
         "tools/verify_ocr_release_freeze.py",
         "tools/verify_distribution.py",
         "tools/verify_service_openapi.py",
+        "tools/sync_evidence_v3_contracts.py",
+        "tools/agent_execution_inspector/clean_text_production_candidate_v3.request.json",
+        "src/customs_ai_agent/contracts/evidence/provider-runtime-lock.json",
         "src/customs_ai_agent/contracts/evidence/runtime-release-v2.lock.json",
+        "src/customs_ai_agent/contracts/evidence/v3/runtime-release-v3.lock.json",
+        "src/customs_ai_agent/release-profile-v1.lock.json",
+        "src/customs_ai_agent/assertion-trust-store-v1.lock.json",
+        "src/customs_ai_agent/reviewer-trust-store-v1.lock.json",
         *{f"src/customs_ai_agent/prompts/{name}" for name in EXPECTED_PROMPT_RESOURCES},
         *{f"src/customs_ai_agent/contracts/{name}" for name in EXPECTED_SCHEMA_RESOURCES},
     }
@@ -230,6 +260,25 @@ _WHEEL_RUNTIME_RELEASE_LOCK: Final = (
 _SDIST_ROOT_RUNTIME_RELEASE_LOCK: Final = "contracts/evidence/runtime-release-v2.lock.json"
 _SDIST_PACKAGED_RUNTIME_RELEASE_LOCK: Final = (
     "src/customs_ai_agent/contracts/evidence/runtime-release-v2.lock.json"
+)
+_WHEEL_PROVIDER_RUNTIME_LOCK: Final = (
+    "customs_ai_agent/contracts/evidence/provider-runtime-lock.json"
+)
+_SDIST_ROOT_PROVIDER_RUNTIME_LOCK: Final = "contracts/evidence/provider-runtime-lock.json"
+_SDIST_PACKAGED_PROVIDER_RUNTIME_LOCK: Final = (
+    "src/customs_ai_agent/contracts/evidence/provider-runtime-lock.json"
+)
+_EXPECTED_PROVIDER_RUNTIME_LOCK_SHA256: Final = (
+    "6932b6323b123ba77624a39793dbbf6386a95aabb8cb90a7169125ffb98d2e17"
+)
+_WHEEL_V3_RUNTIME_RELEASE_LOCK: Final = (
+    "customs_ai_agent/contracts/evidence/v3/runtime-release-v3.lock.json"
+)
+_SDIST_PACKAGED_V3_RUNTIME_RELEASE_LOCK: Final = (
+    "src/customs_ai_agent/contracts/evidence/v3/runtime-release-v3.lock.json"
+)
+_EXPECTED_V3_RUNTIME_RELEASE_LOCK_SHA256: Final = (
+    "fe6cd1101cc80f225a6f89976b50184b8f3a59a07ace2b1a6d0e2609803c1f68"
 )
 _CONFORMANCE_WHEEL_MARKERS: Final = (
     b"agent-v2-provider-conformance-identity-validation",
@@ -653,6 +702,76 @@ def _assert_unreleased_runtime_lock(payload: bytes, *, distribution_kind: str) -
         )
 
 
+def _assert_provider_runtime_lock(payload: bytes, *, distribution_kind: str) -> None:
+    lock = _strict_json_object(payload, distribution_kind=distribution_kind)
+    if (
+        hashlib.sha256(payload).hexdigest() != _EXPECTED_PROVIDER_RUNTIME_LOCK_SHA256
+        or set(lock)
+        != {
+            "contract",
+            "schema_version",
+            "provider_release",
+            "provider_revision",
+            "provider_build_sha256",
+            "provider_source_manifest_sha256",
+            "retrieval_schema_sha256",
+            "readiness_schema_sha256",
+        }
+        or lock.get("contract") != "evidence-runtime-release-provider-lock"
+        or lock.get("schema_version") != "1.0"
+        or lock.get("provider_release") != "evidence-api-v1.2.0"
+        or lock.get("provider_revision") != "a0db83a7c69f792f0801dc7bd63ef74692a30d03"
+        or lock.get("provider_build_sha256")
+        != "113ddb6e7485dda8e4f0d3268e6a0cc14a6245fcd95fad022841ccd4c07eceb0"
+        or lock.get("provider_source_manifest_sha256")
+        != "318e7af0e233a92261dbf95b40ee87ab811ab8d7a9d3a25c0dc1da037691a482"
+    ):
+        raise DistributionVerificationError(
+            f"{distribution_kind} Evidence provider runtime lock is invalid"
+        )
+
+
+def _assert_unreleased_v3_runtime_lock(
+    payload: bytes,
+    *,
+    provider_lock: bytes,
+    distribution_kind: str,
+) -> None:
+    lock = _strict_json_object(payload, distribution_kind=distribution_kind)
+    provider = _strict_json_object(provider_lock, distribution_kind=distribution_kind)
+    if (
+        hashlib.sha256(payload).hexdigest() != _EXPECTED_V3_RUNTIME_RELEASE_LOCK_SHA256
+        or set(lock)
+        != {
+            "contract",
+            "schema_version",
+            "canonical_owner",
+            "consumer",
+            "provider_runtime_lock_sha256",
+            "provider_runtime_identity",
+            "retrieval_schema_sha256",
+            "readiness_schema_sha256",
+            "requirement_policy_schema_sha256",
+            "release_state",
+            "identity",
+            "unreleased_reason",
+        }
+        or lock.get("contract") != "evidence-runtime-release-consumer-lock"
+        or lock.get("schema_version") != "3.0"
+        or lock.get("canonical_owner") != "customs-data-platform"
+        or lock.get("consumer") != "customs-ai-agent"
+        or lock.get("provider_runtime_lock_sha256") != _EXPECTED_PROVIDER_RUNTIME_LOCK_SHA256
+        or lock.get("provider_runtime_identity") != provider
+        or lock.get("release_state") != "unreleased"
+        or lock.get("identity") is not None
+        or not isinstance(lock.get("unreleased_reason"), str)
+        or not str(lock["unreleased_reason"]).strip()
+    ):
+        raise DistributionVerificationError(
+            f"{distribution_kind} Evidence V3 runtime release lock is invalid"
+        )
+
+
 def _assert_wheel_conformance_boundary(payloads: Mapping[str, bytes]) -> None:
     try:
         lock_bytes = payloads[_WHEEL_RUNTIME_RELEASE_LOCK]
@@ -661,6 +780,24 @@ def _assert_wheel_conformance_boundary(payloads: Mapping[str, bytes]) -> None:
             "wheel production runtime release lock is missing"
         ) from None
     _assert_unreleased_runtime_lock(lock_bytes, distribution_kind="wheel")
+    try:
+        provider_lock = payloads[_WHEEL_PROVIDER_RUNTIME_LOCK]
+    except KeyError:
+        raise DistributionVerificationError(
+            "wheel Evidence provider runtime lock is missing"
+        ) from None
+    _assert_provider_runtime_lock(provider_lock, distribution_kind="wheel")
+    try:
+        v3_lock = payloads[_WHEEL_V3_RUNTIME_RELEASE_LOCK]
+    except KeyError:
+        raise DistributionVerificationError(
+            "wheel Evidence V3 runtime release lock is missing"
+        ) from None
+    _assert_unreleased_v3_runtime_lock(
+        v3_lock,
+        provider_lock=provider_lock,
+        distribution_kind="wheel",
+    )
     for name, payload in payloads.items():
         if not name.startswith(f"{EXPECTED_IMPORT_PACKAGE}/"):
             continue
@@ -685,6 +822,29 @@ def _assert_sdist_canonical_locks(payloads: Mapping[str, bytes]) -> None:
             "sdist canonical production runtime release locks differ"
         )
     _assert_unreleased_runtime_lock(root_lock, distribution_kind="sdist")
+    try:
+        root_provider_lock = payloads[_SDIST_ROOT_PROVIDER_RUNTIME_LOCK]
+        packaged_provider_lock = payloads[_SDIST_PACKAGED_PROVIDER_RUNTIME_LOCK]
+    except KeyError:
+        raise DistributionVerificationError(
+            "sdist Evidence provider runtime lock is missing"
+        ) from None
+    if root_provider_lock != packaged_provider_lock:
+        raise DistributionVerificationError(
+            "sdist canonical Evidence provider runtime locks differ"
+        )
+    _assert_provider_runtime_lock(root_provider_lock, distribution_kind="sdist")
+    try:
+        v3_lock = payloads[_SDIST_PACKAGED_V3_RUNTIME_RELEASE_LOCK]
+    except KeyError:
+        raise DistributionVerificationError(
+            "sdist Evidence V3 runtime release lock is missing"
+        ) from None
+    _assert_unreleased_v3_runtime_lock(
+        v3_lock,
+        provider_lock=root_provider_lock,
+        distribution_kind="sdist",
+    )
 
 
 def _metadata_from_bytes(payload: bytes) -> None:
@@ -1208,8 +1368,11 @@ def verify_installed_distribution(
             verify_packaged_schemas,
         )
         from customs_ai_agent.prompts import (
+            load_case_answer_system_prompt,
             load_document_analysis_system_prompt,
             load_document_vision_analysis_system_prompt,
+            load_narrative_report_system_prompt,
+            load_review_coordinator_system_prompt,
         )
     except (ImportError, importlib.metadata.PackageNotFoundError):
         raise DistributionVerificationError(
@@ -1277,6 +1440,9 @@ def verify_installed_distribution(
     prompts = {
         "document_analysis_v1.txt": load_document_analysis_system_prompt(),
         "document_vision_analysis_v1.txt": load_document_vision_analysis_system_prompt(),
+        "review_coordinator_v1.txt": load_review_coordinator_system_prompt(),
+        "narrative_report_v1.txt": load_narrative_report_system_prompt(),
+        "case_answer_v1.txt": load_case_answer_system_prompt(),
     }
     if set(prompts) != EXPECTED_PROMPT_RESOURCES or any(
         not value.strip() for value in prompts.values()

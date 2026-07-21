@@ -9,6 +9,12 @@ DOCUMENT_VISION_ANALYSIS_PROMPT_ID = "customs_document_vision_analysis"
 DOCUMENT_VISION_ANALYSIS_PROMPT_VERSION = "1.3.0"
 DOCUMENT_CROP_RECONCILIATION_PROMPT_ID = "customs_document_crop_reconciliation"
 DOCUMENT_CROP_RECONCILIATION_PROMPT_VERSION = "1.0.0"
+REVIEW_COORDINATOR_PROMPT_ID = "customs_review_coordinator"
+REVIEW_COORDINATOR_PROMPT_VERSION = "1.0.0"
+NARRATIVE_REPORT_PROMPT_ID = "customs_narrative_report"
+NARRATIVE_REPORT_PROMPT_VERSION = "1.0.0"
+CASE_ANSWER_PROMPT_ID = "customs_case_answer"
+CASE_ANSWER_PROMPT_VERSION = "1.0.0"
 _CROP_PROMPT_MARKER = "\n=== CROP_RECONCILIATION_PROMPT ===\n"
 
 
@@ -44,6 +50,22 @@ def load_document_crop_reconciliation_system_prompt() -> str:
     return crop_prompt.strip() + "\n"
 
 
+def _load_prompt(name: str) -> str:
+    return files("customs_ai_agent.prompts").joinpath(name).read_text(encoding="utf-8")
+
+
+def load_review_coordinator_system_prompt() -> str:
+    return _load_prompt("review_coordinator_v1.txt")
+
+
+def load_narrative_report_system_prompt() -> str:
+    return _load_prompt("narrative_report_v1.txt")
+
+
+def load_case_answer_system_prompt() -> str:
+    return _load_prompt("case_answer_v1.txt")
+
+
 __all__ = [
     "DOCUMENT_ANALYSIS_PROMPT_ID",
     "DOCUMENT_ANALYSIS_PROMPT_VERSION",
@@ -54,4 +76,13 @@ __all__ = [
     "load_document_analysis_system_prompt",
     "load_document_crop_reconciliation_system_prompt",
     "load_document_vision_analysis_system_prompt",
+    "REVIEW_COORDINATOR_PROMPT_ID",
+    "REVIEW_COORDINATOR_PROMPT_VERSION",
+    "NARRATIVE_REPORT_PROMPT_ID",
+    "NARRATIVE_REPORT_PROMPT_VERSION",
+    "CASE_ANSWER_PROMPT_ID",
+    "CASE_ANSWER_PROMPT_VERSION",
+    "load_review_coordinator_system_prompt",
+    "load_narrative_report_system_prompt",
+    "load_case_answer_system_prompt",
 ]

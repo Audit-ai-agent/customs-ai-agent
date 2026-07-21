@@ -32,6 +32,7 @@ from customs_ai_agent.contracts.evidence_runtime_release import (
     EvidenceRuntimeReleaseUnreleasedError,
     canonical_json_bytes,
     load_evidence_runtime_release_lock,
+    load_pinned_evidence_provider_runtime_identity,
     load_released_evidence_runtime_identity,
 )
 from customs_ai_agent.schemas.models import (
@@ -246,6 +247,54 @@ def test_checkout_and_packaged_v2_release_resources_are_byte_identical() -> None
         assert (root / "contracts" / "evidence" / name).read_bytes() == (
             root / "src" / "customs_ai_agent" / "contracts" / "evidence" / name
         ).read_bytes()
+    provider_lock = (root / "contracts" / "evidence" / "provider-runtime-lock.json").read_bytes()
+    assert (
+        provider_lock
+        == (
+            root
+            / "src"
+            / "customs_ai_agent"
+            / "contracts"
+            / "evidence"
+            / "provider-runtime-lock.json"
+        ).read_bytes()
+    )
+    assert (
+        provider_lock
+        == (
+            root / "tests" / "fixtures" / "evidence_runtime_v2" / "provider-runtime-lock.json"
+        ).read_bytes()
+    )
+    assert hashlib.sha256(provider_lock).hexdigest() == (
+        "6932b6323b123ba77624a39793dbbf6386a95aabb8cb90a7169125ffb98d2e17"
+    )
+
+
+def test_packaged_provider_runtime_pin_is_exact_and_tamper_evident(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    identity = load_pinned_evidence_provider_runtime_identity()
+    assert identity.provider_revision == "a0db83a7c69f792f0801dc7bd63ef74692a30d03"
+    assert identity.provider_build_sha256 == (
+        "113ddb6e7485dda8e4f0d3268e6a0cc14a6245fcd95fad022841ccd4c07eceb0"
+    )
+    assert identity.provider_source_manifest_sha256 == (
+        "318e7af0e233a92261dbf95b40ee87ab811ab8d7a9d3a25c0dc1da037691a482"
+    )
+
+    original = release_module._read_resource_bytes
+
+    def tampered(name: str) -> bytes:
+        raw = original(name)
+        if name == "provider-runtime-lock.json":
+            return raw.replace(b"a0db83a7", b"00db83a7", 1)
+        return raw
+
+    monkeypatch.setattr(release_module, "_read_resource_bytes", tampered)
+    release_module.load_pinned_evidence_provider_runtime_identity.cache_clear()
+    with pytest.raises(EvidenceRuntimeReleaseLockError):
+        release_module.load_pinned_evidence_provider_runtime_identity()
+    release_module.load_pinned_evidence_provider_runtime_identity.cache_clear()
 
 
 def test_malformed_packaged_lock_fails_closed(monkeypatch: pytest.MonkeyPatch) -> None:
@@ -745,7 +794,7 @@ def test_release_lock_builder_requires_exact_data_code_and_schema_lock() -> None
     fixture_root = Path(__file__).parent / "fixtures" / "evidence_runtime_v2"
     lock_bytes = (fixture_root / "provider-runtime-lock.json").read_bytes()
     assert hashlib.sha256(lock_bytes).hexdigest() == (
-        "5b391374f897b308d6e9091a36cd6568f7227bd5e8ec9770d4c7ecc22b1550be"
+        "6932b6323b123ba77624a39793dbbf6386a95aabb8cb90a7169125ffb98d2e17"
     )
     expected = json.loads(lock_bytes)
     identity = _identity(

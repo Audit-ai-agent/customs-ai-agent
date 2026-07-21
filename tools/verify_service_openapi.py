@@ -14,6 +14,9 @@ from customs_ai_agent.service.settings import ServiceSettings
 
 ROOT = Path(__file__).parents[1]
 LOCK_PATH = ROOT / "contracts" / "agent" / "service" / "v1" / "openapi.lock.json"
+PACKAGED_LOCK_PATH = (
+    ROOT / "src" / "customs_ai_agent" / "contracts" / "service" / "v1" / "openapi.lock.json"
+)
 _LOCK_TOKEN = "Abcdefghijklmnopqrstuvwxyz0123456789-._~+/=XYZ"  # noqa: S105
 
 
@@ -46,9 +49,13 @@ def canonical_openapi() -> tuple[dict[str, Any], bytes]:
 
 def verify_openapi_lock() -> str:
     try:
-        lock = json.loads(LOCK_PATH.read_text(encoding="utf-8"))
+        lock_bytes = LOCK_PATH.read_bytes()
+        packaged_lock_bytes = PACKAGED_LOCK_PATH.read_bytes()
+        lock = json.loads(lock_bytes.decode("utf-8"))
     except (OSError, UnicodeError, json.JSONDecodeError):
         raise OpenApiDriftError("service_openapi_lock_invalid") from None
+    if packaged_lock_bytes != lock_bytes:
+        raise OpenApiDriftError("service_openapi_packaged_lock_drift")
     schema, encoded = canonical_openapi()
     observed_paths = {
         path: sorted(methods)

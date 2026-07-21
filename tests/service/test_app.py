@@ -1,6 +1,8 @@
 from __future__ import annotations
 
 import json
+from datetime import date
+from types import SimpleNamespace
 from typing import Any
 
 import pytest
@@ -92,6 +94,63 @@ def test_metadata_and_metrics_are_authenticated_and_safe(
     assert "bearer" not in encoded
     assert "api_key" not in encoded
 
+    metadata_v2 = client.get("/internal/agent/v2/metadata", headers=auth_headers)
+    assert metadata_v2.status_code == 200
+    metadata_v2_payload = metadata_v2.json()
+    assert metadata_v2_payload["transport_limits"] == {
+        "max_body_bytes": 2 * 1024 * 1024,
+        "max_documents": 6,
+        "max_text_characters": 500_000,
+        "text_only": True,
+        "empty_visual_placeholders_accepted": True,
+    }
+    agentic = metadata_v2_payload["agentic_limits"]
+    assert agentic == {
+        "max_cycles": 2,
+        "max_tool_calls": 6,
+        "ocr_enabled": False,
+        "planner_mode": "shadow",
+        "active_execution_authorized_by_release": False,
+        "active_tool_handlers_registered": True,
+        "trusted_assertion_verifier_configured": False,
+        "effective_execution_mode": "shadow",
+    }
+    from customs_ai_agent.schemas.v3 import RuntimeReleaseIdentityV1
+
+    runtime_release = RuntimeReleaseIdentityV1.model_validate(
+        metadata_v2_payload["runtime_release"]
+    )
+    assert runtime_release.release_profile_state == "unreleased"
+    assert runtime_release.evidence_runtime_v3_sha256 is None
+    assert runtime_release.kill_switch_active is True
+    assert metadata_v2_payload["automatic_completion_release"]["production_admission"] == {
+        "admitted": False,
+        "reason_code": "evidence_runtime_release_unreleased",
+    }
+    assert metadata_v2_payload["evidence_provider_contract"] == {
+        "contract": "evidence-runtime-release-provider-lock",
+        "schema_version": "1.0",
+        "provider_release": "evidence-api-v1.2.0",
+        "provider_revision": "a0db83a7c69f792f0801dc7bd63ef74692a30d03",
+        "provider_build_sha256": (
+            "113ddb6e7485dda8e4f0d3268e6a0cc14a6245fcd95fad022841ccd4c07eceb0"
+        ),
+        "provider_source_manifest_sha256": (
+            "318e7af0e233a92261dbf95b40ee87ab811ab8d7a9d3a25c0dc1da037691a482"
+        ),
+        "retrieval_schema_sha256": (
+            "531b59ba4e86f78cef20a4fca052996efd8b88c48853ac12113ca76e69cdd69a"
+        ),
+        "readiness_schema_sha256": (
+            "0a0b50fef627ecbbad954af5878ccb3630ecc51f618132f8cfc674c324467a69"
+        ),
+    }
+    assert metadata_v2_payload["evidence_runtime_release"] == {"release_state": "unreleased"}
+    assert metadata_v2_payload["evidence_runtime_release_v3"] == {"release_state": "unreleased"}
+    assert metadata_v2_payload["schemas"]["service_openapi_sha256"] == (
+        "17199315855410ae9c5221259a492488d95ed58a21f46c89c11ec69030feccb6"
+    )
+
     metrics = client.get("/internal/agent/v1/metrics", headers=auth_headers)
     assert metrics.status_code == 200
     assert set(metrics.json()) == {
@@ -110,6 +169,116 @@ def test_metadata_and_metrics_are_authenticated_and_safe(
         "review_requests_total",
         "review_timeouts_total",
     }
+
+
+def test_metadata_released_shapes_expose_full_nested_base_and_v3_identities(
+    monkeypatch: pytest.MonkeyPatch,
+    service_settings: Any,
+) -> None:
+    import customs_ai_agent.service.metadata as metadata_module
+    from customs_ai_agent.contracts.evidence_runtime_release import (
+        EvidenceRuntimeReleaseIdentity,
+        EvidenceRuntimeReleaseLock,
+    )
+    from customs_ai_agent.contracts.evidence_v3 import (
+        EvidenceRuntimeReleaseIdentityV3,
+        EvidenceRuntimeReleaseLockV3,
+    )
+
+    provider = metadata_module.load_pinned_evidence_provider_runtime_identity()
+    base = EvidenceRuntimeReleaseIdentity(
+        contract="evidence-runtime-release",
+        schema_version="2.0",
+        retrieval_schema_version="1.0",
+        provider_release=provider.provider_release,
+        provider_revision=provider.provider_revision,
+        provider_build_sha256=provider.provider_build_sha256,
+        retrieval_schema_sha256=provider.retrieval_schema_sha256,
+        provider_source_manifest_sha256=provider.provider_source_manifest_sha256,
+        knowledge_generation_id="4" * 64,
+        knowledge_generation_attestation_sha256="5" * 64,
+        knowledge_source_manifest_sha256="6" * 64,
+        model_manifest_sha256="7" * 64,
+        index_config_sha256="8" * 64,
+        evaluation_report_sha256="9" * 64,
+        seal_attestation_sha256="a" * 64,
+        knowledge_snapshot_id="knowledge-release-test",
+        supported_review_as_of=date(2026, 7, 22),
+        runtime_release_sha256="b" * 64,
+    )
+    v3 = EvidenceRuntimeReleaseIdentityV3(
+        contract="evidence-runtime-release",
+        schema_version="3.0",
+        retrieval_schema_version="3.0",
+        base_runtime_release=base,
+        retrieval_schema_sha256=(
+            "d20de13f4cc8db14a2cd3213e063916fd046922ae32687ac939dbb4019e485d6"
+        ),
+        readiness_schema_sha256=(
+            "3488e98b9899ce6cbb375fad4120360a2d4a77d82117ef56f098514547a7d882"
+        ),
+        requirement_policy_schema_sha256=(
+            "b1e9e5918d03c247d8503af861ee647451b0c2f378c1a9d2cc380f23ca26c226"
+        ),
+        requirement_policy_release="requirement-policy-v1",
+        requirement_policy_manifest_sha256="c" * 64,
+        coverage_matrix_sha256="d" * 64,
+        requirement_policy_approval_sha256="e" * 64,
+        reviewer_trust_store_sha256="f" * 64,
+        runtime_release_v3_sha256="0" * 64,
+    )
+    monkeypatch.setattr(
+        metadata_module,
+        "load_evidence_runtime_release_lock",
+        lambda: EvidenceRuntimeReleaseLock(release_state="released", identity=base),
+    )
+    monkeypatch.setattr(
+        metadata_module,
+        "load_evidence_runtime_release_lock_v3",
+        lambda: EvidenceRuntimeReleaseLockV3(
+            release_state="released",
+            provider_runtime_identity=provider,
+            identity=v3,
+        ),
+    )
+
+    payload = metadata_module.build_metadata(service_settings)
+
+    assert payload["evidence_runtime_release"] == {
+        "release_state": "released",
+        "identity": base.to_wire(),
+    }
+    assert payload["evidence_runtime_release_v3"] == {
+        "release_state": "released",
+        "identity": v3.to_wire(),
+    }
+
+
+def test_metadata_rejects_cross_lock_base_and_v3_identity_mismatch(
+    monkeypatch: pytest.MonkeyPatch,
+    service_settings: Any,
+) -> None:
+    import customs_ai_agent.service.metadata as metadata_module
+    from customs_ai_agent.service.settings import ServiceConfigurationError
+
+    monkeypatch.setattr(
+        metadata_module,
+        "load_evidence_runtime_release_lock",
+        lambda: SimpleNamespace(identity=object()),
+    )
+    monkeypatch.setattr(
+        metadata_module,
+        "load_evidence_runtime_release_lock_v3",
+        lambda: SimpleNamespace(
+            identity=SimpleNamespace(base_runtime_release=object()),
+        ),
+    )
+
+    with pytest.raises(
+        ServiceConfigurationError,
+        match="customs_agent_evidence_release_lock_mismatch",
+    ):
+        metadata_module.build_metadata(service_settings)
 
 
 @pytest.mark.parametrize(
@@ -201,6 +370,41 @@ def test_visual_keys_are_rejected_before_runtime(
     valid_payload["documents"][0][visual_field] = None
     response = client.post(
         "/internal/agent/v1/reviews",
+        headers=auth_headers,
+        json=valid_payload,
+    )
+    assert response.status_code == 422
+    assert response.json()["error"]["code"] == "visual_input_not_supported"
+    assert fake_runtime.calls == 0
+
+
+def test_v3_accepts_backend_text_dump_with_only_empty_visual_defaults(
+    client: TestClient,
+    auth_headers: dict[str, str],
+    valid_payload: dict[str, Any],
+    fake_runtime: Any,
+) -> None:
+    valid_payload["documents"][0]["image_pages"] = []
+    valid_payload["documents"][0]["pdf_pages"] = None
+    response = client.post(
+        "/internal/agent/v2/reviews",
+        headers=auth_headers,
+        json=valid_payload,
+    )
+    assert response.status_code == 200
+    assert fake_runtime.calls == 1
+
+
+def test_v3_rejects_nonempty_backend_visual_default_before_runtime(
+    client: TestClient,
+    auth_headers: dict[str, str],
+    valid_payload: dict[str, Any],
+    fake_runtime: Any,
+) -> None:
+    valid_payload["documents"][0]["image_pages"] = [{}]
+    valid_payload["documents"][0]["pdf_pages"] = None
+    response = client.post(
+        "/internal/agent/v2/reviews",
         headers=auth_headers,
         json=valid_payload,
     )

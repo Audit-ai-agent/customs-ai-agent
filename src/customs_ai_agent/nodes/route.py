@@ -6,8 +6,15 @@ from customs_ai_agent.nodes.common import audit
 from customs_ai_agent.policies.outcome import determine_outcome
 
 
-def route_to_human_or_complete(state: dict[str, Any]) -> dict[str, Any]:
-    final_status, human, reasons = determine_outcome(state)
+def route_to_human_or_complete(
+    state: dict[str, Any],
+    *,
+    extraction_release_approved: bool = False,
+) -> dict[str, Any]:
+    final_status, human, reasons = determine_outcome(
+        state,
+        extraction_release_approved=extraction_release_approved,
+    )
     report = dict(state.get("report_json") or {})
     report["overall_status"] = final_status
     if report.get("summary") is not None:
