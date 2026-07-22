@@ -483,6 +483,55 @@ def build_fact_ledger(result: ReviewRunResultV2) -> _FactIndex:
     )
 
 
+def _retain_investigation_input_facts(
+    current: _FactIndex,
+    investigation_input: FactLedgerV1,
+    input_reference_ids: set[str],
+) -> _FactIndex:
+    """Retain only pre-action facts actually consumed by an active plan.
+
+    An outcome/evidence rerun may replace the current FactLedger references.
+    The action trace must still resolve each immutable input reference without
+    confusing it with a current fact, so missing inputs are copied with an
+    explicit audit-only label into the canonical run ledger.
+    """
+
+    existing_reference_ids = {item.reference_id for item in current.ledger.entries}
+    retained = [
+        _fact(
+            kind=item.kind,
+            reference_id=item.reference_id,
+            label=f"investigation_input:{item.label}",
+            value=item.value,
+            document_id=item.document_id,
+        )
+        for item in investigation_input.entries
+        if item.reference_id in input_reference_ids
+        and item.reference_id not in existing_reference_ids
+    ]
+    if not retained:
+        return current
+    entries = sorted(
+        [*current.ledger.entries, *retained],
+        key=lambda item: (item.kind, item.reference_id),
+    )
+    ledger = FactLedgerV1(
+        ledger_id=stable_object_id(
+            "ledger",
+            [item.model_dump(mode="json") for item in entries],
+        ),
+        entries=entries,
+    )
+    return _FactIndex(
+        ledger=ledger,
+        field_references=current.field_references,
+        issue_references=current.issue_references,
+        finding_references=current.finding_references,
+        evidence_references=current.evidence_references,
+        outcome_reference=current.outcome_reference,
+    )
+
+
 def _gap(gap_type: str, reason_code: str, references: Iterable[str]) -> ReviewGapV1:
     source_reference_ids = sorted(set(references))
     canonical = {
@@ -1713,6 +1762,7 @@ def to_review_run_result_v3(
         result.requires_human_review = True
         result.report.overall_status = "needs_review"
     facts, runtime_release, eligibility, gaps = derive(result, rejection_codes)
+    investigation_input_ledger = facts.ledger
     initial_gaps = list(gaps)
     if analyzer is None:
         plan = compile_shadow_plan(gaps)
@@ -1773,14 +1823,35 @@ def to_review_run_result_v3(
                     result,
                     rejection_codes,
                 )
+                plan_input_reference_ids = {
+                    reference_id
+                    for action in plan.actions
+                    for reference_id in action.input_reference_ids
+                }
+                facts = _retain_investigation_input_facts(
+                    facts,
+                    investigation_input_ledger,
+                    plan_input_reference_ids,
+                )
                 final_gap_ids = {item.gap_id for item in final_gaps}
+                planned_gap_ids = {item.gap_id for item in plan.actions}
+                explicitly_resolved_gap_ids = set(active_outcome.resolved_gap_ids)
                 historical = [
                     gap.model_copy(
                         update={
-                            "status": ("resolved" if gap.gap_id not in final_gap_ids else "open")
+                            "status": (
+                                "open"
+                                if gap.gap_id in final_gap_ids
+                                else (
+                                    "resolved"
+                                    if gap.gap_id in explicitly_resolved_gap_ids
+                                    else "deferred"
+                                )
+                            )
                         }
                     )
                     for gap in initial_gaps
+                    if gap.gap_id in planned_gap_ids
                 ]
                 gaps = sorted(
                     {gap.gap_id: gap for gap in [*historical, *final_gaps]}.values(),

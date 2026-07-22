@@ -42,13 +42,17 @@ from customs_ai_agent.schemas.models import (
     UserCorrection,
 )
 from customs_ai_agent.schemas.v3 import (
+    FactLedgerV1,
     GroundedQuestionV1,
     HumanDecisionV1,
+    ReviewRunResultV3,
     ReviewRevisionRequestV1,
     ReviewGapV1,
     ServiceReviewRunRequestV3,
     SupportingDocumentV1,
     VerificationAssertionV1,
+    canonical_json_sha256,
+    review_result_v3_sha256,
     stable_object_id,
 )
 
@@ -386,6 +390,521 @@ def test_unreleased_profile_keeps_clean_result_human_review_required() -> None:
     assert len(result.action_trace) <= 6
     assert len(result.action_trace) == len(result.observations)
     assert all(0 <= item.cycle <= 1 for item in result.action_trace)
+
+
+def _validate_tampered_v3_result(payload: dict) -> ReviewRunResultV3:
+    payload["result_sha256"] = review_result_v3_sha256(payload)
+    return ReviewRunResultV3.model_validate(payload)
+
+
+def _refresh_plan_id(payload: dict) -> None:
+    plan = payload["review_plan"]
+    plan_payload = {key: value for key, value in plan.items() if key != "plan_id"}
+    plan["plan_id"] = stable_object_id("plan", plan_payload)
+
+
+def _refresh_fact_identity(entry: dict) -> None:
+    canonical = {
+        "kind": entry["kind"],
+        "reference_id": entry["reference_id"],
+        "label": entry["label"],
+        "value": entry["value"],
+        "document_id": entry["document_id"],
+    }
+    entry["fact_id"] = stable_object_id("fact", canonical)
+    entry["source_sha256"] = canonical_json_sha256(canonical)
+
+
+def _clean_auto_complete_result() -> ReviewRunResultV3:
+    _request_value, _result_v2, result = _v3_result()
+    payload = result.model_dump(mode="python")
+    payload["execution_status"] = "succeeded"
+    payload["assessment"] = "no_issue_detected"
+    payload["review_disposition"] = "auto_review_complete"
+    payload["assurance_level"] = "production"
+    payload["completion_eligibility"] = {
+        "eligible": True,
+        "profile_id": "signed-test-profile",
+        "scope": ["text", "KR"],
+        "unmet_reason_codes": [],
+    }
+    payload["required_actions"] = []
+    payload["review_gaps"] = []
+    payload["review_plan"]["mode"] = "shadow"
+    payload["review_plan"]["actions"] = []
+    payload["review_plan"].update(
+        {
+            "provider": "anthropic",
+            "model_id": payload["runtime_release"]["model_id"],
+            "prompt_sha256": payload["runtime_release"]["coordinator_prompt_sha256"],
+            "output_schema_sha256": payload["runtime_release"]["coordinator_schema_sha256"],
+            "input_tokens": 1,
+            "output_tokens": 1,
+            "latency_ms": 1,
+        }
+    )
+    _refresh_plan_id(payload)
+    payload["action_trace"] = []
+    payload["observations"] = []
+    payload["runtime_release"].update(
+        {
+            "release_profile_state": "approved",
+            "release_profile_sha256": "a" * 64,
+            "release_profile_subject_sha256": "b" * 64,
+            "kill_switch_active": False,
+        }
+    )
+    payload["narrative_report"].update(
+        {
+            "generation_mode": "claude",
+            "model_call": {
+                "task_id": "customs_narrative_report",
+                "provider": "anthropic",
+                "model_id": payload["runtime_release"]["model_id"],
+                "prompt_sha256": payload["runtime_release"]["narrative_prompt_sha256"],
+                "output_schema_sha256": payload["runtime_release"]["narrative_schema_sha256"],
+                "request_id_sha256": "c" * 64,
+                "message_id_sha256": "d" * 64,
+                "input_tokens": 1,
+                "output_tokens": 1,
+                "latency_ms": 1,
+            },
+        }
+    )
+    return _validate_tampered_v3_result(payload)
+
+
+def _resolved_field_auto_complete_payload() -> dict:
+    payload = _clean_auto_complete_result().model_dump(mode="json")
+    reference_id = next(
+        item["reference_id"]
+        for item in payload["fact_ledger"]["entries"]
+        if item["kind"] == "field_source"
+    )
+    gap_payload = {
+        "gap_type": "field_uncertainty",
+        "reason_code": "field_requires_one_reread",
+        "source_reference_ids": [reference_id],
+    }
+    gap_id = stable_object_id("gap", gap_payload)
+    payload["review_gaps"] = [{"gap_id": gap_id, **gap_payload, "status": "resolved"}]
+    action_payload = {
+        "tool_name": "document.reread_span/v1",
+        "gap_id": gap_id,
+        "reason_code": "field_requires_one_reread",
+        "input_reference_ids": [reference_id],
+    }
+    action_id = stable_object_id("action", action_payload)
+    payload["review_plan"]["mode"] = "active"
+    payload["review_plan"]["actions"] = [{"action_id": action_id, **action_payload}]
+    _refresh_plan_id(payload)
+    payload["action_trace"] = [
+        {
+            "action_id": action_id,
+            "cycle": 0,
+            "tool_name": action_payload["tool_name"],
+            "reason_code": action_payload["reason_code"],
+            "input_reference_ids": action_payload["input_reference_ids"],
+            "output_reference_ids": [reference_id],
+            "status": "succeeded",
+            "duration_ms": 1,
+            "provider": "deterministic_policy",
+            "model_id": None,
+            "prompt_sha256": None,
+            "input_tokens": 0,
+            "output_tokens": 0,
+        }
+    ]
+    observation_payload = {
+        "action_id": action_id,
+        "cycle": 0,
+        "tool_name": "document.reread_span/v1",
+        "status": "succeeded",
+        "reason_code": "reread_completed_without_policy_mutation",
+        "input_reference_ids": [reference_id],
+        "output_reference_ids": [reference_id],
+    }
+    payload["observations"] = [
+        {
+            "observation_id": stable_object_id("observation", observation_payload),
+            **observation_payload,
+        }
+    ]
+    return payload
+
+
+def test_v3_rejects_failed_trace_with_succeeded_observation() -> None:
+    _request_value, _result_v2, result = _v3_result()
+    payload = result.model_dump(mode="python")
+    payload["action_trace"][0]["status"] = "failed"
+
+    with pytest.raises(
+        ValidationError,
+        match="Tool observation must exactly match its correlated action trace",
+    ):
+        _validate_tampered_v3_result(payload)
+
+
+def test_v3_rejects_duplicate_observation_id() -> None:
+    _request_value, _result_v2, result = _v3_result()
+    payload = result.model_dump(mode="python")
+    payload["observations"][1]["observation_id"] = payload["observations"][0]["observation_id"]
+
+    with pytest.raises(ValidationError, match="Tool observation IDs must be unique"):
+        _validate_tampered_v3_result(payload)
+
+
+def test_v3_rejects_duplicate_trace_action_id() -> None:
+    _request_value, _result_v2, result = _v3_result()
+    payload = result.model_dump(mode="python")
+    payload["action_trace"][1]["action_id"] = payload["action_trace"][0]["action_id"]
+
+    with pytest.raises(ValidationError, match="action trace action IDs must be unique"):
+        _validate_tampered_v3_result(payload)
+
+
+def test_v3_rejects_reordered_trace_or_observation() -> None:
+    _request_value, _result_v2, result = _v3_result()
+    trace_reordered = result.model_dump(mode="python")
+    trace_reordered["action_trace"][0], trace_reordered["action_trace"][1] = (
+        trace_reordered["action_trace"][1],
+        trace_reordered["action_trace"][0],
+    )
+    trace_reordered["observations"][0], trace_reordered["observations"][1] = (
+        trace_reordered["observations"][1],
+        trace_reordered["observations"][0],
+    )
+    with pytest.raises(ValidationError, match="planned execution prefix order"):
+        _validate_tampered_v3_result(trace_reordered)
+
+    observation_reordered = result.model_dump(mode="python")
+    observation_reordered["observations"][0], observation_reordered["observations"][1] = (
+        observation_reordered["observations"][1],
+        observation_reordered["observations"][0],
+    )
+    with pytest.raises(ValidationError, match="preserve action trace order"):
+        _validate_tampered_v3_result(observation_reordered)
+
+
+def test_v3_tool_outputs_are_unique_and_canonically_bound() -> None:
+    _request_value, _result_v2, result = _v3_result()
+    duplicate = result.model_dump(mode="python")
+    output_reference_id = duplicate["action_trace"][0]["output_reference_ids"][0]
+    duplicate["action_trace"][0]["output_reference_ids"] = [
+        output_reference_id,
+        output_reference_id,
+    ]
+    duplicate["observations"][0]["output_reference_ids"] = [
+        output_reference_id,
+        output_reference_id,
+    ]
+    with pytest.raises(ValidationError, match="Tool output references must be unique"):
+        _validate_tampered_v3_result(duplicate)
+
+    unbound = result.model_dump(mode="python")
+    unbound["action_trace"][0]["output_reference_ids"] = ["unbound-output"]
+    unbound["observations"][0]["output_reference_ids"] = ["unbound-output"]
+    with pytest.raises(ValidationError, match="Tool outputs must reference canonical"):
+        _validate_tampered_v3_result(unbound)
+
+
+@pytest.mark.parametrize(("cycle_limit", "trace_cycle"), [(2, 2), (1, 1), (0, 0)])
+def test_v3_rejects_trace_cycle_outside_compiled_limit(
+    cycle_limit: int,
+    trace_cycle: int,
+) -> None:
+    _request_value, _result_v2, result = _v3_result()
+    payload = result.model_dump(mode="python")
+    plan = payload["review_plan"]
+    plan["cycle_limit"] = cycle_limit
+    plan_payload = {key: value for key, value in plan.items() if key != "plan_id"}
+    plan["plan_id"] = stable_object_id("plan", plan_payload)
+    payload["action_trace"][0]["cycle"] = trace_cycle
+    payload["observations"][0]["cycle"] = trace_cycle
+
+    with pytest.raises(
+        ValidationError,
+        match="action trace cycle must be within the compiled cycle limit",
+    ):
+        _validate_tampered_v3_result(payload)
+
+
+def test_v3_rejects_duplicate_review_gap_id() -> None:
+    _request_value, _result_v2, result = _v3_result()
+    payload = result.model_dump(mode="python")
+    payload["review_gaps"].append(dict(payload["review_gaps"][0]))
+
+    with pytest.raises(ValidationError, match="review gap IDs must be unique"):
+        _validate_tampered_v3_result(payload)
+
+
+def test_v3_review_gap_sources_are_unique_and_fact_bound() -> None:
+    _request_value, _result_v2, result = _v3_result()
+    duplicate = result.model_dump(mode="python")
+    reference_id = duplicate["review_gaps"][0]["source_reference_ids"][0]
+    duplicate["review_gaps"][0]["source_reference_ids"] = [
+        reference_id,
+        reference_id,
+    ]
+    with pytest.raises(ValidationError, match="review gap source references must be unique"):
+        _validate_tampered_v3_result(duplicate)
+
+    unbound = result.model_dump(mode="python")
+    unbound["review_gaps"][0]["source_reference_ids"].append("unbound-gap-source")
+    with pytest.raises(ValidationError, match="review gap sources must exist"):
+        _validate_tampered_v3_result(unbound)
+
+    unsorted = result.model_dump(mode="python")
+    multi_source_gap = next(
+        item for item in unsorted["review_gaps"] if len(item["source_reference_ids"]) > 1
+    )
+    multi_source_gap["source_reference_ids"] = list(
+        reversed(multi_source_gap["source_reference_ids"])
+    )
+    with pytest.raises(ValidationError, match="canonical sorted order"):
+        _validate_tampered_v3_result(unsorted)
+
+
+def test_v3_fact_ledger_reference_ids_are_globally_unique() -> None:
+    _request_value, _result_v2, result = _v3_result()
+    ledger = result.fact_ledger.model_dump(mode="python")
+    duplicate = dict(ledger["entries"][0])
+    duplicate["kind"] = "issue"
+    _refresh_fact_identity(duplicate)
+    ledger["entries"].append(duplicate)
+    ledger["ledger_id"] = stable_object_id("ledger", ledger["entries"])
+
+    with pytest.raises(ValidationError, match="fact reference IDs must be globally unique"):
+        FactLedgerV1.model_validate(ledger)
+
+
+def test_v3_rejects_trace_that_differs_from_compiled_action() -> None:
+    _request_value, _result_v2, result = _v3_result()
+    payload = result.model_dump(mode="python")
+    payload["action_trace"][0]["reason_code"] = "tampered_reason"
+    payload["observations"][0]["reason_code"] = "tampered_reason"
+
+    with pytest.raises(
+        ValidationError,
+        match="action trace must exactly match its compiled planned action",
+    ):
+        _validate_tampered_v3_result(payload)
+
+
+def test_v3_binds_plan_inputs_to_unique_gap_facts() -> None:
+    _request_value, _result_v2, result = _v3_result()
+    duplicate = result.model_dump(mode="python")
+    reference_id = duplicate["review_plan"]["actions"][0]["input_reference_ids"][0]
+    duplicate["review_plan"]["actions"][0]["input_reference_ids"] = [
+        reference_id,
+        reference_id,
+    ]
+    _refresh_plan_id(duplicate)
+    with pytest.raises(ValidationError, match="planned action input references must be unique"):
+        _validate_tampered_v3_result(duplicate)
+
+    missing_fact = result.model_dump(mode="python")
+    action = missing_fact["review_plan"]["actions"][0]
+    gap = next(item for item in missing_fact["review_gaps"] if item["gap_id"] == action["gap_id"])
+    missing_reference = "field_" + "f" * 64
+    action["input_reference_ids"] = [missing_reference]
+    gap["source_reference_ids"].append(missing_reference)
+    gap["source_reference_ids"].sort()
+    _refresh_plan_id(missing_fact)
+    with pytest.raises(
+        ValidationError,
+        match="review gap sources must exist in the canonical fact ledger",
+    ):
+        _validate_tampered_v3_result(missing_fact)
+
+    unsorted = result.model_dump(mode="python")
+    action = unsorted["review_plan"]["actions"][0]
+    gap = next(item for item in unsorted["review_gaps"] if item["gap_id"] == action["gap_id"])
+    references = sorted(item["reference_id"] for item in unsorted["fact_ledger"]["entries"])[:2]
+    gap["source_reference_ids"] = references
+    action["input_reference_ids"] = list(reversed(references))
+    _refresh_plan_id(unsorted)
+    with pytest.raises(ValidationError, match="planned action inputs must use canonical"):
+        _validate_tampered_v3_result(unsorted)
+
+
+def test_v3_rejects_duplicate_field_reread_and_wrong_gap_tool() -> None:
+    payload = _resolved_field_auto_complete_payload()
+    duplicate_reread = json.loads(json.dumps(payload))
+    second_action = dict(duplicate_reread["review_plan"]["actions"][0])
+    second_action["reason_code"] = "second_reread_attempt"
+    second_action["action_id"] = stable_object_id(
+        "action",
+        {key: value for key, value in second_action.items() if key != "action_id"},
+    )
+    duplicate_reread["review_plan"]["actions"].append(second_action)
+    _refresh_plan_id(duplicate_reread)
+    with pytest.raises(ValidationError, match="field reference may be reread at most once"):
+        _validate_tampered_v3_result(duplicate_reread)
+
+    wrong_tool = json.loads(json.dumps(payload))
+    wrong_tool["review_plan"]["actions"][0]["tool_name"] = "evidence.retrieve/v3"
+    _refresh_plan_id(wrong_tool)
+    with pytest.raises(ValidationError, match="planned Tool does not match"):
+        _validate_tampered_v3_result(wrong_tool)
+
+
+def test_v3_tool_inputs_are_bound_to_allowed_fact_kinds() -> None:
+    field_reread = _resolved_field_auto_complete_payload()
+    reference_id = field_reread["review_plan"]["actions"][0]["input_reference_ids"][0]
+    referenced_fact = next(
+        item
+        for item in field_reread["fact_ledger"]["entries"]
+        if item["reference_id"] == reference_id
+    )
+    referenced_fact["kind"] = "evidence"
+    _refresh_fact_identity(referenced_fact)
+    field_reread["fact_ledger"]["ledger_id"] = stable_object_id(
+        "ledger", field_reread["fact_ledger"]["entries"]
+    )
+    with pytest.raises(ValidationError, match="field-source facts"):
+        _validate_tampered_v3_result(field_reread)
+
+    evidence_retry = _resolved_field_auto_complete_payload()
+    evidence_retry["review_gaps"][0]["gap_type"] = "evidence_incomplete"
+    evidence_retry["review_plan"]["actions"][0]["tool_name"] = "evidence.retrieve/v3"
+    evidence_retry["action_trace"][0]["tool_name"] = "evidence.retrieve/v3"
+    evidence_retry["observations"][0]["tool_name"] = "evidence.retrieve/v3"
+    _refresh_plan_id(evidence_retry)
+    with pytest.raises(ValidationError, match="Evidence or outcome facts"):
+        _validate_tampered_v3_result(evidence_retry)
+
+
+def test_v3_rejects_noncanonical_fact_gap_action_and_observation_ids() -> None:
+    _request_value, _result_v2, result = _v3_result()
+
+    fact_ledger = result.fact_ledger.model_dump(mode="python")
+    fact_ledger["entries"][0]["fact_id"] = "fact_" + "f" * 64
+    fact_ledger["ledger_id"] = stable_object_id("ledger", fact_ledger["entries"])
+    with pytest.raises(ValidationError, match="fact ID does not match"):
+        FactLedgerV1.model_validate(fact_ledger)
+
+    gap_tamper = result.model_dump(mode="python")
+    gap_tamper["review_gaps"].append(
+        {
+            "gap_id": "gap_" + "f" * 64,
+            "gap_type": "release_gate",
+            "reason_code": "canonical_id_tamper",
+            "source_reference_ids": [gap_tamper["fact_ledger"]["entries"][0]["reference_id"]],
+            "status": "open",
+        }
+    )
+    with pytest.raises(ValidationError, match="review gap ID does not match"):
+        _validate_tampered_v3_result(gap_tamper)
+
+    action_tamper = result.model_dump(mode="python")
+    old_action_id = action_tamper["review_plan"]["actions"][0]["action_id"]
+    bad_action_id = "action_" + "f" * 64
+    action_tamper["review_plan"]["actions"][0]["action_id"] = bad_action_id
+    next(item for item in action_tamper["action_trace"] if item["action_id"] == old_action_id)[
+        "action_id"
+    ] = bad_action_id
+    next(item for item in action_tamper["observations"] if item["action_id"] == old_action_id)[
+        "action_id"
+    ] = bad_action_id
+    _refresh_plan_id(action_tamper)
+    with pytest.raises(ValidationError, match="planned action ID does not match"):
+        _validate_tampered_v3_result(action_tamper)
+
+    observation_tamper = result.model_dump(mode="python")
+    observation_tamper["observations"][0]["observation_id"] = "observation_" + "f" * 64
+    with pytest.raises(ValidationError, match="Tool observation ID does not match"):
+        _validate_tampered_v3_result(observation_tamper)
+
+
+def test_v3_auto_completion_requires_active_successful_policy_resolver() -> None:
+    valid = _resolved_field_auto_complete_payload()
+    accepted = _validate_tampered_v3_result(valid)
+    assert accepted.review_disposition == "auto_review_complete"
+    assert accepted.observations[0].reason_code != accepted.action_trace[0].reason_code
+
+    shadow = json.loads(json.dumps(valid))
+    shadow["review_plan"]["mode"] = "shadow"
+    _refresh_plan_id(shadow)
+    with pytest.raises(ValidationError, match="investigation requires an active plan"):
+        _validate_tampered_v3_result(shadow)
+
+    no_action = json.loads(json.dumps(valid))
+    no_action["review_plan"]["actions"] = []
+    no_action["action_trace"] = []
+    no_action["observations"] = []
+    _refresh_plan_id(no_action)
+    with pytest.raises(ValidationError, match="successful policy resolver"):
+        _validate_tampered_v3_result(no_action)
+
+    human_only = json.loads(json.dumps(valid))
+    human_only["review_gaps"][0]["gap_type"] = "human_approval_required"
+    human_only["review_plan"]["actions"][0]["tool_name"] = "human.request/v1"
+    human_only["action_trace"][0]["tool_name"] = "human.request/v1"
+    human_only["observations"][0]["tool_name"] = "human.request/v1"
+    _refresh_plan_id(human_only)
+    with pytest.raises(ValidationError, match="cannot resolve this gap type in-run"):
+        _validate_tampered_v3_result(human_only)
+
+
+def test_v3_non_explanation_trace_cannot_claim_model_execution() -> None:
+    payload = _resolved_field_auto_complete_payload()
+    payload["action_trace"][0].update(
+        {
+            "provider": "anthropic",
+            "model_id": "claude-test",
+            "prompt_sha256": "f" * 64,
+            "input_tokens": 1,
+            "output_tokens": 1,
+        }
+    )
+    with pytest.raises(ValidationError, match="cannot claim model execution"):
+        _validate_tampered_v3_result(payload)
+
+
+def test_v3_anthropic_explanation_trace_requires_exact_narrative_call() -> None:
+    _request_value, _result_v2, result = _v3_result()
+    payload = result.model_dump(mode="python")
+    explanation = next(
+        item for item in payload["action_trace"] if item["tool_name"] == "explanation.compose/v1"
+    )
+    explanation.update(
+        {
+            "provider": "anthropic",
+            "model_id": "bogus-model",
+            "prompt_sha256": "f" * 64,
+            "input_tokens": 1,
+            "output_tokens": 1,
+        }
+    )
+    with pytest.raises(ValidationError, match="exact narrative call identity"):
+        _validate_tampered_v3_result(payload)
+
+
+def test_v3_auto_completion_requires_exact_coordinator_and_narrative_audit() -> None:
+    result = _clean_auto_complete_result()
+
+    coordinator_tamper = result.model_dump(mode="python")
+    coordinator_tamper["review_plan"]["provider"] = "deterministic_policy"
+    coordinator_tamper["review_plan"]["model_id"] = None
+    coordinator_tamper["review_plan"]["prompt_sha256"] = None
+    coordinator_tamper["review_plan"]["output_schema_sha256"] = None
+    coordinator_tamper["review_plan"]["input_tokens"] = 0
+    coordinator_tamper["review_plan"]["output_tokens"] = 0
+    _refresh_plan_id(coordinator_tamper)
+    with pytest.raises(ValidationError, match="exact Claude coordinator audit"):
+        _validate_tampered_v3_result(coordinator_tamper)
+
+    narrative_tamper = result.model_dump(mode="python")
+    narrative_tamper["narrative_report"]["generation_mode"] = "deterministic_fallback"
+    narrative_tamper["narrative_report"]["model_call"] = None
+    with pytest.raises(ValidationError, match="exact Claude narrative audit"):
+        _validate_tampered_v3_result(narrative_tamper)
+
+    narrative_task_tamper = result.model_dump(mode="python")
+    narrative_task_tamper["narrative_report"]["model_call"]["task_id"] = "customs_case_answer"
+    with pytest.raises(ValidationError, match="exact Claude narrative audit"):
+        _validate_tampered_v3_result(narrative_task_tamper)
 
 
 def test_narrative_renderer_rejects_model_authored_text_and_citations() -> None:
@@ -990,7 +1509,6 @@ def test_agent_runtime_service_entry_executes_authorized_evidence_recovery(
 
     import customs_ai_agent.agentic as agentic
     import customs_ai_agent.runtime as runtime_module
-    from customs_ai_agent.adapters.llm import LLMError
     from customs_ai_agent.nodes.compliance import compliance_review
     from customs_ai_agent.nodes.report import generate_xai_report
     from customs_ai_agent.nodes.route import route_to_human_or_complete
@@ -1085,16 +1603,57 @@ def test_agent_runtime_service_entry_executes_authorized_evidence_recovery(
     monkeypatch.setattr(
         agentic,
         "compile_shadow_plan",
-        lambda gaps: original_compile(
-            [gap for gap in gaps if gap.gap_type == "evidence_incomplete"]
+        lambda gaps, **kwargs: original_compile(
+            [gap for gap in gaps if gap.gap_type == "evidence_incomplete"],
+            **kwargs,
         ),
     )
 
     class Analyzer:
         model_id = "claude-sonnet-5"
 
-        def run_bounded_agentic_task(self, *_args, **_kwargs):
-            raise LLMError("injected_planner_unavailable", "test")
+        def run_bounded_agentic_task(self, **kwargs):
+            task_id = kwargs["task_id"]
+            context = kwargs["untrusted_context"]
+            if task_id == "customs_review_coordinator":
+                value = {
+                    "suggestions": [
+                        {
+                            "gap_id": gap["gap_id"],
+                            "tool_name": "evidence.retrieve/v3",
+                            "reason_code": gap["reason_code"],
+                            "input_reference_ids": gap["source_reference_ids"],
+                        }
+                        for gap in context["declared_gaps"]
+                        if gap["gap_type"] == "evidence_incomplete"
+                    ]
+                }
+                semantic_hash = agentic.agentic_semantic_schema_hashes()["coordinator"]
+            else:
+                assert task_id == "customs_narrative_report"
+                value = {
+                    "claims": [
+                        {
+                            "section": claim["section"],
+                            "source_claim_id": claim["source_claim_id"],
+                            "frame": "plain",
+                        }
+                        for claim in context["canonical_claims"]
+                    ]
+                }
+                semantic_hash = agentic.agentic_semantic_schema_hashes()["narrative"]
+            return StructuredAgenticResult(
+                value=value,
+                model_id=self.model_id,
+                prompt_sha256=hashlib.sha256(kwargs["system_prompt"].encode("utf-8")).hexdigest(),
+                output_schema_sha256=anthropic_output_schema_sha256(kwargs["output_schema"]),
+                semantic_output_schema_sha256=semantic_hash,
+                request_id=f"request-{task_id}",
+                message_id=f"message-{task_id}",
+                input_tokens=10,
+                output_tokens=10,
+                latency_ms=1,
+            )
 
     class Retriever:
         expected_identity = SimpleNamespace(runtime_release_v3_sha256="e" * 64)
@@ -1168,6 +1727,27 @@ def test_agent_runtime_service_entry_executes_authorized_evidence_recovery(
         "status": result.status,
         "human": result.requires_human_review,
     }
+    planned_action_ids = {item.action_id for item in result.review_plan.actions}
+    assert planned_action_ids == {item.action_id for item in result.action_trace}
+    assert planned_action_ids == {item.action_id for item in result.observations}
+
+    incomplete_execution = result.model_dump(mode="python")
+    incomplete_execution["action_trace"] = []
+    incomplete_execution["observations"] = []
+    with pytest.raises(
+        ValidationError,
+        match="automatic review completion requires exact planned Tool coverage",
+    ):
+        _validate_tampered_v3_result(incomplete_execution)
+
+    deferred_gap = result.model_dump(mode="python")
+    assert deferred_gap["review_gaps"]
+    deferred_gap["review_gaps"][0]["status"] = "deferred"
+    with pytest.raises(
+        ValidationError,
+        match="automatic review completion requires every deterministic Gate",
+    ):
+        _validate_tampered_v3_result(deferred_gap)
 
 
 def test_actual_llm_uncalibrated_state_bootstraps_only_through_signed_code_owned_route(
@@ -1291,17 +1871,17 @@ def test_actual_llm_uncalibrated_state_bootstraps_only_through_signed_code_owned
         )
         assert "claude_model_call_identity_incomplete" in reasons
 
-    # Coordinator/narrative exact-call enforcement has separate tests.  Keep
-    # this regression focused on the formerly impossible calibration bootstrap.
+    # Extraction calibration alone must not bootstrap automatic completion.
+    # The authoritative V3 validator still requires exact live Coordinator and
+    # Narrative call identities, even if an internal blocker helper is bypassed.
     monkeypatch.setattr(agentic, "_coordinator_identity_blockers", lambda *_args: [])
     monkeypatch.setattr(agentic, "_narrative_identity_blockers", lambda *_args: [])
-    result = to_review_run_result_v3(
-        v2_result,
-        request,
-        evidence_runtime_v3_sha256="e" * 64,
-    )
-    assert result.completion_eligibility.eligible is True
-    assert result.review_disposition == "auto_review_complete"
+    with pytest.raises(ValidationError, match="exact Claude coordinator audit"):
+        to_review_run_result_v3(
+            v2_result,
+            request,
+            evidence_runtime_v3_sha256="e" * 64,
+        )
 
 
 def test_active_broker_rejects_unknown_tool_and_repeated_field_reread(

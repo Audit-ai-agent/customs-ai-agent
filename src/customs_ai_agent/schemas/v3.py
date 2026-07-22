@@ -326,11 +326,23 @@ class FactLedgerV1(V3WireModel):
     @model_validator(mode="after")
     def _unique_facts(self) -> "FactLedgerV1":
         fact_ids = [item.fact_id for item in self.entries]
-        references = [(item.kind, item.reference_id) for item in self.entries]
+        reference_ids = [item.reference_id for item in self.entries]
         if len(fact_ids) != len(set(fact_ids)):
             raise ValueError("fact IDs must be unique")
-        if len(references) != len(set(references)):
-            raise ValueError("fact references must be unique")
+        if len(reference_ids) != len(set(reference_ids)):
+            raise ValueError("fact reference IDs must be globally unique")
+        for item in self.entries:
+            canonical = {
+                "kind": item.kind,
+                "reference_id": item.reference_id,
+                "label": item.label,
+                "value": item.value,
+                "document_id": item.document_id,
+            }
+            if item.fact_id != stable_object_id("fact", canonical):
+                raise ValueError("fact ID does not match its canonical contents")
+            if item.source_sha256 != canonical_json_sha256(canonical):
+                raise ValueError("fact source hash does not match its canonical contents")
         expected = stable_object_id(
             "ledger",
             [item.model_dump(mode="json") for item in self.entries],
@@ -587,18 +599,161 @@ class ReviewRunResultV3(ReviewRunResultV2):
                 for citation in claim.citations
             ):
                 raise ValueError("narrative claim cites a fact outside the canonical ledger")
-        gap_ids = {item.gap_id for item in self.review_gaps}
+        review_gap_ids = [item.gap_id for item in self.review_gaps]
+        if len(review_gap_ids) != len(set(review_gap_ids)):
+            raise ValueError("review gap IDs must be unique")
+        gap_ids = set(review_gap_ids)
+        gaps_by_id = {item.gap_id: item for item in self.review_gaps}
         if any(action.gap_id not in gap_ids for action in self.review_plan.actions):
             raise ValueError("planned actions must reference declared review gaps")
+        fact_kind_by_reference_id = {
+            item.reference_id: item.kind for item in self.fact_ledger.entries
+        }
+        fact_reference_ids = set(fact_kind_by_reference_id)
+        for gap in self.review_gaps:
+            if len(gap.source_reference_ids) != len(set(gap.source_reference_ids)):
+                raise ValueError("review gap source references must be unique")
+            if gap.source_reference_ids != sorted(gap.source_reference_ids):
+                raise ValueError("review gap source references must use canonical sorted order")
+            if not set(gap.source_reference_ids).issubset(fact_reference_ids):
+                raise ValueError("review gap sources must exist in the canonical fact ledger")
+        primary_tool_by_gap_type: dict[str, AllowedToolName] = {
+            "field_uncertainty": "document.reread_span/v1",
+            "evidence_incomplete": "evidence.retrieve/v3",
+            "validation_issue": "human.request/v1",
+            "regulatory_finding": "human.request/v1",
+            "human_approval_required": "human.request/v1",
+            "release_gate": "human.request/v1",
+        }
+        reread_reference_ids: set[str] = set()
+        for action in self.review_plan.actions:
+            gap = gaps_by_id[action.gap_id]
+            if len(action.input_reference_ids) != len(set(action.input_reference_ids)):
+                raise ValueError("planned action input references must be unique")
+            if action.input_reference_ids != sorted(action.input_reference_ids):
+                raise ValueError("planned action inputs must use canonical sorted order")
+            if not set(action.input_reference_ids).issubset(gap.source_reference_ids):
+                raise ValueError("planned action inputs must be bound to its review gap")
+            if not set(action.input_reference_ids).issubset(fact_reference_ids):
+                raise ValueError("planned action inputs must exist in the canonical fact ledger")
+            expected_tool = primary_tool_by_gap_type[gap.gap_type]
+            if action.tool_name not in {expected_tool, "explanation.compose/v1"}:
+                raise ValueError("planned Tool does not match the review gap policy")
+            if action.tool_name == "document.reread_span/v1":
+                if any(
+                    fact_kind_by_reference_id[reference_id] != "field_source"
+                    for reference_id in action.input_reference_ids
+                ):
+                    raise ValueError("field reread inputs must reference field-source facts")
+                if reread_reference_ids.intersection(action.input_reference_ids):
+                    raise ValueError("a field reference may be reread at most once per plan")
+                reread_reference_ids.update(action.input_reference_ids)
+            if action.tool_name == "evidence.retrieve/v3" and any(
+                fact_kind_by_reference_id[reference_id] not in {"evidence", "outcome"}
+                for reference_id in action.input_reference_ids
+            ):
+                raise ValueError(
+                    "Evidence retrieval inputs must reference Evidence or outcome facts"
+                )
         planned_ids = {item.action_id for item in self.review_plan.actions}
         if any(item.action_id not in planned_ids for item in self.action_trace):
             raise ValueError("action trace must reference the compiled review plan")
         if any(item.action_id not in planned_ids for item in self.observations):
             raise ValueError("Tool observations must reference the compiled review plan")
+        trace_action_ids = [item.action_id for item in self.action_trace]
+        if len(trace_action_ids) != len(set(trace_action_ids)):
+            raise ValueError("action trace action IDs must be unique")
+        planned_action_order = [item.action_id for item in self.review_plan.actions]
+        if trace_action_ids != planned_action_order[: len(trace_action_ids)]:
+            raise ValueError("action trace must preserve the planned execution prefix order")
+        if self.action_trace and (
+            self.review_plan.cycle_limit == 0
+            or any(item.cycle >= self.review_plan.cycle_limit for item in self.action_trace)
+        ):
+            raise ValueError("action trace cycle must be within the compiled cycle limit")
+        observation_ids = [item.observation_id for item in self.observations]
+        if len(observation_ids) != len(set(observation_ids)):
+            raise ValueError("Tool observation IDs must be unique")
+        observation_action_order = [item.action_id for item in self.observations]
+        if observation_action_order != trace_action_ids:
+            raise ValueError("Tool observations must preserve action trace order")
         if len(self.action_trace) > self.review_plan.tool_call_limit:
             raise ValueError("action trace exceeds the compiled Tool-call limit")
         if len(self.observations) != len(self.action_trace):
             raise ValueError("every Tool action requires exactly one observation")
+        planned_by_action_id = {item.action_id: item for item in self.review_plan.actions}
+        for trace in self.action_trace:
+            planned = planned_by_action_id[trace.action_id]
+            if (
+                trace.tool_name != planned.tool_name
+                or trace.reason_code != planned.reason_code
+                or trace.input_reference_ids != planned.input_reference_ids
+            ):
+                raise ValueError("action trace must exactly match its compiled planned action")
+            if trace.tool_name != "explanation.compose/v1" and (
+                trace.provider != "deterministic_policy"
+                or trace.model_id is not None
+                or trace.prompt_sha256 is not None
+                or trace.input_tokens != 0
+                or trace.output_tokens != 0
+            ):
+                raise ValueError("non-explanation Tool traces cannot claim model execution")
+            if trace.tool_name == "explanation.compose/v1":
+                narrative_call = self.narrative_report.model_call
+                if trace.provider == "anthropic" and (
+                    narrative_call is None
+                    or narrative_call.task_id != "customs_narrative_report"
+                    or trace.model_id != narrative_call.model_id
+                    or trace.model_id != self.runtime_release.model_id
+                    or trace.prompt_sha256 != narrative_call.prompt_sha256
+                    or trace.prompt_sha256 != self.runtime_release.narrative_prompt_sha256
+                    or narrative_call.output_schema_sha256
+                    != self.runtime_release.narrative_schema_sha256
+                    or trace.input_tokens != narrative_call.input_tokens
+                    or trace.output_tokens != narrative_call.output_tokens
+                    or trace.duration_ms != narrative_call.latency_ms
+                ):
+                    raise ValueError(
+                        "Anthropic explanation traces require exact narrative call identity"
+                    )
+                if trace.provider == "deterministic_policy" and (
+                    trace.model_id is not None
+                    or trace.prompt_sha256 is not None
+                    or trace.input_tokens != 0
+                    or trace.output_tokens != 0
+                ):
+                    raise ValueError(
+                        "deterministic explanation traces cannot claim model execution"
+                    )
+        observations_by_action_id = {item.action_id: item for item in self.observations}
+        if len(observations_by_action_id) != len(self.observations) or set(
+            observations_by_action_id
+        ) != set(trace_action_ids):
+            raise ValueError("every traced Tool action requires exactly one observation")
+        for trace in self.action_trace:
+            observation = observations_by_action_id[trace.action_id]
+            if len(trace.output_reference_ids) != len(set(trace.output_reference_ids)):
+                raise ValueError("Tool output references must be unique")
+            narrative_claim_ids = {claim.claim_id for claim in claims}
+            allowed_output_reference_ids = {
+                *fact_reference_ids,
+                *gap_ids,
+                *narrative_claim_ids,
+            }
+            if not set(trace.output_reference_ids).issubset(allowed_output_reference_ids):
+                raise ValueError(
+                    "Tool outputs must reference canonical facts, gaps, or narrative claims"
+                )
+            if (
+                observation.tool_name != trace.tool_name
+                or observation.cycle != trace.cycle
+                or observation.status != trace.status
+                # The observation reason is the execution outcome code; the
+                # trace reason remains the distinct compiled-plan rationale.
+                or observation.input_reference_ids != trace.input_reference_ids
+                or observation.output_reference_ids != trace.output_reference_ids
+            ):
+                raise ValueError("Tool observation must exactly match its correlated action trace")
         expected_assessment = (
             "issues_detected"
             if self.validation_issues or self.regulatory_findings
@@ -610,14 +765,77 @@ class ReviewRunResultV3(ReviewRunResultV2):
         )
         if self.assessment != expected_assessment:
             raise ValueError("assessment must be derived from deterministic issues and Evidence")
+        resolved_gaps = [item for item in self.review_gaps if item.status == "resolved"]
+        if (
+            self.review_disposition == "auto_review_complete"
+            and (resolved_gaps or self.review_plan.actions)
+            and self.review_plan.mode != "active"
+        ):
+            raise ValueError(
+                "automatic review completion with investigation requires an active plan"
+            )
+        if self.review_disposition == "auto_review_complete" and (
+            planned_ids != set(trace_action_ids) or planned_ids != set(observations_by_action_id)
+        ):
+            raise ValueError("automatic review completion requires exact planned Tool coverage")
+        if self.review_disposition == "auto_review_complete":
+            if (
+                self.review_plan.provider != "anthropic"
+                or self.review_plan.model_id != self.runtime_release.model_id
+                or self.review_plan.prompt_sha256 != self.runtime_release.coordinator_prompt_sha256
+                or self.review_plan.output_schema_sha256
+                != self.runtime_release.coordinator_schema_sha256
+                or self.review_plan.input_tokens <= 0
+                or self.review_plan.output_tokens <= 0
+            ):
+                raise ValueError(
+                    "automatic review completion requires exact Claude coordinator audit"
+                )
+            narrative_call = self.narrative_report.model_call
+            if (
+                self.narrative_report.generation_mode != "claude"
+                or narrative_call is None
+                or narrative_call.task_id != "customs_narrative_report"
+                or narrative_call.model_id != self.runtime_release.model_id
+                or narrative_call.prompt_sha256 != self.runtime_release.narrative_prompt_sha256
+                or narrative_call.output_schema_sha256
+                != self.runtime_release.narrative_schema_sha256
+                or narrative_call.input_tokens <= 0
+                or narrative_call.output_tokens <= 0
+            ):
+                raise ValueError(
+                    "automatic review completion requires exact Claude narrative audit"
+                )
+            successful_action_ids = {
+                item.action_id for item in self.action_trace if item.status == "succeeded"
+            }
+            resolver_tool_by_gap_type: dict[str, AllowedToolName] = {
+                "field_uncertainty": "document.reread_span/v1",
+                "evidence_incomplete": "evidence.retrieve/v3",
+            }
+            for gap in resolved_gaps:
+                resolver_tool = resolver_tool_by_gap_type.get(gap.gap_type)
+                if resolver_tool is None:
+                    raise ValueError(
+                        "automatic review completion cannot resolve this gap type in-run"
+                    )
+                if not any(
+                    action.gap_id == gap.gap_id
+                    and action.tool_name == resolver_tool
+                    and bool(action.input_reference_ids)
+                    and action.action_id in successful_action_ids
+                    for action in self.review_plan.actions
+                ):
+                    raise ValueError("every resolved gap requires its successful policy resolver")
         if self.review_disposition == "auto_review_complete" and (
             not self.completion_eligibility.eligible
             or self.assessment != "no_issue_detected"
             or self.execution_status != "succeeded"
             or self.required_actions
-            or any(gap.status == "open" for gap in self.review_gaps)
+            or any(gap.status != "resolved" for gap in self.review_gaps)
             or self.validation_issues
             or self.regulatory_findings
+            or any(item.status != "succeeded" for item in self.action_trace)
             or any(item.status != "succeeded" for item in self.observations)
             or self.runtime_release.release_profile_state != "approved"
             or self.runtime_release.release_profile_sha256 is None
@@ -634,6 +852,31 @@ class ReviewRunResultV3(ReviewRunResultV2):
             and self.review_disposition == "auto_review_complete"
         ):
             raise ValueError("non-production assurance cannot auto-complete a review")
+        for gap in self.review_gaps:
+            expected_gap_id = stable_object_id(
+                "gap",
+                {
+                    "gap_type": gap.gap_type,
+                    "reason_code": gap.reason_code,
+                    "source_reference_ids": gap.source_reference_ids,
+                },
+            )
+            if gap.gap_id != expected_gap_id:
+                raise ValueError("review gap ID does not match its canonical contents")
+        for action in self.review_plan.actions:
+            expected_action_id = stable_object_id(
+                "action",
+                action.model_dump(mode="json", exclude={"action_id"}),
+            )
+            if action.action_id != expected_action_id:
+                raise ValueError("planned action ID does not match its canonical contents")
+        for observation in self.observations:
+            expected_observation_id = stable_object_id(
+                "observation",
+                observation.model_dump(mode="json", exclude={"observation_id"}),
+            )
+            if observation.observation_id != expected_observation_id:
+                raise ValueError("Tool observation ID does not match its canonical contents")
         expected_hash = review_result_v3_sha256(self)
         if self.result_sha256 != expected_hash:
             raise ValueError("result_sha256 does not match the canonical V3 result")
