@@ -14,11 +14,14 @@ from customs_ai_agent.agentic import (
     BoundedToolPolicyError,
     BoundedToolResult,
     DeterministicReevaluationResult,
-    _grounded_claim_synthesis,
+    _deterministic_grounded_answer_plan,
+    _render_grounded_claim,
+    _rewrite_grounded_answer,
     _rewrite_report,
     activate_bounded_plan,
     answer_grounded_question,
     build_fact_ledger,
+    claude_narrative,
     compile_shadow_plan,
     deterministic_narrative,
     execute_active_bounded_plan,
@@ -380,7 +383,7 @@ def test_unreleased_profile_keeps_clean_result_human_review_required() -> None:
     assert all(0 <= item.cycle <= 1 for item in result.action_trace)
 
 
-def test_narrative_renderer_rejects_a_false_claim_even_with_valid_citation_ids() -> None:
+def test_narrative_renderer_rejects_model_authored_text_and_citations() -> None:
     _request_value, result_v2, _result = _v3_result()
     facts = build_fact_ledger(result_v2)
     canonical = deterministic_narrative(result_v2, facts)
@@ -388,8 +391,7 @@ def test_narrative_renderer_rejects_a_false_claim_even_with_valid_citation_ids()
         {
             "section": section,
             "source_claim_id": claim.claim_id,
-            "text": claim.text,
-            "citations": [item.model_dump(mode="json") for item in claim.citations],
+            "frame": "plain",
         }
         for section in (
             "summary",
@@ -399,7 +401,8 @@ def test_narrative_renderer_rejects_a_false_claim_even_with_valid_citation_ids()
         )
         for claim in getattr(canonical, section)
     ]
-    rewrites[0]["text"] += " 세관이 통관을 승인했습니다."
+    rewrites[0]["text"] = "세관이 통관을 승인했습니다."
+    rewrites[0]["citations"] = []
     call = StructuredAgenticResult(
         value={"rewrites": rewrites},
         model_id="claude-test",
@@ -411,7 +414,7 @@ def test_narrative_renderer_rejects_a_false_claim_even_with_valid_citation_ids()
         output_tokens=10,
         latency_ms=1,
     )
-    with pytest.raises(ValueError, match="semantics"):
+    with pytest.raises(ValueError, match="frame selection is invalid"):
         _rewrite_report(canonical, rewrites, call=call)
 
 
@@ -422,8 +425,7 @@ def test_narrative_renderer_accepts_only_typed_code_owned_frame_and_exact_citati
         {
             "section": section,
             "source_claim_id": claim.claim_id,
-            "text": f"요약하면, {claim.text}" if section == "summary" else claim.text,
-            "citations": [item.model_dump(mode="json") for item in claim.citations],
+            "frame": "summary_brief" if section == "summary" else "plain",
         }
         for section in (
             "summary",
@@ -448,17 +450,79 @@ def test_narrative_renderer_accepts_only_typed_code_owned_frame_and_exact_citati
     assert report.generation_mode == "claude"
     assert report.summary[0].text.startswith("요약하면, ")
 
+    invalid_cases = []
     unknown = [dict(item) for item in values]
     unknown[0]["source_claim_id"] = "claim_" + "f" * 64
-    with pytest.raises(ValueError, match="unknown typed claim"):
-        _rewrite_report(canonical, unknown, call=call)
+    invalid_cases.append((unknown, "unknown typed claim"))
+    wrong_section = [dict(item) for item in values]
+    wrong_section[0]["section"] = "required_actions"
+    invalid_cases.append((wrong_section, "unknown typed claim"))
+    wrong_frame = [dict(item) for item in values]
+    wrong_frame[0]["frame"] = "action_owner"
+    invalid_cases.append((wrong_frame, "not allowed"))
+    duplicate = [dict(item) for item in values]
+    duplicate[1] = dict(duplicate[0])
+    invalid_cases.append((duplicate, "identity is invalid"))
+    missing = [dict(item) for item in values[1:]]
+    invalid_cases.append((missing, "cover every canonical claim"))
+    extra_field = [dict(item) for item in values]
+    extra_field[0]["canonical_text"] = canonical.summary[0].text
+    invalid_cases.append((extra_field, "frame selection is invalid"))
+    for invalid, message in invalid_cases:
+        with pytest.raises(ValueError, match=message):
+            _rewrite_report(canonical, invalid, call=call)
 
-    wrong_citation = [dict(item) for item in values]
-    wrong_citation[0]["citations"] = [
-        {"kind": "outcome", "reference_id": "unknown-ledger-reference"}
-    ]
-    with pytest.raises(ValueError, match="citations"):
-        _rewrite_report(canonical, wrong_citation, call=call)
+
+def test_claude_narrative_boundary_accepts_only_frame_selections() -> None:
+    _request_value, result_v2, _result = _v3_result()
+    facts = build_fact_ledger(result_v2)
+    canonical = deterministic_narrative(result_v2, facts)
+
+    class FrameSelectionAnalyzer:
+        def run_bounded_agentic_task(self, *_args, **kwargs):
+            assert kwargs["task_id"] == "customs_narrative_report"
+            item_schema = kwargs["output_schema"]["properties"]["claims"]["items"]
+            assert item_schema["required"] == ["section", "source_claim_id", "frame"]
+            assert "text" not in item_schema["properties"]
+            assert "citations" not in item_schema["properties"]
+            canonical_claims = kwargs["untrusted_context"]["canonical_claims"]
+            assert all("citations" not in item for item in canonical_claims)
+            claims = [
+                {
+                    "section": item["section"],
+                    "source_claim_id": item["source_claim_id"],
+                    "frame": item["allowed_frames"][-1],
+                }
+                for item in canonical_claims
+            ]
+            return StructuredAgenticResult(
+                value={"claims": claims},
+                model_id="claude-test",
+                prompt_sha256="a" * 64,
+                output_schema_sha256="b" * 64,
+                request_id="request-narrative-frame",
+                message_id="message-narrative-frame",
+                input_tokens=10,
+                output_tokens=10,
+                latency_ms=1,
+            )
+
+    report, _call = claude_narrative(  # type: ignore[arg-type]
+        FrameSelectionAnalyzer(),
+        result_v2,
+        facts,
+    )
+    assert report.generation_mode == "claude"
+    for section in ("summary", "document_consistency", "regulatory_review", "required_actions"):
+        canonical_claims = getattr(canonical, section)
+        rendered_claims = getattr(report, section)
+        assert [item.citations for item in rendered_claims] == [
+            item.citations for item in canonical_claims
+        ]
+        assert all(
+            rendered.text.endswith(source.text)
+            for rendered, source in zip(rendered_claims, canonical_claims, strict=True)
+        )
 
 
 def test_invalid_narrative_and_chat_each_make_exactly_two_claude_calls_then_fallback() -> None:
@@ -519,26 +583,131 @@ def test_invalid_narrative_and_chat_each_make_exactly_two_claude_calls_then_fall
     assert answer.generation_mode == "deterministic_fallback"
 
 
-@pytest.mark.parametrize(
-    "candidate",
-    [
-        "수입자는 수출자에게 100 USD를 지급했습니다.",
-        "수출자는 수입자에게 90 USD보다 큰 100 USD를 지급했습니다.",
-        "수출자는 수입자에게 100 USD를 지급하지 않았습니다.",
-        "수출자는 100 USD를 수입자에게 200 USD 대신 지급했습니다.",
-    ],
-)
-def test_material_claim_rewrite_rejects_role_direction_negation_and_number_swaps(
-    candidate: str,
-) -> None:
+def test_frame_renderer_uses_only_code_owned_prefix_and_canonical_text() -> None:
     canonical = "수출자는 수입자에게 100 USD를 지급했습니다."
-    assert _grounded_claim_synthesis(canonical, canonical, section="answer")
-    assert _grounded_claim_synthesis(
-        canonical,
-        f"확인된 Case 근거에 따르면, {canonical}",
-        section="answer",
+    assert _render_grounded_claim(canonical, "plain", section="answer") == canonical
+    assert (
+        _render_grounded_claim(
+            canonical,
+            "answer_grounded",
+            section="answer",
+        )
+        == f"확인된 Case 근거에 따르면, {canonical}"
     )
-    assert not _grounded_claim_synthesis(canonical, candidate, section="answer")
+    with pytest.raises(ValueError, match="not allowed"):
+        _render_grounded_claim(canonical, "summary_brief", section="answer")
+    with pytest.raises(ValueError, match="not allowed"):
+        _render_grounded_claim(
+            canonical,
+            "수입자는 수출자에게 100 USD를 지급했습니다.",
+            section="answer",
+        )
+
+
+def test_case_answer_renderer_selects_frames_but_code_owns_text_and_citations() -> None:
+    _request_value, _result_v2, result = _v3_result()
+    question = GroundedQuestionV1(
+        question_id="question_" + "8" * 64,
+        question="현재 심사 결과 상태는 무엇인가요?",
+        review_result=result,
+    )
+    plan = _deterministic_grounded_answer_plan(question)
+    assert plan.status == "answered"
+    values = [
+        {"source_claim_id": claim.claim_id, "frame": "answer_grounded"} for claim in plan.claims
+    ]
+    call = StructuredAgenticResult(
+        value={"claims": values},
+        model_id=result.runtime_release.model_id,
+        prompt_sha256=result.runtime_release.chat_prompt_sha256,
+        output_schema_sha256=result.runtime_release.chat_schema_sha256,
+        request_id="request-answer-frame",
+        message_id="message-answer-frame",
+        input_tokens=10,
+        output_tokens=10,
+        latency_ms=1,
+    )
+    answer = _rewrite_grounded_answer(
+        plan,
+        values,
+        question_id=question.question_id,
+        call=call,
+    )
+    assert answer.generation_mode == "claude"
+    assert answer.answer.startswith("확인된 Case 근거에 따르면, ")
+    expected_citations = {
+        (citation.kind, citation.reference_id)
+        for claim in plan.claims
+        for citation in claim.citations
+    }
+    assert {(item.kind, item.reference_id) for item in answer.citations} == expected_citations
+
+    invalid_cases = []
+    unknown = [dict(item) for item in values]
+    unknown[0]["source_claim_id"] = "answer_claim_" + "f" * 64
+    invalid_cases.append((unknown, "unknown canonical claim"))
+    wrong_frame = [dict(item) for item in values]
+    wrong_frame[0]["frame"] = "summary_brief"
+    invalid_cases.append((wrong_frame, "not allowed"))
+    duplicate = [dict(item) for item in values]
+    duplicate.append(dict(duplicate[0]))
+    invalid_cases.append((duplicate, "identity is invalid"))
+    missing = [dict(item) for item in values[1:]]
+    invalid_cases.append((missing, "cover every canonical claim"))
+    extra_field = [dict(item) for item in values]
+    extra_field[0]["canonical_text"] = plan.claims[0].text
+    invalid_cases.append((extra_field, "frame selection is invalid"))
+    for invalid, message in invalid_cases:
+        with pytest.raises(ValueError, match=message):
+            _rewrite_grounded_answer(
+                plan,
+                invalid,
+                question_id=question.question_id,
+                call=call,
+            )
+
+
+def test_case_answer_boundary_accepts_only_frame_selections() -> None:
+    _request_value, _result_v2, result = _v3_result()
+    question = GroundedQuestionV1(
+        question_id="question_" + "7" * 64,
+        question="현재 심사 결과 상태는 무엇인가요?",
+        review_result=result,
+    )
+
+    class FrameSelectionAnalyzer:
+        def run_bounded_agentic_task(self, *_args, **kwargs):
+            assert kwargs["task_id"] == "customs_case_answer"
+            item_schema = kwargs["output_schema"]["properties"]["claims"]["items"]
+            assert item_schema["required"] == ["source_claim_id", "frame"]
+            assert "text" not in item_schema["properties"]
+            assert "citations" not in item_schema["properties"]
+            canonical_claims = kwargs["untrusted_context"]["canonical_claims"]
+            assert all("citations" not in item for item in canonical_claims)
+            return StructuredAgenticResult(
+                value={
+                    "claims": [
+                        {
+                            "source_claim_id": item["source_claim_id"],
+                            "frame": "answer_evidence",
+                        }
+                        for item in canonical_claims
+                    ]
+                },
+                model_id=result.runtime_release.model_id,
+                prompt_sha256=result.runtime_release.chat_prompt_sha256,
+                output_schema_sha256=result.runtime_release.chat_schema_sha256,
+                request_id="request-answer-boundary",
+                message_id="message-answer-boundary",
+                input_tokens=10,
+                output_tokens=10,
+                latency_ms=1,
+            )
+
+    answer = answer_grounded_question(question, analyzer=FrameSelectionAnalyzer())  # type: ignore[arg-type]
+    assert answer.generation_mode == "claude"
+    assert answer.answer.startswith("근거 확인 결과: ")
+    assert answer.citations
 
 
 def _active_profile() -> SimpleNamespace:

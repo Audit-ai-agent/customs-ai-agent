@@ -173,18 +173,6 @@ class BoundedToolBroker:
         raise BoundedToolPolicyError("Tool is outside the active bounded registry")
 
 
-_CITATION_SCHEMA: dict[str, Any] = {
-    "type": "object",
-    "additionalProperties": False,
-    "required": ["kind", "reference_id"],
-    "properties": {
-        "kind": {
-            "type": "string",
-            "enum": ["field_source", "issue", "finding", "evidence", "outcome"],
-        },
-        "reference_id": {"type": "string", "minLength": 1, "maxLength": 256},
-    },
-}
 _COORDINATOR_OUTPUT_SCHEMA: dict[str, Any] = {
     "type": "object",
     "additionalProperties": False,
@@ -225,21 +213,25 @@ _NARRATIVE_SECTIONS = (
     "regulatory_review",
     "required_actions",
 )
-_SAFE_REWRITE_SCHEMA: dict[str, Any] = {
+_NARRATIVE_FRAME_IDS = (
+    "plain",
+    "summary_brief",
+    "summary_label",
+    "document_result",
+    "document_review",
+    "regulatory_result",
+    "regulatory_review",
+    "action_brief",
+    "action_owner",
+)
+_SAFE_FRAME_SELECTION_SCHEMA: dict[str, Any] = {
     "type": "object",
     "additionalProperties": False,
-    "required": ["section", "source_claim_id", "text", "citations"],
+    "required": ["section", "source_claim_id", "frame"],
     "properties": {
         "section": {"type": "string", "enum": list(_NARRATIVE_SECTIONS)},
         "source_claim_id": {"type": "string", "pattern": r"^claim_[a-f0-9]{64}$"},
-        "text": {"type": "string", "minLength": 1, "maxLength": 4000},
-        "citations": {
-            "type": "array",
-            "minItems": 1,
-            "maxItems": 100,
-            "uniqueItems": True,
-            "items": _CITATION_SCHEMA,
-        },
+        "frame": {"type": "string", "enum": list(_NARRATIVE_FRAME_IDS)},
     },
 }
 _NARRATIVE_OUTPUT_SCHEMA: dict[str, Any] = {
@@ -251,7 +243,7 @@ _NARRATIVE_OUTPUT_SCHEMA: dict[str, Any] = {
             "type": "array",
             "minItems": 1,
             "maxItems": 320,
-            "items": _SAFE_REWRITE_SCHEMA,
+            "items": _SAFE_FRAME_SELECTION_SCHEMA,
         },
     },
 }
@@ -267,19 +259,15 @@ _ANSWER_OUTPUT_SCHEMA: dict[str, Any] = {
             "items": {
                 "type": "object",
                 "additionalProperties": False,
-                "required": ["source_claim_id", "text", "citations"],
+                "required": ["source_claim_id", "frame"],
                 "properties": {
                     "source_claim_id": {
                         "type": "string",
                         "pattern": r"^answer_claim_[a-f0-9]{64}$",
                     },
-                    "text": {"type": "string", "minLength": 1, "maxLength": 4000},
-                    "citations": {
-                        "type": "array",
-                        "minItems": 1,
-                        "maxItems": 100,
-                        "uniqueItems": True,
-                        "items": _CITATION_SCHEMA,
+                    "frame": {
+                        "type": "string",
+                        "enum": ["plain", "answer_grounded", "answer_evidence"],
                     },
                 },
             },
@@ -822,28 +810,50 @@ def _call_audit(task_id: str, call: StructuredAgenticResult) -> AgenticCallAudit
     )
 
 
-_SAFE_CLAIM_FRAMES: dict[str, tuple[str, ...]] = {
-    "summary": ("", "요약하면, ", "사전심사 요약: "),
-    "document_consistency": ("", "문서 정합성 확인 결과, ", "문서 검토 결과: "),
-    "regulatory_review": ("", "규정 근거 검토 결과, ", "규정 검토 결과: "),
-    "required_actions": ("", "필요 조치: ", "담당자 조치 사항: "),
-    "answer": ("", "확인된 Case 근거에 따르면, ", "근거 확인 결과: "),
+_SAFE_CLAIM_FRAMES: dict[str, dict[str, str]] = {
+    "summary": {
+        "plain": "",
+        "summary_brief": "요약하면, ",
+        "summary_label": "사전심사 요약: ",
+    },
+    "document_consistency": {
+        "plain": "",
+        "document_result": "문서 정합성 확인 결과, ",
+        "document_review": "문서 검토 결과: ",
+    },
+    "regulatory_review": {
+        "plain": "",
+        "regulatory_result": "규정 근거 검토 결과, ",
+        "regulatory_review": "규정 검토 결과: ",
+    },
+    "required_actions": {
+        "plain": "",
+        "action_brief": "필요 조치: ",
+        "action_owner": "담당자 조치 사항: ",
+    },
+    "answer": {
+        "plain": "",
+        "answer_grounded": "확인된 Case 근거에 따르면, ",
+        "answer_evidence": "근거 확인 결과: ",
+    },
 }
 
 
-def _grounded_claim_synthesis(canonical: str, candidate: str, *, section: str) -> bool:
-    """Accept bounded presentation synthesis without granting factual authority.
+def _render_grounded_claim(canonical: str, frame: str, *, section: str) -> str:
+    """Render a code-owned claim from Claude's bounded presentation choice.
 
-    The code-authored material sentence must remain byte-for-byte present. Claude
-    may only choose one code-owned, non-material framing phrase for the declared
-    claim type. This permits a useful user-facing presentation while making role,
-    amount, negation, Evidence, Finding, severity, and outcome changes impossible.
+    Claude selects only an allowlisted frame identifier.  The factual sentence
+    and citations never cross the model-output authority boundary: both are
+    projected from the canonical code-owned claim after strict identity checks.
     """
 
-    if not candidate.strip() or len(candidate) > 4000:
-        return False
     frames = _SAFE_CLAIM_FRAMES.get(section)
-    return frames is not None and candidate in {f"{frame}{canonical}" for frame in frames}
+    if not canonical.strip() or frames is None or frame not in frames:
+        raise ValueError("claim frame is not allowed for the declared section")
+    rendered = f"{frames[frame]}{canonical}"
+    if len(rendered) > 4000:
+        raise ValueError("rendered canonical claim exceeds the wire limit")
+    return rendered
 
 
 def _rewrite_report(
@@ -859,40 +869,40 @@ def _rewrite_report(
         for section in _NARRATIVE_SECTIONS
         for claim in getattr(canonical, section)
     }
-    rewrites: dict[str, tuple[str, str]] = {}
+    selections: dict[str, tuple[str, str]] = {}
     for value in values:
-        if not isinstance(value, dict):
-            raise ValueError("narrative rewrite is invalid")
+        if not isinstance(value, dict) or set(value) != {"section", "source_claim_id", "frame"}:
+            raise ValueError("narrative frame selection is invalid")
         section = value.get("section")
         claim_id = value.get("source_claim_id")
-        text = value.get("text")
-        citations = value.get("citations")
+        frame = value.get("frame")
         if (
             not isinstance(section, str)
             or not isinstance(claim_id, str)
-            or not isinstance(text, str)
-            or not isinstance(citations, list)
-            or claim_id in rewrites
+            or not isinstance(frame, str)
+            or claim_id in selections
         ):
-            raise ValueError("narrative rewrite identity is invalid")
+            raise ValueError("narrative frame selection identity is invalid")
         source = canonical_claims.get(claim_id)
         if source is None or source[0] != section:
-            raise ValueError("narrative rewrite references an unknown typed claim")
-        source_claim = source[1]
-        try:
-            candidate_citations = [CitationReferenceV1.model_validate(item) for item in citations]
-        except Exception as exc:
-            raise ValueError("narrative rewrite citation is invalid") from exc
-        if candidate_citations != source_claim.citations:
-            raise ValueError("narrative rewrite changed canonical citations")
-        if not _grounded_claim_synthesis(source_claim.text, text, section=section):
-            raise ValueError("narrative rewrite changed canonical claim semantics")
-        rewrites[claim_id] = (section, text)
-    if set(rewrites) != set(canonical_claims):
-        raise ValueError("narrative rewrite must cover every canonical claim exactly once")
+            raise ValueError("narrative frame selection references an unknown typed claim")
+        _render_grounded_claim(source[1].text, frame, section=section)
+        selections[claim_id] = (section, frame)
+    if set(selections) != set(canonical_claims):
+        raise ValueError("narrative frame selection must cover every canonical claim exactly once")
 
     def project(claims: list[NarrativeClaimV1]) -> list[NarrativeClaimV1]:
-        return [_claim(rewrites[claim.claim_id][1], claim.citations) for claim in claims]
+        return [
+            _claim(
+                _render_grounded_claim(
+                    claim.text,
+                    selections[claim.claim_id][1],
+                    section=selections[claim.claim_id][0],
+                ),
+                claim.citations,
+            )
+            for claim in claims
+        ]
 
     return NarrativeReportV1(
         summary=project(canonical.summary),
@@ -917,7 +927,6 @@ def claude_narrative(
             "section": section,
             "source_claim_id": claim.claim_id,
             "canonical_text": claim.text,
-            "citations": [item.model_dump(mode="json") for item in claim.citations],
             "allowed_frames": list(_SAFE_CLAIM_FRAMES[section]),
         }
         for section in _NARRATIVE_SECTIONS
@@ -2068,41 +2077,35 @@ def _rewrite_grounded_answer(
     if plan.status != "answered" or not isinstance(values, list):
         raise ValueError("Case answer claim collection is invalid")
     canonical = {claim.claim_id: claim for claim in plan.claims}
-    rewritten: dict[str, str] = {}
+    selections: dict[str, str] = {}
     for value in values:
-        if not isinstance(value, dict):
-            raise ValueError("Case answer claim is invalid")
+        if not isinstance(value, dict) or set(value) != {"source_claim_id", "frame"}:
+            raise ValueError("Case answer frame selection is invalid")
         claim_id = value.get("source_claim_id")
-        text = value.get("text")
-        citations = value.get("citations")
-        if (
-            not isinstance(claim_id, str)
-            or not isinstance(text, str)
-            or not isinstance(citations, list)
-            or claim_id in rewritten
-        ):
-            raise ValueError("Case answer claim identity is invalid")
+        frame = value.get("frame")
+        if not isinstance(claim_id, str) or not isinstance(frame, str) or claim_id in selections:
+            raise ValueError("Case answer frame selection identity is invalid")
         source = canonical.get(claim_id)
         if source is None:
             raise ValueError("Case answer references an unknown canonical claim")
-        try:
-            candidate_citations = tuple(
-                CitationReferenceV1.model_validate(item) for item in citations
-            )
-        except Exception as exc:
-            raise ValueError("Case answer citation is invalid") from exc
-        if candidate_citations != source.citations:
-            raise ValueError("Case answer changed canonical citations")
-        if not _grounded_claim_synthesis(source.text, text, section="answer"):
-            raise ValueError("Case answer changed canonical claim semantics")
-        rewritten[claim_id] = text
-    if set(rewritten) != set(canonical):
-        raise ValueError("Case answer must cover every canonical claim exactly once")
+        _render_grounded_claim(source.text, frame, section="answer")
+        selections[claim_id] = frame
+    if set(selections) != set(canonical):
+        raise ValueError(
+            "Case answer frame selection must cover every canonical claim exactly once"
+        )
     citations = [citation for claim in plan.claims for citation in claim.citations]
     unique_citations = list(dict.fromkeys((item.kind, item.reference_id) for item in citations))
     return GroundedAnswerV1(
         question_id=question_id,
-        answer="\n".join(rewritten[claim.claim_id] for claim in plan.claims),
+        answer="\n".join(
+            _render_grounded_claim(
+                claim.text,
+                selections[claim.claim_id],
+                section="answer",
+            )
+            for claim in plan.claims
+        ),
         status="answered",
         citations=[_citation(kind, reference_id) for kind, reference_id in unique_citations],
         generation_mode="claude",
@@ -2125,7 +2128,6 @@ def answer_grounded_question(
             {
                 "source_claim_id": claim.claim_id,
                 "canonical_text": claim.text,
-                "citations": [item.model_dump(mode="json") for item in claim.citations],
                 "allowed_frames": list(_SAFE_CLAIM_FRAMES["answer"]),
             }
             for claim in plan.claims
