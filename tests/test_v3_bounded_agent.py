@@ -1,6 +1,7 @@
 from __future__ import annotations
 
 import hashlib
+import json
 from types import SimpleNamespace
 
 import pytest
@@ -1194,6 +1195,60 @@ def test_revision_compiler_rejects_every_unapproved_request_change() -> None:
             revised_request=tampered,
             decisions=[decision],
         )
+
+
+def test_revision_never_claims_decision_applied_when_public_child_value_is_unchanged(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    import customs_ai_agent.runtime as runtime_module
+
+    parent_request, _result_v2, parent_result = _v3_result()
+    first_document = parent_result.document_results[0]
+    first_field = first_document.fields[0]
+    correction = UserCorrection(
+        document_id=first_document.document_id,
+        field_path=f"fields.{first_field.name}",
+        value=f"{first_field.value}-human-corrected",
+    )
+    decision_payload = {
+        "decision": "correct_field",
+        "actor_id": "reviewer-1",
+        "actor_role": "reviewer",
+        "decided_at": "2026-07-14T00:00:00Z",
+        "reason": "Confirmed against the submitted source.",
+        "confirmed_reference_id": None,
+        "correction": correction,
+        "supporting_document": None,
+    }
+    decision = HumanDecisionV1(
+        decision_id=stable_object_id("decision", decision_payload),
+        **decision_payload,
+    )
+    revised = parent_request.model_copy(deep=True)
+    revised.review_run_id = "v3_child_public_value_mismatch"
+    revision = ReviewRevisionRequestV1(
+        parent_result_sha256=parent_result.result_sha256,
+        parent_input_manifest_sha256=parent_result.input_manifest_sha256,
+        parent_result=parent_result,
+        parent_request=parent_request,
+        revised_request=revised,
+        decisions=[decision],
+    )
+    runtime = object.__new__(runtime_module.AgentRuntime)
+    runtime._closed = False
+    runtime._secret_markers = ()
+    monkeypatch.setattr(
+        runtime_module.AgentRuntime,
+        "_review_v3_with_corrections",
+        lambda *_args, **_kwargs: parent_result,
+    )
+
+    with pytest.raises(runtime_module.RuntimeConflictError) as captured:
+        runtime.revision_v3_json(
+            json.dumps(revision.model_dump(mode="json"), ensure_ascii=False).encode("utf-8")
+        )
+
+    assert captured.value.code == "correction_application_failed"
 
 
 def test_revision_rejects_conflicting_terminal_human_decisions() -> None:

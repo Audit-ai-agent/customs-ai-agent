@@ -31,6 +31,7 @@ from customs_ai_agent.contracts.evidence_runtime_release import (
 )
 from customs_ai_agent.ocr_release import ReleaseLockedOcrProvider
 from customs_ai_agent.runner import (
+    CorrectionApplicationError,
     rerun_review,
     run_review_result_v2,
     run_review_v2,
@@ -60,6 +61,7 @@ from customs_ai_agent.schemas.models import (
     ReviewRunRequestV2,
     ReviewRunResultV2,
     ServiceReviewRunRequestV2,
+    UserCorrection,
 )
 from customs_ai_agent.schemas.v3 import (
     GroundedAnswerV1,
@@ -492,6 +494,78 @@ def _assert_result_correlated(
             "review_result_correlation_failed",
             "The Agent result documents differ from its request.",
         )
+
+
+def _assert_public_corrections_applied(
+    result: ReviewRunResultV3,
+    corrections: list[UserCorrection],
+) -> None:
+    """Bind every claimed human correction to the exact public child value."""
+
+    for correction in corrections:
+        documents = [
+            document
+            for document in result.document_results
+            if document.document_id == correction.document_id
+        ]
+        if len(documents) != 1:
+            raise RuntimeConflictError(
+                "correction_application_failed",
+                "An approved correction is not present exactly once in the child result.",
+            )
+        document = documents[0]
+        parts = correction.field_path.split(".")
+        if len(parts) == 2 and parts[0] == "fields":
+            fields = [field for field in document.fields if field.name == parts[1]]
+        elif (
+            len(parts) == 3
+            and parts[0] == "line_items"
+            and parts[1].isascii()
+            and parts[1].isdigit()
+            and 0 <= int(parts[1]) < len(document.line_items)
+        ):
+            fields = [
+                field
+                for field in document.line_items[int(parts[1])].fields
+                if field.name == parts[2]
+            ]
+        else:
+            fields = []
+        if len(fields) != 1:
+            raise RuntimeConflictError(
+                "correction_application_failed",
+                "An approved correction target is absent or ambiguous in the child result.",
+            )
+        public_field = fields[0]
+        try:
+            actual = json.dumps(
+                public_field.value,
+                ensure_ascii=False,
+                allow_nan=False,
+                separators=(",", ":"),
+                sort_keys=True,
+            )
+            expected = json.dumps(
+                correction.value,
+                ensure_ascii=False,
+                allow_nan=False,
+                separators=(",", ":"),
+                sort_keys=True,
+            )
+        except (TypeError, ValueError):
+            raise RuntimeConflictError(
+                "correction_application_failed",
+                "An approved correction is not representable in the child result.",
+            ) from None
+        if (
+            type(public_field.value) is not type(correction.value)
+            or actual != expected
+            or public_field.confidence != correction.confidence
+        ):
+            raise RuntimeConflictError(
+                "correction_application_failed",
+                "An approved correction was not reflected exactly in the child result.",
+            )
 
 
 def _assert_public_result_safe(
@@ -1264,6 +1338,11 @@ class AgentRuntime:
             return result, supporting_rejections, state
         except AgentRuntimeError:
             raise
+        except CorrectionApplicationError:
+            raise RuntimeConflictError(
+                "correction_application_failed",
+                "An approved correction could not be applied exactly to the child review.",
+            ) from None
         except (LLMError, OcrLayoutProviderError, RetrievalError, ValidationError, ValueError):
             raise RuntimeExecutionError(
                 "review_execution_failed",
@@ -1344,6 +1423,7 @@ class AgentRuntime:
                 corrections,
                 forced_human_review_reasons=forced_reasons,
             )
+            _assert_public_corrections_applied(child, corrections)
         else:
             child = self.review_v3(
                 revision.revised_request,
