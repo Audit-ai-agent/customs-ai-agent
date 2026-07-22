@@ -1973,6 +1973,10 @@ def _bounded_answer_claims(claims: Iterable[_AnswerClaim]) -> tuple[_AnswerClaim
 
 def _deterministic_grounded_answer_plan(question: GroundedQuestionV1) -> _GroundedAnswerPlan:
     result = question.review_result
+    current_semantics = reconstruct_v3_current_semantics(result)
+    current_facts = {
+        str(entry["reference_id"]): entry for entry in current_semantics.current_fact_entries
+    }
     lowered = question.question.casefold()
     out_of_scope_tokens = (
         "weather",
@@ -2015,32 +2019,22 @@ def _deterministic_grounded_answer_plan(question: GroundedQuestionV1) -> _Ground
         )
     claims: list[_AnswerClaim] = []
     if issue_intent:
-        finding_entries = {
-            entry.reference_id: entry
-            for entry in result.fact_ledger.entries
-            if entry.kind == "finding"
-        }
-        for finding_index, finding in enumerate(result.regulatory_findings):
-            reference_id = stable_object_id(
-                "finding",
-                {"index": finding_index, "finding": finding.model_dump(mode="json")},
-            )
-            if reference_id not in finding_entries:
+        for finding, reference_id in zip(
+            result.regulatory_findings,
+            current_semantics.finding_reference_ids,
+            strict=True,
+        ):
+            if reference_id not in current_facts:
                 continue
             citations = [_citation("finding", reference_id)]
             citations.extend(_citation("evidence", item) for item in finding.evidence_ids)
             claims.append(_answer_claim(f"{finding.finding_code}: {finding.message}", citations))
-        issue_entries = {
-            entry.reference_id: entry
-            for entry in result.fact_ledger.entries
-            if entry.kind == "issue"
-        }
-        for issue_index, issue in enumerate(result.validation_issues):
-            reference_id = stable_object_id(
-                "issue",
-                {"index": issue_index, "issue": issue.model_dump(mode="json")},
-            )
-            if reference_id in issue_entries:
+        for issue, reference_id in zip(
+            result.validation_issues,
+            current_semantics.issue_reference_ids,
+            strict=True,
+        ):
+            if reference_id in current_facts:
                 claims.append(
                     _answer_claim(
                         f"{issue.issue_code}: {issue.message}",
@@ -2056,23 +2050,25 @@ def _deterministic_grounded_answer_plan(question: GroundedQuestionV1) -> _Ground
                 )
             )
     elif outcome_intent:
-        reference = next(entry for entry in result.fact_ledger.entries if entry.kind == "outcome")
         claims.append(
             _answer_claim(
                 f"현재 사전심사 상태는 {result.review_disposition}입니다.",
-                [_citation("outcome", reference.reference_id)],
+                [_citation("outcome", current_semantics.outcome_reference_id)],
             )
         )
     elif field_intent:
         specific_tokens = question_tokens.difference({"문서", "품목", "송장", "선하", "hsk", "hs"})
+        field_facts = [
+            current_facts[reference_id] for reference_id in current_semantics.field_reference_ids
+        ]
         matching = [
             entry
-            for entry in result.fact_ledger.entries
-            if entry.kind == "field_source"
-            and (
+            for entry in field_facts
+            if (
                 not specific_tokens
                 or any(
-                    token in f"{entry.label} {entry.value}".casefold() for token in specific_tokens
+                    token in f"{entry['label']} {entry['value']}".casefold()
+                    for token in specific_tokens
                 )
             )
         ]
@@ -2085,8 +2081,8 @@ def _deterministic_grounded_answer_plan(question: GroundedQuestionV1) -> _Ground
             )
         claims.extend(
             _answer_claim(
-                f"{reference.label}: {reference.value}",
-                [_citation("field_source", reference.reference_id)],
+                f"{reference['label']}: {reference['value']}",
+                [_citation("field_source", str(reference["reference_id"]))],
             )
             for reference in matching
         )

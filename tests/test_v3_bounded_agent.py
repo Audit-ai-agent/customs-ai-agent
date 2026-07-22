@@ -2190,6 +2190,40 @@ def test_agent_runtime_service_entry_executes_authorized_evidence_recovery(
         }
     )
 
+    current_semantics = reconstruct_v3_current_semantics(result)
+    retained_reference_ids = {item.reference_id for item in retained_inputs}
+    outcome_plan = _deterministic_grounded_answer_plan(
+        GroundedQuestionV1(
+            question_id="question_" + "a" * 64,
+            question="현재 심사 결과 상태는 무엇인가요?",
+            review_result=result,
+        )
+    )
+    assert outcome_plan.status == "answered"
+    assert [
+        (citation.kind, citation.reference_id)
+        for claim in outcome_plan.claims
+        for citation in claim.citations
+    ] == [("outcome", current_semantics.outcome_reference_id)]
+    assert current_semantics.outcome_reference_id not in retained_reference_ids
+
+    field_plan = _deterministic_grounded_answer_plan(
+        GroundedQuestionV1(
+            question_id="question_" + "b" * 64,
+            question="문서",
+            review_result=result,
+        )
+    )
+    assert field_plan.status == "answered"
+    field_citations = [
+        citation.reference_id
+        for claim in field_plan.claims
+        for citation in claim.citations
+        if citation.kind == "field_source"
+    ]
+    assert field_citations == list(current_semantics.field_reference_ids)[: len(field_citations)]
+    assert set(field_citations).isdisjoint(retained_reference_ids)
+
     retained_citation = result.model_dump(mode="python")
     retained_outcome = next(item for item in retained_inputs if item.kind == "outcome")
     retained_citation["narrative_report"]["summary"][0]["citations"] = [
