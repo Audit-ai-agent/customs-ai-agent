@@ -1691,6 +1691,33 @@ def test_case_answer_canonical_claim_collapses_multiline_and_repeated_whitespace
     assert "\r" not in claim.text
 
 
+def test_case_answer_field_claims_use_canonical_ledger_order_and_20_claim_limit() -> None:
+    _request_value, _result_v2, result = _v3_result()
+    current_semantics = reconstruct_v3_current_semantics(result)
+    expected_references = [
+        str(entry["reference_id"])
+        for entry in current_semantics.current_fact_entries
+        if entry["kind"] == "field_source"
+    ][:20]
+    assert len(expected_references) == 20
+
+    plan = _deterministic_grounded_answer_plan(
+        GroundedQuestionV1(
+            question_id="question_" + "c" * 64,
+            question="문서",
+            review_result=result,
+        )
+    )
+
+    assert plan.status == "answered"
+    assert [
+        citation.reference_id
+        for claim in plan.claims
+        for citation in claim.citations
+        if citation.kind == "field_source"
+    ] == expected_references
+
+
 def test_case_answer_boundary_accepts_only_frame_selections() -> None:
     _request_value, _result_v2, result = _v3_result()
     question = GroundedQuestionV1(
@@ -2235,7 +2262,12 @@ def test_agent_runtime_service_entry_executes_authorized_evidence_recovery(
         for citation in claim.citations
         if citation.kind == "field_source"
     ]
-    assert field_citations == list(current_semantics.field_reference_ids)[: len(field_citations)]
+    expected_field_citations = [
+        str(entry["reference_id"])
+        for entry in current_semantics.current_fact_entries
+        if entry["kind"] == "field_source"
+    ][: len(field_citations)]
+    assert field_citations == expected_field_citations
     assert set(field_citations).isdisjoint(retained_reference_ids)
 
     retained_citation = result.model_dump(mode="python")

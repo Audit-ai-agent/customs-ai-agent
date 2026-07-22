@@ -2060,7 +2060,9 @@ def _deterministic_grounded_answer_plan(question: GroundedQuestionV1) -> _Ground
     elif field_intent:
         specific_tokens = question_tokens.difference({"문서", "품목", "송장", "선하", "hsk", "hs"})
         field_facts = [
-            current_facts[reference_id] for reference_id in current_semantics.field_reference_ids
+            entry
+            for entry in current_semantics.current_fact_entries
+            if entry["kind"] == "field_source"
         ]
         matching = [
             entry
