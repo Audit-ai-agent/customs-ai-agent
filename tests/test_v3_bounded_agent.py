@@ -14,6 +14,7 @@ from customs_ai_agent.agentic import (
     BoundedToolPolicyError,
     BoundedToolResult,
     DeterministicReevaluationResult,
+    _answer_claim,
     _deterministic_grounded_answer_plan,
     _render_grounded_claim,
     _rewrite_grounded_answer,
@@ -44,6 +45,7 @@ from customs_ai_agent.schemas.models import (
     stable_evidence_id,
 )
 from customs_ai_agent.schemas.v3 import (
+    CitationReferenceV1,
     FactLedgerV1,
     GroundedAnswerV1,
     GroundedQuestionV1,
@@ -1675,6 +1677,18 @@ def test_case_answer_renderer_selects_frames_but_code_owns_text_and_citations() 
                 question_id=question.question_id,
                 call=call,
             )
+
+
+def test_case_answer_canonical_claim_collapses_multiline_and_repeated_whitespace() -> None:
+    citation = CitationReferenceV1(kind="outcome", reference_id="outcome_" + "a" * 64)
+    claim = _answer_claim(
+        "first line\r\nsecond\tline   with repeated spaces",
+        [citation],
+    )
+
+    assert claim.text == "first line second line with repeated spaces"
+    assert "\n" not in claim.text
+    assert "\r" not in claim.text
 
 
 def test_case_answer_boundary_accepts_only_frame_selections() -> None:

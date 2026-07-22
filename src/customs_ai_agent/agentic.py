@@ -1947,6 +1947,7 @@ class _GroundedAnswerPlan:
 
 
 def _answer_claim(text: str, citations: Iterable[CitationReferenceV1]) -> _AnswerClaim:
+    text = " ".join(text.split())
     frozen_citations = tuple(citations)
     payload = {
         "text": text,
