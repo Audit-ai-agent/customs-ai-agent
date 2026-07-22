@@ -1,3 +1,4 @@
+import hashlib
 import json
 import logging
 import os
@@ -16,6 +17,8 @@ from customs_ai_agent.adapters.llm import (
     LLMOutputValidationError,
     LLMProviderError,
     analysis_to_extracted_document,
+    anthropic_compatible_output_schema,
+    anthropic_output_schema_sha256,
 )
 from customs_ai_agent.schemas.models import DocumentInput, ReviewRunRequest
 
@@ -115,6 +118,103 @@ def _analyze(payload=None, text=INVOICE_TEXT):
         }
     )
     return analysis, transport
+
+
+def _schema_keywords(value):
+    if isinstance(value, dict):
+        for key, nested in value.items():
+            yield key
+            yield from _schema_keywords(nested)
+    elif isinstance(value, list):
+        for nested in value:
+            yield from _schema_keywords(nested)
+
+
+def test_agentic_raw_schema_is_projected_for_anthropic_then_strictly_validated_locally():
+    strict_schema = {
+        "type": "object",
+        "additionalProperties": False,
+        "required": ["claims"],
+        "properties": {
+            "claims": {
+                "type": "array",
+                "minItems": 1,
+                "maxItems": 2,
+                "uniqueItems": True,
+                "items": {
+                    "type": "object",
+                    "additionalProperties": False,
+                    "required": ["source_claim_id", "frame"],
+                    "properties": {
+                        "source_claim_id": {
+                            "type": "string",
+                            "pattern": r"^claim_[a-f0-9]{64}$",
+                            "minLength": 70,
+                            "maxLength": 70,
+                        },
+                        "frame": {"type": "string", "enum": ["plain"]},
+                    },
+                },
+            }
+        },
+    }
+    valid = {"claims": [{"source_claim_id": "claim_" + "a" * 64, "frame": "plain"}]}
+    transport = FakeTransport(valid)
+    result = ClaudeDocumentAnalyzer(transport, _settings()).run_bounded_agentic_task(
+        task_id="customs_narrative_report",
+        system_prompt="system",
+        untrusted_context={"canonical_claims": []},
+        output_schema=strict_schema,
+    )
+
+    sent = transport.calls[0]["output_schema"]
+    forbidden = {
+        "pattern",
+        "minLength",
+        "maxLength",
+        "minItems",
+        "maxItems",
+        "uniqueItems",
+    }
+    assert forbidden.isdisjoint(_schema_keywords(sent))
+    assert sent == anthropic_compatible_output_schema(strict_schema)
+    assert result.output_schema_sha256 == anthropic_output_schema_sha256(strict_schema)
+    semantic_sha256 = hashlib.sha256(
+        json.dumps(
+            strict_schema,
+            ensure_ascii=False,
+            separators=(",", ":"),
+            sort_keys=True,
+        ).encode("utf-8")
+    ).hexdigest()
+    assert result.semantic_output_schema_sha256 == semantic_sha256
+    assert result.output_schema_sha256 != result.semantic_output_schema_sha256
+
+
+def test_agentic_projection_does_not_weaken_strict_local_rejection():
+    strict_schema = {
+        "type": "object",
+        "additionalProperties": False,
+        "required": ["claims"],
+        "properties": {
+            "claims": {
+                "type": "array",
+                "minItems": 1,
+                "maxItems": 1,
+                "items": {"type": "string", "pattern": r"^claim_[a-f0-9]{64}$"},
+            }
+        },
+    }
+    transport = FakeTransport({"claims": []})
+    with pytest.raises(LLMOutputValidationError) as exc_info:
+        ClaudeDocumentAnalyzer(transport, _settings()).run_bounded_agentic_task(
+            task_id="customs_narrative_report",
+            system_prompt="system",
+            untrusted_context={},
+            output_schema=strict_schema,
+        )
+    assert exc_info.value.code == "agentic_output_invalid"
+    assert "minItems" not in set(_schema_keywords(transport.calls[0]["output_schema"]))
 
 
 def test_analyzer_uses_versioned_prompt_and_strict_json_schema():

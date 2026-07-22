@@ -13,6 +13,7 @@ from customs_ai_agent.adapters.llm import (
     ClaudeDocumentAnalyzer,
     LLMError,
     StructuredAgenticResult,
+    anthropic_output_schema_sha256,
     text_output_schema_sha256,
 )
 from customs_ai_agent.build_info import (
@@ -274,6 +275,17 @@ _ANSWER_OUTPUT_SCHEMA: dict[str, Any] = {
         },
     },
 }
+
+
+def agentic_semantic_schema_hashes() -> dict[str, str]:
+    """Return strict local schemas, distinct from provider-transmitted schemas."""
+
+    return {
+        "coordinator": canonical_json_sha256(_COORDINATOR_OUTPUT_SCHEMA),
+        "narrative": canonical_json_sha256(_NARRATIVE_OUTPUT_SCHEMA),
+        "chat": canonical_json_sha256(_ANSWER_OUTPUT_SCHEMA),
+    }
+
 
 _QUESTION_TOKEN = re.compile(r"[0-9A-Za-z가-힣]{2,}")
 _QUESTION_STOP_WORDS = frozenset(
@@ -691,6 +703,8 @@ def claude_shadow_plan(
         output_schema=_COORDINATOR_OUTPUT_SCHEMA,
         max_tokens=2048,
     )
+    if result.semantic_output_schema_sha256 != agentic_semantic_schema_hashes()["coordinator"]:
+        raise ValueError("coordinator semantic output schema identity mismatch")
     suggestions = result.value.get("suggestions")
     if not isinstance(suggestions, list):
         raise ValueError("coordinator suggestions are invalid")
@@ -943,6 +957,8 @@ def claude_narrative(
         output_schema=_NARRATIVE_OUTPUT_SCHEMA,
         max_tokens=4096,
     )
+    if call.semantic_output_schema_sha256 != agentic_semantic_schema_hashes()["narrative"]:
+        raise ValueError("narrative semantic output schema identity mismatch")
     report = _rewrite_report(canonical, call.value.get("claims"), call=call)
     return report, call
 
@@ -1319,9 +1335,9 @@ def runtime_release_identity(
         narrative_prompt_sha256=narrative_prompt_sha,
         chat_prompt_sha256=chat_prompt_sha,
         extraction_schema_sha256=text_output_schema_sha256(),
-        coordinator_schema_sha256=canonical_json_sha256(_COORDINATOR_OUTPUT_SCHEMA),
-        narrative_schema_sha256=canonical_json_sha256(_NARRATIVE_OUTPUT_SCHEMA),
-        chat_schema_sha256=canonical_json_sha256(_ANSWER_OUTPUT_SCHEMA),
+        coordinator_schema_sha256=anthropic_output_schema_sha256(_COORDINATOR_OUTPUT_SCHEMA),
+        narrative_schema_sha256=anthropic_output_schema_sha256(_NARRATIVE_OUTPUT_SCHEMA),
+        chat_schema_sha256=anthropic_output_schema_sha256(_ANSWER_OUTPUT_SCHEMA),
         result_schema_sha256=schema_sha256("backend", "v3", "review-result"),
         policy_id=AGENT_POLICY_ID,
         tool_registry_id=TOOL_REGISTRY_ID,
@@ -1406,6 +1422,18 @@ def automatic_completion_unmet_reason_codes(
         (profile.coordinator_schema_sha256, runtime_release.coordinator_schema_sha256),
         (profile.narrative_schema_sha256, runtime_release.narrative_schema_sha256),
         (profile.chat_schema_sha256, runtime_release.chat_schema_sha256),
+        (
+            profile.coordinator_semantic_schema_sha256,
+            agentic_semantic_schema_hashes()["coordinator"],
+        ),
+        (
+            profile.narrative_semantic_schema_sha256,
+            agentic_semantic_schema_hashes()["narrative"],
+        ),
+        (
+            profile.chat_semantic_schema_sha256,
+            agentic_semantic_schema_hashes()["chat"],
+        ),
         (profile.policy_id, runtime_release.policy_id),
         (profile.tool_registry_id, runtime_release.tool_registry_id),
         (
@@ -2148,6 +2176,7 @@ def answer_grounded_question(
                 call.model_id != runtime_release.model_id
                 or call.prompt_sha256 != runtime_release.chat_prompt_sha256
                 or call.output_schema_sha256 != runtime_release.chat_schema_sha256
+                or call.semantic_output_schema_sha256 != agentic_semantic_schema_hashes()["chat"]
             ):
                 raise ValueError("Case answer release identity mismatch")
             return _rewrite_grounded_answer(

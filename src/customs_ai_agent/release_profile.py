@@ -196,6 +196,9 @@ class ClaudeExtractionReleaseProfileV1(BaseModel):
     coordinator_schema_sha256: str | None = Field(default=None, pattern=r"^[a-f0-9]{64}$")
     narrative_schema_sha256: str | None = Field(default=None, pattern=r"^[a-f0-9]{64}$")
     chat_schema_sha256: str | None = Field(default=None, pattern=r"^[a-f0-9]{64}$")
+    coordinator_semantic_schema_sha256: str | None = Field(default=None, pattern=r"^[a-f0-9]{64}$")
+    narrative_semantic_schema_sha256: str | None = Field(default=None, pattern=r"^[a-f0-9]{64}$")
+    chat_semantic_schema_sha256: str | None = Field(default=None, pattern=r"^[a-f0-9]{64}$")
     request_schema_sha256: str | None = Field(default=None, pattern=r"^[a-f0-9]{64}$")
     result_schema_sha256: str | None = Field(default=None, pattern=r"^[a-f0-9]{64}$")
     policy_id: str | None = Field(default=None, min_length=1, max_length=128)
@@ -244,6 +247,9 @@ class ClaudeExtractionReleaseProfileV1(BaseModel):
                 self.coordinator_schema_sha256,
                 self.narrative_schema_sha256,
                 self.chat_schema_sha256,
+                self.coordinator_semantic_schema_sha256,
+                self.narrative_semantic_schema_sha256,
+                self.chat_semantic_schema_sha256,
                 self.request_schema_sha256,
                 self.result_schema_sha256,
                 self.policy_id,
@@ -284,6 +290,9 @@ class ClaudeExtractionReleaseProfileV1(BaseModel):
             self.coordinator_schema_sha256,
             self.narrative_schema_sha256,
             self.chat_schema_sha256,
+            self.coordinator_semantic_schema_sha256,
+            self.narrative_semantic_schema_sha256,
+            self.chat_semantic_schema_sha256,
             self.request_schema_sha256,
             self.result_schema_sha256,
             self.policy_id,
@@ -336,6 +345,9 @@ class ClaudeExtractionReleaseProfileV1(BaseModel):
             "coordinator_schema_sha256": self.coordinator_schema_sha256,
             "narrative_schema_sha256": self.narrative_schema_sha256,
             "chat_schema_sha256": self.chat_schema_sha256,
+            "coordinator_semantic_schema_sha256": self.coordinator_semantic_schema_sha256,
+            "narrative_semantic_schema_sha256": self.narrative_semantic_schema_sha256,
+            "chat_semantic_schema_sha256": self.chat_semantic_schema_sha256,
             "request_schema_sha256": self.request_schema_sha256,
             "result_schema_sha256": self.result_schema_sha256,
             "policy_id": self.policy_id,

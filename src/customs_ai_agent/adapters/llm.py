@@ -17,6 +17,7 @@ from typing import Any, Mapping, Protocol
 import anthropic
 from dotenv import dotenv_values
 from jsonschema import Draft202012Validator
+from jsonschema.exceptions import SchemaError
 from PIL import Image
 from pydantic import (
     BaseModel,
@@ -592,7 +593,10 @@ class StructuredAgenticResult:
     value: dict[str, Any]
     model_id: str
     prompt_sha256: str
+    # Hash of the exact Anthropic-compatible schema sent in output_config.
     output_schema_sha256: str
+    # Internal hash of the complete schema used for strict local validation.
+    semantic_output_schema_sha256: str
     request_id: str
     message_id: str
     input_tokens: int
@@ -670,6 +674,127 @@ class DocumentAnalysis:
     additional_model_calls: tuple[ModelCallMetadata, ...] = ()
     model_conflicts: tuple[dict[str, Any], ...] = ()
     additional_model_errors: tuple[dict[str, Any], ...] = ()
+
+
+_ANTHROPIC_SUPPORTED_STRING_FORMATS = frozenset(
+    {
+        "date-time",
+        "time",
+        "date",
+        "duration",
+        "email",
+        "hostname",
+        "uri",
+        "ipv4",
+        "ipv6",
+        "uuid",
+    }
+)
+
+
+def anthropic_compatible_output_schema(schema: Mapping[str, Any]) -> dict[str, Any]:
+    """Project a strict local schema onto Anthropic's supported grammar subset.
+
+    The projection is deliberately code-owned instead of relying on the SDK's
+    private native-model helper. Unsupported semantic constraints (for example
+    pattern, length, count, uniqueness, and numeric bounds) are omitted only
+    from the provider grammar. The unmodified input schema remains authoritative
+    and is applied with Draft 2020-12 validation after the response is parsed.
+    """
+
+    if not isinstance(schema, Mapping):
+        raise ValueError("structured output schema must be an object")
+    source = dict(schema)
+    projected: dict[str, Any] = {}
+
+    definitions = source.get("$defs")
+    if definitions is not None:
+        if not isinstance(definitions, Mapping):
+            raise ValueError("structured output schema definitions must be an object")
+        projected["$defs"] = {
+            str(name): anthropic_compatible_output_schema(definition)
+            for name, definition in definitions.items()
+        }
+
+    reference = source.get("$ref")
+    if reference is not None:
+        if not isinstance(reference, str):
+            raise ValueError("structured output schema reference must be a string")
+        projected["$ref"] = reference
+        return projected
+
+    schema_type = source.get("type")
+    variants = source.get("anyOf")
+    if variants is None:
+        variants = source.get("oneOf")
+    intersections = source.get("allOf")
+    if variants is not None:
+        if not isinstance(variants, list) or not variants:
+            raise ValueError("structured output schema union must be a non-empty array")
+        projected["anyOf"] = [anthropic_compatible_output_schema(item) for item in variants]
+    elif intersections is not None:
+        if not isinstance(intersections, list) or not intersections:
+            raise ValueError("structured output schema intersection must be a non-empty array")
+        projected["allOf"] = [anthropic_compatible_output_schema(item) for item in intersections]
+    else:
+        if schema_type not in {
+            "object",
+            "array",
+            "string",
+            "integer",
+            "number",
+            "boolean",
+            "null",
+        }:
+            raise ValueError("structured output schema has an unsupported or missing type")
+        projected["type"] = schema_type
+
+    enum = source.get("enum")
+    if enum is not None:
+        if not isinstance(enum, list) or not enum:
+            raise ValueError("structured output schema enum must be a non-empty array")
+        projected["enum"] = list(enum)
+    for annotation in ("title", "description"):
+        value = source.get(annotation)
+        if value is not None:
+            if not isinstance(value, str):
+                raise ValueError("structured output schema annotations must be strings")
+            projected[annotation] = value
+
+    if schema_type == "object":
+        properties = source.get("properties", {})
+        if not isinstance(properties, Mapping):
+            raise ValueError("structured output schema properties must be an object")
+        projected["properties"] = {
+            str(name): anthropic_compatible_output_schema(property_schema)
+            for name, property_schema in properties.items()
+        }
+        required = source.get("required")
+        if required is not None:
+            if not isinstance(required, list) or any(
+                not isinstance(item, str) for item in required
+            ):
+                raise ValueError("structured output schema required must be a string array")
+            projected["required"] = list(required)
+        projected["additionalProperties"] = False
+    elif schema_type == "array":
+        items = source.get("items")
+        if items is None:
+            raise ValueError("structured output array schema requires items")
+        projected["items"] = anthropic_compatible_output_schema(items)
+    elif schema_type == "string":
+        string_format = source.get("format")
+        if string_format in _ANTHROPIC_SUPPORTED_STRING_FORMATS:
+            projected["format"] = string_format
+
+    Draft202012Validator.check_schema(projected)
+    return projected
+
+
+def anthropic_output_schema_sha256(schema: Mapping[str, Any]) -> str:
+    """Hash the exact schema projection sent to Anthropic."""
+
+    return _canonical_schema_sha256(anthropic_compatible_output_schema(schema))
 
 
 class ClaudeTransport(Protocol):
@@ -1513,14 +1638,16 @@ class ClaudeDocumentAnalyzer:
                 "The Agentic context must be one structured object.",
             )
         prompt_sha256 = hashlib.sha256(system_prompt.encode("utf-8")).hexdigest()
-        schema_bytes = json.dumps(
-            output_schema,
-            ensure_ascii=True,
-            allow_nan=False,
-            separators=(",", ":"),
-            sort_keys=True,
-        ).encode("utf-8")
-        output_schema_sha256 = hashlib.sha256(schema_bytes).hexdigest()
+        try:
+            Draft202012Validator.check_schema(output_schema)
+            provider_output_schema = anthropic_compatible_output_schema(output_schema)
+        except (SchemaError, TypeError, ValueError) as exc:
+            raise LLMConfigurationError(
+                "agentic_output_schema_invalid",
+                "The Agentic output schema cannot be projected safely.",
+            ) from exc
+        semantic_output_schema_sha256 = _canonical_schema_sha256(output_schema)
+        output_schema_sha256 = _canonical_schema_sha256(provider_output_schema)
         envelope = json.dumps(
             {
                 "protocol": f"{task_id}_input/v1",
@@ -1539,7 +1666,7 @@ class ClaudeDocumentAnalyzer:
             max_tokens=min(max_tokens, self._settings.max_tokens),
             system_prompt=system_prompt,
             user_message=envelope,
-            output_schema=output_schema,
+            output_schema=provider_output_schema,
         )
         try:
             value = json.loads(transport_result.text)
@@ -1565,6 +1692,7 @@ class ClaudeDocumentAnalyzer:
             model_id=transport_result.model,
             prompt_sha256=prompt_sha256,
             output_schema_sha256=output_schema_sha256,
+            semantic_output_schema_sha256=semantic_output_schema_sha256,
             request_id=transport_result.request_id,
             message_id=transport_result.message_id,
             input_tokens=transport_result.input_tokens,

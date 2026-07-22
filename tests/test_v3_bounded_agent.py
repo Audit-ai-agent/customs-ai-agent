@@ -19,6 +19,7 @@ from customs_ai_agent.agentic import (
     _rewrite_grounded_answer,
     _rewrite_report,
     activate_bounded_plan,
+    agentic_semantic_schema_hashes,
     answer_grounded_question,
     build_fact_ledger,
     claude_narrative,
@@ -28,7 +29,11 @@ from customs_ai_agent.agentic import (
     to_review_run_result_v3,
     verified_requirement_codes_by_item,
 )
-from customs_ai_agent.adapters.llm import StructuredAgenticResult
+from customs_ai_agent.adapters.llm import (
+    StructuredAgenticResult,
+    anthropic_compatible_output_schema,
+    anthropic_output_schema_sha256,
+)
 from customs_ai_agent.fixtures.scenarios import get_scenario
 from customs_ai_agent.runner import run_review_result_v2, run_review_v2, to_review_run_result_v2
 from customs_ai_agent.schemas.models import (
@@ -408,6 +413,7 @@ def test_narrative_renderer_rejects_model_authored_text_and_citations() -> None:
         model_id="claude-test",
         prompt_sha256="a" * 64,
         output_schema_sha256="b" * 64,
+        semantic_output_schema_sha256=agentic_semantic_schema_hashes()["narrative"],
         request_id="request-1",
         message_id="message-1",
         input_tokens=10,
@@ -440,6 +446,7 @@ def test_narrative_renderer_accepts_only_typed_code_owned_frame_and_exact_citati
         model_id="claude-test",
         prompt_sha256="a" * 64,
         output_schema_sha256="b" * 64,
+        semantic_output_schema_sha256=agentic_semantic_schema_hashes()["narrative"],
         request_id="request-1",
         message_id="message-1",
         input_tokens=10,
@@ -500,6 +507,7 @@ def test_claude_narrative_boundary_accepts_only_frame_selections() -> None:
                 model_id="claude-test",
                 prompt_sha256="a" * 64,
                 output_schema_sha256="b" * 64,
+                semantic_output_schema_sha256=agentic_semantic_schema_hashes()["narrative"],
                 request_id="request-narrative-frame",
                 message_id="message-narrative-frame",
                 input_tokens=10,
@@ -523,6 +531,48 @@ def test_claude_narrative_boundary_accepts_only_frame_selections() -> None:
             rendered.text.endswith(source.text)
             for rendered, source in zip(rendered_claims, canonical_claims, strict=True)
         )
+
+
+def test_all_agentic_tasks_bind_provider_projection_and_strict_semantic_identity() -> None:
+    import customs_ai_agent.agentic as agentic
+
+    _request_value, _result_v2, result = _v3_result()
+    schemas = {
+        "coordinator": agentic._COORDINATOR_OUTPUT_SCHEMA,
+        "narrative": agentic._NARRATIVE_OUTPUT_SCHEMA,
+        "chat": agentic._ANSWER_OUTPUT_SCHEMA,
+    }
+    runtime_hashes = {
+        "coordinator": result.runtime_release.coordinator_schema_sha256,
+        "narrative": result.runtime_release.narrative_schema_sha256,
+        "chat": result.runtime_release.chat_schema_sha256,
+    }
+    forbidden = {
+        "pattern",
+        "minLength",
+        "maxLength",
+        "minItems",
+        "maxItems",
+        "uniqueItems",
+        "minimum",
+        "maximum",
+    }
+
+    def keywords(value):
+        if isinstance(value, dict):
+            for key, nested in value.items():
+                yield key
+                yield from keywords(nested)
+        elif isinstance(value, list):
+            for nested in value:
+                yield from keywords(nested)
+
+    semantic_hashes = agentic_semantic_schema_hashes()
+    for task, strict_schema in schemas.items():
+        provider_schema = anthropic_compatible_output_schema(strict_schema)
+        assert forbidden.isdisjoint(keywords(provider_schema))
+        assert runtime_hashes[task] == anthropic_output_schema_sha256(strict_schema)
+        assert runtime_hashes[task] != semantic_hashes[task]
 
 
 def test_invalid_narrative_and_chat_each_make_exactly_two_claude_calls_then_fallback() -> None:
@@ -551,6 +601,11 @@ def test_invalid_narrative_and_chat_each_make_exactly_two_claude_calls_then_fall
                     if task_id == "customs_case_answer"
                     else "b" * 64
                 ),
+                semantic_output_schema_sha256=agentic_semantic_schema_hashes()[
+                    "chat"
+                    if task_id == "customs_case_answer"
+                    else ("coordinator" if task_id == "customs_review_coordinator" else "narrative")
+                ],
                 request_id=f"request-{task_id}-{self.calls[task_id]}",
                 message_id=f"message-{task_id}-{self.calls[task_id]}",
                 input_tokens=10,
@@ -621,6 +676,7 @@ def test_case_answer_renderer_selects_frames_but_code_owns_text_and_citations() 
         model_id=result.runtime_release.model_id,
         prompt_sha256=result.runtime_release.chat_prompt_sha256,
         output_schema_sha256=result.runtime_release.chat_schema_sha256,
+        semantic_output_schema_sha256=agentic_semantic_schema_hashes()["chat"],
         request_id="request-answer-frame",
         message_id="message-answer-frame",
         input_tokens=10,
@@ -697,6 +753,7 @@ def test_case_answer_boundary_accepts_only_frame_selections() -> None:
                 model_id=result.runtime_release.model_id,
                 prompt_sha256=result.runtime_release.chat_prompt_sha256,
                 output_schema_sha256=result.runtime_release.chat_schema_sha256,
+                semantic_output_schema_sha256=agentic_semantic_schema_hashes()["chat"],
                 request_id="request-answer-boundary",
                 message_id="message-answer-boundary",
                 input_tokens=10,
@@ -728,6 +785,9 @@ def _active_profile() -> SimpleNamespace:
         coordinator_schema_sha256="d" * 64,
         narrative_schema_sha256="e" * 64,
         chat_schema_sha256="f" * 64,
+        coordinator_semantic_schema_sha256="1" * 64,
+        narrative_semantic_schema_sha256="2" * 64,
+        chat_semantic_schema_sha256="3" * 64,
         request_schema_sha256="5" * 64,
         result_schema_sha256="6" * 64,
         policy_id="bounded-adaptive-customs-review/v1",
@@ -979,6 +1039,9 @@ def test_agent_runtime_service_entry_executes_authorized_evidence_recovery(
         coordinator_schema_sha256="d" * 64,
         narrative_schema_sha256="e" * 64,
         chat_schema_sha256="f" * 64,
+        coordinator_semantic_schema_sha256="1" * 64,
+        narrative_semantic_schema_sha256="2" * 64,
+        chat_semantic_schema_sha256="3" * 64,
         request_schema_sha256="5" * 64,
         result_schema_sha256="6" * 64,
         policy_id="bounded-adaptive-customs-review/v1",
@@ -1144,6 +1207,10 @@ def test_actual_llm_uncalibrated_state_bootstraps_only_through_signed_code_owned
         "tool_registry_id",
     ):
         setattr(profile, name, getattr(identity, name))
+    semantic_hashes = agentic.agentic_semantic_schema_hashes()
+    profile.coordinator_semantic_schema_sha256 = semantic_hashes["coordinator"]
+    profile.narrative_semantic_schema_sha256 = semantic_hashes["narrative"]
+    profile.chat_semantic_schema_sha256 = semantic_hashes["chat"]
     from customs_ai_agent.contracts import schema_sha256
 
     profile.request_schema_sha256 = schema_sha256("backend", "v3", "review-request")

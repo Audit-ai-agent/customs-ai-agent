@@ -9,7 +9,7 @@ from __future__ import annotations
 
 from dataclasses import dataclass
 
-from customs_ai_agent.agentic import runtime_release_identity
+from customs_ai_agent.agentic import agentic_semantic_schema_hashes, runtime_release_identity
 from customs_ai_agent.contracts import schema_sha256
 from customs_ai_agent.contracts.evidence_runtime_release import (
     EvidenceRuntimeReleaseLockError,
@@ -105,6 +105,18 @@ def assert_production_release_admission(
         (profile.coordinator_schema_sha256, runtime.coordinator_schema_sha256),
         (profile.narrative_schema_sha256, runtime.narrative_schema_sha256),
         (profile.chat_schema_sha256, runtime.chat_schema_sha256),
+        (
+            profile.coordinator_semantic_schema_sha256,
+            agentic_semantic_schema_hashes()["coordinator"],
+        ),
+        (
+            profile.narrative_semantic_schema_sha256,
+            agentic_semantic_schema_hashes()["narrative"],
+        ),
+        (
+            profile.chat_semantic_schema_sha256,
+            agentic_semantic_schema_hashes()["chat"],
+        ),
         (profile.request_schema_sha256, schema_sha256("backend", "v3", "review-request")),
         (profile.result_schema_sha256, runtime.result_schema_sha256),
         (profile.policy_id, runtime.policy_id),

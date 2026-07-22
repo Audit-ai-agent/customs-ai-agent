@@ -23,6 +23,9 @@ def _profile() -> SimpleNamespace:
         coordinator_schema_sha256="6" * 64,
         narrative_schema_sha256="7" * 64,
         chat_schema_sha256="8" * 64,
+        coordinator_semantic_schema_sha256="b" * 64,
+        narrative_semantic_schema_sha256="c" * 64,
+        chat_semantic_schema_sha256="d" * 64,
         request_schema_sha256="9" * 64,
         result_schema_sha256="a" * 64,
         policy_id="policy/v1",
@@ -69,6 +72,15 @@ def _admitted_dependencies(monkeypatch: pytest.MonkeyPatch) -> SimpleNamespace:
     monkeypatch.setattr(admission, "load_released_evidence_runtime_identity", lambda: base)
     monkeypatch.setattr(admission, "load_released_evidence_runtime_identity_v3", lambda: v3)
     monkeypatch.setattr(admission, "load_release_profile", lambda: profile)
+    monkeypatch.setattr(
+        admission,
+        "agentic_semantic_schema_hashes",
+        lambda: {
+            "coordinator": profile.coordinator_semantic_schema_sha256,
+            "narrative": profile.narrative_semantic_schema_sha256,
+            "chat": profile.chat_semantic_schema_sha256,
+        },
+    )
     monkeypatch.setattr(
         admission,
         "load_assertion_trust_store",
