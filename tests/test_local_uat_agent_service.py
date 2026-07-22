@@ -165,12 +165,44 @@ def test_diagnostic_runtime_structurally_forces_human_review() -> None:
 
     assert observed.assurance_level == "diagnostic"
     assert observed.review_disposition == "human_review_required"
-    assert observed.status == "needs_review"
-    assert observed.requires_human_review is True
-    assert observed.report.overall_status == "needs_review"
+    assert observed.status == result.status
+    assert observed.requires_human_review is result.requires_human_review
+    assert observed.report.overall_status == result.report.overall_status
     assert observed.completion_eligibility.eligible is False
     assert "local_uat_non_release" in observed.completion_eligibility.unmet_reason_codes
     assert observed.result_sha256 != result.result_sha256
+
+
+def test_diagnostic_runtime_refuses_to_reframe_a_release_approved_narrative() -> None:
+    _request, result = _result()
+    release_approved = result.model_copy(
+        update={
+            "completion_eligibility": result.completion_eligibility.model_copy(
+                update={
+                    "eligible": True,
+                    "profile_id": "release-approved-test",
+                    "unmet_reason_codes": [],
+                }
+            ),
+            "review_disposition": "auto_review_complete",
+        }
+    )
+
+    class Core:
+        def review_v3_json(self, _payload: bytes) -> Any:
+            return release_approved
+
+        def close(self) -> None:
+            return None
+
+    runtime = LocalUatDiagnosticRuntime(
+        Core(),  # type: ignore[arg-type]
+        object(),  # type: ignore[arg-type]
+        model_id="claude-sonnet-5",
+    )
+    with pytest.raises(RuntimeExecutionError) as captured:
+        runtime.review_v3_json(b"{}")
+    assert captured.value.code == "uat_release_result_forbidden"
 
 
 def test_diagnostic_retriever_never_reads_or_patches_production_identity_loader(

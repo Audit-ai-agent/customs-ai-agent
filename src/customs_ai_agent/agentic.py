@@ -57,6 +57,16 @@ from customs_ai_agent.schemas.v3 import (
     stable_object_id,
 )
 from customs_ai_agent.assertion_trust import load_assertion_trust_store
+from customs_ai_agent.v3_semantics import (
+    ACTIVE_FAILURE_REASON_CODES,
+    SAFE_CLAIM_FRAMES,
+    allowed_framed_claim_texts,
+    citable_regulatory_evidence_ids,
+    expected_required_actions,
+    has_citable_regulatory_evidence,
+    reconstruct_v3_current_semantics,
+    render_framed_claim,
+)
 
 
 AGENT_POLICY_ID = "bounded-adaptive-customs-review/v1"
@@ -787,7 +797,11 @@ def deterministic_narrative(
     outcome_citation = [_citation("outcome", facts.outcome_reference)]
     if result.validation_issues or result.regulatory_findings:
         summary_text = "문서 또는 규정 검토에서 담당자 확인이 필요한 항목이 발견되었습니다."
-    elif result.retrieval_status == "ok" and result.retrieval_coverage == "complete":
+    elif (
+        result.retrieval_status == "ok"
+        and result.retrieval_coverage == "complete"
+        and has_citable_regulatory_evidence(result)
+    ):
         summary_text = "현재 검토 범위에서 문서 불일치와 미충족 규정 요건이 발견되지 않았습니다."
     else:
         summary_text = "규정 근거가 완전하지 않아 자동 사전심사를 확정할 수 없습니다."
@@ -807,6 +821,7 @@ def deterministic_narrative(
         )
 
     regulatory_review: list[NarrativeClaimV1] = []
+    citable_evidence_ids = citable_regulatory_evidence_ids(result)
     for finding, reference_id in zip(
         result.regulatory_findings,
         facts.finding_references,
@@ -816,11 +831,11 @@ def deterministic_narrative(
         citations.extend(_citation("evidence", evidence_id) for evidence_id in finding.evidence_ids)
         regulatory_review.append(_claim(f"{finding.finding_code}: {finding.message}", citations))
     if not regulatory_review:
-        if facts.evidence_references:
+        if citable_evidence_ids:
             regulatory_review.append(
                 _claim(
                     "조회된 규정 근거 범위에서 별도의 미충족 요건 Finding이 생성되지 않았습니다.",
-                    [_citation("evidence", facts.evidence_references[0])],
+                    [_citation("evidence", citable_evidence_ids[0])],
                 )
             )
         else:
@@ -873,35 +888,6 @@ def _call_audit(task_id: str, call: StructuredAgenticResult) -> AgenticCallAudit
     )
 
 
-_SAFE_CLAIM_FRAMES: dict[str, dict[str, str]] = {
-    "summary": {
-        "plain": "",
-        "summary_brief": "요약하면, ",
-        "summary_label": "사전심사 요약: ",
-    },
-    "document_consistency": {
-        "plain": "",
-        "document_result": "문서 정합성 확인 결과, ",
-        "document_review": "문서 검토 결과: ",
-    },
-    "regulatory_review": {
-        "plain": "",
-        "regulatory_result": "규정 근거 검토 결과, ",
-        "regulatory_review": "규정 검토 결과: ",
-    },
-    "required_actions": {
-        "plain": "",
-        "action_brief": "필요 조치: ",
-        "action_owner": "담당자 조치 사항: ",
-    },
-    "answer": {
-        "plain": "",
-        "answer_grounded": "확인된 Case 근거에 따르면, ",
-        "answer_evidence": "근거 확인 결과: ",
-    },
-}
-
-
 def _render_grounded_claim(canonical: str, frame: str, *, section: str) -> str:
     """Render a code-owned claim from Claude's bounded presentation choice.
 
@@ -910,13 +896,7 @@ def _render_grounded_claim(canonical: str, frame: str, *, section: str) -> str:
     projected from the canonical code-owned claim after strict identity checks.
     """
 
-    frames = _SAFE_CLAIM_FRAMES.get(section)
-    if not canonical.strip() or frames is None or frame not in frames:
-        raise ValueError("claim frame is not allowed for the declared section")
-    rendered = f"{frames[frame]}{canonical}"
-    if len(rendered) > 4000:
-        raise ValueError("rendered canonical claim exceeds the wire limit")
-    return rendered
+    return render_framed_claim(canonical, frame, section=section)
 
 
 def _rewrite_report(
@@ -990,7 +970,7 @@ def claude_narrative(
             "section": section,
             "source_claim_id": claim.claim_id,
             "canonical_text": claim.text,
-            "allowed_frames": list(_SAFE_CLAIM_FRAMES[section]),
+            "allowed_frames": list(SAFE_CLAIM_FRAMES[section]),
         }
         for section in _NARRATIVE_SECTIONS
         for claim in getattr(canonical, section)
@@ -1014,49 +994,22 @@ def claude_narrative(
 
 def _required_actions(
     result: ReviewRunResultV2,
-    facts: _FactIndex,
     *,
     supporting_rejections: list[str],
     release_approved: bool,
+    active_failure_codes: list[str],
 ) -> list[RequiredActionV1]:
-    actions: list[RequiredActionV1] = []
-    for issue, reference_id in zip(result.validation_issues, facts.issue_references, strict=True):
-        actions.append(
-            RequiredActionV1(
-                action_code=f"resolve_{issue.issue_code.casefold()}",
-                message=issue.message,
-                source_reference_ids=[reference_id],
-            )
+    semantics = reconstruct_v3_current_semantics(result)
+    return [
+        RequiredActionV1.model_validate(item)
+        for item in expected_required_actions(
+            result,
+            semantics,
+            completion_eligible=release_approved,
+            supporting_verification_incomplete=bool(supporting_rejections),
+            active_failure_codes=active_failure_codes,
         )
-    for finding, reference_id in zip(
-        result.regulatory_findings,
-        facts.finding_references,
-        strict=True,
-    ):
-        actions.append(
-            RequiredActionV1(
-                action_code=f"resolve_{finding.finding_code.casefold()}",
-                message=finding.message,
-                source_reference_ids=[reference_id, *finding.evidence_ids],
-            )
-        )
-    if not release_approved:
-        actions.append(
-            RequiredActionV1(
-                action_code="obtain_production_release_approval",
-                message="Claude extraction과 법령 범위에 대한 독립 검수 및 Release 승인이 필요합니다.",
-                source_reference_ids=[facts.outcome_reference],
-            )
-        )
-    for reason_code in supporting_rejections:
-        actions.append(
-            RequiredActionV1(
-                action_code="verify_supporting_document",
-                message=reason_code,
-                source_reference_ids=[facts.outcome_reference],
-            )
-        )
-    return actions
+    ]
 
 
 def activate_bounded_plan(
@@ -1566,6 +1519,12 @@ def automatic_completion_unmet_reason_codes(
         reasons.add("evidence_runtime_v3_unreleased")
     if result.retrieval_status != "ok" or result.retrieval_coverage != "complete":
         reasons.add("evidence_not_complete")
+    if not has_citable_regulatory_evidence(result):
+        # A successful transport/coverage response is not itself affirmative
+        # regulatory Evidence.  Until Data publishes a separately verified
+        # no-requirement negative assertion, zero citable records cannot
+        # authorize automatic completion.
+        reasons.add("evidence_citation_missing")
     if supporting_rejections:
         reasons.add("supporting_document_verification_incomplete")
     if require_completed_outcome and (result.status != "completed" or result.requires_human_review):
@@ -1638,6 +1597,7 @@ _ADAPTIVE_RECOVERABLE_RELEASE_REASONS = frozenset(
         # but do not grant Claude authority over Outcome or severity.  Every
         # immutable release/scope/model-call identity reason remains blocking.
         "claude_extraction_not_release_clean",
+        "evidence_citation_missing",
         "evidence_not_complete",
         "material_issue_or_finding_present",
         "supporting_document_verification_incomplete",
@@ -1771,15 +1731,18 @@ def to_review_run_result_v3(
             plan = claude_shadow_plan(analyzer, gaps)
         except (LLMError, ValueError):
             plan = compile_shadow_plan(gaps)
+    observed_coordinator_blockers = _coordinator_identity_blockers(plan, runtime_release)
+    if plan.provider == "anthropic" and observed_coordinator_blockers:
+        # A non-release run may still call Claude, but a call outside the exact
+        # runtime identity cannot be published as Anthropic-authored audit.
+        plan = compile_shadow_plan(gaps)
     adaptive_authorized = _adaptive_execution_authorized(
         result,
         request,
         runtime_release,
         supporting_rejections=rejection_codes,
     )
-    coordinator_blockers = (
-        _coordinator_identity_blockers(plan, runtime_release) if adaptive_authorized else []
-    )
+    coordinator_blockers = observed_coordinator_blockers if adaptive_authorized else []
     eligibility = _with_release_identity_blockers(eligibility, coordinator_blockers)
     gaps.extend(
         _gap("release_gate", reason_code, (facts.outcome_reference,))
@@ -1857,6 +1820,16 @@ def to_review_run_result_v3(
                     {gap.gap_id: gap for gap in [*historical, *final_gaps]}.values(),
                     key=lambda item: item.gap_id,
                 )
+    active_failure_codes = sorted(
+        {
+            (
+                reason_code
+                if isinstance(reason_code, str) and reason_code in ACTIVE_FAILURE_REASON_CODES
+                else "active_bounded_execution_failed"
+            )
+            for reason_code in active_failure_codes
+        }
+    )
     for reason_code in sorted(set(active_failure_codes)):
         gaps.append(
             _gap(
@@ -1873,12 +1846,15 @@ def to_review_run_result_v3(
         # deterministic report remains the fail-closed public fallback.
         for _attempt in range(2):
             try:
-                narrative, narrative_call = claude_narrative(
+                candidate_narrative, candidate_call = claude_narrative(
                     analyzer,
                     result,
                     facts,
                     release_approved=eligibility.eligible,
                 )
+                if _narrative_identity_blockers(candidate_narrative, runtime_release):
+                    continue
+                narrative, narrative_call = candidate_narrative, candidate_call
                 break
             except (LLMError, ValueError):
                 continue
@@ -1917,23 +1893,19 @@ def to_review_run_result_v3(
         )
     if result.validation_issues or result.regulatory_findings:
         assessment = "issues_detected"
-    elif result.retrieval_status == "ok" and result.retrieval_coverage == "complete":
+    elif (
+        result.retrieval_status == "ok"
+        and result.retrieval_coverage == "complete"
+        and has_citable_regulatory_evidence(result)
+    ):
         assessment = "no_issue_detected"
     else:
         assessment = "indeterminate"
     required_actions = _required_actions(
         result,
-        facts,
         supporting_rejections=rejection_codes,
         release_approved=eligibility.eligible,
-    )
-    required_actions.extend(
-        RequiredActionV1(
-            action_code=reason_code,
-            message="제한된 Agent 조사를 완료하지 못해 사람 검토가 필요합니다.",
-            source_reference_ids=[facts.outcome_reference],
-        )
-        for reason_code in sorted(set(active_failure_codes))
+        active_failure_codes=active_failure_codes,
     )
     payload = result.model_dump(mode="python", warnings=False)
     payload.update(
@@ -2212,6 +2184,61 @@ def _rewrite_grounded_answer(
     )
 
 
+def validate_grounded_answer_projection(
+    question: GroundedQuestionV1,
+    answer: GroundedAnswerV1,
+) -> GroundedAnswerV1:
+    """Validate a Case answer against its code-owned question/result projection.
+
+    ``GroundedAnswerV1`` alone intentionally carries no duplicate ReviewResult.
+    Therefore the service boundary (and Backend consumer) must validate the
+    answer together with the exact ``GroundedQuestionV1`` request.
+    """
+
+    plan = _deterministic_grounded_answer_plan(question)
+    canonical = _render_answer_plan(question.question_id, plan)
+    if answer.question_id != question.question_id or answer.status != canonical.status:
+        raise ValueError("Case answer identity and status must match the canonical plan")
+    if answer.citations != canonical.citations:
+        raise ValueError("Case answer citations must exactly match the canonical plan")
+    if plan.status != "answered":
+        if (
+            answer.generation_mode != "deterministic_fallback"
+            or answer.model_call is not None
+            or answer.answer != canonical.answer
+        ):
+            raise ValueError("refused Case answer must use the exact deterministic response")
+        return answer
+
+    rendered_claims = answer.answer.split("\n")
+    if len(rendered_claims) != len(plan.claims):
+        raise ValueError("Case answer must cover every canonical claim exactly once")
+    if answer.generation_mode == "deterministic_fallback":
+        if rendered_claims != [claim.text for claim in plan.claims]:
+            raise ValueError("deterministic Case answer must use exact canonical claim text")
+        return answer
+
+    call = answer.model_call
+    runtime_release = question.review_result.runtime_release
+    if (
+        call is None
+        or call.task_id != "customs_case_answer"
+        or call.provider != "anthropic"
+        or call.model_id != runtime_release.model_id
+        or call.prompt_sha256 != runtime_release.chat_prompt_sha256
+        or call.output_schema_sha256 != runtime_release.chat_schema_sha256
+        or call.input_tokens <= 0
+        or call.output_tokens <= 0
+    ):
+        raise ValueError("Claude Case answer requires exact runtime release identity")
+    if any(
+        rendered not in allowed_framed_claim_texts("answer", source.text)
+        for rendered, source in zip(rendered_claims, plan.claims, strict=True)
+    ):
+        raise ValueError("Claude Case answer must use code-owned claim frames")
+    return answer
+
+
 def answer_grounded_question(
     question: GroundedQuestionV1,
     *,
@@ -2220,14 +2247,14 @@ def answer_grounded_question(
     plan = _deterministic_grounded_answer_plan(question)
     fallback = _deterministic_grounded_answer(question)
     if analyzer is None or fallback.status != "answered":
-        return fallback
+        return validate_grounded_answer_projection(question, fallback)
     context = {
         "question": question.question,
         "canonical_claims": [
             {
                 "source_claim_id": claim.claim_id,
                 "canonical_text": claim.text,
-                "allowed_frames": list(_SAFE_CLAIM_FRAMES["answer"]),
+                "allowed_frames": list(SAFE_CLAIM_FRAMES["answer"]),
             }
             for claim in plan.claims
         ],
@@ -2250,15 +2277,16 @@ def answer_grounded_question(
                 or call.semantic_output_schema_sha256 != agentic_semantic_schema_hashes()["chat"]
             ):
                 raise ValueError("Case answer release identity mismatch")
-            return _rewrite_grounded_answer(
+            answer = _rewrite_grounded_answer(
                 plan,
                 call.value.get("claims"),
                 question_id=question.question_id,
                 call=call,
             )
+            return validate_grounded_answer_projection(question, answer)
         except (LLMError, ValueError):
             continue
-    return fallback
+    return validate_grounded_answer_projection(question, fallback)
 
 
 def verified_requirement_codes_by_item(
@@ -2403,4 +2431,5 @@ __all__ = [
     "runtime_release_identity",
     "to_review_run_result_v3",
     "verified_requirement_codes_by_item",
+    "validate_grounded_answer_projection",
 ]

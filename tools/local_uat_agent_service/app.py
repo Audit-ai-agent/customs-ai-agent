@@ -24,7 +24,7 @@ from fastapi.responses import JSONResponse
 
 from customs_ai_agent.adapters.llm import ClaudeDocumentAnalyzer, ClaudeSettings
 from customs_ai_agent.contracts.evidence_v3 import EvidenceRuntimeReleaseIdentityV3
-from customs_ai_agent.runtime import AgentRuntime, RuntimeInputError
+from customs_ai_agent.runtime import AgentRuntime, RuntimeExecutionError, RuntimeInputError
 from customs_ai_agent.schemas.v3 import (
     ReviewRevisionResultV1,
     ReviewRunResultV3,
@@ -276,6 +276,18 @@ def local_uat_service_settings(
 def _diagnostic_result(result: ReviewRunResultV3) -> ReviewRunResultV3:
     """Make non-Production assurance and automatic completion structural."""
 
+    prior_reasons = set(result.completion_eligibility.unmet_reason_codes)
+    if result.completion_eligibility.eligible or prior_reasons == {
+        "narrative_release_identity_incomplete"
+    }:
+        # Reframing a release-approved narrative after generation would require
+        # recompiling its canonical claims, trace outputs, and result lineage.
+        # This diagnostic adapter has no such authority and therefore refuses
+        # that state rather than emitting a self-contradictory result.
+        raise RuntimeExecutionError(
+            "uat_release_result_forbidden",
+            "LOCAL UAT accepts only an already non-release review result.",
+        )
     payload = result.model_dump(mode="python", warnings=False)
     eligibility = dict(payload["completion_eligibility"])
     eligibility.update(
@@ -291,13 +303,11 @@ def _diagnostic_result(result: ReviewRunResultV3) -> ReviewRunResultV3:
     payload["assurance_level"] = "diagnostic"
     if payload["review_disposition"] != "blocked":
         payload["review_disposition"] = "human_review_required"
-        # Keep the inherited V2 compatibility fields semantically aligned so
-        # older Backend/UI projections cannot mistake a diagnostic result for
-        # a completed review merely by ignoring the V3 disposition.
-        payload["status"] = "needs_review"
-        payload["requires_human_review"] = True
-        payload["report"] = dict(payload["report"])
-        payload["report"]["overall_status"] = "needs_review"
+        # V1/V2 fields are an immutable provider-owned review projection.  A
+        # diagnostic overlay must not rewrite those facts after the canonical
+        # FactLedger, Gap plan, action trace, and narrative were built.  V3's
+        # assurance, eligibility, and disposition are the sole authorization
+        # boundary consumed by the LOCAL UAT workspace.
     payload["result_sha256"] = "0" * 64
     payload["result_sha256"] = review_result_v3_sha256(payload)
     return ReviewRunResultV3.model_validate(payload)

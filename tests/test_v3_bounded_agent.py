@@ -27,6 +27,7 @@ from customs_ai_agent.agentic import (
     deterministic_narrative,
     execute_active_bounded_plan,
     to_review_run_result_v3,
+    validate_grounded_answer_projection,
     verified_requirement_codes_by_item,
 )
 from customs_ai_agent.adapters.llm import (
@@ -40,9 +41,11 @@ from customs_ai_agent.schemas.models import (
     ReviewRunRequestV2,
     ServiceReviewRunRequestV2,
     UserCorrection,
+    stable_evidence_id,
 )
 from customs_ai_agent.schemas.v3 import (
     FactLedgerV1,
+    GroundedAnswerV1,
     GroundedQuestionV1,
     HumanDecisionV1,
     ReviewRunResultV3,
@@ -54,6 +57,11 @@ from customs_ai_agent.schemas.v3 import (
     canonical_json_sha256,
     review_result_v3_sha256,
     stable_object_id,
+)
+from customs_ai_agent.v3_semantics import (
+    SUPPORTING_DOCUMENT_ACTION_MESSAGE,
+    expected_narrative_claims,
+    reconstruct_v3_current_semantics,
 )
 
 
@@ -415,6 +423,17 @@ def _refresh_fact_identity(entry: dict) -> None:
     entry["source_sha256"] = canonical_json_sha256(canonical)
 
 
+def _refresh_claim_id(claim: dict) -> None:
+    claim["claim_id"] = stable_object_id(
+        "claim",
+        {
+            "text": claim["text"],
+            "material": claim["material"],
+            "citations": claim["citations"],
+        },
+    )
+
+
 def _clean_auto_complete_result() -> ReviewRunResultV3:
     _request_value, _result_v2, result = _v3_result()
     payload = result.model_dump(mode="python")
@@ -454,6 +473,11 @@ def _clean_auto_complete_result() -> ReviewRunResultV3:
             "kill_switch_active": False,
         }
     )
+    payload["narrative_report"] = deterministic_narrative(
+        _result_v2,
+        build_fact_ledger(_result_v2),
+        release_approved=True,
+    ).model_dump(mode="python")
     payload["narrative_report"].update(
         {
             "generation_mode": "claude",
@@ -762,7 +786,7 @@ def test_v3_tool_inputs_are_bound_to_allowed_fact_kinds() -> None:
     field_reread["fact_ledger"]["ledger_id"] = stable_object_id(
         "ledger", field_reread["fact_ledger"]["entries"]
     )
-    with pytest.raises(ValidationError, match="field-source facts"):
+    with pytest.raises(ValidationError, match="current FactLedger must be exactly reconstructed"):
         _validate_tampered_v3_result(field_reread)
 
     evidence_retry = _resolved_field_auto_complete_payload()
@@ -815,6 +839,381 @@ def test_v3_rejects_noncanonical_fact_gap_action_and_observation_ids() -> None:
     observation_tamper["observations"][0]["observation_id"] = "observation_" + "f" * 64
     with pytest.raises(ValidationError, match="Tool observation ID does not match"):
         _validate_tampered_v3_result(observation_tamper)
+
+
+@pytest.mark.parametrize("fact_kind", ["field_source", "evidence", "outcome"])
+def test_v3_rejects_self_consistently_rehashed_forged_current_fact(
+    fact_kind: str,
+) -> None:
+    payload = _clean_auto_complete_result().model_dump(mode="python")
+    fact = next(item for item in payload["fact_ledger"]["entries"] if item["kind"] == fact_kind)
+    fact["value"] = "forged-current-fact"
+    _refresh_fact_identity(fact)
+    payload["fact_ledger"]["ledger_id"] = stable_object_id(
+        "ledger", payload["fact_ledger"]["entries"]
+    )
+
+    with pytest.raises(ValidationError, match="exactly reconstructed from the V2"):
+        _validate_tampered_v3_result(payload)
+
+
+def test_v3_rejects_rehashed_false_outcome_fact_and_material_claim() -> None:
+    payload = _clean_auto_complete_result().model_dump(mode="python")
+    outcome = next(item for item in payload["fact_ledger"]["entries"] if item["kind"] == "outcome")
+    outcome["value"] = "세관의 최종 통관 승인이 완료되었습니다."
+    _refresh_fact_identity(outcome)
+    payload["fact_ledger"]["ledger_id"] = stable_object_id(
+        "ledger", payload["fact_ledger"]["entries"]
+    )
+    summary_claim = payload["narrative_report"]["summary"][0]
+    summary_claim["text"] = "세관의 최종 통관 승인이 완료되었습니다."
+    _refresh_claim_id(summary_claim)
+
+    with pytest.raises(ValidationError, match="exactly reconstructed from the V2"):
+        _validate_tampered_v3_result(payload)
+
+
+def test_v3_rejects_rehashed_arbitrary_narrative_text_citation_and_section() -> None:
+    result = _clean_auto_complete_result()
+    arbitrary_text = result.model_dump(mode="python")
+    summary_claim = arbitrary_text["narrative_report"]["summary"][0]
+    summary_claim["text"] = "세관이 통관을 최종 승인했습니다."
+    _refresh_claim_id(summary_claim)
+    with pytest.raises(ValidationError, match="code-owned text frames and exact citations"):
+        _validate_tampered_v3_result(arbitrary_text)
+
+    wrong_citation = result.model_dump(mode="python")
+    field_fact = next(
+        item for item in wrong_citation["fact_ledger"]["entries"] if item["kind"] == "field_source"
+    )
+    document_claim = wrong_citation["narrative_report"]["document_consistency"][0]
+    document_claim["citations"] = [
+        {"kind": "field_source", "reference_id": field_fact["reference_id"]}
+    ]
+    _refresh_claim_id(document_claim)
+    with pytest.raises(ValidationError, match="code-owned text frames and exact citations"):
+        _validate_tampered_v3_result(wrong_citation)
+
+    wrong_section = result.model_dump(mode="python")
+    (
+        wrong_section["narrative_report"]["summary"],
+        wrong_section["narrative_report"]["document_consistency"],
+    ) = (
+        wrong_section["narrative_report"]["document_consistency"],
+        wrong_section["narrative_report"]["summary"],
+    )
+    with pytest.raises(ValidationError, match="code-owned text frames and exact citations"):
+        _validate_tampered_v3_result(wrong_section)
+
+
+def test_v3_release_approved_narrative_requires_exact_identity_blocker_singleton() -> None:
+    result = _clean_auto_complete_result()
+    _request_value, _result_v2, unreleased = _v3_result()
+    release_actions = [
+        item.model_dump(mode="python")
+        for item in unreleased.required_actions
+        if item.action_code == "obtain_production_release_approval"
+    ]
+    historical_fallback = result.model_dump(mode="python")
+    historical_fallback["review_disposition"] = "human_review_required"
+    historical_fallback["assurance_level"] = "production_candidate"
+    historical_fallback["completion_eligibility"] = {
+        "eligible": False,
+        "profile_id": None,
+        "scope": ["text", "KR"],
+        "unmet_reason_codes": ["narrative_release_identity_incomplete"],
+    }
+    historical_fallback["required_actions"] = release_actions
+    accepted = _validate_tampered_v3_result(historical_fallback)
+    assert accepted.completion_eligibility.unmet_reason_codes == [
+        "narrative_release_identity_incomplete"
+    ]
+
+    forged_extra_blocker = result.model_dump(mode="python")
+    forged_extra_blocker["review_disposition"] = "human_review_required"
+    forged_extra_blocker["assurance_level"] = "production_candidate"
+    forged_extra_blocker["completion_eligibility"] = {
+        "eligible": False,
+        "profile_id": None,
+        "scope": ["text", "KR"],
+        "unmet_reason_codes": [
+            "evidence_not_complete",
+            "narrative_release_identity_incomplete",
+        ],
+    }
+    forged_extra_blocker["required_actions"] = release_actions
+    with pytest.raises(ValidationError, match="code-owned text frames and exact citations"):
+        _validate_tampered_v3_result(forged_extra_blocker)
+
+
+def test_v3_deterministic_fallback_cannot_claim_a_claude_safe_frame() -> None:
+    _request_value, _result_v2, result = _v3_result()
+    payload = result.model_dump(mode="python")
+    assert payload["narrative_report"]["generation_mode"] == "deterministic_fallback"
+    claim = payload["narrative_report"]["summary"][0]
+    claim["text"] = f"요약하면, {claim['text']}"
+    _refresh_claim_id(claim)
+
+    with pytest.raises(ValidationError, match="code-owned text frames and exact citations"):
+        _validate_tampered_v3_result(payload)
+
+
+def test_v3_current_fact_with_reserved_label_prefix_is_not_misclassified_as_history() -> None:
+    result = _clean_auto_complete_result()
+    payload = result.model_dump(mode="python")
+    evidence_id = payload["rag_evidence"][0]["evidence_id"]
+    reserved_title = "investigation_input:official-evidence-title"
+    payload["rag_evidence"][0]["title"] = reserved_title
+    next(
+        item
+        for retrieval in payload["retrieval_results"]
+        for item in retrieval["evidence"]
+        if item["evidence_id"] == evidence_id
+    )["title"] = reserved_title
+    next(item for item in payload["report"]["rag_evidence"] if item["evidence_id"] == evidence_id)[
+        "title"
+    ] = reserved_title
+    evidence_fact = next(
+        item for item in payload["fact_ledger"]["entries"] if item["reference_id"] == evidence_id
+    )
+    evidence_fact["label"] = reserved_title
+    _refresh_fact_identity(evidence_fact)
+    payload["fact_ledger"]["ledger_id"] = stable_object_id(
+        "ledger", payload["fact_ledger"]["entries"]
+    )
+
+    accepted = _validate_tampered_v3_result(payload)
+    accepted_fact = next(
+        item for item in accepted.fact_ledger.entries if item.reference_id == evidence_id
+    )
+    assert accepted_fact.label == reserved_title
+
+
+def test_v3_zero_citable_evidence_can_never_auto_complete() -> None:
+    import customs_ai_agent.agentic as agentic
+
+    request, result_v2, result = _v3_result()
+    empty_evidence_v2 = result_v2.model_copy(update={"rag_evidence": []})
+    assert "evidence_citation_missing" in agentic.automatic_completion_unmet_reason_codes(
+        empty_evidence_v2,
+        request,
+        result.runtime_release,
+        supporting_rejections=[],
+    )
+    blocked_only_v2 = result_v2.model_copy(
+        update={
+            "rag_evidence": [
+                item.model_copy(update={"eligibility": "blocked"})
+                for item in result_v2.rag_evidence
+            ]
+        }
+    )
+    assert "evidence_citation_missing" in agentic.automatic_completion_unmet_reason_codes(
+        blocked_only_v2,
+        request,
+        result.runtime_release,
+        supporting_rejections=[],
+    )
+    assert (
+        deterministic_narrative(
+            empty_evidence_v2,
+            build_fact_ledger(empty_evidence_v2),
+        )
+        .summary[0]
+        .text
+        == "규정 근거가 완전하지 않아 자동 사전심사를 확정할 수 없습니다."
+    )
+
+    payload = _clean_auto_complete_result().model_dump(mode="python")
+    payload["rag_evidence"] = []
+    payload["report"]["rag_evidence"] = []
+    for retrieval in payload["retrieval_results"]:
+        retrieval["evidence"] = []
+        retrieval["requirements_found"] = False
+    payload["assessment"] = "indeterminate"
+    payload["fact_ledger"]["entries"] = [
+        item for item in payload["fact_ledger"]["entries"] if item["kind"] != "evidence"
+    ]
+    payload["fact_ledger"]["ledger_id"] = stable_object_id(
+        "ledger", payload["fact_ledger"]["entries"]
+    )
+    outcome = next(item for item in payload["fact_ledger"]["entries"] if item["kind"] == "outcome")
+    summary_claim = payload["narrative_report"]["summary"][0]
+    summary_claim["text"] = "규정 근거가 완전하지 않아 자동 사전심사를 확정할 수 없습니다."
+    _refresh_claim_id(summary_claim)
+    regulatory_claim = payload["narrative_report"]["regulatory_review"][0]
+    regulatory_claim["text"] = "인용 가능한 규정 근거가 없어 규정 판단을 보류합니다."
+    regulatory_claim["citations"] = [{"kind": "outcome", "reference_id": outcome["reference_id"]}]
+    _refresh_claim_id(regulatory_claim)
+
+    with pytest.raises(
+        ValidationError,
+        match="automatic review completion requires current Evidence-cited",
+    ):
+        _validate_tampered_v3_result(payload)
+
+
+def test_v3_narrative_skips_blocked_evidence_and_cites_first_citable_record() -> None:
+    _request_value, result_v2, _result = _v3_result()
+    supporting = result_v2.rag_evidence[0]
+    blocked_source_id = f"blocked:{supporting.source_record_id}"
+    blocked = supporting.model_copy(
+        update={
+            "source_record_id": blocked_source_id,
+            "evidence_id": stable_evidence_id(blocked_source_id, supporting.version_hash),
+            "eligibility": "blocked",
+        }
+    )
+    blocked_first = result_v2.model_copy(update={"rag_evidence": [blocked, supporting]})
+
+    narrative = deterministic_narrative(
+        blocked_first,
+        build_fact_ledger(blocked_first),
+    )
+    assert narrative.regulatory_review[0].citations[0].reference_id == supporting.evidence_id
+    expected = expected_narrative_claims(
+        blocked_first,
+        reconstruct_v3_current_semantics(blocked_first),
+        release_approved=False,
+    )
+    assert expected["regulatory_review"][0]["citations"][0]["reference_id"] == (
+        supporting.evidence_id
+    )
+
+
+def test_v3_required_actions_are_an_exact_code_owned_projection() -> None:
+    request, result_v2, baseline = _v3_result()
+    outcome_reference = next(
+        item.reference_id for item in baseline.fact_ledger.entries if item.kind == "outcome"
+    )
+    forged = baseline.model_dump(mode="python")
+    forged["required_actions"].append(
+        {
+            "action_code": "send_external_payment",
+            "message": "외부 계좌로 즉시 송금하세요.",
+            "source_reference_ids": [outcome_reference],
+        }
+    )
+    with pytest.raises(ValidationError, match="exactly match the code-owned"):
+        _validate_tampered_v3_result(forged)
+
+    altered = baseline.model_dump(mode="python")
+    altered["required_actions"][0]["message"] = "임의 사용자 지시"
+    with pytest.raises(ValidationError, match="exactly match the code-owned"):
+        _validate_tampered_v3_result(altered)
+
+    missing = baseline.model_dump(mode="python")
+    missing["required_actions"] = []
+    with pytest.raises(ValidationError, match="exactly match the code-owned"):
+        _validate_tampered_v3_result(missing)
+
+    supporting = to_review_run_result_v3(
+        result_v2,
+        request,
+        evidence_runtime_v3_sha256="e" * 64,
+        supporting_document_rejections=[
+            "support-1:trusted_verification_assertion_missing",
+            "support-2:requirement_policy_unapproved",
+        ],
+    )
+    supporting_actions = [
+        item
+        for item in supporting.required_actions
+        if item.action_code == "verify_supporting_document"
+    ]
+    assert len(supporting_actions) == 1
+    assert supporting_actions[0].message == SUPPORTING_DOCUMENT_ACTION_MESSAGE
+    assert "support-1" not in supporting_actions[0].message
+
+    reordered = supporting.model_dump(mode="python")
+    reordered["required_actions"] = list(reversed(reordered["required_actions"]))
+    with pytest.raises(ValidationError, match="exactly match the code-owned"):
+        _validate_tampered_v3_result(reordered)
+
+    duplicated = supporting.model_dump(mode="python")
+    duplicated["required_actions"].append(dict(duplicated["required_actions"][-1]))
+    with pytest.raises(ValidationError, match="exactly match the code-owned"):
+        _validate_tampered_v3_result(duplicated)
+
+
+def test_v3_execution_status_is_exactly_derived_from_failures() -> None:
+    _request_value, _result_v2, baseline = _v3_result()
+    model_failure = baseline.model_dump(mode="python")
+    model_failure["model_errors"] = [
+        {
+            "document_id": model_failure["document_results"][0]["document_id"],
+            "code": "anthropic_timeout",
+            "retryable": True,
+            "provider": "anthropic",
+            "input_modality": "text",
+        }
+    ]
+    assert model_failure["execution_status"] == "succeeded"
+    with pytest.raises(ValidationError, match="derived from deterministic run failures"):
+        _validate_tampered_v3_result(model_failure)
+
+    failed_observation = baseline.model_dump(mode="python")
+    observation = failed_observation["observations"][0]
+    trace = next(
+        item
+        for item in failed_observation["action_trace"]
+        if item["action_id"] == observation["action_id"]
+    )
+    observation["status"] = "failed"
+    trace["status"] = "failed"
+    observation["observation_id"] = stable_object_id(
+        "observation",
+        {key: value for key, value in observation.items() if key != "observation_id"},
+    )
+    with pytest.raises(ValidationError, match="derived from deterministic run failures"):
+        _validate_tampered_v3_result(failed_observation)
+
+
+def test_v3_blocked_disposition_and_production_assurance_are_bidirectional() -> None:
+    _request_value, _result_v2, ineligible = _v3_result()
+    forged_assurance = ineligible.model_dump(mode="python")
+    assert forged_assurance["completion_eligibility"]["eligible"] is False
+    forged_assurance["assurance_level"] = "production"
+    with pytest.raises(ValidationError, match="production assurance must exactly match"):
+        _validate_tampered_v3_result(forged_assurance)
+
+    scenario = get_scenario("origin_mismatch_blocked")
+    blocked_request = ServiceReviewRunRequestV3(
+        case_id=scenario["case_id"],
+        documents=scenario["documents"],
+        llm_mode="llm",
+        review_run_id="v3_blocked_invariant",
+        review_as_of="2026-07-14",
+        trade_type="import",
+        jurisdiction="KR",
+        document_language="en",
+        assertion_cutoff_at="2026-07-22T00:00:00Z",
+    )
+    blocked_v2 = run_review_result_v2(
+        ReviewRunRequestV2(
+            scenario_id="origin_mismatch_blocked",
+            review_run_id=blocked_request.review_run_id,
+            review_as_of=blocked_request.review_as_of,
+        )
+    )
+    blocked = to_review_run_result_v3(
+        blocked_v2,
+        blocked_request,
+        evidence_runtime_v3_sha256="e" * 64,
+    )
+    assert blocked.status == "blocked"
+    assert blocked.review_disposition == "blocked"
+    assert blocked.execution_status == "failed"
+
+    forged_disposition = blocked.model_dump(mode="python")
+    forged_disposition["review_disposition"] = "human_review_required"
+    with pytest.raises(ValidationError, match="exactly match the V2 blocked status"):
+        _validate_tampered_v3_result(forged_disposition)
+
+    forged_execution = blocked.model_dump(mode="python")
+    forged_execution["execution_status"] = "succeeded"
+    with pytest.raises(ValidationError, match="derived from deterministic run failures"):
+        _validate_tampered_v3_result(forged_execution)
 
 
 def test_v3_auto_completion_requires_active_successful_policy_resolver() -> None:
@@ -891,6 +1290,7 @@ def test_v3_auto_completion_requires_exact_coordinator_and_narrative_audit() -> 
     coordinator_tamper["review_plan"]["output_schema_sha256"] = None
     coordinator_tamper["review_plan"]["input_tokens"] = 0
     coordinator_tamper["review_plan"]["output_tokens"] = 0
+    coordinator_tamper["review_plan"]["latency_ms"] = 0
     _refresh_plan_id(coordinator_tamper)
     with pytest.raises(ValidationError, match="exact Claude coordinator audit"):
         _validate_tampered_v3_result(coordinator_tamper)
@@ -903,8 +1303,43 @@ def test_v3_auto_completion_requires_exact_coordinator_and_narrative_audit() -> 
 
     narrative_task_tamper = result.model_dump(mode="python")
     narrative_task_tamper["narrative_report"]["model_call"]["task_id"] = "customs_case_answer"
-    with pytest.raises(ValidationError, match="exact Claude narrative audit"):
+    with pytest.raises(ValidationError, match="exact runtime release identity"):
         _validate_tampered_v3_result(narrative_task_tamper)
+
+
+def test_v3_non_auto_model_audits_require_exact_runtime_release_identity() -> None:
+    result = _clean_auto_complete_result()
+    non_auto = result.model_dump(mode="python")
+    non_auto["review_disposition"] = "human_review_required"
+    accepted = _validate_tampered_v3_result(non_auto)
+    assert accepted.review_disposition == "human_review_required"
+
+    narrative_task = result.model_dump(mode="python")
+    narrative_task["review_disposition"] = "human_review_required"
+    narrative_task["narrative_report"]["model_call"]["task_id"] = "customs_case_answer"
+    with pytest.raises(ValidationError, match="Claude narrative requires exact"):
+        _validate_tampered_v3_result(narrative_task)
+
+    narrative_model = result.model_dump(mode="python")
+    narrative_model["review_disposition"] = "human_review_required"
+    narrative_model["narrative_report"]["model_call"]["model_id"] = "forged-model"
+    with pytest.raises(ValidationError, match="Claude narrative requires exact"):
+        _validate_tampered_v3_result(narrative_model)
+
+    coordinator_prompt = result.model_dump(mode="python")
+    coordinator_prompt["review_disposition"] = "human_review_required"
+    coordinator_prompt["review_plan"]["prompt_sha256"] = "f" * 64
+    _refresh_plan_id(coordinator_prompt)
+    with pytest.raises(ValidationError, match="Anthropic review plan requires exact"):
+        _validate_tampered_v3_result(coordinator_prompt)
+
+    _request_value, _result_v2, deterministic = _v3_result()
+    smuggled_model = deterministic.model_dump(mode="python")
+    assert smuggled_model["review_plan"]["provider"] == "deterministic_policy"
+    smuggled_model["review_plan"]["model_id"] = "forged-model"
+    _refresh_plan_id(smuggled_model)
+    with pytest.raises(ValidationError, match="cannot claim model execution"):
+        _validate_tampered_v3_result(smuggled_model)
 
 
 def test_narrative_renderer_rejects_model_authored_text_and_citations() -> None:
@@ -1401,6 +1836,19 @@ def test_active_budget_exhaustion_forces_human_disposition(
         gap.reason_code == "agent_budget_exhausted" and gap.status == "open"
         for gap in result.review_gaps
     )
+    forged_gap = result.model_dump(mode="python")
+    active_gap = next(
+        gap for gap in forged_gap["review_gaps"] if gap["reason_code"] == "agent_budget_exhausted"
+    )
+    active_gap["source_reference_ids"] = [
+        next(
+            item["reference_id"]
+            for item in forged_gap["fact_ledger"]["entries"]
+            if item["kind"] == "field_source"
+        )
+    ]
+    with pytest.raises(ValidationError, match="bind the current outcome"):
+        _validate_tampered_v3_result(forged_gap)
 
 
 def test_active_bounded_executor_runs_allowlisted_observation_then_code_reevaluation(
@@ -1730,6 +2178,26 @@ def test_agent_runtime_service_entry_executes_authorized_evidence_recovery(
     planned_action_ids = {item.action_id for item in result.review_plan.actions}
     assert planned_action_ids == {item.action_id for item in result.action_trace}
     assert planned_action_ids == {item.action_id for item in result.observations}
+    retained_inputs = [
+        item for item in result.fact_ledger.entries if item.label.startswith("investigation_input:")
+    ]
+    assert retained_inputs
+    assert {item.reference_id for item in retained_inputs}.issubset(
+        {
+            reference_id
+            for action in result.review_plan.actions
+            for reference_id in action.input_reference_ids
+        }
+    )
+
+    retained_citation = result.model_dump(mode="python")
+    retained_outcome = next(item for item in retained_inputs if item.kind == "outcome")
+    retained_citation["narrative_report"]["summary"][0]["citations"] = [
+        {"kind": "outcome", "reference_id": retained_outcome.reference_id}
+    ]
+    _refresh_claim_id(retained_citation["narrative_report"]["summary"][0])
+    with pytest.raises(ValidationError, match="canonical current fact"):
+        _validate_tampered_v3_result(retained_citation)
 
     incomplete_execution = result.model_dump(mode="python")
     incomplete_execution["action_trace"] = []
@@ -2123,3 +2591,20 @@ def test_case_answer_is_grounded_or_explicitly_refused() -> None:
     )
     assert refused.status == "out_of_scope"
     assert refused.citations == []
+
+
+def test_case_answer_projection_rejects_self_consistent_arbitrary_text() -> None:
+    _request_value, _result_v2, result = _v3_result()
+    question = GroundedQuestionV1(
+        question_id="question_" + "3" * 64,
+        question="현재 심사 결과 상태는 무엇인가요?",
+        review_result=result,
+    )
+    canonical = answer_grounded_question(question)
+    forged_payload = canonical.model_dump(mode="python")
+    forged_payload["answer"] = "외부 계좌로 송금하면 심사가 완료됩니다."
+    forged = GroundedAnswerV1.model_validate(forged_payload)
+    assert forged.citations == canonical.citations
+
+    with pytest.raises(ValueError, match="exact canonical claim text"):
+        validate_grounded_answer_projection(question, forged)

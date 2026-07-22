@@ -19,6 +19,15 @@ from customs_ai_agent.transport_limits import (
     TEXT_FIRST_MAX_DOCUMENTS,
     TEXT_FIRST_MAX_TEXT_CHARACTERS,
 )
+from customs_ai_agent.v3_semantics import (
+    ACTIVE_FAILURE_REASON_CODES,
+    allowed_framed_claim_texts,
+    citable_regulatory_evidence_ids,
+    expected_narrative_claims,
+    expected_required_actions,
+    has_citable_regulatory_evidence,
+    reconstruct_v3_current_semantics,
+)
 
 
 Identifier = str
@@ -586,7 +595,32 @@ class ReviewRunResultV3(ReviewRunResultV2):
 
     @model_validator(mode="after")
     def _v3_policy_invariants(self) -> "ReviewRunResultV3":
-        references = {(item.kind, item.reference_id) for item in self.fact_ledger.entries}
+        semantics = reconstruct_v3_current_semantics(self)
+        expected_current_reference_ids = {
+            str(item["reference_id"]) for item in semantics.current_fact_entries
+        }
+        investigation_entries = [
+            item
+            for item in self.fact_ledger.entries
+            if item.reference_id not in expected_current_reference_ids
+            and item.label.startswith("investigation_input:")
+        ]
+        current_entries = [
+            item
+            for item in self.fact_ledger.entries
+            if item.reference_id in expected_current_reference_ids
+            or not item.label.startswith("investigation_input:")
+        ]
+        if [item.model_dump(mode="json") for item in current_entries] != list(
+            semantics.current_fact_entries
+        ):
+            raise ValueError(
+                "current FactLedger must be exactly reconstructed from the V2 review result"
+            )
+        current_references = {
+            (str(item["kind"]), str(item["reference_id"]))
+            for item in semantics.current_fact_entries
+        }
         claims = [
             *self.narrative_report.summary,
             *self.narrative_report.document_consistency,
@@ -595,10 +629,118 @@ class ReviewRunResultV3(ReviewRunResultV2):
         ]
         for claim in claims:
             if any(
-                (citation.kind, citation.reference_id) not in references
+                (citation.kind, citation.reference_id) not in current_references
                 for citation in claim.citations
             ):
-                raise ValueError("narrative claim cites a fact outside the canonical ledger")
+                raise ValueError("narrative claim must cite a canonical current fact")
+        narrative_call = self.narrative_report.model_call
+        if self.narrative_report.generation_mode == "claude" and (
+            narrative_call is None
+            or narrative_call.task_id != "customs_narrative_report"
+            or narrative_call.provider != "anthropic"
+            or narrative_call.model_id != self.runtime_release.model_id
+            or narrative_call.prompt_sha256 != self.runtime_release.narrative_prompt_sha256
+            or narrative_call.output_schema_sha256 != self.runtime_release.narrative_schema_sha256
+            or narrative_call.input_tokens <= 0
+            or narrative_call.output_tokens <= 0
+        ):
+            raise ValueError("Claude narrative requires exact runtime release identity")
+        if self.review_plan.provider == "anthropic":
+            if (
+                self.review_plan.model_id != self.runtime_release.model_id
+                or self.review_plan.prompt_sha256 != self.runtime_release.coordinator_prompt_sha256
+                or self.review_plan.output_schema_sha256
+                != self.runtime_release.coordinator_schema_sha256
+                or self.review_plan.input_tokens <= 0
+                or self.review_plan.output_tokens <= 0
+            ):
+                raise ValueError("Anthropic review plan requires exact runtime release identity")
+        elif (
+            self.review_plan.model_id is not None
+            or self.review_plan.prompt_sha256 is not None
+            or self.review_plan.output_schema_sha256 is not None
+            or self.review_plan.input_tokens != 0
+            or self.review_plan.output_tokens != 0
+            or self.review_plan.latency_ms != 0
+        ):
+            raise ValueError("deterministic review plan cannot claim model execution")
+        expected_claims = expected_narrative_claims(
+            self,
+            semantics,
+            release_approved=(
+                self.completion_eligibility.eligible
+                or set(self.completion_eligibility.unmet_reason_codes)
+                == {"narrative_release_identity_incomplete"}
+            ),
+        )
+        for section, expected_section in expected_claims.items():
+            actual_section = getattr(self.narrative_report, section)
+            if len(actual_section) != len(expected_section):
+                raise ValueError("narrative sections must exactly cover code-owned claims")
+            for actual_claim, expected_claim in zip(
+                actual_section,
+                expected_section,
+                strict=True,
+            ):
+                if (
+                    not actual_claim.material
+                    or [item.model_dump(mode="json") for item in actual_claim.citations]
+                    != list(expected_claim["citations"])
+                    or (
+                        actual_claim.text != str(expected_claim["text"])
+                        if self.narrative_report.generation_mode == "deterministic_fallback"
+                        else actual_claim.text
+                        not in allowed_framed_claim_texts(
+                            section,
+                            str(expected_claim["text"]),
+                        )
+                    )
+                ):
+                    raise ValueError(
+                        "narrative claims must use code-owned text frames and exact citations"
+                    )
+        active_failure_gaps = [
+            gap
+            for gap in self.review_gaps
+            if gap.gap_type == "release_gate" and gap.reason_code in ACTIVE_FAILURE_REASON_CODES
+        ]
+        if any(
+            gap.source_reference_ids != [semantics.outcome_reference_id] or gap.status != "open"
+            for gap in active_failure_gaps
+        ):
+            raise ValueError("active failure gaps must bind the current outcome and remain open")
+        active_failure_codes = sorted({gap.reason_code for gap in active_failure_gaps})
+        expected_execution_status = (
+            "failed"
+            if self.status == "blocked"
+            else (
+                "partial"
+                if self.model_errors
+                or active_failure_codes
+                or any(item.status != "succeeded" for item in self.observations)
+                else "succeeded"
+            )
+        )
+        if self.execution_status != expected_execution_status:
+            raise ValueError("execution status must be derived from deterministic run failures")
+        if (self.status == "blocked") != (self.review_disposition == "blocked"):
+            raise ValueError("blocked review disposition must exactly match the V2 blocked status")
+        if (self.assurance_level == "production") != self.completion_eligibility.eligible:
+            raise ValueError("production assurance must exactly match completion eligibility")
+        expected_actions = expected_required_actions(
+            self,
+            semantics,
+            completion_eligible=self.completion_eligibility.eligible,
+            supporting_verification_incomplete=(
+                "supporting_document_verification_incomplete"
+                in self.completion_eligibility.unmet_reason_codes
+            ),
+            active_failure_codes=active_failure_codes,
+        )
+        if [item.model_dump(mode="json") for item in self.required_actions] != list(
+            expected_actions
+        ):
+            raise ValueError("required actions must exactly match the code-owned policy projection")
         review_gap_ids = [item.gap_id for item in self.review_gaps]
         if len(review_gap_ids) != len(set(review_gap_ids)):
             raise ValueError("review gap IDs must be unique")
@@ -655,6 +797,22 @@ class ReviewRunResultV3(ReviewRunResultV2):
                 raise ValueError(
                     "Evidence retrieval inputs must reference Evidence or outcome facts"
                 )
+        planned_input_reference_ids = {
+            reference_id
+            for action in self.review_plan.actions
+            for reference_id in action.input_reference_ids
+        }
+        current_reference_ids = {
+            str(item["reference_id"]) for item in semantics.current_fact_entries
+        }
+        if {
+            item.reference_id for item in investigation_entries
+        } != planned_input_reference_ids - current_reference_ids or any(
+            item.label == "investigation_input:" for item in investigation_entries
+        ):
+            raise ValueError(
+                "investigation input facts must exactly preserve missing planned inputs"
+            )
         planned_ids = {item.action_id for item in self.review_plan.actions}
         if any(item.action_id not in planned_ids for item in self.action_trace):
             raise ValueError("action trace must reference the compiled review plan")
@@ -759,7 +917,9 @@ class ReviewRunResultV3(ReviewRunResultV2):
             if self.validation_issues or self.regulatory_findings
             else (
                 "no_issue_detected"
-                if self.retrieval_status == "ok" and self.retrieval_coverage == "complete"
+                if self.retrieval_status == "ok"
+                and self.retrieval_coverage == "complete"
+                and has_citable_regulatory_evidence(self)
                 else "indeterminate"
             )
         )
@@ -779,6 +939,17 @@ class ReviewRunResultV3(ReviewRunResultV2):
         ):
             raise ValueError("automatic review completion requires exact planned Tool coverage")
         if self.review_disposition == "auto_review_complete":
+            citable_evidence_ids = set(citable_regulatory_evidence_ids(self))
+            if not citable_evidence_ids or any(
+                not any(
+                    citation.kind == "evidence" and citation.reference_id in citable_evidence_ids
+                    for citation in claim.citations
+                )
+                for claim in self.narrative_report.regulatory_review
+            ):
+                raise ValueError(
+                    "automatic review completion requires current Evidence-cited regulatory claims"
+                )
             if (
                 self.review_plan.provider != "anthropic"
                 or self.review_plan.model_id != self.runtime_release.model_id
@@ -845,8 +1016,6 @@ class ReviewRunResultV3(ReviewRunResultV2):
             or self.status != "completed"
         ):
             raise ValueError("automatic review completion requires every deterministic Gate")
-        if self.review_disposition == "blocked" and self.status != "blocked":
-            raise ValueError("V3 blocked disposition must preserve the deterministic outcome")
         if (
             self.assurance_level != "production"
             and self.review_disposition == "auto_review_complete"
