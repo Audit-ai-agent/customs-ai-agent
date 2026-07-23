@@ -121,6 +121,22 @@ def test_replay_cache_limits_are_bounded_for_one_gib_container(
         ServiceSettings.from_environment(source)
 
 
+def test_readiness_timeout_can_cover_a_bounded_slow_dependency() -> None:
+    source = {
+        "CUSTOMS_AGENT_SERVICE_BEARER_TOKEN": TEST_TOKEN,
+        "EVIDENCE_SERVICE_BASE_URL": "http://127.0.0.1:8010",
+        "CUSTOMS_AGENT_READINESS_TIMEOUT_SECONDS": "90",
+    }
+
+    assert ServiceSettings.from_environment(source).readiness_timeout_seconds == 90
+    source["CUSTOMS_AGENT_READINESS_TIMEOUT_SECONDS"] = "121"
+    with pytest.raises(
+        ServiceConfigurationError,
+        match="customs_agent_readiness_timeout_seconds_invalid",
+    ):
+        ServiceSettings.from_environment(source)
+
+
 def test_metadata_rejects_build_sha_not_bound_to_packaged_manifest(
     monkeypatch: pytest.MonkeyPatch,
 ) -> None:

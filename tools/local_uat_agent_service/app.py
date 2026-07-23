@@ -209,10 +209,11 @@ def _evidence_timeout_seconds(mode: EvidenceMode) -> float:
 
 
 def _readiness_policy(mode: EvidenceMode) -> tuple[float, float]:
-    # The controller's hard readiness limit is 30 seconds. Actual-store
-    # preflight re-attests three stores, so it receives that full bounded
-    # window and a longer cache TTL to avoid redundant scans.
-    return (30.0, 30.0) if mode == "preserved-3law-v3-diagnostic" else (5.0, 5.0)
+    # The actual Data request itself has a 75-second hard deadline. Give that
+    # request enough time to finish and cache the result for the maximum
+    # bounded TTL; otherwise a 30-second controller timeout leaves the
+    # single-threaded probe running and every retry observes SERVICE_BUSY.
+    return (60.0, 90.0) if mode == "preserved-3law-v3-diagnostic" else (5.0, 5.0)
 
 
 def load_local_uat_manifest(path: str | os.PathLike[str]) -> LocalUatManifest:

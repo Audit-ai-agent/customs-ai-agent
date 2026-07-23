@@ -173,7 +173,7 @@ class ServiceSettings:
             raise ServiceConfigurationError("customs_agent_replay_max_bytes_invalid")
         if not 0.1 <= self.readiness_ttl_seconds <= 60:
             raise ServiceConfigurationError("customs_agent_readiness_ttl_seconds_invalid")
-        if not 0.1 <= self.readiness_timeout_seconds <= 30:
+        if not 0.1 <= self.readiness_timeout_seconds <= 120:
             raise ServiceConfigurationError("customs_agent_readiness_timeout_seconds_invalid")
         if not 1 <= self.shutdown_grace_seconds <= 900:
             raise ServiceConfigurationError("customs_agent_shutdown_grace_seconds_invalid")
@@ -290,7 +290,7 @@ class ServiceSettings:
                 "CUSTOMS_AGENT_READINESS_TIMEOUT_SECONDS",
                 5,
                 minimum=0.1,
-                maximum=30,
+                maximum=120,
             ),
             shutdown_grace_seconds=_number(
                 source,
