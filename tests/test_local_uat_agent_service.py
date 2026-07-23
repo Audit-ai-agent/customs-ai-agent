@@ -16,11 +16,14 @@ from tests.test_evidence_v3_consumer import _identity
 from tests.test_v3_conformance_runner import _result
 from tools.agent_execution_inspector.evidence_v3_conformance import (
     LoopbackEvidenceV3ConformanceRetriever,
+    LoopbackEvidenceV3DiagnosticRetriever,
 )
 from tools.local_uat_agent_service.app import (
     LOCAL_UAT_ACKNOWLEDGEMENT,
     LocalUatConfigurationError,
     LocalUatDiagnosticRuntime,
+    _evidence_timeout_seconds,
+    _readiness_policy,
     LocalUatManifest,
     _compose_local_uat_app,
     create_local_uat_app,
@@ -137,6 +140,7 @@ def test_manifest_requires_explicit_non_release_policy_and_literal_loopback(
         ({"mock_fallback_allowed": True}, "uat_manifest_policy_invalid"),
         ({"auto_completion_allowed": True}, "uat_manifest_policy_invalid"),
         ({"evidence_mode": "preserved-3law"}, "uat_manifest_policy_invalid"),
+        ({"evidence_mode": "production-v3"}, "uat_manifest_policy_invalid"),
         ({"evidence_base_url": "http://localhost:18091"}, "not_loopback"),
         ({"evidence_base_url": "https://example.test"}, "not_loopback"),
     ):
@@ -144,6 +148,55 @@ def test_manifest_requires_explicit_non_release_policy_and_literal_loopback(
         path.write_text(json.dumps(_manifest_payload(**updates)), encoding="utf-8")
         with pytest.raises(LocalUatConfigurationError, match=code):
             load_local_uat_manifest(path)
+
+
+@pytest.mark.parametrize(
+    ("evidence_mode", "profile_kind"),
+    [
+        ("synthetic-v3", "synthetic_contract_control"),
+        (
+            "preserved-3law-v3-diagnostic",
+            "preserved_three_law_rag_diagnostic",
+        ),
+    ],
+)
+def test_manifest_accepts_only_explicit_diagnostic_profiles_and_exposes_safe_metadata(
+    tmp_path: Path,
+    evidence_mode: str,
+    profile_kind: str,
+) -> None:
+    manifest = _load_manifest(tmp_path, evidence_mode=evidence_mode)
+
+    assert manifest.evidence_mode == evidence_mode
+    assert manifest.evidence_runtime_identity == _identity()
+    profile = manifest.safe_metadata()["evidence_profile"]
+    assert profile == {
+        "profile_id": evidence_mode,
+        "profile_kind": profile_kind,
+        "transport": "evidence_http_v3",
+        "identity_binding": "exact_readiness_and_response_headers",
+        "direct_database_access": False,
+        "mock_fallback_allowed": False,
+        "release_eligible": False,
+        "provider_execution_corroboration": "backend_harness_required",
+        "rag_quality_status": "not_attested_by_agent",
+        "result_provenance_paths": [
+            "knowledge_snapshot_id",
+            "rag_evidence[].source_record_id",
+            "rag_evidence[].source_uri",
+            "rag_evidence[].version_hash",
+            "rag_evidence[].retrieval_methods",
+            "rag_evidence[].score",
+            "rag_evidence[].raw_scores",
+        ],
+    }
+
+
+def test_actual_store_profile_has_a_bounded_longer_http_budget() -> None:
+    assert _evidence_timeout_seconds("synthetic-v3") == 30.0
+    assert _evidence_timeout_seconds("preserved-3law-v3-diagnostic") == 75.0
+    assert _readiness_policy("synthetic-v3") == (5.0, 5.0)
+    assert _readiness_policy("preserved-3law-v3-diagnostic") == (30.0, 30.0)
 
 
 def test_diagnostic_runtime_structurally_forces_human_review() -> None:
@@ -171,6 +224,46 @@ def test_diagnostic_runtime_structurally_forces_human_review() -> None:
     assert observed.completion_eligibility.eligible is False
     assert "local_uat_non_release" in observed.completion_eligibility.unmet_reason_codes
     assert observed.result_sha256 != result.result_sha256
+
+
+def test_preserved_three_law_diagnostic_keeps_safe_rag_provenance_unchanged(
+    tmp_path: Path,
+) -> None:
+    manifest = _load_manifest(
+        tmp_path,
+        evidence_mode="preserved-3law-v3-diagnostic",
+    )
+    _request, result = _result()
+
+    class Core:
+        def review_v3_json(self, _payload: bytes) -> Any:
+            return result
+
+        def close(self) -> None:
+            return None
+
+    runtime = LocalUatDiagnosticRuntime(
+        Core(),  # type: ignore[arg-type]
+        object(),  # type: ignore[arg-type]
+        model_id="claude-sonnet-5",
+    )
+    observed = runtime.review_v3_json(b"{}")
+
+    assert manifest.evidence_mode == "preserved-3law-v3-diagnostic"
+    assert observed.knowledge_snapshot_id == result.knowledge_snapshot_id
+    assert observed.rag_evidence == result.rag_evidence
+    assert observed.report.rag_evidence == result.report.rag_evidence
+    assert observed.rag_evidence
+    evidence = observed.rag_evidence[0]
+    assert evidence.source_record_id
+    assert evidence.source_uri
+    assert len(evidence.version_hash) == 64
+    assert evidence.retrieval_methods
+    assert evidence.score is not None
+    assert evidence.raw_scores
+    assert observed.assurance_level == "diagnostic"
+    assert observed.review_disposition == "human_review_required"
+    assert observed.completion_eligibility.eligible is False
 
 
 def test_diagnostic_runtime_refuses_to_reframe_a_release_approved_narrative() -> None:
@@ -223,6 +316,29 @@ def test_diagnostic_retriever_never_reads_or_patches_production_identity_loader(
         acknowledge_non_release=True,
     )
     assert retriever.expected_identity == _identity()
+    assert production_retrieval_v3.load_released_evidence_runtime_identity_v3 is forbidden_loader
+
+
+def test_preserved_three_law_retriever_uses_the_same_no_production_lock_http_boundary(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    def forbidden_loader() -> Any:
+        pytest.fail("Diagnostic profile must not load a Production identity")
+
+    monkeypatch.setattr(
+        production_retrieval_v3,
+        "load_released_evidence_runtime_identity_v3",
+        forbidden_loader,
+    )
+    retriever = LoopbackEvidenceV3DiagnosticRetriever(
+        "http://127.0.0.1:18091",
+        conformance_identity=_identity(),
+        service_token=EVIDENCE_TOKEN,
+        acknowledge_non_release=True,
+    )
+
+    assert retriever.expected_identity == _identity()
+    assert retriever.url == "http://127.0.0.1:18091/internal/rag/v3/retrieve"
     assert production_retrieval_v3.load_released_evidence_runtime_identity_v3 is forbidden_loader
 
 
@@ -294,6 +410,13 @@ def test_uat_health_metadata_and_v2_routes_are_explicit_and_safe(tmp_path: Path)
             "planner_mode",
         }.intersection(metadata_payload)
         assert metadata_payload["uat"]["evidence_mode"] == "synthetic-v3"
+        assert metadata_payload["uat"]["evidence_profile"]["profile_kind"] == (
+            "synthetic_contract_control"
+        )
+        assert metadata_payload["uat"]["evidence_profile"]["direct_database_access"] is False
+        assert metadata_payload["uat"]["evidence_profile"]["rag_quality_status"] == (
+            "not_attested_by_agent"
+        )
         assert metadata_payload["uat"]["mock_fallback_allowed"] is False
         assert metadata_payload["automatic_completion_release"]["uat_forced_disabled"] is True
 
@@ -328,6 +451,34 @@ def test_uat_health_metadata_and_v2_routes_are_explicit_and_safe(tmp_path: Path)
         "ANTHROPIC_API_KEY",
     ):
         assert secret not in encoded
+
+
+def test_preserved_three_law_mode_is_visible_but_stays_non_release(
+    tmp_path: Path,
+) -> None:
+    manifest = _load_manifest(
+        tmp_path,
+        evidence_mode="preserved-3law-v3-diagnostic",
+    )
+    app = _app(manifest, _RouteRuntime())
+    auth = {"Authorization": f"Bearer {SERVICE_TOKEN}"}
+
+    with TestClient(app, raise_server_exceptions=False) as client:
+        assert client.get("/health/ready").status_code == 503
+        ready = client.get("/health/uat-ready")
+        metadata = client.get("/internal/agent/v2/metadata", headers=auth)
+
+    assert ready.status_code == 200
+    assert ready.json()["evidence_mode"] == "preserved-3law-v3-diagnostic"
+    payload = metadata.json()
+    assert payload["assurance_level"] == "diagnostic"
+    assert payload["uat"]["evidence_mode"] == "preserved-3law-v3-diagnostic"
+    profile = payload["uat"]["evidence_profile"]
+    assert profile["profile_kind"] == "preserved_three_law_rag_diagnostic"
+    assert profile["provider_execution_corroboration"] == "backend_harness_required"
+    assert profile["rag_quality_status"] == "not_attested_by_agent"
+    assert profile["release_eligible"] is False
+    assert payload["automatic_completion_release"]["uat_forced_disabled"] is True
 
 
 def test_uat_errors_redact_runtime_and_secret_detail(tmp_path: Path) -> None:

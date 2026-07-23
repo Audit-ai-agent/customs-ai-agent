@@ -34,7 +34,7 @@ from customs_ai_agent.service.app import create_app
 from customs_ai_agent.service.controller import ServiceRuntime
 from customs_ai_agent.service.settings import ServiceConfigurationError, ServiceSettings
 from tools.agent_execution_inspector.evidence_v3_conformance import (
-    LoopbackEvidenceV3ConformanceRetriever,
+    LoopbackEvidenceV3DiagnosticRetriever,
 )
 
 
@@ -53,7 +53,8 @@ _MANIFEST_FIELDS = frozenset(
         "evidence_runtime_identity",
     }
 )
-_EVIDENCE_MODES = frozenset({"synthetic-v3"})
+EvidenceMode = Literal["synthetic-v3", "preserved-3law-v3-diagnostic"]
+_EVIDENCE_MODES = frozenset({"synthetic-v3", "preserved-3law-v3-diagnostic"})
 _MAX_MANIFEST_BYTES = 1024 * 1024
 _LOCAL_UAT_REASON = "local_uat_non_release"
 _SERVICE_ENV_KEYS = frozenset(
@@ -145,7 +146,7 @@ def _literal_loopback_origin(value: object) -> str:
 
 @dataclass(frozen=True, slots=True)
 class LocalUatManifest:
-    evidence_mode: Literal["synthetic-v3"]
+    evidence_mode: EvidenceMode
     evidence_base_url: str
     evidence_runtime_identity: EvidenceRuntimeReleaseIdentityV3
     manifest_sha256: str
@@ -155,6 +156,7 @@ class LocalUatManifest:
             "schema_version": _MANIFEST_SCHEMA_VERSION,
             "manifest_sha256": self.manifest_sha256,
             "evidence_mode": self.evidence_mode,
+            "evidence_profile": _evidence_profile_metadata(self.evidence_mode),
             "evidence_base_url": self.evidence_base_url,
             "evidence_runtime_identity": self.evidence_runtime_identity.to_wire(),
             "diagnostic_only": True,
@@ -162,6 +164,55 @@ class LocalUatManifest:
             "mock_fallback_allowed": False,
             "auto_completion_allowed": False,
         }
+
+
+def _evidence_profile_metadata(mode: EvidenceMode) -> dict[str, Any]:
+    """Return non-secret UI hints without asserting provider internals.
+
+    A V3 response proves the exact provider/runtime identity and preserves
+    Evidence provenance.  It does not prove that the provider opened any
+    particular database.  Store counts and execution claims therefore remain
+    the Backend/harness's responsibility after independent corroboration.
+    """
+
+    return {
+        "profile_id": mode,
+        "profile_kind": (
+            "synthetic_contract_control"
+            if mode == "synthetic-v3"
+            else "preserved_three_law_rag_diagnostic"
+        ),
+        "transport": "evidence_http_v3",
+        "identity_binding": "exact_readiness_and_response_headers",
+        "direct_database_access": False,
+        "mock_fallback_allowed": False,
+        "release_eligible": False,
+        "provider_execution_corroboration": "backend_harness_required",
+        "rag_quality_status": "not_attested_by_agent",
+        "result_provenance_paths": [
+            "knowledge_snapshot_id",
+            "rag_evidence[].source_record_id",
+            "rag_evidence[].source_uri",
+            "rag_evidence[].version_hash",
+            "rag_evidence[].retrieval_methods",
+            "rag_evidence[].score",
+            "rag_evidence[].raw_scores",
+        ],
+    }
+
+
+def _evidence_timeout_seconds(mode: EvidenceMode) -> float:
+    # The actual-store readiness re-attests all three stores before returning.
+    # Keep it bounded by the provider's 75-second request deadline, but do not
+    # force the lightweight synthetic control to inherit that long timeout.
+    return 75.0 if mode == "preserved-3law-v3-diagnostic" else 30.0
+
+
+def _readiness_policy(mode: EvidenceMode) -> tuple[float, float]:
+    # The controller's hard readiness limit is 30 seconds. Actual-store
+    # preflight re-attests three stores, so it receives that full bounded
+    # window and a longer cache TTL to avoid redundant scans.
+    return (30.0, 30.0) if mode == "preserved-3law-v3-diagnostic" else (5.0, 5.0)
 
 
 def load_local_uat_manifest(path: str | os.PathLike[str]) -> LocalUatManifest:
@@ -241,6 +292,22 @@ def local_uat_service_settings(
         if item.strip()
     }
     configured_token_header = source.get("EVIDENCE_SERVICE_TOKEN_HEADER", "Authorization").strip()
+    readiness_ttl, readiness_timeout = _readiness_policy(manifest.evidence_mode)
+    configured_readiness_ttl = source.get(
+        "CUSTOMS_AGENT_READINESS_TTL_SECONDS",
+        str(readiness_ttl),
+    ).strip()
+    configured_readiness_timeout = source.get(
+        "CUSTOMS_AGENT_READINESS_TIMEOUT_SECONDS",
+        str(readiness_timeout),
+    ).strip()
+    try:
+        readiness_conflict = (
+            float(configured_readiness_ttl) != readiness_ttl
+            or float(configured_readiness_timeout) != readiness_timeout
+        )
+    except ValueError:
+        readiness_conflict = True
     if (
         configured_environment not in {"development", "test"}
         or configured_host != "127.0.0.1"
@@ -248,6 +315,7 @@ def local_uat_service_settings(
         or configured_evidence_url != manifest.evidence_base_url
         or configured_origins != {manifest.evidence_base_url}
         or configured_token_header.casefold() != "authorization"
+        or readiness_conflict
     ):
         raise LocalUatConfigurationError("uat_env_boundary_conflict")
     source.update(
@@ -258,6 +326,8 @@ def local_uat_service_settings(
             "EVIDENCE_SERVICE_BASE_URL": manifest.evidence_base_url,
             "EVIDENCE_SERVICE_ALLOWED_ORIGINS": manifest.evidence_base_url,
             "EVIDENCE_SERVICE_TOKEN_HEADER": "Authorization",
+            "CUSTOMS_AGENT_READINESS_TTL_SECONDS": str(readiness_ttl),
+            "CUSTOMS_AGENT_READINESS_TIMEOUT_SECONDS": str(readiness_timeout),
         }
     )
     try:
@@ -319,7 +389,7 @@ class LocalUatDiagnosticRuntime:
     def __init__(
         self,
         core: AgentRuntime,
-        retriever: LoopbackEvidenceV3ConformanceRetriever,
+        retriever: LoopbackEvidenceV3DiagnosticRetriever,
         *,
         model_id: str,
     ) -> None:
@@ -370,12 +440,12 @@ def build_local_uat_runtime(
     claude_settings = ClaudeSettings.from_environment(env_file)
     analyzer = ClaudeDocumentAnalyzer.from_settings(claude_settings)
     try:
-        retriever = LoopbackEvidenceV3ConformanceRetriever(
+        retriever = LoopbackEvidenceV3DiagnosticRetriever(
             manifest.evidence_base_url,
             conformance_identity=manifest.evidence_runtime_identity,
             service_token=evidence_service_token,
             acknowledge_non_release=True,
-            timeout_seconds=30,
+            timeout_seconds=_evidence_timeout_seconds(manifest.evidence_mode),
             max_retries=0,
         )
     except Exception:

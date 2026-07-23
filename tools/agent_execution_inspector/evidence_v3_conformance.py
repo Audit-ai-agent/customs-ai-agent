@@ -44,8 +44,15 @@ def _assert_loopback(base_url: str) -> None:
     raise ValueError("non-release Evidence v3 conformance is loopback-only")
 
 
-class LoopbackEvidenceV3ConformanceRetriever(ProductionHttpRegulationRetrieverV3):
-    """Real HTTP consumer with explicit, non-release identity injection."""
+class LoopbackEvidenceV3DiagnosticRetriever(ProductionHttpRegulationRetrieverV3):
+    """Real HTTP consumer with explicit, non-release identity injection.
+
+    The caller owns the exact V3 runtime identity and the meaning of the
+    diagnostic profile.  This adapter only proves that the loopback provider's
+    readiness and retrieval response are bound to that identity.  It never
+    infers which databases the provider used, never loads a Production lock,
+    and has no Mock fallback.
+    """
 
     def __init__(
         self,
@@ -136,6 +143,11 @@ class LoopbackEvidenceV3ConformanceRetriever(ProductionHttpRegulationRetrieverV3
         return self._successful_retrieval_post_count
 
 
+class LoopbackEvidenceV3ConformanceRetriever(LoopbackEvidenceV3DiagnosticRetriever):
+    """Backward-compatible name for the synthetic V3 conformance runner."""
+
+
 __all__ = [
     "LoopbackEvidenceV3ConformanceRetriever",
+    "LoopbackEvidenceV3DiagnosticRetriever",
 ]
