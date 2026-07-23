@@ -57,6 +57,7 @@ EvidenceMode = Literal["synthetic-v3", "preserved-3law-v3-diagnostic"]
 _EVIDENCE_MODES = frozenset({"synthetic-v3", "preserved-3law-v3-diagnostic"})
 _MAX_MANIFEST_BYTES = 1024 * 1024
 _LOCAL_UAT_REASON = "local_uat_non_release"
+_THREE_LAW_EVIDENCE_HTTP_TIMEOUT_SECONDS = 195.0
 _SERVICE_ENV_KEYS = frozenset(
     {
         "CUSTOMS_AGENT_SERVICE_BEARER_TOKEN",
@@ -202,10 +203,13 @@ def _evidence_profile_metadata(mode: EvidenceMode) -> dict[str, Any]:
 
 
 def _evidence_timeout_seconds(mode: EvidenceMode) -> float:
-    # The actual-store readiness re-attests all three stores before returning.
-    # Keep it bounded by the provider's 75-second request deadline, but do not
-    # force the lightweight synthetic control to inherit that long timeout.
-    return 75.0 if mode == "preserved-3law-v3-diagnostic" else 30.0
+    # The actual-store provider performs fail-closed full-store attestation
+    # before and after retrieval under its own 180-second service deadline.
+    # Its HTTP consumer must have a strictly larger budget so a valid terminal
+    # response is not discarded at the same deadline boundary.
+    return (
+        _THREE_LAW_EVIDENCE_HTTP_TIMEOUT_SECONDS if mode == "preserved-3law-v3-diagnostic" else 30.0
+    )
 
 
 def _readiness_policy(mode: EvidenceMode) -> tuple[float, float]:
@@ -339,6 +343,7 @@ def local_uat_service_settings(
         settings.environment != "test"
         or settings.host != "127.0.0.1"
         or settings.max_concurrency != 1
+        or settings.run_timeout_seconds <= _evidence_timeout_seconds(manifest.evidence_mode)
     ):
         raise LocalUatConfigurationError("uat_service_boundary_invalid")
     return settings

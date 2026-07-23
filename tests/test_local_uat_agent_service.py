@@ -194,9 +194,35 @@ def test_manifest_accepts_only_explicit_diagnostic_profiles_and_exposes_safe_met
 
 def test_actual_store_profile_has_a_bounded_longer_http_budget() -> None:
     assert _evidence_timeout_seconds("synthetic-v3") == 30.0
-    assert _evidence_timeout_seconds("preserved-3law-v3-diagnostic") == 75.0
+    assert _evidence_timeout_seconds("preserved-3law-v3-diagnostic") == 195.0
     assert _readiness_policy("synthetic-v3") == (5.0, 5.0)
     assert _readiness_policy("preserved-3law-v3-diagnostic") == (60.0, 90.0)
+
+
+def test_actual_store_profile_rejects_service_budget_not_larger_than_http_budget(
+    tmp_path: Path,
+) -> None:
+    manifest = _load_manifest(
+        tmp_path,
+        evidence_mode="preserved-3law-v3-diagnostic",
+    )
+    env_file = tmp_path / ".env"
+    env_file.write_text(
+        "\n".join(
+            (
+                "CUSTOMS_AGENT_SERVICE_BEARER_TOKEN=Abcdefghijklmnopqrstuvwxyz0123456789-._~+/=XYZ",
+                "CUSTOMS_AGENT_RUN_TIMEOUT_SECONDS=195",
+            )
+        )
+        + "\n",
+        encoding="utf-8",
+    )
+
+    with pytest.raises(
+        LocalUatConfigurationError,
+        match="uat_service_boundary_invalid",
+    ):
+        local_uat_service_settings(manifest, env_file)
 
 
 def test_diagnostic_runtime_structurally_forces_human_review() -> None:
