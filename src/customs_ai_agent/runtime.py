@@ -23,6 +23,10 @@ from customs_ai_agent.adapters.retrieval import (
     validate_evidence_destination,
 )
 from customs_ai_agent.adapters.retrieval_v3 import ProductionHttpRegulationRetrieverV3
+from customs_ai_agent.assertion_trust import (
+    AssertionTrustStoreV1,
+    SupportingDocumentAssertionVerifier,
+)
 from customs_ai_agent.contracts import get_schema
 from customs_ai_agent.contracts.evidence_runtime_release import (
     EvidenceRuntimeReleaseLockError,
@@ -48,6 +52,7 @@ from customs_ai_agent.agentic import (
     automatic_completion_unmet_reason_codes,
     assert_result_hash,
     execute_active_bounded_plan,
+    presented_requirement_codes_by_item,
     runtime_release_identity,
     to_review_run_result_v3,
     verified_requirement_codes_by_item,
@@ -661,6 +666,10 @@ class _RuntimeBoundedAdaptiveExecutor:
         )
         next_state = copy.deepcopy(state)
         next_state["verified_requirement_documents_by_item"] = verified_by_item
+        next_state["presented_requirement_documents_by_item"] = presented_requirement_codes_by_item(
+            self._request.supporting_documents,
+            retrieval_results=list(state.get("retrieval_results") or []),
+        )
         # A prior route result is not an independent source of truth. Rebuild
         # the human flag from provider/model facts, then let compliance/outcome
         # derive it again from the complete state.
@@ -683,6 +692,14 @@ class _RuntimeBoundedAdaptiveExecutor:
             evidence_snapshot_id=provisional.knowledge_snapshot_id,
             evidence_runtime_v3_sha256=(
                 self._retriever.expected_identity.runtime_release_v3_sha256
+            ),
+            assertion_trust_store=(
+                self._assertion_verifier.store
+                if isinstance(
+                    self._assertion_verifier,
+                    SupportingDocumentAssertionVerifier,
+                )
+                else None
             ),
         )
         calibration_blockers = automatic_completion_unmet_reason_codes(
@@ -940,6 +957,17 @@ class AgentRuntime:
                 "runtime_closed",
                 "The Agent runtime is closed.",
             )
+
+    def _runtime_assertion_trust_store(self) -> AssertionTrustStoreV1 | None:
+        """Return only the store owned by the concrete runtime verifier.
+
+        Request data can never supply this identity.  Alternate verifier
+        implementations remain fail-closed on the packaged unreleased store.
+        """
+
+        if isinstance(self._assertion_verifier, SupportingDocumentAssertionVerifier):
+            return self._assertion_verifier.store
+        return None
 
     def close(self) -> None:
         """Close the runtime-owned Anthropic client.
@@ -1253,6 +1281,7 @@ class AgentRuntime:
             service_request,
             analyzer=self._analyzer,
             evidence_runtime_v3_sha256=(retriever_v3.expected_identity.runtime_release_v3_sha256),
+            assertion_trust_store=self._runtime_assertion_trust_store(),
             supporting_document_rejections=supporting_rejections,
             active_executor=active_executor,
         )
@@ -1298,6 +1327,10 @@ class AgentRuntime:
                 assertion_verifier=self._assertion_verifier,
             )
             state["verified_requirement_documents_by_item"] = verified_by_item
+            state["presented_requirement_documents_by_item"] = presented_requirement_codes_by_item(
+                request.supporting_documents,
+                retrieval_results=list(state.get("retrieval_results") or []),
+            )
             for node in (compliance_review, generate_xai_report, route_to_human_or_complete):
                 state.update(node(state))
             result = to_review_run_result_v2(state)
@@ -1313,6 +1346,7 @@ class AgentRuntime:
                 model_id=observed_model,
                 evidence_snapshot_id=result.knowledge_snapshot_id,
                 evidence_runtime_v3_sha256=retriever.expected_identity.runtime_release_v3_sha256,
+                assertion_trust_store=self._runtime_assertion_trust_store(),
             )
             release_blockers = automatic_completion_unmet_reason_codes(
                 result,
@@ -1476,6 +1510,7 @@ class AgentRuntime:
             request,
             analyzer=self._analyzer,
             evidence_runtime_v3_sha256=(retriever.expected_identity.runtime_release_v3_sha256),
+            assertion_trust_store=self._runtime_assertion_trust_store(),
             supporting_document_rejections=supporting_rejections,
             active_executor=active_executor,
         )

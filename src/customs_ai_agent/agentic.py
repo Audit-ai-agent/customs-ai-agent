@@ -60,7 +60,7 @@ from customs_ai_agent.schemas.v3 import (
     review_result_v3_sha256,
     stable_object_id,
 )
-from customs_ai_agent.assertion_trust import load_assertion_trust_store
+from customs_ai_agent.assertion_trust import AssertionTrustStoreV1, load_assertion_trust_store
 from customs_ai_agent.v3_semantics import (
     ACTIVE_FAILURE_REASON_CODES,
     SAFE_CLAIM_FRAMES,
@@ -1301,6 +1301,7 @@ def runtime_release_identity(
     model_id: str,
     evidence_snapshot_id: str | None,
     evidence_runtime_v3_sha256: str | None,
+    assertion_trust_store: AssertionTrustStoreV1 | None = None,
 ) -> RuntimeReleaseIdentityV1:
     """Build the canonical public Runtime identity from one code-owned source.
 
@@ -1322,7 +1323,7 @@ def runtime_release_identity(
     ).hexdigest()
     chat_prompt_sha = hashlib.sha256(load_case_answer_system_prompt().encode("utf-8")).hexdigest()
     profile = load_release_profile()
-    assertion_store = load_assertion_trust_store()
+    assertion_store = assertion_trust_store or load_assertion_trust_store()
     build_manifest = load_packaged_build_manifest(required=False)
     exact_model_revision = (
         model_id if re.fullmatch(r"claude-[A-Za-z0-9._-]*[0-9]{8}", model_id) else None
@@ -1365,12 +1366,14 @@ def _runtime_release(
     result: ReviewRunResultV2,
     *,
     evidence_runtime_v3_sha256: str | None,
+    assertion_trust_store: AssertionTrustStoreV1 | None = None,
 ) -> RuntimeReleaseIdentityV1:
     observed_model = result.model_calls[0].model_id if result.model_calls else DEFAULT_CLAUDE_MODEL
     return runtime_release_identity(
         model_id=observed_model,
         evidence_snapshot_id=result.knowledge_snapshot_id,
         evidence_runtime_v3_sha256=evidence_runtime_v3_sha256,
+        assertion_trust_store=assertion_trust_store,
     )
 
 
@@ -1665,6 +1668,7 @@ def to_review_run_result_v3(
     *,
     analyzer: ClaudeDocumentAnalyzer | None = None,
     evidence_runtime_v3_sha256: str | None = None,
+    assertion_trust_store: AssertionTrustStoreV1 | None = None,
     supporting_document_rejections: list[str] | None = None,
     active_executor: ActiveBoundedRuntimeExecutor | None = None,
 ) -> ReviewRunResultV3:
@@ -1683,6 +1687,7 @@ def to_review_run_result_v3(
         current_release = _runtime_release(
             current,
             evidence_runtime_v3_sha256=evidence_runtime_v3_sha256,
+            assertion_trust_store=assertion_trust_store,
         )
         current_eligibility = _completion_eligibility(
             current,
@@ -2418,6 +2423,34 @@ def verified_requirement_codes_by_item(
     )
 
 
+def presented_requirement_codes_by_item(
+    documents: list[SupportingDocumentV1],
+    *,
+    retrieval_results: list[Any],
+) -> dict[str, list[str]]:
+    """Project exact item/HSK-bound presence without claiming document trust."""
+
+    item_hsk: dict[str, str] = {}
+    for result in retrieval_results:
+        item_id = (
+            result.get("item_id") if isinstance(result, dict) else getattr(result, "item_id", None)
+        )
+        resolved_hsk10 = (
+            result.get("resolved_hsk10")
+            if isinstance(result, dict)
+            else getattr(result, "resolved_hsk10", None)
+        )
+        if isinstance(item_id, str) and isinstance(resolved_hsk10, str):
+            item_hsk[item_id] = resolved_hsk10
+    presented: dict[str, set[str]] = {}
+    for document in documents:
+        for item_id in document.subject_item_ids:
+            resolved_hsk10 = item_hsk.get(item_id)
+            if resolved_hsk10 is not None and resolved_hsk10 in document.hs_codes:
+                presented.setdefault(item_id, set()).add(document.document_code)
+    return {item_id: sorted(codes) for item_id, codes in sorted(presented.items()) if codes}
+
+
 def assert_result_hash(result: ReviewRunResultV3) -> None:
     if result.result_sha256 != review_result_v3_sha256(result):
         raise ValueError("stale or mutated V3 result")
@@ -2436,6 +2469,7 @@ __all__ = [
     "detect_review_gaps",
     "deterministic_narrative",
     "execute_bounded_plan",
+    "presented_requirement_codes_by_item",
     "runtime_release_identity",
     "to_review_run_result_v3",
     "verified_requirement_codes_by_item",

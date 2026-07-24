@@ -857,6 +857,38 @@ def test_scenario_eval_mode_uses_actual_store_boundary_and_sealed_test_policy(
     assert payload["automatic_completion_release"]["uat_forced_disabled"] is True
 
 
+def test_scenario_eval_review_identity_uses_the_injected_active_trust_store(
+    tmp_path: Path,
+) -> None:
+    from customs_ai_agent.agentic import runtime_release_identity
+    from customs_ai_agent.assertion_trust import SupportingDocumentAssertionVerifier
+    from customs_ai_agent.runtime import AgentRuntime
+
+    manifest = _load_manifest(
+        tmp_path,
+        evidence_mode="preserved-3law-v3-scenario-eval",
+    )
+    assert manifest.assertion_trust_store is not None
+    runtime = object.__new__(AgentRuntime)
+    runtime._assertion_verifier = SupportingDocumentAssertionVerifier(
+        manifest.assertion_trust_store
+    )
+
+    injected = runtime._runtime_assertion_trust_store()
+    identity = runtime_release_identity(
+        model_id="claude-sonnet-5-20260722",
+        evidence_snapshot_id="snapshot-three-law",
+        evidence_runtime_v3_sha256="e" * 64,
+        assertion_trust_store=injected,
+    )
+
+    assert injected == manifest.assertion_trust_store
+    assert identity.assertion_trust_store_sha256 == (
+        manifest.assertion_trust_store.trust_store_sha256
+    )
+    assert identity.assertion_trust_store_state == "active"
+
+
 def test_uat_errors_redact_runtime_and_secret_detail(tmp_path: Path) -> None:
     manifest = _load_manifest(tmp_path)
 

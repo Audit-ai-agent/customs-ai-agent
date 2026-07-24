@@ -27,10 +27,13 @@ from customs_ai_agent.agentic import (
     compile_shadow_plan,
     deterministic_narrative,
     execute_active_bounded_plan,
+    presented_requirement_codes_by_item,
     to_review_run_result_v3,
     validate_grounded_answer_projection,
     verified_requirement_codes_by_item,
 )
+import customs_ai_agent.assertion_trust as assertion_trust
+from customs_ai_agent.assertion_trust import AssertionTrustStoreV1
 from customs_ai_agent.adapters.llm import (
     StructuredAgenticResult,
     anthropic_compatible_output_schema,
@@ -121,6 +124,34 @@ def _v3_result():
             evidence_runtime_v3_sha256="e" * 64,
         ),
     )
+
+
+def _injected_unreleased_assertion_store() -> AssertionTrustStoreV1:
+    payload = {
+        "contract": "customs-ai-agent-assertion-trust-store",
+        "schema_version": "1.0",
+        "release_state": "unreleased",
+        "trust_domain": "customs-ai-agent/supporting-document-verification/v1",
+        "keys": [],
+    }
+    payload["trust_store_sha256"] = assertion_trust._sha256(payload)
+    return AssertionTrustStoreV1.model_validate(payload)
+
+
+def test_v3_result_uses_the_explicit_runtime_assertion_trust_store_identity() -> None:
+    request, result_v2, _baseline = _v3_result()
+    injected = _injected_unreleased_assertion_store()
+
+    result = to_review_run_result_v3(
+        result_v2,
+        request,
+        evidence_runtime_v3_sha256="e" * 64,
+        assertion_trust_store=injected,
+    )
+
+    assert result.runtime_release.assertion_trust_store_sha256 == (injected.trust_store_sha256)
+    assert result.runtime_release.assertion_trust_store_state == injected.release_state
+    assert result.runtime_release.assertion_trust_store_sha256 != "b" * 64
 
 
 def test_prompt_injection_guard_forces_indeterminate_without_mutating_review_facts() -> None:
@@ -343,6 +374,26 @@ def test_supporting_document_requires_exact_item_hsk_source_and_released_policy(
     )
     assert wrong_source == {}
     assert any("assertion_missing" in reason for reason in rejected_source)
+
+
+def test_presented_supporting_document_presence_is_exactly_item_and_hsk_bound() -> None:
+    document = _supporting_document()
+    exact = presented_requirement_codes_by_item(
+        [document],
+        retrieval_results=[{"item_id": "item-1", "resolved_hsk10": "0303540000"}],
+    )
+    assert exact == {"item-1": ["REQ_CERT"]}
+
+    wrong_hsk = presented_requirement_codes_by_item(
+        [document],
+        retrieval_results=[{"item_id": "item-1", "resolved_hsk10": "0303550000"}],
+    )
+    wrong_item = presented_requirement_codes_by_item(
+        [document],
+        retrieval_results=[{"item_id": "item-2", "resolved_hsk10": "0303540000"}],
+    )
+    assert wrong_hsk == {}
+    assert wrong_item == {}
 
 
 def test_human_assertion_after_legal_review_date_is_valid_until_immutable_job_cutoff() -> None:
@@ -1183,6 +1234,12 @@ def test_v3_required_actions_are_an_exact_code_owned_projection() -> None:
         for item in supporting.required_actions
         if item.action_code == "verify_supporting_document"
     ]
+    assert supporting.regulatory_findings == result_v2.regulatory_findings
+    assert (
+        "supporting_document_verification_incomplete"
+        in supporting.completion_eligibility.unmet_reason_codes
+    )
+    assert supporting.review_disposition == "human_review_required"
     assert len(supporting_actions) == 1
     assert supporting_actions[0].message == SUPPORTING_DOCUMENT_ACTION_MESSAGE
     assert "support-1" not in supporting_actions[0].message

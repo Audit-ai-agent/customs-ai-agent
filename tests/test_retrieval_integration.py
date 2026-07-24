@@ -941,6 +941,63 @@ def test_submitted_requirement_code_suppresses_missing_finding():
     assert state["requires_human_review"] is False
 
 
+def test_exact_presented_but_unverified_document_is_not_reported_as_missing():
+    response = RequirementRetriever().retrieve(_http_test_request())
+    evidence = response.results[0].evidence[0].model_dump(mode="json")
+    required_code = evidence["required_document_code"]
+
+    update = compliance_review(
+        {
+            "retrieval_status": "ok",
+            "retrieval_coverage": "complete",
+            "knowledge_snapshot_id": response.knowledge_snapshot_id,
+            "rag_evidence": [evidence],
+            "normalized_documents": {},
+            "uploaded_requirement_document_codes": [],
+            "documents": [],
+            "verified_requirement_documents_by_item": {},
+            "presented_requirement_documents_by_item": {
+                "item-http-1": [required_code],
+            },
+            # The verification rejection is projected to V3 separately. The
+            # compliance node must preserve that fail-closed human boundary.
+            "requires_human_review": True,
+            "audit_trail": [],
+        }
+    )
+
+    assert update["regulatory_findings"] == []
+    assert update["requires_human_review"] is True
+
+
+def test_presented_document_for_another_item_does_not_suppress_missing_finding():
+    response = RequirementRetriever().retrieve(_http_test_request())
+    evidence = response.results[0].evidence[0].model_dump(mode="json")
+    required_code = evidence["required_document_code"]
+
+    update = compliance_review(
+        {
+            "retrieval_status": "ok",
+            "retrieval_coverage": "complete",
+            "knowledge_snapshot_id": response.knowledge_snapshot_id,
+            "rag_evidence": [evidence],
+            "normalized_documents": {},
+            "uploaded_requirement_document_codes": [],
+            "documents": [],
+            "verified_requirement_documents_by_item": {},
+            "presented_requirement_documents_by_item": {
+                "item-other": [required_code],
+            },
+            "requires_human_review": False,
+            "audit_trail": [],
+        }
+    )
+
+    assert [item["finding_code"] for item in update["regulatory_findings"]] == [
+        "REQUIRED_CERT_MISSING"
+    ]
+
+
 def test_response_rejects_cross_item_evidence_link():
     source_record_id = "record-1"
     version_hash = "d" * 64
