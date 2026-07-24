@@ -302,9 +302,35 @@ def agentic_semantic_schema_hashes() -> dict[str, str]:
 
 
 _QUESTION_TOKEN = re.compile(r"[0-9A-Za-z가-힣]{2,}")
+_KOREAN_QUESTION_TOKEN = re.compile(r"[가-힣]+")
 _QUESTION_STOP_WORDS = frozenset(
     {"어떤", "무엇", "있나요", "인가요", "대해", "대한", "현재", "이번", "해당", "알려줘"}
 )
+_ISSUE_INTENT_KEYWORDS = frozenset({"문제", "오류", "불일치", "위험", "finding", "issue"})
+_REGULATION_INTENT_KEYWORDS = frozenset({"법령", "규정", "요건", "서류", "근거", "evidence"})
+_OUTCOME_INTENT_KEYWORDS = frozenset({"결과", "상태", "완료", "심사", "outcome", "status"})
+_FIELD_INTENT_KEYWORDS = frozenset(
+    {"문서", "금액", "수량", "원산지", "송장", "선하", "품목", "hsk", "hs"}
+)
+
+
+def _matches_question_intent(
+    question_tokens: set[str],
+    keywords: frozenset[str],
+) -> bool:
+    """Match Korean inflections without broadening English substring matching."""
+
+    for keyword in keywords:
+        if keyword.isascii():
+            if keyword in question_tokens:
+                return True
+            continue
+        if any(
+            _KOREAN_QUESTION_TOKEN.fullmatch(token) is not None and keyword in token
+            for token in question_tokens
+        ):
+            return True
+    return False
 
 
 @dataclass(frozen=True, slots=True)
@@ -2012,20 +2038,10 @@ def _deterministic_grounded_answer_plan(question: GroundedQuestionV1) -> _Ground
         for token in _QUESTION_TOKEN.findall(question.question)
         if token.casefold() not in _QUESTION_STOP_WORDS
     }
-    issue_intent = bool(
-        question_tokens.intersection({"문제", "오류", "불일치", "위험", "finding", "issue"})
-    )
-    regulation_intent = bool(
-        question_tokens.intersection({"법령", "규정", "요건", "서류", "근거", "evidence"})
-    )
-    outcome_intent = bool(
-        question_tokens.intersection({"결과", "상태", "완료", "심사", "outcome", "status"})
-    )
-    field_intent = bool(
-        question_tokens.intersection(
-            {"문서", "금액", "수량", "원산지", "송장", "선하", "품목", "hsk", "hs"}
-        )
-    )
+    issue_intent = _matches_question_intent(question_tokens, _ISSUE_INTENT_KEYWORDS)
+    regulation_intent = _matches_question_intent(question_tokens, _REGULATION_INTENT_KEYWORDS)
+    outcome_intent = _matches_question_intent(question_tokens, _OUTCOME_INTENT_KEYWORDS)
+    field_intent = _matches_question_intent(question_tokens, _FIELD_INTENT_KEYWORDS)
     case_intent = issue_intent or regulation_intent or outcome_intent or field_intent
     if not case_intent:
         return _GroundedAnswerPlan(

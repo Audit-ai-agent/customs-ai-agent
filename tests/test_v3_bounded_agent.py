@@ -2790,6 +2790,55 @@ def test_case_answer_is_grounded_or_explicitly_refused() -> None:
     assert refused.citations == []
 
 
+def test_case_answer_recognizes_korean_outcome_keyword_with_endings() -> None:
+    _request_value, _result_v2, result = _v3_result()
+
+    answer = answer_grounded_question(
+        GroundedQuestionV1(
+            question_id="question_" + "4" * 64,
+            question="왜 이 결과인가요?",
+            review_result=result,
+        )
+    )
+
+    assert answer.status == "answered"
+    assert answer.citations == [
+        CitationReferenceV1(
+            kind="outcome",
+            reference_id=reconstruct_v3_current_semantics(result).outcome_reference_id,
+        )
+    ]
+    assert result.review_disposition in answer.answer
+
+
+@pytest.mark.parametrize(
+    ("question_text", "expected_status"),
+    [
+        ("규정은 무엇인가요?", "answered"),
+        ("문제가 있나요?", "insufficient_evidence"),
+        ("문서금액이 어떻게 되나요?", "insufficient_evidence"),
+        ("오늘 날씨와 심사 결과를 알려줘", "out_of_scope"),
+        ("outcome", "answered"),
+        ("preoutcomepost 설명해줘", "out_of_scope"),
+    ],
+)
+def test_case_answer_korean_intent_matching_preserves_scope_safety(
+    question_text: str,
+    expected_status: str,
+) -> None:
+    _request_value, _result_v2, result = _v3_result()
+
+    answer = answer_grounded_question(
+        GroundedQuestionV1(
+            question_id="question_" + hashlib.sha256(question_text.encode()).hexdigest(),
+            question=question_text,
+            review_result=result,
+        )
+    )
+
+    assert answer.status == expected_status
+
+
 def test_case_answer_projection_rejects_self_consistent_arbitrary_text() -> None:
     _request_value, _result_v2, result = _v3_result()
     question = GroundedQuestionV1(
