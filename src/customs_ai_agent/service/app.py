@@ -54,6 +54,18 @@ _NO_STORE_HEADERS = {
     "X-Content-Type-Options": "nosniff",
 }
 _BEARER_SECURITY: list[dict[str, list[str]]] = [{"ServiceBearer": []}]
+_PRE_EXECUTION_503_RESPONSE: dict[str, Any] = {
+    "content": {"application/json": {"schema": ERROR_RESPONSE_SCHEMA}},
+    "headers": {
+        "X-Agent-Execution-State": {
+            "description": (
+                "Present only when the authenticated request was rejected by the dependency "
+                "admission Gate before controller.submit and runtime execution."
+            ),
+            "schema": {"type": "string", "enum": ["not-started"]},
+        }
+    },
+}
 
 
 class _UnavailableRuntime:
@@ -81,6 +93,8 @@ def _request_id(request: Request) -> str:
 def _error_response(request: Request, error: ServiceHttpError) -> JSONResponse:
     request_id = _request_id(request)
     headers = {**_NO_STORE_HEADERS, "X-Request-ID": request_id}
+    if error.execution_state == "not-started":
+        headers["X-Agent-Execution-State"] = "not-started"
     if error.retry_after_seconds is not None:
         headers["Retry-After"] = str(error.retry_after_seconds)
     safe_log(
@@ -383,7 +397,7 @@ def create_app(
             415: {"content": {"application/json": {"schema": ERROR_RESPONSE_SCHEMA}}},
             422: {"content": {"application/json": {"schema": ERROR_RESPONSE_SCHEMA}}},
             502: {"content": {"application/json": {"schema": ERROR_RESPONSE_SCHEMA}}},
-            503: {"content": {"application/json": {"schema": ERROR_RESPONSE_SCHEMA}}},
+            503: _PRE_EXECUTION_503_RESPONSE,
             504: {"content": {"application/json": {"schema": ERROR_RESPONSE_SCHEMA}}},
         },
     )
@@ -396,7 +410,12 @@ def create_app(
         # before the runtime worker, so an unsealed/mismatched Data release can
         # never spend Claude tokens.
         if not await controller.ready():
-            raise ServiceHttpError("dependency_unready", 503, retryable=True)
+            raise ServiceHttpError(
+                "dependency_unready",
+                503,
+                retryable=True,
+                execution_state="not-started",
+            )
         outcome, replayed = await controller.submit(
             payload=payload,
             review_run_id=inspection.review_run_id,
@@ -456,7 +475,7 @@ def create_app(
             415: {"content": {"application/json": {"schema": ERROR_RESPONSE_SCHEMA}}},
             422: {"content": {"application/json": {"schema": ERROR_RESPONSE_SCHEMA}}},
             502: {"content": {"application/json": {"schema": ERROR_RESPONSE_SCHEMA}}},
-            503: {"content": {"application/json": {"schema": ERROR_RESPONSE_SCHEMA}}},
+            503: _PRE_EXECUTION_503_RESPONSE,
             504: {"content": {"application/json": {"schema": ERROR_RESPONSE_SCHEMA}}},
         },
     )
@@ -470,7 +489,12 @@ def create_app(
         )
         controller: AgentServiceController = request.app.state.controller
         if not await controller.ready():
-            raise ServiceHttpError("dependency_unready", 503, retryable=True)
+            raise ServiceHttpError(
+                "dependency_unready",
+                503,
+                retryable=True,
+                execution_state="not-started",
+            )
         outcome, replayed = await controller.submit(
             payload=payload,
             review_run_id=f"v3:{inspection.review_run_id}",
@@ -507,7 +531,7 @@ def create_app(
             200: {"content": {"application/json": {"schema": revision_result_schema}}},
             409: {"content": {"application/json": {"schema": ERROR_RESPONSE_SCHEMA}}},
             422: {"content": {"application/json": {"schema": ERROR_RESPONSE_SCHEMA}}},
-            503: {"content": {"application/json": {"schema": ERROR_RESPONSE_SCHEMA}}},
+            503: _PRE_EXECUTION_503_RESPONSE,
         },
     )
     async def revision_v3(request: Request) -> JSONResponse:
@@ -520,7 +544,12 @@ def create_app(
         )
         controller: AgentServiceController = request.app.state.controller
         if not await controller.ready():
-            raise ServiceHttpError("dependency_unready", 503, retryable=True)
+            raise ServiceHttpError(
+                "dependency_unready",
+                503,
+                retryable=True,
+                execution_state="not-started",
+            )
         outcome, replayed = await controller.submit(
             payload=payload,
             review_run_id=f"revision:{inspection.replay_id}",
@@ -555,7 +584,7 @@ def create_app(
         responses={
             200: {"content": {"application/json": {"schema": grounded_answer_schema}}},
             422: {"content": {"application/json": {"schema": ERROR_RESPONSE_SCHEMA}}},
-            503: {"content": {"application/json": {"schema": ERROR_RESPONSE_SCHEMA}}},
+            503: _PRE_EXECUTION_503_RESPONSE,
         },
     )
     async def answer_v3(request: Request) -> JSONResponse:
@@ -568,7 +597,12 @@ def create_app(
         )
         controller: AgentServiceController = request.app.state.controller
         if not await controller.ready():
-            raise ServiceHttpError("dependency_unready", 503, retryable=True)
+            raise ServiceHttpError(
+                "dependency_unready",
+                503,
+                retryable=True,
+                execution_state="not-started",
+            )
         outcome, replayed = await controller.submit(
             payload=payload,
             review_run_id=f"answer:{inspection.replay_id}",

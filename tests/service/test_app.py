@@ -40,6 +40,7 @@ def test_unready_dependency_is_generic_503(
         response = local_client.get("/health/ready")
     assert response.status_code == 503
     assert response.json()["error"]["code"] == "dependency_unready"
+    assert "x-agent-execution-state" not in response.headers
     assert "private dependency details" not in response.text
 
 
@@ -78,6 +79,52 @@ def test_unreleased_packaged_data_lock_keeps_service_live_but_never_calls_claude
         )
     assert review.status_code == 503
     assert review.json()["error"]["code"] == "dependency_unready"
+    assert review.headers["x-agent-execution-state"] == "not-started"
+
+
+def test_all_execution_endpoints_mark_only_admission_dependency_rejection_not_started(
+    monkeypatch: pytest.MonkeyPatch,
+    service_settings: Any,
+    fake_runtime: Any,
+    auth_headers: dict[str, str],
+    valid_payload: dict[str, Any],
+) -> None:
+    import customs_ai_agent.service.app as app_module
+
+    def unavailable() -> object:
+        raise RuntimeError("dependency not ready")
+
+    monkeypatch.setattr(
+        app_module,
+        "inspect_v3_auxiliary_request",
+        lambda *_args, **_kwargs: SimpleNamespace(
+            replay_id="admission-test",
+            canonical_sha256="a" * 64,
+        ),
+    )
+    app = app_module.create_app(
+        service_settings,
+        runtime_factory=lambda _settings: fake_runtime,
+        readiness_probe_factory=lambda _settings: unavailable,
+    )
+    requests = (
+        ("/internal/agent/v1/reviews", valid_payload),
+        ("/internal/agent/v2/reviews", valid_payload),
+        ("/internal/agent/v2/revisions", {}),
+        ("/internal/agent/v2/answers", {}),
+    )
+    with TestClient(app, raise_server_exceptions=False) as local_client:
+        responses = [
+            local_client.post(path, headers=auth_headers, json=payload)
+            for path, payload in requests
+        ]
+
+    assert fake_runtime.calls == 0
+    for response in responses:
+        assert response.status_code == 503
+        assert response.json()["error"]["code"] == "dependency_unready"
+        assert response.headers["x-agent-execution-state"] == "not-started"
+        assert response.json()["error"]["request_id"] == response.headers["x-request-id"]
 
 
 def test_metadata_and_metrics_are_authenticated_and_safe(
@@ -148,7 +195,7 @@ def test_metadata_and_metrics_are_authenticated_and_safe(
     assert metadata_v2_payload["evidence_runtime_release"] == {"release_state": "unreleased"}
     assert metadata_v2_payload["evidence_runtime_release_v3"] == {"release_state": "unreleased"}
     assert metadata_v2_payload["schemas"]["service_openapi_sha256"] == (
-        "17199315855410ae9c5221259a492488d95ed58a21f46c89c11ec69030feccb6"
+        "e0ac396417ddc37a20fce7ed9ba612db3db5d259a3a3393faadfb1ad95f6c64e"
     )
 
     metrics = client.get("/internal/agent/v1/metrics", headers=auth_headers)
@@ -320,6 +367,7 @@ def test_transport_rejects_unsafe_wire_before_runtime(
     )
     assert response.status_code == status
     assert response.json()["error"]["code"] == code
+    assert "x-agent-execution-state" not in response.headers
     assert fake_runtime.calls == 0
 
 
@@ -392,7 +440,71 @@ def test_v3_accepts_backend_text_dump_with_only_empty_visual_defaults(
         json=valid_payload,
     )
     assert response.status_code == 200
+    assert "x-agent-execution-state" not in response.headers
     assert fake_runtime.calls == 1
+
+
+def test_runtime_dependency_failure_after_submit_never_claims_not_started(
+    client: TestClient,
+    auth_headers: dict[str, str],
+    valid_payload: dict[str, Any],
+    fake_runtime: Any,
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    from customs_ai_agent.runtime import RuntimeConfigurationError
+
+    calls = 0
+
+    def fail_after_submit(_payload: bytes) -> object:
+        nonlocal calls
+        calls += 1
+        raise RuntimeConfigurationError(
+            "runtime_dependency_unready",
+            "The runtime failed after admission.",
+        )
+
+    monkeypatch.setattr(fake_runtime, "review_v3_json", fail_after_submit)
+    response = client.post(
+        "/internal/agent/v2/reviews",
+        headers=auth_headers,
+        json=valid_payload,
+    )
+
+    assert calls == 1
+    assert response.status_code == 503
+    assert response.json()["error"] == {
+        "code": "dependency_unready",
+        "message": "A required service dependency is not ready.",
+        "request_id": response.headers["x-request-id"],
+        "retryable": True,
+    }
+    assert "x-agent-execution-state" not in response.headers
+
+
+def test_service_http_error_rejects_invalid_not_started_claims() -> None:
+    from customs_ai_agent.service.errors import ServiceHttpError
+
+    with pytest.raises(ValueError, match="reserved"):
+        ServiceHttpError(
+            "dependency_unready",
+            503,
+            retryable=True,
+            execution_state="started",  # type: ignore[arg-type]
+        )
+    with pytest.raises(ValueError, match="reserved"):
+        ServiceHttpError(
+            "review_execution_failed",
+            502,
+            retryable=True,
+            execution_state="not-started",
+        )
+    with pytest.raises(ValueError, match="reserved"):
+        ServiceHttpError(
+            "dependency_unready",
+            503,
+            retryable=False,
+            execution_state="not-started",
+        )
 
 
 def test_v3_rejects_nonempty_backend_visual_default_before_runtime(

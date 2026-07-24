@@ -52,6 +52,12 @@ OpenAPI endpoint를 런타임에 공개하지 않는다. canonical OpenAPI는
 `contracts/agent/service/v1/openapi.lock.json`의 hash·크기·route로 고정하고
 `tools/verify_service_openapi.py`로 drift를 검사한다.
 
+`POST` 실행 API가 dependency admission Gate에서 `controller.submit` 전에 거절한
+`503 dependency_unready`에만 `X-Agent-Execution-State: not-started`를 반환한다.
+Backend는 이 단일 header와 canonical 오류 body·`X-Request-ID`가 모두 일치할 때만
+동일 Job을 제한적으로 다시 전달할 수 있다. runtime worker가 시작된 뒤 발생한 동일
+503에는 이 header가 없으므로 호출-1회 장벽을 다시 열어서는 안 된다.
+
 ## 입력 불변식
 
 - `Content-Type`은 `application/json`과 선택적 UTF-8 charset만 허용한다.

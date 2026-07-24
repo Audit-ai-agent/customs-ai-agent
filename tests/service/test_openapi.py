@@ -12,7 +12,7 @@ from tools.verify_service_openapi import (
 
 def test_service_openapi_matches_frozen_lock() -> None:
     assert (
-        verify_openapi_lock() == "17199315855410ae9c5221259a492488d95ed58a21f46c89c11ec69030feccb6"
+        verify_openapi_lock() == "e0ac396417ddc37a20fce7ed9ba612db3db5d259a3a3393faadfb1ad95f6c64e"
     )
 
 
@@ -40,3 +40,16 @@ def test_openapi_declares_bearer_auth_and_exact_v2_result_schema() -> None:
     assert operation["security"] == [{"ServiceBearer": []}]
     result = operation["responses"]["200"]["content"]["application/json"]["schema"]
     assert result["$id"] == "https://schemas.customs.local/agent/v2/review-result.schema.json"
+    for path in (
+        "/internal/agent/v1/reviews",
+        "/internal/agent/v2/reviews",
+        "/internal/agent/v2/revisions",
+        "/internal/agent/v2/answers",
+    ):
+        pre_execution_header = schema["paths"][path]["post"]["responses"]["503"]["headers"][
+            "X-Agent-Execution-State"
+        ]
+        assert pre_execution_header["schema"] == {
+            "type": "string",
+            "enum": ["not-started"],
+        }
