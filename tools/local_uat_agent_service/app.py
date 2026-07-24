@@ -13,6 +13,7 @@ import hashlib
 import json
 import os
 from dataclasses import dataclass
+from datetime import date
 from pathlib import Path
 from typing import Any, Callable, Literal, Mapping
 from urllib.parse import urlsplit
@@ -23,6 +24,10 @@ from fastapi import FastAPI, Request
 from fastapi.responses import JSONResponse
 
 from customs_ai_agent.adapters.llm import ClaudeDocumentAnalyzer, ClaudeSettings
+from customs_ai_agent.assertion_trust import (
+    AssertionTrustStoreV1,
+    SupportingDocumentAssertionVerifier,
+)
 from customs_ai_agent.contracts.evidence_v3 import EvidenceRuntimeReleaseIdentityV3
 from customs_ai_agent.runtime import AgentRuntime, RuntimeExecutionError, RuntimeInputError
 from customs_ai_agent.schemas.v3 import (
@@ -39,7 +44,7 @@ from tools.agent_execution_inspector.evidence_v3_conformance import (
 
 
 LOCAL_UAT_ACKNOWLEDGEMENT = "LOCAL_UAT_DIAGNOSTIC_NOT_PRODUCTION"
-_MANIFEST_SCHEMA_VERSION = "customs-agent-local-uat-manifest/v1"
+_MANIFEST_SCHEMA_VERSION = "customs-agent-local-uat-manifest/v2"
 _MANIFEST_FIELDS = frozenset(
     {
         "schema_version",
@@ -51,12 +56,77 @@ _MANIFEST_FIELDS = frozenset(
         "evidence_mode",
         "evidence_base_url",
         "evidence_runtime_identity",
+        "assertion_fixture_mode",
+        "assertion_trust_store_path",
+        "assertion_trust_store_sha256",
     }
 )
-EvidenceMode = Literal["synthetic-v3", "preserved-3law-v3-diagnostic"]
-_EVIDENCE_MODES = frozenset({"synthetic-v3", "preserved-3law-v3-diagnostic"})
+EvidenceMode = Literal[
+    "synthetic-v3",
+    "preserved-3law-v3-diagnostic",
+    "preserved-3law-v3-scenario-eval",
+]
+
+
+@dataclass(frozen=True, slots=True)
+class _EvidencePolicyIdentityPin:
+    requirement_policy_release: str
+    requirement_policy_manifest_sha256: str
+    coverage_matrix_sha256: str
+    reviewer_trust_store_sha256: str | None = None
+
+
+_EVIDENCE_MODES = frozenset(
+    {
+        "synthetic-v3",
+        "preserved-3law-v3-diagnostic",
+        "preserved-3law-v3-scenario-eval",
+    }
+)
+_ACTUAL_STORE_EVIDENCE_MODES = frozenset(
+    {
+        "preserved-3law-v3-diagnostic",
+        "preserved-3law-v3-scenario-eval",
+    }
+)
+_EVIDENCE_POLICY_MODES: Mapping[EvidenceMode, str] = {
+    "synthetic-v3": "SYNTHETIC_FIXTURE",
+    "preserved-3law-v3-diagnostic": "ACTUAL_CODES_HUMAN_ONLY",
+    "preserved-3law-v3-scenario-eval": "SEALED_TEST_ONLY_ACTUAL_CCCT_HUMAN_ONLY",
+}
+_EVIDENCE_POLICY_IDENTITY_PINS: Mapping[EvidenceMode, _EvidencePolicyIdentityPin] = {
+    "synthetic-v3": _EvidencePolicyIdentityPin(
+        requirement_policy_release="test-only-conformance.no-production-policy.v1",
+        requirement_policy_manifest_sha256=(
+            "882d18df864cf19149589705c27e9d94b8441e80c8d6bef397a7507cf67a9c90"
+        ),
+        coverage_matrix_sha256=("a47fd7e683b7e0a270c5d4b76365034b2f24a0b4f2a52ba1c69421480c1f5263"),
+    ),
+    "preserved-3law-v3-diagnostic": _EvidencePolicyIdentityPin(
+        requirement_policy_release="test-only-conformance.no-production-policy.v1",
+        requirement_policy_manifest_sha256=(
+            "54aa31a0baed9a8eeeea57f9c436a78b8d687e244538491a46e34af46238cf7a"
+        ),
+        coverage_matrix_sha256=("a47fd7e683b7e0a270c5d4b76365034b2f24a0b4f2a52ba1c69421480c1f5263"),
+    ),
+    "preserved-3law-v3-scenario-eval": _EvidencePolicyIdentityPin(
+        requirement_policy_release="test-only-three-law-scenario-eval-human-only.v1",
+        requirement_policy_manifest_sha256=(
+            "2467226fe64c84f8fdc0b41a8ab44ebaba04e6ba7280cd3e4bd56bd2e9c38c95"
+        ),
+        coverage_matrix_sha256=("21012116b4fddf0ae0e0bb12343558aca472373480d32d535e6b59875800c444"),
+        reviewer_trust_store_sha256=(
+            "7864482157b701b44c457bd35c7721b31ffc31564ea43d83948aa27e08233637"
+        ),
+    ),
+}
 _MAX_MANIFEST_BYTES = 1024 * 1024
+_MAX_ASSERTION_TRUST_STORE_BYTES = 1024 * 1024
 _LOCAL_UAT_REASON = "local_uat_non_release"
+_ASSERTION_FIXTURE_MODE = "LOOPBACK_TEST_ONLY_HUMAN_APPROVER"
+_UAT_APPROVER_AUTHORITY_ID = (
+    "backend:principal-sha256:6cc4551495f1ec8da505fdeaa4f34c17eeb8c234bcaeb6ca184f92a0cdd6318d"
+)
 _THREE_LAW_EVIDENCE_HTTP_TIMEOUT_SECONDS = 195.0
 _SERVICE_ENV_KEYS = frozenset(
     {
@@ -150,6 +220,11 @@ class LocalUatManifest:
     evidence_mode: EvidenceMode
     evidence_base_url: str
     evidence_runtime_identity: EvidenceRuntimeReleaseIdentityV3
+    assertion_fixture_mode: Literal[
+        "DISABLED",
+        "LOOPBACK_TEST_ONLY_HUMAN_APPROVER",
+    ]
+    assertion_trust_store: AssertionTrustStoreV1 | None
     manifest_sha256: str
 
     def safe_metadata(self) -> dict[str, Any]:
@@ -157,9 +232,17 @@ class LocalUatManifest:
             "schema_version": _MANIFEST_SCHEMA_VERSION,
             "manifest_sha256": self.manifest_sha256,
             "evidence_mode": self.evidence_mode,
+            "evidence_policy_mode": _EVIDENCE_POLICY_MODES[self.evidence_mode],
             "evidence_profile": _evidence_profile_metadata(self.evidence_mode),
             "evidence_base_url": self.evidence_base_url,
             "evidence_runtime_identity": self.evidence_runtime_identity.to_wire(),
+            "assertion_fixture_mode": self.assertion_fixture_mode,
+            "assertion_trust_store_sha256": (
+                self.assertion_trust_store.trust_store_sha256
+                if self.assertion_trust_store is not None
+                else None
+            ),
+            "trusted_assertion_verifier_configured": self.assertion_trust_store is not None,
             "diagnostic_only": True,
             "text_only": True,
             "mock_fallback_allowed": False,
@@ -176,13 +259,14 @@ def _evidence_profile_metadata(mode: EvidenceMode) -> dict[str, Any]:
     the Backend/harness's responsibility after independent corroboration.
     """
 
+    profile_kinds = {
+        "synthetic-v3": "synthetic_contract_control",
+        "preserved-3law-v3-diagnostic": "preserved_three_law_rag_diagnostic",
+        "preserved-3law-v3-scenario-eval": "preserved_three_law_rag_scenario_evaluation",
+    }
     return {
         "profile_id": mode,
-        "profile_kind": (
-            "synthetic_contract_control"
-            if mode == "synthetic-v3"
-            else "preserved_three_law_rag_diagnostic"
-        ),
+        "profile_kind": profile_kinds[mode],
         "transport": "evidence_http_v3",
         "identity_binding": "exact_readiness_and_response_headers",
         "direct_database_access": False,
@@ -208,7 +292,7 @@ def _evidence_timeout_seconds(mode: EvidenceMode) -> float:
     # Its HTTP consumer must have a strictly larger budget so a valid terminal
     # response is not discarded at the same deadline boundary.
     return (
-        _THREE_LAW_EVIDENCE_HTTP_TIMEOUT_SECONDS if mode == "preserved-3law-v3-diagnostic" else 30.0
+        _THREE_LAW_EVIDENCE_HTTP_TIMEOUT_SECONDS if mode in _ACTUAL_STORE_EVIDENCE_MODES else 30.0
     )
 
 
@@ -217,7 +301,78 @@ def _readiness_policy(mode: EvidenceMode) -> tuple[float, float]:
     # request enough time to finish and cache the result for the maximum
     # bounded TTL; otherwise a 30-second controller timeout leaves the
     # single-threaded probe running and every retry observes SERVICE_BUSY.
-    return (60.0, 90.0) if mode == "preserved-3law-v3-diagnostic" else (5.0, 5.0)
+    return (60.0, 90.0) if mode in _ACTUAL_STORE_EVIDENCE_MODES else (5.0, 5.0)
+
+
+def _assert_evidence_policy_identity(
+    mode: EvidenceMode,
+    identity: EvidenceRuntimeReleaseIdentityV3,
+) -> None:
+    """Bind the operator-selected profile to an independently pinned policy identity."""
+
+    pin = _EVIDENCE_POLICY_IDENTITY_PINS[mode]
+    if (
+        identity.requirement_policy_release != pin.requirement_policy_release
+        or identity.requirement_policy_manifest_sha256 != pin.requirement_policy_manifest_sha256
+        or identity.coverage_matrix_sha256 != pin.coverage_matrix_sha256
+        or (
+            pin.reviewer_trust_store_sha256 is not None
+            and identity.reviewer_trust_store_sha256 != pin.reviewer_trust_store_sha256
+        )
+    ):
+        raise LocalUatConfigurationError("uat_evidence_policy_identity_mismatch")
+
+
+def _load_uat_assertion_trust_store(
+    path_value: object,
+    expected_sha256: object,
+) -> AssertionTrustStoreV1:
+    if (
+        not isinstance(path_value, str)
+        or path_value != path_value.strip()
+        or not path_value
+        or not isinstance(expected_sha256, str)
+        or len(expected_sha256) != 64
+        or any(character not in "0123456789abcdef" for character in expected_sha256)
+    ):
+        raise LocalUatConfigurationError("uat_assertion_trust_store_config_invalid")
+    path = Path(path_value)
+    if not path.is_absolute() or path.is_symlink():
+        raise LocalUatConfigurationError("uat_assertion_trust_store_path_invalid")
+    try:
+        resolved = path.resolve(strict=True)
+        if not resolved.is_file() or "_secrets" not in {part.casefold() for part in resolved.parts}:
+            raise LocalUatConfigurationError("uat_assertion_trust_store_path_invalid")
+        raw = resolved.read_bytes()
+    except LocalUatConfigurationError:
+        raise
+    except OSError:
+        raise LocalUatConfigurationError("uat_assertion_trust_store_unavailable") from None
+    if not raw or len(raw) > _MAX_ASSERTION_TRUST_STORE_BYTES:
+        raise LocalUatConfigurationError("uat_assertion_trust_store_size_invalid")
+    try:
+        payload = json.loads(
+            raw.decode("utf-8"),
+            object_pairs_hook=_unique_object,
+            parse_constant=_reject_nonfinite,
+        )
+        store = AssertionTrustStoreV1.model_validate(payload)
+    except (UnicodeError, ValueError, RecursionError):
+        raise LocalUatConfigurationError("uat_assertion_trust_store_invalid") from None
+    active_keys = [item for item in store.keys if item.status == "active"]
+    today = date.today()
+    if (
+        store.release_state != "active"
+        or store.trust_store_sha256 != expected_sha256
+        or len(store.keys) != 1
+        or len(active_keys) != 1
+        or active_keys[0].authority_id != _UAT_APPROVER_AUTHORITY_ID
+        or active_keys[0].method != "human_approver"
+        or not active_keys[0].key_id.startswith("local-uat-")
+        or not active_keys[0].valid_from <= today <= active_keys[0].valid_until
+    ):
+        raise LocalUatConfigurationError("uat_assertion_trust_store_policy_invalid")
+    return store
 
 
 def load_local_uat_manifest(path: str | os.PathLike[str]) -> LocalUatManifest:
@@ -255,10 +410,30 @@ def load_local_uat_manifest(path: str | os.PathLike[str]) -> LocalUatManifest:
         )
     except (TypeError, ValueError):
         raise LocalUatConfigurationError("uat_evidence_identity_invalid") from None
+    _assert_evidence_policy_identity(payload["evidence_mode"], identity)
+    scenario_eval = payload["evidence_mode"] == "preserved-3law-v3-scenario-eval"
+    fixture_mode = payload.get("assertion_fixture_mode")
+    if scenario_eval:
+        if fixture_mode != _ASSERTION_FIXTURE_MODE:
+            raise LocalUatConfigurationError("uat_assertion_fixture_policy_invalid")
+        assertion_trust_store = _load_uat_assertion_trust_store(
+            payload.get("assertion_trust_store_path"),
+            payload.get("assertion_trust_store_sha256"),
+        )
+    else:
+        if (
+            fixture_mode != "DISABLED"
+            or payload.get("assertion_trust_store_path") is not None
+            or payload.get("assertion_trust_store_sha256") is not None
+        ):
+            raise LocalUatConfigurationError("uat_assertion_fixture_policy_invalid")
+        assertion_trust_store = None
     return LocalUatManifest(
         evidence_mode=payload["evidence_mode"],
         evidence_base_url=base_url,
         evidence_runtime_identity=identity,
+        assertion_fixture_mode=fixture_mode,
+        assertion_trust_store=assertion_trust_store,
         manifest_sha256=hashlib.sha256(_canonical_json_bytes(payload)).hexdigest(),
     )
 
@@ -463,7 +638,11 @@ def build_local_uat_runtime(
     core._config = None
     core._retriever = None
     core._retriever_v3 = retriever
-    core._assertion_verifier = None
+    core._assertion_verifier = (
+        SupportingDocumentAssertionVerifier(manifest.assertion_trust_store)
+        if manifest.assertion_trust_store is not None
+        else None
+    )
     core._secret_markers = (
         claude_settings.api_key.get_secret_value(),
         evidence_service_token,
@@ -612,6 +791,16 @@ def _compose_local_uat_app(
                 "auto_completion_allowed": False,
                 "assurance_level": "diagnostic",
                 "evidence_mode": manifest.evidence_mode,
+                "evidence_policy_mode": _EVIDENCE_POLICY_MODES[manifest.evidence_mode],
+                "assertion_fixture_mode": manifest.assertion_fixture_mode,
+                "assertion_trust_store_sha256": (
+                    manifest.assertion_trust_store.trust_store_sha256
+                    if manifest.assertion_trust_store is not None
+                    else None
+                ),
+                "trusted_assertion_verifier_configured": (
+                    manifest.assertion_trust_store is not None
+                ),
                 "manifest_sha256": manifest.manifest_sha256,
             },
         )

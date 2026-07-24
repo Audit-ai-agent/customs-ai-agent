@@ -31,6 +31,10 @@ from customs_ai_agent.prompts import (
     load_review_coordinator_system_prompt,
 )
 from customs_ai_agent.release_profile import load_release_profile
+from customs_ai_agent.security_guard import (
+    PROMPT_INJECTION_REASON_CODE,
+    prompt_injection_unmet_reason_codes,
+)
 from customs_ai_agent.schemas.models import ReviewRunResultV2
 from customs_ai_agent.schemas.v3 import (
     ActionTraceV1,
@@ -1407,6 +1411,9 @@ def automatic_completion_unmet_reason_codes(
 
     profile = load_release_profile()
     reasons: set[str] = set()
+    reasons.update(
+        prompt_injection_unmet_reason_codes(document.content_text for document in request.documents)
+    )
     if profile.release_state != "approved":
         reasons.add("claude_release_profile_unapproved")
         reasons.add("domain_reviewers_unavailable")
@@ -1891,7 +1898,9 @@ def to_review_run_result_v3(
             if eligibility.eligible and not open_gaps and not action_failed
             else "human_review_required"
         )
-    if result.validation_issues or result.regulatory_findings:
+    if PROMPT_INJECTION_REASON_CODE in eligibility.unmet_reason_codes:
+        assessment = "indeterminate"
+    elif result.validation_issues or result.regulatory_findings:
         assessment = "issues_detected"
     elif (
         result.retrieval_status == "ok"

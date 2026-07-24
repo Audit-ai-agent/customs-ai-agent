@@ -15,6 +15,7 @@ from customs_ai_agent.schemas.models import (
     ReviewRunResultV2,
     UserCorrection,
 )
+from customs_ai_agent.security_guard import PROMPT_INJECTION_REASON_CODE
 from customs_ai_agent.transport_limits import (
     TEXT_FIRST_MAX_DOCUMENTS,
     TEXT_FIRST_MAX_TEXT_CHARACTERS,
@@ -913,14 +914,18 @@ class ReviewRunResultV3(ReviewRunResultV2):
             ):
                 raise ValueError("Tool observation must exactly match its correlated action trace")
         expected_assessment = (
-            "issues_detected"
-            if self.validation_issues or self.regulatory_findings
+            "indeterminate"
+            if PROMPT_INJECTION_REASON_CODE in self.completion_eligibility.unmet_reason_codes
             else (
-                "no_issue_detected"
-                if self.retrieval_status == "ok"
-                and self.retrieval_coverage == "complete"
-                and has_citable_regulatory_evidence(self)
-                else "indeterminate"
+                "issues_detected"
+                if self.validation_issues or self.regulatory_findings
+                else (
+                    "no_issue_detected"
+                    if self.retrieval_status == "ok"
+                    and self.retrieval_coverage == "complete"
+                    and has_citable_regulatory_evidence(self)
+                    else "indeterminate"
+                )
             )
         )
         if self.assessment != expected_assessment:

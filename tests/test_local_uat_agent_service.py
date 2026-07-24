@@ -1,15 +1,20 @@
 from __future__ import annotations
 
+import base64
+import hashlib
 import inspect
 import json
 from pathlib import Path
 from typing import Any
 
 import pytest
+from cryptography.hazmat.primitives import serialization
+from cryptography.hazmat.primitives.asymmetric.ed25519 import Ed25519PrivateKey
 from fastapi.testclient import TestClient
 from pydantic import SecretStr
 
 import customs_ai_agent.adapters.retrieval_v3 as production_retrieval_v3
+import customs_ai_agent.assertion_trust as assertion_trust
 from customs_ai_agent.runtime import RuntimeExecutionError
 from customs_ai_agent.service.settings import ServiceSettings
 from tests.test_evidence_v3_consumer import _identity
@@ -35,10 +40,67 @@ from tools.local_uat_agent_service.app import (
 SERVICE_TOKEN = "Abcdefghijklmnopqrstuvwxyz0123456789-._~+/=XYZ"
 EVIDENCE_TOKEN = "EvidenceBearer_abcdefghijklmnopqrstuvwxyz0123456789"
 
+_PROFILE_POLICY_IDENTITIES: dict[str, dict[str, str]] = {
+    "synthetic-v3": {
+        "requirement_policy_release": "test-only-conformance.no-production-policy.v1",
+        "requirement_policy_manifest_sha256": (
+            "882d18df864cf19149589705c27e9d94b8441e80c8d6bef397a7507cf67a9c90"
+        ),
+        "coverage_matrix_sha256": (
+            "a47fd7e683b7e0a270c5d4b76365034b2f24a0b4f2a52ba1c69421480c1f5263"
+        ),
+    },
+    "preserved-3law-v3-diagnostic": {
+        "requirement_policy_release": "test-only-conformance.no-production-policy.v1",
+        "requirement_policy_manifest_sha256": (
+            "54aa31a0baed9a8eeeea57f9c436a78b8d687e244538491a46e34af46238cf7a"
+        ),
+        "coverage_matrix_sha256": (
+            "a47fd7e683b7e0a270c5d4b76365034b2f24a0b4f2a52ba1c69421480c1f5263"
+        ),
+    },
+    "preserved-3law-v3-scenario-eval": {
+        "requirement_policy_release": "test-only-three-law-scenario-eval-human-only.v1",
+        "requirement_policy_manifest_sha256": (
+            "2467226fe64c84f8fdc0b41a8ab44ebaba04e6ba7280cd3e4bd56bd2e9c38c95"
+        ),
+        "coverage_matrix_sha256": (
+            "21012116b4fddf0ae0e0bb12343558aca472373480d32d535e6b59875800c444"
+        ),
+        "reviewer_trust_store_sha256": (
+            "7864482157b701b44c457bd35c7721b31ffc31564ea43d83948aa27e08233637"
+        ),
+    },
+}
+
+
+def _rehash_v3_identity(payload: dict[str, Any]) -> dict[str, Any]:
+    result = dict(payload)
+    result.pop("runtime_release_v3_sha256", None)
+    canonical = json.dumps(
+        result,
+        ensure_ascii=False,
+        allow_nan=False,
+        separators=(",", ":"),
+        sort_keys=True,
+    ).encode("utf-8")
+    result["runtime_release_v3_sha256"] = hashlib.sha256(canonical).hexdigest()
+    return result
+
+
+def _profile_identity(profile: str) -> dict[str, Any]:
+    payload = _identity().to_wire()
+    payload.update(_PROFILE_POLICY_IDENTITIES[profile])
+    return _rehash_v3_identity(payload)
+
 
 def _manifest_payload(**updates: Any) -> dict[str, Any]:
+    requested_mode = updates.get("evidence_mode", "synthetic-v3")
+    identity_profile = (
+        requested_mode if requested_mode in _PROFILE_POLICY_IDENTITIES else "synthetic-v3"
+    )
     payload: dict[str, Any] = {
-        "schema_version": "customs-agent-local-uat-manifest/v1",
+        "schema_version": "customs-agent-local-uat-manifest/v2",
         "acknowledgement": LOCAL_UAT_ACKNOWLEDGEMENT,
         "diagnostic_only": True,
         "text_only": True,
@@ -46,15 +108,77 @@ def _manifest_payload(**updates: Any) -> dict[str, Any]:
         "auto_completion_allowed": False,
         "evidence_mode": "synthetic-v3",
         "evidence_base_url": "http://127.0.0.1:18091",
-        "evidence_runtime_identity": _identity().to_wire(),
+        "evidence_runtime_identity": _profile_identity(identity_profile),
+        "assertion_fixture_mode": "DISABLED",
+        "assertion_trust_store_path": None,
+        "assertion_trust_store_sha256": None,
     }
     payload.update(updates)
     return payload
 
 
+def _b64(value: bytes) -> str:
+    return base64.urlsafe_b64encode(value).decode("ascii").rstrip("=")
+
+
+def _write_uat_assertion_trust_store(
+    tmp_path: Path,
+    *,
+    valid_from: str = "2026-01-01",
+    valid_until: str = "2027-12-31",
+) -> tuple[Path, dict[str, Any], Ed25519PrivateKey]:
+    private = Ed25519PrivateKey.generate()
+    asserted_by = "uat-approver"
+    authority_id = (
+        "backend:principal-sha256:" + hashlib.sha256(asserted_by.encode("utf-8")).hexdigest()
+    )
+    payload: dict[str, Any] = {
+        "contract": "customs-ai-agent-assertion-trust-store",
+        "schema_version": "1.0",
+        "release_state": "active",
+        "trust_domain": "customs-ai-agent/supporting-document-verification/v1",
+        "keys": [
+            {
+                "authority_id": authority_id,
+                "authority_release": "backend-human-decision-policy/v1",
+                "method": "human_approver",
+                "key_id": "local-uat-approver-key-v1",
+                "public_key_base64url": _b64(
+                    private.public_key().public_bytes(
+                        encoding=serialization.Encoding.Raw,
+                        format=serialization.PublicFormat.Raw,
+                    )
+                ),
+                "valid_from": valid_from,
+                "valid_until": valid_until,
+                "status": "active",
+            }
+        ],
+    }
+    payload["trust_store_sha256"] = assertion_trust._sha256(payload)
+    path = tmp_path / "_secrets" / "uat" / "assertion-trust-store.json"
+    path.parent.mkdir(parents=True, exist_ok=True)
+    path.write_text(json.dumps(payload), encoding="utf-8")
+    return path, payload, private
+
+
 def _load_manifest(tmp_path: Path, **updates: Any) -> LocalUatManifest:
     path = tmp_path / "uat-manifest.json"
-    path.write_text(json.dumps(_manifest_payload(**updates)), encoding="utf-8")
+    payload = _manifest_payload(**updates)
+    if payload["evidence_mode"] == "preserved-3law-v3-scenario-eval" and not {
+        "assertion_fixture_mode",
+        "assertion_trust_store_path",
+        "assertion_trust_store_sha256",
+    }.intersection(updates):
+        trust_path, trust_store, _private = _write_uat_assertion_trust_store(tmp_path)
+        payload.update(
+            {
+                "assertion_fixture_mode": "LOOPBACK_TEST_ONLY_HUMAN_APPROVER",
+                "assertion_trust_store_path": str(trust_path.resolve()),
+                "assertion_trust_store_sha256": trust_store["trust_store_sha256"],
+            }
+        )
+    path.write_text(json.dumps(payload), encoding="utf-8")
     return load_local_uat_manifest(path)
 
 
@@ -151,12 +275,18 @@ def test_manifest_requires_explicit_non_release_policy_and_literal_loopback(
 
 
 @pytest.mark.parametrize(
-    ("evidence_mode", "profile_kind"),
+    ("evidence_mode", "profile_kind", "policy_mode"),
     [
-        ("synthetic-v3", "synthetic_contract_control"),
+        ("synthetic-v3", "synthetic_contract_control", "SYNTHETIC_FIXTURE"),
         (
             "preserved-3law-v3-diagnostic",
             "preserved_three_law_rag_diagnostic",
+            "ACTUAL_CODES_HUMAN_ONLY",
+        ),
+        (
+            "preserved-3law-v3-scenario-eval",
+            "preserved_three_law_rag_scenario_evaluation",
+            "SEALED_TEST_ONLY_ACTUAL_CCCT_HUMAN_ONLY",
         ),
     ],
 )
@@ -164,12 +294,15 @@ def test_manifest_accepts_only_explicit_diagnostic_profiles_and_exposes_safe_met
     tmp_path: Path,
     evidence_mode: str,
     profile_kind: str,
+    policy_mode: str,
 ) -> None:
     manifest = _load_manifest(tmp_path, evidence_mode=evidence_mode)
 
     assert manifest.evidence_mode == evidence_mode
-    assert manifest.evidence_runtime_identity == _identity()
-    profile = manifest.safe_metadata()["evidence_profile"]
+    assert manifest.evidence_runtime_identity.to_wire() == _profile_identity(evidence_mode)
+    safe_metadata = manifest.safe_metadata()
+    assert safe_metadata["evidence_policy_mode"] == policy_mode
+    profile = safe_metadata["evidence_profile"]
     assert profile == {
         "profile_id": evidence_mode,
         "profile_kind": profile_kind,
@@ -192,19 +325,199 @@ def test_manifest_accepts_only_explicit_diagnostic_profiles_and_exposes_safe_met
     }
 
 
+@pytest.mark.parametrize(
+    ("evidence_mode", "identity_profile"),
+    [
+        ("synthetic-v3", "preserved-3law-v3-diagnostic"),
+        ("synthetic-v3", "preserved-3law-v3-scenario-eval"),
+        ("preserved-3law-v3-diagnostic", "synthetic-v3"),
+        ("preserved-3law-v3-diagnostic", "preserved-3law-v3-scenario-eval"),
+        ("preserved-3law-v3-scenario-eval", "synthetic-v3"),
+        ("preserved-3law-v3-scenario-eval", "preserved-3law-v3-diagnostic"),
+    ],
+)
+def test_manifest_rejects_a_structurally_valid_cross_profile_policy_identity(
+    tmp_path: Path,
+    evidence_mode: str,
+    identity_profile: str,
+) -> None:
+    with pytest.raises(
+        LocalUatConfigurationError,
+        match="uat_evidence_policy_identity_mismatch",
+    ):
+        _load_manifest(
+            tmp_path,
+            evidence_mode=evidence_mode,
+            evidence_runtime_identity=_profile_identity(identity_profile),
+        )
+
+
+@pytest.mark.parametrize(
+    "field",
+    [
+        "requirement_policy_release",
+        "requirement_policy_manifest_sha256",
+        "coverage_matrix_sha256",
+        "reviewer_trust_store_sha256",
+    ],
+)
+def test_scenario_eval_manifest_rejects_a_rehashed_policy_identity_mismatch(
+    tmp_path: Path,
+    field: str,
+) -> None:
+    identity = _profile_identity("preserved-3law-v3-scenario-eval")
+    identity[field] = "f" * 64 if field != "requirement_policy_release" else "old-policy.v1"
+    identity = _rehash_v3_identity(identity)
+
+    with pytest.raises(
+        LocalUatConfigurationError,
+        match="uat_evidence_policy_identity_mismatch",
+    ):
+        _load_manifest(
+            tmp_path,
+            evidence_mode="preserved-3law-v3-scenario-eval",
+            evidence_runtime_identity=identity,
+        )
+
+
+def test_scenario_eval_requires_exact_external_test_only_assertion_trust(
+    tmp_path: Path,
+) -> None:
+    trust_path, trust_store, _private = _write_uat_assertion_trust_store(tmp_path)
+    common = {
+        "evidence_mode": "preserved-3law-v3-scenario-eval",
+        "assertion_fixture_mode": "LOOPBACK_TEST_ONLY_HUMAN_APPROVER",
+        "assertion_trust_store_path": str(trust_path.resolve()),
+        "assertion_trust_store_sha256": trust_store["trust_store_sha256"],
+    }
+    manifest = _load_manifest(tmp_path, **common)
+    assert manifest.assertion_trust_store is not None
+    assert manifest.assertion_trust_store.trust_store_sha256 == (trust_store["trust_store_sha256"])
+    assert manifest.safe_metadata()["trusted_assertion_verifier_configured"] is True
+    assert "assertion_trust_store_path" not in manifest.safe_metadata()
+
+    for mutation in (
+        {"assertion_fixture_mode": "DISABLED"},
+        {"assertion_trust_store_sha256": "0" * 64},
+        {"assertion_trust_store_path": None},
+    ):
+        with pytest.raises(
+            LocalUatConfigurationError,
+            match="uat_assertion",
+        ):
+            _load_manifest(tmp_path, **{**common, **mutation})
+
+
+def test_scenario_eval_rejects_wrong_approver_authority_even_with_a_valid_digest(
+    tmp_path: Path,
+) -> None:
+    trust_path, trust_store, _private = _write_uat_assertion_trust_store(tmp_path)
+    trust_store["keys"][0]["authority_id"] = (
+        "backend:principal-sha256:" + hashlib.sha256(b"not-uat-approver").hexdigest()
+    )
+    trust_store["trust_store_sha256"] = assertion_trust._sha256(
+        {key: value for key, value in trust_store.items() if key != "trust_store_sha256"}
+    )
+    trust_path.write_text(json.dumps(trust_store), encoding="utf-8")
+
+    with pytest.raises(
+        LocalUatConfigurationError,
+        match="uat_assertion_trust_store_policy_invalid",
+    ):
+        _load_manifest(
+            tmp_path,
+            evidence_mode="preserved-3law-v3-scenario-eval",
+            assertion_fixture_mode="LOOPBACK_TEST_ONLY_HUMAN_APPROVER",
+            assertion_trust_store_path=str(trust_path.resolve()),
+            assertion_trust_store_sha256=trust_store["trust_store_sha256"],
+        )
+
+
+def test_manifest_v1_is_rejected_after_assertion_binding_became_mandatory(
+    tmp_path: Path,
+) -> None:
+    with pytest.raises(
+        LocalUatConfigurationError,
+        match="uat_manifest_policy_invalid",
+    ):
+        _load_manifest(tmp_path, schema_version="customs-agent-local-uat-manifest/v1")
+
+
+def test_scenario_eval_rejects_stale_or_non_secret_assertion_trust_paths(
+    tmp_path: Path,
+) -> None:
+    stale_path, stale_store, _private = _write_uat_assertion_trust_store(
+        tmp_path,
+        valid_from="2025-01-01",
+        valid_until="2025-12-31",
+    )
+    with pytest.raises(
+        LocalUatConfigurationError,
+        match="uat_assertion_trust_store_policy_invalid",
+    ):
+        _load_manifest(
+            tmp_path,
+            evidence_mode="preserved-3law-v3-scenario-eval",
+            assertion_fixture_mode="LOOPBACK_TEST_ONLY_HUMAN_APPROVER",
+            assertion_trust_store_path=str(stale_path.resolve()),
+            assertion_trust_store_sha256=stale_store["trust_store_sha256"],
+        )
+
+    valid_path, valid_store, _private = _write_uat_assertion_trust_store(tmp_path)
+    outside = tmp_path / "public-trust-store.json"
+    outside.write_bytes(valid_path.read_bytes())
+    with pytest.raises(
+        LocalUatConfigurationError,
+        match="uat_assertion_trust_store_path_invalid",
+    ):
+        _load_manifest(
+            tmp_path,
+            evidence_mode="preserved-3law-v3-scenario-eval",
+            assertion_fixture_mode="LOOPBACK_TEST_ONLY_HUMAN_APPROVER",
+            assertion_trust_store_path=str(outside.resolve()),
+            assertion_trust_store_sha256=valid_store["trust_store_sha256"],
+        )
+
+
+def test_non_scenario_profiles_reject_assertion_fixture_activation(tmp_path: Path) -> None:
+    trust_path, trust_store, _private = _write_uat_assertion_trust_store(tmp_path)
+    for evidence_mode in ("synthetic-v3", "preserved-3law-v3-diagnostic"):
+        with pytest.raises(
+            LocalUatConfigurationError,
+            match="uat_assertion_fixture_policy_invalid",
+        ):
+            _load_manifest(
+                tmp_path,
+                evidence_mode=evidence_mode,
+                assertion_fixture_mode="LOOPBACK_TEST_ONLY_HUMAN_APPROVER",
+                assertion_trust_store_path=str(trust_path.resolve()),
+                assertion_trust_store_sha256=trust_store["trust_store_sha256"],
+            )
+
+
 def test_actual_store_profile_has_a_bounded_longer_http_budget() -> None:
     assert _evidence_timeout_seconds("synthetic-v3") == 30.0
     assert _evidence_timeout_seconds("preserved-3law-v3-diagnostic") == 195.0
+    assert _evidence_timeout_seconds("preserved-3law-v3-scenario-eval") == 195.0
     assert _readiness_policy("synthetic-v3") == (5.0, 5.0)
     assert _readiness_policy("preserved-3law-v3-diagnostic") == (60.0, 90.0)
+    assert _readiness_policy("preserved-3law-v3-scenario-eval") == (60.0, 90.0)
 
 
+@pytest.mark.parametrize(
+    "evidence_mode",
+    [
+        "preserved-3law-v3-diagnostic",
+        "preserved-3law-v3-scenario-eval",
+    ],
+)
 def test_actual_store_profile_rejects_service_budget_not_larger_than_http_budget(
     tmp_path: Path,
+    evidence_mode: str,
 ) -> None:
     manifest = _load_manifest(
         tmp_path,
-        evidence_mode="preserved-3law-v3-diagnostic",
+        evidence_mode=evidence_mode,
     )
     env_file = tmp_path / ".env"
     env_file.write_text(
@@ -414,6 +727,7 @@ def test_uat_health_metadata_and_v2_routes_are_explicit_and_safe(tmp_path: Path)
         uat_ready = client.get("/health/uat-ready")
         assert uat_ready.status_code == 200
         assert uat_ready.json()["evidence_mode"] == "synthetic-v3"
+        assert uat_ready.json()["evidence_policy_mode"] == "SYNTHETIC_FIXTURE"
         assert uat_ready.json()["auto_completion_allowed"] is False
 
         assert client.get("/internal/agent/v1/metadata", headers=auth).status_code == 404
@@ -436,6 +750,7 @@ def test_uat_health_metadata_and_v2_routes_are_explicit_and_safe(tmp_path: Path)
             "planner_mode",
         }.intersection(metadata_payload)
         assert metadata_payload["uat"]["evidence_mode"] == "synthetic-v3"
+        assert metadata_payload["uat"]["evidence_policy_mode"] == "SYNTHETIC_FIXTURE"
         assert metadata_payload["uat"]["evidence_profile"]["profile_kind"] == (
             "synthetic_contract_control"
         )
@@ -503,6 +818,41 @@ def test_preserved_three_law_mode_is_visible_but_stays_non_release(
     assert profile["profile_kind"] == "preserved_three_law_rag_diagnostic"
     assert profile["provider_execution_corroboration"] == "backend_harness_required"
     assert profile["rag_quality_status"] == "not_attested_by_agent"
+    assert profile["release_eligible"] is False
+    assert payload["automatic_completion_release"]["uat_forced_disabled"] is True
+
+
+def test_scenario_eval_mode_uses_actual_store_boundary_and_sealed_test_policy(
+    tmp_path: Path,
+) -> None:
+    manifest = _load_manifest(
+        tmp_path,
+        evidence_mode="preserved-3law-v3-scenario-eval",
+    )
+    app = _app(manifest, _RouteRuntime())
+    auth = {"Authorization": f"Bearer {SERVICE_TOKEN}"}
+
+    with TestClient(app, raise_server_exceptions=False) as client:
+        assert client.get("/health/ready").status_code == 503
+        ready = client.get("/health/uat-ready")
+        metadata = client.get("/internal/agent/v2/metadata", headers=auth)
+
+    assert ready.status_code == 200
+    assert ready.json()["evidence_mode"] == "preserved-3law-v3-scenario-eval"
+    assert ready.json()["evidence_policy_mode"] == "SEALED_TEST_ONLY_ACTUAL_CCCT_HUMAN_ONLY"
+    assert ready.json()["assertion_fixture_mode"] == "LOOPBACK_TEST_ONLY_HUMAN_APPROVER"
+    assert ready.json()["trusted_assertion_verifier_configured"] is True
+    assert len(ready.json()["assertion_trust_store_sha256"]) == 64
+    payload = metadata.json()
+    assert payload["assurance_level"] == "diagnostic"
+    assert payload["uat"]["evidence_mode"] == "preserved-3law-v3-scenario-eval"
+    assert payload["uat"]["evidence_policy_mode"] == "SEALED_TEST_ONLY_ACTUAL_CCCT_HUMAN_ONLY"
+    assert payload["uat"]["trusted_assertion_verifier_configured"] is True
+    assert "assertion_trust_store_path" not in payload["uat"]
+    profile = payload["uat"]["evidence_profile"]
+    assert profile["profile_kind"] == "preserved_three_law_rag_scenario_evaluation"
+    assert profile["direct_database_access"] is False
+    assert profile["mock_fallback_allowed"] is False
     assert profile["release_eligible"] is False
     assert payload["automatic_completion_release"]["uat_forced_disabled"] is True
 
