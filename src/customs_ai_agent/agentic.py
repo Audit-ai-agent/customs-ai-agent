@@ -66,6 +66,7 @@ from customs_ai_agent.v3_semantics import (
     SAFE_CLAIM_FRAMES,
     allowed_framed_claim_texts,
     citable_regulatory_evidence_ids,
+    expected_narrative_claims,
     expected_required_actions,
     has_citable_regulatory_evidence,
     reconstruct_v3_current_semantics,
@@ -312,6 +313,13 @@ _OUTCOME_INTENT_KEYWORDS = frozenset({"결과", "상태", "완료", "심사", "o
 _FIELD_INTENT_KEYWORDS = frozenset(
     {"문서", "금액", "수량", "원산지", "송장", "선하", "품목", "hsk", "hs"}
 )
+_EXPLANATION_INTENT_KEYWORDS = frozenset({"왜", "이유", "원인", "의미", "설명", "해석", "영향"})
+_ACTION_INTENT_KEYWORDS = frozenset({"조치", "해야", "해결", "수정", "확인", "다음", "대응"})
+_FOLLOW_UP_INTENT_KEYWORDS = frozenset(
+    {"그럼", "그러면", "그것", "그게", "이것", "이게", "앞서", "방금"}
+)
+_MAX_CHAT_EVIDENCE_CLAIMS = 5
+_MAX_CHAT_EVIDENCE_EXCERPT_CHARS = 360
 
 
 def _matches_question_intent(
@@ -824,82 +832,40 @@ def deterministic_narrative(
     *,
     release_approved: bool = False,
 ) -> NarrativeReportV1:
-    outcome_citation = [_citation("outcome", facts.outcome_reference)]
-    if result.validation_issues or result.regulatory_findings:
-        summary_text = "문서 또는 규정 검토에서 담당자 확인이 필요한 항목이 발견되었습니다."
-    elif (
-        result.retrieval_status == "ok"
-        and result.retrieval_coverage == "complete"
-        and has_citable_regulatory_evidence(result)
+    # Keep one semantic source of truth for both generation and the V3 model
+    # validator.  Claude can choose only a presentation frame around these
+    # exact, code-owned claims.
+    semantics = reconstruct_v3_current_semantics(result)
+    if (
+        facts.issue_references != semantics.issue_reference_ids
+        or facts.finding_references != semantics.finding_reference_ids
+        or facts.evidence_references != semantics.evidence_reference_ids
+        or facts.outcome_reference != semantics.outcome_reference_id
     ):
-        summary_text = "현재 검토 범위에서 문서 불일치와 미충족 규정 요건이 발견되지 않았습니다."
-    else:
-        summary_text = "규정 근거가 완전하지 않아 자동 사전심사를 확정할 수 없습니다."
-    summary = [_claim(summary_text, outcome_citation)]
+        raise ValueError("narrative Fact index does not match the current review result")
+    expected = expected_narrative_claims(
+        result,
+        semantics,
+        release_approved=release_approved,
+    )
 
-    document_consistency: list[NarrativeClaimV1] = []
-    for issue, reference_id in zip(result.validation_issues, facts.issue_references, strict=True):
-        document_consistency.append(
+    def project(section: str) -> list[NarrativeClaimV1]:
+        return [
             _claim(
-                f"{issue.issue_code}: {issue.message}",
-                [_citation("issue", reference_id)],
+                str(item["text"]),
+                [
+                    _citation(str(citation["kind"]), str(citation["reference_id"]))
+                    for citation in item["citations"]
+                ],
             )
-        )
-    if not document_consistency:
-        document_consistency.append(
-            _claim("결정론적 문서 교차검증에서 불일치가 발견되지 않았습니다.", outcome_citation)
-        )
+            for item in expected[section]
+        ]
 
-    regulatory_review: list[NarrativeClaimV1] = []
-    citable_evidence_ids = citable_regulatory_evidence_ids(result)
-    for finding, reference_id in zip(
-        result.regulatory_findings,
-        facts.finding_references,
-        strict=True,
-    ):
-        citations = [_citation("finding", reference_id)]
-        citations.extend(_citation("evidence", evidence_id) for evidence_id in finding.evidence_ids)
-        regulatory_review.append(_claim(f"{finding.finding_code}: {finding.message}", citations))
-    if not regulatory_review:
-        if citable_evidence_ids:
-            regulatory_review.append(
-                _claim(
-                    "조회된 규정 근거 범위에서 별도의 미충족 요건 Finding이 생성되지 않았습니다.",
-                    [_citation("evidence", citable_evidence_ids[0])],
-                )
-            )
-        else:
-            regulatory_review.append(
-                _claim("인용 가능한 규정 근거가 없어 규정 판단을 보류합니다.", outcome_citation)
-            )
-
-    required_actions: list[NarrativeClaimV1] = []
-    if result.requires_human_review:
-        required_actions.append(
-            _claim(
-                "담당자는 근거와 추출값을 확인한 뒤 수정 또는 승인을 기록해야 합니다.",
-                outcome_citation,
-            )
-        )
-    if result.status == "blocked":
-        required_actions.append(
-            _claim(
-                "차단 원인을 해소한 뒤 새로운 Review Run으로 다시 실행해야 합니다.",
-                outcome_citation,
-            )
-        )
-    if not required_actions:
-        message = (
-            "승인된 자동완료 범위에서 추가 조치가 필요한 항목이 없습니다."
-            if release_approved
-            else "현재 결과는 Release Gate 승인 전까지 자동완료에 사용할 수 없습니다."
-        )
-        required_actions.append(_claim(message, outcome_citation))
     return NarrativeReportV1(
-        summary=summary,
-        document_consistency=document_consistency,
-        regulatory_review=regulatory_review,
-        required_actions=required_actions,
+        summary=project("summary"),
+        document_consistency=project("document_consistency"),
+        regulatory_review=project("regulatory_review"),
+        required_actions=project("required_actions"),
         generation_mode="deterministic_fallback",
     )
 
@@ -2012,6 +1978,23 @@ def _bounded_answer_claims(claims: Iterable[_AnswerClaim]) -> tuple[_AnswerClaim
     return tuple(selected)
 
 
+def _evidence_excerpt(text: str) -> str:
+    """Return a compact display excerpt without changing the cited Evidence."""
+
+    compact = " ".join(text.split())
+    if len(compact) <= _MAX_CHAT_EVIDENCE_EXCERPT_CHARS:
+        return compact
+    return f"{compact[: _MAX_CHAT_EVIDENCE_EXCERPT_CHARS - 1].rstrip()}…"
+
+
+def _review_disposition_text(result: ReviewRunResultV3) -> str:
+    return {
+        "auto_review_complete": "자동 사전심사가 완료된 상태",
+        "human_review_required": "담당자 검토가 필요한 상태",
+        "blocked": "실행 또는 근거 조건 때문에 심사가 차단된 상태",
+    }[result.review_disposition]
+
+
 def _deterministic_grounded_answer_plan(question: GroundedQuestionV1) -> _GroundedAnswerPlan:
     result = question.review_result
     current_semantics = reconstruct_v3_current_semantics(result)
@@ -2042,14 +2025,61 @@ def _deterministic_grounded_answer_plan(question: GroundedQuestionV1) -> _Ground
     regulation_intent = _matches_question_intent(question_tokens, _REGULATION_INTENT_KEYWORDS)
     outcome_intent = _matches_question_intent(question_tokens, _OUTCOME_INTENT_KEYWORDS)
     field_intent = _matches_question_intent(question_tokens, _FIELD_INTENT_KEYWORDS)
-    case_intent = issue_intent or regulation_intent or outcome_intent or field_intent
+    explanation_intent = (
+        _matches_question_intent(
+            question_tokens,
+            _EXPLANATION_INTENT_KEYWORDS,
+        )
+        or "왜" in question.question
+    )
+    action_intent = _matches_question_intent(question_tokens, _ACTION_INTENT_KEYWORDS)
+    follow_up_intent = _matches_question_intent(question_tokens, _FOLLOW_UP_INTENT_KEYWORDS)
+    core_case_intent = issue_intent or regulation_intent or outcome_intent or field_intent
+    # A generic explanation or deictic token is not sufficient by itself:
+    # otherwise unrelated text such as "preoutcomepost 설명해줘" could cross
+    # the Case scope boundary.  A bare "왜?" and an explanation explicitly
+    # referring back to the same Run ("그게 무슨 의미인가요?") are safe
+    # shorthands; unrelated categories remain blocked by the guard above.
+    bare_why_intent = "왜" in question.question and question_tokens.issubset(
+        _EXPLANATION_INTENT_KEYWORDS | _FOLLOW_UP_INTENT_KEYWORDS
+    )
+    case_intent = (
+        core_case_intent
+        or action_intent
+        or bare_why_intent
+        or (explanation_intent and follow_up_intent)
+    )
     if not case_intent:
         return _GroundedAnswerPlan(
             status="out_of_scope",
             refusal_text="이 질문은 현재 통관 Case의 문서·규정·심사 결과 범위를 벗어납니다.",
         )
+
     claims: list[_AnswerClaim] = []
-    if issue_intent:
+
+    def append_claim(text: str, citations: Iterable[CitationReferenceV1]) -> None:
+        claim = _answer_claim(text, citations)
+        if all(item.claim_id != claim.claim_id for item in claims):
+            claims.append(claim)
+
+    def citations_for(reference_ids: Iterable[str]) -> list[CitationReferenceV1]:
+        references: list[CitationReferenceV1] = []
+        for reference_id in reference_ids:
+            fact = current_facts.get(reference_id)
+            if fact is not None:
+                references.append(_citation(str(fact["kind"]), reference_id))
+        return references
+
+    detailed_explanation = explanation_intent and (
+        core_case_intent or follow_up_intent or "왜" in question.question
+    )
+    if outcome_intent or detailed_explanation or action_intent or follow_up_intent:
+        append_claim(
+            f"결론 — 현재 사전심사 결과는 {_review_disposition_text(result)}입니다.",
+            [_citation("outcome", current_semantics.outcome_reference_id)],
+        )
+
+    if issue_intent or detailed_explanation:
         for finding, reference_id in zip(
             result.regulatory_findings,
             current_semantics.finding_reference_ids,
@@ -2057,37 +2087,76 @@ def _deterministic_grounded_answer_plan(question: GroundedQuestionV1) -> _Ground
         ):
             if reference_id not in current_facts:
                 continue
-            citations = [_citation("finding", reference_id)]
-            citations.extend(_citation("evidence", item) for item in finding.evidence_ids)
-            claims.append(_answer_claim(f"{finding.finding_code}: {finding.message}", citations))
+            append_claim(
+                f"원인 — 규정 검토에서 {finding.message} ({finding.finding_code})",
+                [
+                    _citation("finding", reference_id),
+                    *(_citation("evidence", evidence_id) for evidence_id in finding.evidence_ids),
+                ],
+            )
         for issue, reference_id in zip(
             result.validation_issues,
             current_semantics.issue_reference_ids,
             strict=True,
         ):
             if reference_id in current_facts:
-                claims.append(
-                    _answer_claim(
-                        f"{issue.issue_code}: {issue.message}",
-                        [_citation("issue", reference_id)],
-                    )
+                append_claim(
+                    f"원인 — 문서 교차검증에서 {issue.message} ({issue.issue_code})",
+                    [_citation("issue", reference_id)],
                 )
-    elif regulation_intent and result.rag_evidence:
+
+    if (
+        (issue_intent or detailed_explanation)
+        and not result.validation_issues
+        and not result.regulatory_findings
+    ):
+        no_issue_citations = [_citation("outcome", current_semantics.outcome_reference_id)]
+        citable_ids = citable_regulatory_evidence_ids(result)
+        if citable_ids:
+            no_issue_citations.append(_citation("evidence", citable_ids[0]))
+        append_claim(
+            (
+                "원인 — 결정론적 문서 교차검증과 현재 인용 가능한 규정 Evidence 범위에서 "
+                "별도의 불일치 또는 미충족 요건이 확인되지 않았습니다."
+            ),
+            no_issue_citations,
+        )
+
+    if regulation_intent or detailed_explanation:
+        citable_evidence_id_set = set(citable_regulatory_evidence_ids(result))
+        evidence_claim_count = 0
         for evidence in result.rag_evidence:
-            claims.append(
-                _answer_claim(
-                    f"{evidence.title}: {evidence.text[:1000]}",
-                    [_citation("evidence", evidence.evidence_id)],
-                )
+            if evidence.evidence_id not in citable_evidence_id_set:
+                continue
+            append_claim(
+                f"근거 — {evidence.title}: {_evidence_excerpt(evidence.text)}",
+                [_citation("evidence", evidence.evidence_id)],
             )
-    elif outcome_intent:
-        claims.append(
-            _answer_claim(
-                f"현재 사전심사 상태는 {result.review_disposition}입니다.",
+            evidence_claim_count += 1
+            if evidence_claim_count >= _MAX_CHAT_EVIDENCE_CLAIMS:
+                break
+
+    if detailed_explanation and (result.validation_issues or result.regulatory_findings):
+        append_claim(
+            (
+                "영향 — 확인된 문서 불일치 또는 규정 요건이 해결되기 전에는 "
+                "현재 사전심사를 자동으로 완료할 수 없습니다."
+            ),
+            [_citation("outcome", current_semantics.outcome_reference_id)],
+        )
+
+    if action_intent or detailed_explanation:
+        for action in result.required_actions:
+            citations = citations_for(action.source_reference_ids)
+            if citations:
+                append_claim(f"조치 — {action.message}", citations)
+        if not result.required_actions:
+            append_claim(
+                "조치 — 현재 ReviewResult에 필수 후속 조치가 기록되어 있지 않습니다.",
                 [_citation("outcome", current_semantics.outcome_reference_id)],
             )
-        )
-    elif field_intent:
+
+    if field_intent:
         specific_tokens = question_tokens.difference({"문서", "품목", "송장", "선하", "hsk", "hs"})
         field_facts = [
             entry
@@ -2105,20 +2174,19 @@ def _deterministic_grounded_answer_plan(question: GroundedQuestionV1) -> _Ground
                 )
             )
         ]
-        if not matching:
+        if not matching and not claims:
             return _GroundedAnswerPlan(
                 status="insufficient_evidence",
                 refusal_text=(
                     "현재 Review Result에 질문과 직접 연결되는 문서 필드 근거가 없습니다."
                 ),
             )
-        claims.extend(
-            _answer_claim(
-                f"{reference['label']}: {reference['value']}",
+        for reference in matching:
+            append_claim(
+                f"문서 근거 — {reference['label']}: {reference['value']}",
                 [_citation("field_source", str(reference["reference_id"]))],
             )
-            for reference in matching
-        )
+
     selected = _bounded_answer_claims(claims)
     if not selected:
         return _GroundedAnswerPlan(

@@ -16,6 +16,7 @@ from customs_ai_agent.agentic import (
     DeterministicReevaluationResult,
     _answer_claim,
     _deterministic_grounded_answer_plan,
+    _evidence_excerpt,
     _render_grounded_claim,
     _rewrite_grounded_answer,
     _rewrite_report,
@@ -1127,14 +1128,11 @@ def test_v3_zero_citable_evidence_can_never_auto_complete() -> None:
         result.runtime_release,
         supporting_rejections=[],
     )
-    assert (
-        deterministic_narrative(
-            empty_evidence_v2,
-            build_fact_ledger(empty_evidence_v2),
-        )
-        .summary[0]
-        .text
-        == "규정 근거가 완전하지 않아 자동 사전심사를 확정할 수 없습니다."
+    assert deterministic_narrative(
+        empty_evidence_v2,
+        build_fact_ledger(empty_evidence_v2),
+    ).summary[0].text == (
+        "사전심사 결론: 규정 근거가 충분하지 않아 결과를 확정할 수 없으며 담당자 검토가 필요합니다."
     )
 
     payload = _clean_auto_complete_result().model_dump(mode="python")
@@ -1152,10 +1150,14 @@ def test_v3_zero_citable_evidence_can_never_auto_complete() -> None:
     )
     outcome = next(item for item in payload["fact_ledger"]["entries"] if item["kind"] == "outcome")
     summary_claim = payload["narrative_report"]["summary"][0]
-    summary_claim["text"] = "규정 근거가 완전하지 않아 자동 사전심사를 확정할 수 없습니다."
+    summary_claim["text"] = (
+        "사전심사 결론: 규정 근거가 충분하지 않아 결과를 확정할 수 없으며 담당자 검토가 필요합니다."
+    )
     _refresh_claim_id(summary_claim)
     regulatory_claim = payload["narrative_report"]["regulatory_review"][0]
-    regulatory_claim["text"] = "인용 가능한 규정 근거가 없어 규정 판단을 보류합니다."
+    regulatory_claim["text"] = (
+        "규정 검토 결과: 인용 가능한 규정 근거가 없어 규정 판단을 보류합니다."
+    )
     regulatory_claim["citations"] = [{"kind": "outcome", "reference_id": outcome["reference_id"]}]
     _refresh_claim_id(regulatory_claim)
 
@@ -1164,6 +1166,33 @@ def test_v3_zero_citable_evidence_can_never_auto_complete() -> None:
         match="automatic review completion requires current Evidence-cited",
     ):
         _validate_tampered_v3_result(payload)
+
+
+def test_narrative_is_answer_first_explanatory_and_exactly_citation_bound() -> None:
+    result_v2 = run_review_result_v2(ReviewRunRequestV2(scenario_id="invoice_total_mismatch"))
+    facts = build_fact_ledger(result_v2)
+
+    report = deterministic_narrative(result_v2, facts)
+
+    assert report.summary[0].text.startswith("사전심사 결론: ")
+    assert report.document_consistency[0].text.startswith("문서 검토 원인(")
+    assert "이 검증 문제가 해결되기 전" in report.document_consistency[0].text
+    assert report.regulatory_review[0].text.startswith("규정 검토 결과: ")
+    assert report.required_actions[0].text.startswith("다음 조치: ")
+    valid_references = {(entry.kind, entry.reference_id) for entry in facts.ledger.entries}
+    claims = [
+        *report.summary,
+        *report.document_consistency,
+        *report.regulatory_review,
+        *report.required_actions,
+    ]
+    assert claims
+    assert all(claim.material and claim.citations for claim in claims)
+    assert all(
+        (citation.kind, citation.reference_id) in valid_references
+        for claim in claims
+        for citation in claim.citations
+    )
 
 
 def test_v3_narrative_skips_blocked_evidence_and_cites_first_citable_record() -> None:
@@ -2802,20 +2831,122 @@ def test_case_answer_recognizes_korean_outcome_keyword_with_endings() -> None:
     )
 
     assert answer.status == "answered"
-    assert answer.citations == [
-        CitationReferenceV1(
-            kind="outcome",
-            reference_id=reconstruct_v3_current_semantics(result).outcome_reference_id,
+    cited = {(item.kind, item.reference_id) for item in answer.citations}
+    assert (
+        "outcome",
+        reconstruct_v3_current_semantics(result).outcome_reference_id,
+    ) in cited
+    lines = answer.answer.splitlines()
+    assert lines[0].startswith("결론 — ")
+    assert any(line.startswith("원인 — ") for line in lines)
+    assert any(line.startswith("근거 — ") for line in lines)
+    assert any(line.startswith("조치 — ") for line in lines)
+    assert "담당자 검토가 필요한 상태" in answer.answer
+
+
+def test_case_answer_supports_bounded_same_run_action_follow_up() -> None:
+    _request_value, _result_v2, result = _v3_result()
+
+    answer = answer_grounded_question(
+        GroundedQuestionV1(
+            question_id="question_" + "5" * 64,
+            question="그럼 다음에 무엇을 해야 하나요?",
+            review_result=result,
         )
-    ]
-    assert result.review_disposition in answer.answer
+    )
+
+    assert answer.status == "answered"
+    assert answer.answer.splitlines()[0].startswith("결론 — ")
+    assert any(line.startswith("조치 — ") for line in answer.answer.splitlines())
+    valid_references = {(entry.kind, entry.reference_id) for entry in result.fact_ledger.entries}
+    assert {(citation.kind, citation.reference_id) for citation in answer.citations}.issubset(
+        valid_references
+    )
+
+
+def test_case_answer_supports_bounded_same_run_explanation_follow_up() -> None:
+    _request_value, _result_v2, result = _v3_result()
+
+    answer = answer_grounded_question(
+        GroundedQuestionV1(
+            question_id="question_" + "a" * 64,
+            question="그게 무슨 의미인가요?",
+            review_result=result,
+        )
+    )
+
+    assert answer.status == "answered"
+    lines = answer.answer.splitlines()
+    assert lines[0].startswith("결론 — ")
+    assert any(line.startswith("원인 — ") for line in lines)
+    valid_references = {(entry.kind, entry.reference_id) for entry in result.fact_ledger.entries}
+    assert {(citation.kind, citation.reference_id) for citation in answer.citations}.issubset(
+        valid_references
+    )
+
+
+def test_case_answer_general_document_explanation_is_not_rejected_as_a_missing_field() -> None:
+    _request_value, _result_v2, result = _v3_result()
+
+    answer = answer_grounded_question(
+        GroundedQuestionV1(
+            question_id="question_" + "8" * 64,
+            question="수정 후 현재 문서 문제의 원인과 다음 조치를 설명해 주세요.",
+            review_result=result,
+        )
+    )
+
+    assert answer.status == "answered"
+    assert any(line.startswith("원인 — ") for line in answer.answer.splitlines())
+    assert any(line.startswith("조치 — ") for line in answer.answer.splitlines())
+    assert answer.citations
+
+
+def test_case_answer_no_issue_question_returns_grounded_no_issue_explanation() -> None:
+    _request_value, _result_v2, result = _v3_result()
+
+    answer = answer_grounded_question(
+        GroundedQuestionV1(
+            question_id="question_" + "7" * 64,
+            question="문제가 있나요?",
+            review_result=result,
+        )
+    )
+
+    assert answer.status == "answered"
+    assert "별도의 불일치 또는 미충족 요건이 확인되지 않았습니다" in answer.answer
+    assert {citation.kind for citation in answer.citations} >= {"outcome", "evidence"}
+
+
+def test_case_answer_does_not_use_deictic_follow_up_to_admit_unrelated_question() -> None:
+    _request_value, _result_v2, result = _v3_result()
+
+    answer = answer_grounded_question(
+        GroundedQuestionV1(
+            question_id="question_" + "6" * 64,
+            question="그럼 오늘 서울 날씨와 점심 메뉴는?",
+            review_result=result,
+        )
+    )
+
+    assert answer.status == "out_of_scope"
+    assert answer.citations == []
+
+
+def test_case_answer_evidence_excerpt_is_compact_and_single_line() -> None:
+    rendered = _evidence_excerpt(("첫 줄\n둘째 줄\t" + ("법령 근거 " * 100)).strip())
+
+    assert "\n" not in rendered
+    assert "\t" not in rendered
+    assert len(rendered) == 360
+    assert rendered.endswith("…")
 
 
 @pytest.mark.parametrize(
     ("question_text", "expected_status"),
     [
         ("규정은 무엇인가요?", "answered"),
-        ("문제가 있나요?", "insufficient_evidence"),
+        ("문제가 있나요?", "answered"),
         ("문서금액이 어떻게 되나요?", "insufficient_evidence"),
         ("오늘 날씨와 심사 결과를 알려줘", "out_of_scope"),
         ("outcome", "answered"),
