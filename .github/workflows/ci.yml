@@ -97,6 +97,19 @@ jobs:
           --expected-git-sha "${GITHUB_SHA}"
           --output-root dist
           --replace
+      - name: Rebuild and require byte-exact release reproducibility
+        shell: bash
+        run: |
+          REBUILD_ROOT="${RUNNER_TEMP}/agent-release-rebuild"
+          .venv/bin/python -m tools.build_release_distributions \
+            --expected-git-sha "${GITHUB_SHA}" \
+            --output-root "${REBUILD_ROOT}"
+          cmp \
+            dist/wheel/customs_ai_agent-0.3.0-py3-none-any.whl \
+            "${REBUILD_ROOT}/wheel/customs_ai_agent-0.3.0-py3-none-any.whl"
+          cmp \
+            dist/source/customs_ai_agent-0.3.0.tar.gz \
+            "${REBUILD_ROOT}/source/customs_ai_agent-0.3.0.tar.gz"
       - name: Verify wheel and source distribution inventories
         run: >-
           .venv/bin/python tools/verify_distribution.py

@@ -607,6 +607,116 @@ def test_release_builder_requires_exact_clean_git_head(tmp_path: Path) -> None:
         _assert_exact_clean_head(repository, "0" * 40)
 
 
+def test_release_builder_derives_reproducible_epoch_from_exact_commit(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    monkeypatch.setattr(release_builder, "_git", lambda *_args: "1700000000")
+
+    epoch = release_builder._source_date_epoch(Path("."), "1" * 40)
+
+    assert epoch == 1_700_000_000
+
+
+def test_release_builder_rejects_invalid_commit_timestamp(
+    monkeypatch: pytest.MonkeyPatch,
+    tmp_path: Path,
+) -> None:
+    monkeypatch.setattr(release_builder, "_git", lambda *_args: "not-a-timestamp")
+
+    with pytest.raises(ReleaseBuildError, match="release_git_timestamp_invalid"):
+        release_builder._source_date_epoch(tmp_path, "1" * 40)
+
+
+def test_release_builder_normalizes_environment_and_materialized_mtimes(
+    monkeypatch: pytest.MonkeyPatch,
+    tmp_path: Path,
+) -> None:
+    epoch = 1_700_000_000
+    monkeypatch.setenv("SOURCE_DATE_EPOCH", "untrusted")
+    environment = release_builder._reproducible_build_environment(epoch)
+    source_tree = tmp_path / "source-tree"
+    source_tree.mkdir()
+
+    release_builder._materialize_snapshot(
+        source_tree,
+        {"src/customs_ai_agent/__init__.py": b"VERSION = 'test'\n"},
+        source_date_epoch=epoch,
+    )
+    release_builder._normalize_directory_mtimes(
+        source_tree,
+        source_date_epoch=epoch,
+    )
+
+    materialized = source_tree / "src" / "customs_ai_agent" / "__init__.py"
+    assert environment["SOURCE_DATE_EPOCH"] == str(epoch)
+    assert environment["PYTHONHASHSEED"] == "0"
+    assert environment["TZ"] == "UTC"
+    assert int(materialized.stat().st_mtime) == epoch
+    assert int((source_tree / "src").stat().st_mtime) == epoch
+    assert int(source_tree.stat().st_mtime) == epoch
+
+
+def test_release_builder_canonicalizes_sdist_tar_and_gzip_metadata(
+    tmp_path: Path,
+) -> None:
+    epoch = 1_700_000_000
+    payloads = {
+        "customs_ai_agent-0.3.0/README.md": b"release\n",
+        "customs_ai_agent-0.3.0/src/customs_ai_agent/__init__.py": b"VERSION = 'test'\n",
+    }
+    outputs: list[bytes] = []
+    for build_number in (1, 2):
+        sdist = tmp_path / f"build-{build_number}.tar.gz"
+        with tarfile.open(sdist, mode="w:gz") as archive:
+            directory = tarfile.TarInfo("customs_ai_agent-0.3.0/src/")
+            directory.type = tarfile.DIRTYPE
+            directory.mode = 0o777
+            directory.mtime = epoch + build_number
+            archive.addfile(directory)
+            for name, payload in reversed(payloads.items()):
+                member = tarfile.TarInfo(name)
+                member.size = len(payload)
+                member.mode = 0o777
+                member.mtime = epoch + build_number
+                member.uid = build_number
+                member.gid = build_number
+                archive.addfile(member, io.BytesIO(payload))
+
+        release_builder._canonicalize_sdist(
+            sdist,
+            source_date_epoch=epoch,
+        )
+        outputs.append(sdist.read_bytes())
+
+        with tarfile.open(sdist, mode="r:gz") as archive:
+            members = archive.getmembers()
+            assert [member.name for member in members] == sorted(payloads)
+            assert all(member.isfile() for member in members)
+            assert all(member.mode == 0o644 for member in members)
+            assert all(member.mtime == epoch for member in members)
+            assert all(member.uid == member.gid == 0 for member in members)
+
+    assert outputs[0] == outputs[1]
+
+
+def test_release_builder_rejects_non_regular_sdist_member(tmp_path: Path) -> None:
+    sdist = tmp_path / "unsafe.tar.gz"
+    with tarfile.open(sdist, mode="w:gz") as archive:
+        member = tarfile.TarInfo("customs_ai_agent-0.3.0/link")
+        member.type = tarfile.SYMTYPE
+        member.linkname = "../../outside"
+        archive.addfile(member)
+
+    with pytest.raises(
+        ReleaseBuildError,
+        match="release_sdist_canonicalization_failed",
+    ):
+        release_builder._canonicalize_sdist(
+            sdist,
+            source_date_epoch=1_700_000_000,
+        )
+
+
 def test_release_builder_resolves_executable_to_regular_absolute_file(
     monkeypatch: pytest.MonkeyPatch,
 ) -> None:
