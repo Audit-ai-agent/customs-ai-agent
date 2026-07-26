@@ -73,6 +73,19 @@ def _number(
     return value
 
 
+def _boolean(
+    source: Mapping[str, str],
+    name: str,
+    default: bool,
+) -> bool:
+    raw = source.get(name, "true" if default else "false").strip().casefold()
+    if raw in {"1", "true", "yes", "on"}:
+        return True
+    if raw in {"0", "false", "no", "off"}:
+        return False
+    raise ServiceConfigurationError(f"{name.casefold()}_invalid")
+
+
 @dataclass(frozen=True, slots=True)
 class ServiceSettings:
     """Validated settings for one Agent service process.
@@ -105,6 +118,8 @@ class ServiceSettings:
     readiness_timeout_seconds: float = 5.0
     shutdown_grace_seconds: float = 30.0
     log_level: str = "INFO"
+    enhanced_agent_experience: bool = False
+    uat_adaptive_active: bool = False
 
     def __post_init__(self) -> None:
         token = self.bearer_token.get_secret_value()
@@ -129,6 +144,8 @@ class ServiceSettings:
         if self.environment not in {"development", "test", "production"}:
             raise ServiceConfigurationError("customs_agent_environment_invalid")
         if self.environment == "production":
+            if self.enhanced_agent_experience or self.uat_adaptive_active:
+                raise ServiceConfigurationError("production_uat_capability_forbidden")
             if self.evidence_token_header.casefold() != "authorization":
                 raise ServiceConfigurationError("production_evidence_auth_must_use_bearer")
             if evidence_token is None:
@@ -300,6 +317,16 @@ class ServiceSettings:
                 maximum=900,
             ),
             log_level=source.get("CUSTOMS_AGENT_LOG_LEVEL", "INFO").strip().upper(),
+            enhanced_agent_experience=_boolean(
+                source,
+                "CUSTOMS_ENHANCED_AGENT_EXPERIENCE",
+                False,
+            ),
+            uat_adaptive_active=_boolean(
+                source,
+                "CUSTOMS_UAT_ADAPTIVE_ACTIVE",
+                False,
+            ),
         )
 
 

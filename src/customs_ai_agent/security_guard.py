@@ -149,6 +149,20 @@ _STRONG_PATTERNS = tuple(
         r".{0,48}(?:공개|노출|출력|유출)",
         r"(?:공개|노출|출력|유출).{0,48}"
         r"(?:(?:시스템|개발자).{0,16}프롬프트|API.{0,8}키|비밀|토큰)",
+        # High-confidence Korean policy/Tool manipulation imperatives used at
+        # the Chat boundary. These do not classify ordinary customs intent;
+        # they only recognize requests to erase evidence, bypass approval, or
+        # expand the bounded execution authority.
+        r"(?:법령|근거).{0,20}(?:없이|무시).{0,32}"
+        r"(?:통관|승인|완료).{0,24}(?:답|표시|변경)",
+        r"(?:issue|finding|문제|확인.?사항).{0,32}(?:삭제|제거).{0,32}"
+        r"(?:정상|승인|완료)",
+        r"(?:숨은.?사고과정|api.{0,8}(?:key|키)).{0,32}(?:공개|출력|노출)",
+        r"(?:임의.{0,8}url).{0,24}(?:접속|호출)",
+        r"(?:데이터베이스|db).{0,24}sql.{0,24}(?:실행|호출)",
+        r"(?:사람|담당자).{0,16}승인.{0,16}없이.{0,32}(?:수정|적용)",
+        r"(?:tool|도구).{0,20}제한.{0,20}(?:해제|우회)",
+        r"정책.{0,24}(?:변경|우회).{0,32}자동완료.{0,20}(?:켜|활성)",
     )
 )
 _TOOL_MANIPULATION_PATTERN = re.compile(

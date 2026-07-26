@@ -4,9 +4,11 @@ import copy
 import json
 import math
 import re
+import time
 from dataclasses import dataclass, field
 from os import PathLike
-from typing import Any
+from collections.abc import Callable
+from typing import Any, Literal
 
 from jsonschema import Draft202012Validator, FormatChecker
 from pydantic import SecretStr, ValidationError
@@ -36,6 +38,8 @@ from customs_ai_agent.contracts.evidence_runtime_release import (
 from customs_ai_agent.ocr_release import ReleaseLockedOcrProvider
 from customs_ai_agent.runner import (
     CorrectionApplicationError,
+    WorkflowStageObserver,
+    WorkflowStageState,
     rerun_review,
     run_review_result_v2,
     run_review_v2,
@@ -80,6 +84,13 @@ from customs_ai_agent.schemas.v3 import (
     ServiceReviewRunRequestV3,
     review_result_v3_sha256,
 )
+from customs_ai_agent.schemas.experience import (
+    AgentUatCapabilityAttestationV1,
+    AssistantAnswerV2,
+    CaseConversationRequestV2,
+    ReviewExperienceEnvelopeV1,
+)
+from customs_ai_agent.experience import answer_case_conversation, build_review_experience
 
 
 _FORBIDDEN_RESULT_KEYS = frozenset(
@@ -868,11 +879,32 @@ class _RuntimeBoundedAdaptiveExecutor:
         *,
         plan: ReviewPlanProposalV1,
         fact_ledger: FactLedgerV1,
+        uat_capability: AgentUatCapabilityAttestationV1 | None = None,
     ) -> ActiveBoundedRuntimeOutcome:
         self._reference_kinds = {entry.reference_id: entry.kind for entry in fact_ledger.entries}
         self._reference_documents = {
             entry.reference_id: entry.document_id for entry in fact_ledger.entries
         }
+        observed_model = (
+            self._result.model_calls[0].model_id
+            if self._result.model_calls
+            else self._analyzer.model_id
+        )
+        active_runtime_release = runtime_release_identity(
+            model_id=observed_model,
+            evidence_snapshot_id=self._result.knowledge_snapshot_id,
+            evidence_runtime_v3_sha256=(
+                self._retriever.expected_identity.runtime_release_v3_sha256
+            ),
+            assertion_trust_store=(
+                self._assertion_verifier.store
+                if isinstance(
+                    self._assertion_verifier,
+                    SupportingDocumentAssertionVerifier,
+                )
+                else None
+            ),
+        )
         traces, observations, resolved = execute_active_bounded_plan(
             plan,
             broker=BoundedToolBroker(
@@ -881,11 +913,26 @@ class _RuntimeBoundedAdaptiveExecutor:
             ),
             reevaluate=self._reevaluate,
             policy_id=AGENT_POLICY_ID,
+            uat_capability=uat_capability,
+            runtime_release=active_runtime_release,
         )
         failures: set[str] = set()
         if len(traces) < len(plan.actions):
             failures.add("agent_budget_exhausted")
-        if any(item.status != "succeeded" for item in observations):
+        second_cycle_evidence_failed = any(
+            trace.tool_name == "evidence.retrieve/v3"
+            and trace.reason_code == "evidence_retry_cycle_2_if_unresolved"
+            and trace.cycle == 1
+            and trace.status == "failed"
+            for trace in traces
+        )
+        if second_cycle_evidence_failed:
+            failures.add("agent_budget_exhausted")
+        if any(
+            item.status == "failed"
+            or (item.status == "deferred" and item.reason_code != "gap_already_resolved")
+            for item in observations
+        ):
             failures.add("active_tool_execution_incomplete")
         return ActiveBoundedRuntimeOutcome(
             result=self._result,
@@ -908,6 +955,7 @@ class AgentRuntime:
         "_retriever_v3",
         "_secret_markers",
         "_assertion_verifier",
+        "_uat_capability",
     )
 
     def __init__(self, config: RuntimeConfig) -> None:
@@ -958,6 +1006,7 @@ class AgentRuntime:
         self._retriever_v3: ProductionHttpRegulationRetrieverV3 | None = None
         self._analyzer = analyzer
         self._assertion_verifier = config.verification_assertion_verifier
+        self._uat_capability: AgentUatCapabilityAttestationV1 | None = None
         self._closed = False
         self._secret_markers = tuple(
             marker
@@ -1237,6 +1286,7 @@ class AgentRuntime:
         request: ServiceReviewRunRequestV3 | dict[str, Any],
         *,
         _forced_human_review_reasons: tuple[str, ...] = (),
+        _stage_observer: WorkflowStageObserver | None = None,
     ) -> ReviewRunResultV3:
         """Execute mandatory policy stages plus release-gated bounded adaptation."""
 
@@ -1281,6 +1331,7 @@ class AgentRuntime:
             v2_request,
             request=service_request,
             retriever=retriever_v3,
+            stage_observer=_stage_observer,
         )
         supporting_rejections = sorted({*supporting_rejections, *_forced_human_review_reasons})
         active_executor = _RuntimeBoundedAdaptiveExecutor(
@@ -1293,15 +1344,55 @@ class AgentRuntime:
             supporting_document_rejections=supporting_rejections,
             assertion_verifier=self._assertion_verifier,
         )
-        result = to_review_run_result_v3(
-            v2_result,
-            service_request,
-            analyzer=self._analyzer,
-            evidence_runtime_v3_sha256=(retriever_v3.expected_identity.runtime_release_v3_sha256),
-            assertion_trust_store=self._runtime_assertion_trust_store(),
-            supporting_document_rejections=supporting_rejections,
-            active_executor=active_executor,
-        )
+        adaptive_started_ns = time.perf_counter_ns()
+        if _stage_observer is not None:
+            _stage_observer("__adaptive__", "started", {}, None)
+        try:
+            result = to_review_run_result_v3(
+                v2_result,
+                service_request,
+                analyzer=self._analyzer,
+                evidence_runtime_v3_sha256=(
+                    retriever_v3.expected_identity.runtime_release_v3_sha256
+                ),
+                assertion_trust_store=self._runtime_assertion_trust_store(),
+                supporting_document_rejections=supporting_rejections,
+                active_executor=active_executor,
+                uat_capability=getattr(self, "_uat_capability", None),
+            )
+        except Exception:
+            if _stage_observer is not None:
+                _stage_observer(
+                    "__adaptive__",
+                    "failed",
+                    {},
+                    max(
+                        1,
+                        min(
+                            300_000,
+                            round((time.perf_counter_ns() - adaptive_started_ns) / 1_000_000),
+                        ),
+                    ),
+                )
+            raise
+        if _stage_observer is not None:
+            _stage_observer(
+                "__adaptive__",
+                "completed",
+                {
+                    "issues": len(result.validation_issues),
+                    "findings": len(result.regulatory_findings),
+                    "evidence": len(result.rag_evidence),
+                    "actions": len(result.action_trace),
+                },
+                max(
+                    1,
+                    min(
+                        300_000,
+                        round((time.perf_counter_ns() - adaptive_started_ns) / 1_000_000),
+                    ),
+                ),
+            )
         _assert_public_result_safe(
             result.model_dump(mode="python", warnings=False),
             sensitive_markers=self._secret_markers,
@@ -1315,6 +1406,7 @@ class AgentRuntime:
         request: ServiceReviewRunRequestV3,
         retriever: ProductionHttpRegulationRetrieverV3,
         corrections: list[Any] | None = None,
+        stage_observer: WorkflowStageObserver | None = None,
     ) -> tuple[ReviewRunResultV2, list[str], dict[str, Any]]:
         try:
             retriever.preflight(service_request.review_as_of)
@@ -1325,6 +1417,7 @@ class AgentRuntime:
                 workflow_request,
                 retriever=retriever,
                 analyzer=self._analyzer,
+                stage_observer=stage_observer,
             )
             if corrections:
                 # Human corrections never mutate the immutable parent request.
@@ -1418,6 +1511,393 @@ class AgentRuntime:
         _assert_public_result_safe(
             answer.model_dump(mode="python", warnings=False),
             sensitive_markers=self._secret_markers,
+        )
+        return answer
+
+    def review_experience_json(
+        self,
+        payload: bytes | bytearray | memoryview,
+    ) -> ReviewExperienceEnvelopeV1:
+        """Run one canonical review and add a verified user presentation.
+
+        This additive boundary never mutates or replaces ``ReviewRunResultV3``.
+        It is disabled unless the local-UAT composition injected an exact,
+        unexpired capability attestation.
+        """
+
+        self._assert_open()
+        capability = getattr(self, "_uat_capability", None)
+        if capability is None:
+            raise RuntimeConfigurationError(
+                "enhanced_experience_disabled",
+                "The enhanced Agent experience is not enabled for this runtime.",
+            )
+        result = self.review_v3_json(payload)
+        envelope = build_review_experience(
+            result,
+            analyzer=self._analyzer,
+            capability=capability,
+        )
+        _assert_public_result_safe(
+            envelope.model_dump(mode="python", warnings=False),
+            sensitive_markers=self._secret_markers,
+        )
+        return envelope
+
+    def review_experience_stream_json(
+        self,
+        payload: bytes | bytearray | memoryview,
+        stage_callback: Callable[[dict[str, Any]], None],
+        *,
+        _result_transform: Callable[[ReviewRunResultV3], ReviewRunResultV3] | None = None,
+    ) -> ReviewExperienceEnvelopeV1:
+        """Execute v3 while publishing only safe, actually observed stage boundaries."""
+
+        self._assert_open()
+        capability = getattr(self, "_uat_capability", None)
+        if capability is None:
+            raise RuntimeConfigurationError(
+                "enhanced_experience_disabled",
+                "The enhanced Agent experience is not enabled for this runtime.",
+            )
+        document_analysis_started_ns: int | None = None
+
+        def emit_started(stage_code: str) -> int:
+            started_ns = time.perf_counter_ns()
+            stage_callback(
+                {
+                    "stage_code": stage_code,
+                    "state": "started",
+                    "duration_ms": None,
+                    "safe_counts": {},
+                }
+            )
+            return started_ns
+
+        def emit_finished(
+            stage_code: str,
+            started_ns: int,
+            *,
+            state: str,
+            safe_counts: dict[str, int] | None = None,
+            duration_ms: int | None = None,
+        ) -> None:
+            stage_callback(
+                {
+                    "stage_code": stage_code,
+                    "state": state,
+                    "duration_ms": (
+                        duration_ms
+                        if duration_ms is not None
+                        else max(
+                            1,
+                            min(
+                                300_000,
+                                round((time.perf_counter_ns() - started_ns) / 1_000_000),
+                            ),
+                        )
+                    ),
+                    "safe_counts": safe_counts or {},
+                }
+            )
+
+        request_validation_started = emit_started("request_validation")
+        try:
+            decoded = _decode_serialized_json_object(
+                payload,
+                invalid_code="review_v3_request_invalid",
+            )
+            service_request = ServiceReviewRunRequestV3.model_validate(decoded)
+            emit_finished(
+                "request_validation",
+                request_validation_started,
+                state="completed",
+                safe_counts={"documents": len(service_request.documents)},
+            )
+        except Exception:
+            emit_finished(
+                "request_validation",
+                request_validation_started,
+                state="failed",
+            )
+            raise
+
+        public_by_internal = {
+            "normalize_documents": "normalization",
+            "pair_documents": "document_pairing",
+            "validate_cross_documents": "cross_validation",
+            "retrieve_regulations": "evidence_retrieval",
+            "compliance_review": "compliance_review",
+        }
+
+        def observe(
+            internal_stage: str,
+            state: WorkflowStageState,
+            counts: dict[str, int],
+            duration_ms: int | None,
+        ) -> None:
+            nonlocal document_analysis_started_ns
+            if internal_stage == "classify_documents" and state == "started":
+                document_analysis_started_ns = emit_started("document_analysis")
+                return
+            if internal_stage in {"classify_documents", "extract_documents"}:
+                if state == "failed" and document_analysis_started_ns is not None:
+                    emit_finished(
+                        "document_analysis",
+                        document_analysis_started_ns,
+                        state="failed",
+                        safe_counts=counts,
+                    )
+                    document_analysis_started_ns = None
+                elif (
+                    internal_stage == "extract_documents"
+                    and state == "completed"
+                    and document_analysis_started_ns is not None
+                ):
+                    emit_finished(
+                        "document_analysis",
+                        document_analysis_started_ns,
+                        state="completed",
+                        safe_counts=counts,
+                    )
+                    document_analysis_started_ns = None
+                return
+            if internal_stage == "__adaptive__":
+                stage_callback(
+                    {
+                        "stage_code": "adaptive_investigation",
+                        "state": state,
+                        "duration_ms": duration_ms,
+                        "safe_counts": counts,
+                    }
+                )
+                return
+            public_stage = public_by_internal.get(internal_stage)
+            if public_stage is None:
+                return
+            stage_callback(
+                {
+                    "stage_code": public_stage,
+                    "state": state,
+                    "duration_ms": duration_ms,
+                    "safe_counts": counts,
+                }
+            )
+
+        result = self.review_v3(service_request, _stage_observer=observe)
+        if _result_transform is not None:
+            result = _result_transform(result)
+        envelope = build_review_experience(
+            result,
+            analyzer=self._analyzer,
+            capability=capability,
+            stage_callback=stage_callback,
+        )
+        result_validation_started = emit_started("result_validation")
+        try:
+            _assert_public_result_safe(
+                envelope.model_dump(mode="python", warnings=False),
+                sensitive_markers=self._secret_markers,
+            )
+            emit_finished(
+                "result_validation",
+                result_validation_started,
+                state="completed",
+                safe_counts={
+                    "statements": sum(
+                        len(section.statements) for section in envelope.user_presentation.sections
+                    )
+                },
+            )
+        except Exception:
+            emit_finished(
+                "result_validation",
+                result_validation_started,
+                state="failed",
+            )
+            raise
+        stage_callback(
+            {
+                "stage_code": "completed",
+                "state": "completed",
+                "duration_ms": None,
+                "safe_counts": {
+                    "documents": len(result.document_results),
+                    "issues": len(result.validation_issues),
+                    "findings": len(result.regulatory_findings),
+                    "evidence": len(result.rag_evidence),
+                },
+            }
+        )
+        return envelope
+
+    def answer_v2_json(
+        self,
+        payload: bytes | bytearray | memoryview,
+    ) -> AssistantAnswerV2:
+        self._assert_open()
+        if getattr(self, "_uat_capability", None) is None:
+            raise RuntimeConfigurationError(
+                "enhanced_experience_disabled",
+                "The enhanced Agent experience is not enabled for this runtime.",
+            )
+        decoded = _decode_serialized_json_object(
+            payload,
+            invalid_code="answer_v2_request_invalid",
+        )
+        try:
+            request = CaseConversationRequestV2.model_validate(decoded)
+        except ValidationError:
+            raise RuntimeInputError(
+                "answer_v2_request_invalid",
+                "The conversation request is stale or invalid.",
+            ) from None
+        answer = answer_case_conversation(request, analyzer=self._analyzer)
+        valid_fact_refs = {
+            (entry.kind, entry.reference_id) for entry in request.review_result.fact_ledger.entries
+        }
+        if any(
+            (citation.kind, citation.reference_id) not in valid_fact_refs
+            for citation in answer.citations
+        ):
+            raise RuntimeExecutionError(
+                "answer_grounding_invalid",
+                "The Assistant answer failed its canonical grounding check.",
+            )
+        _assert_public_result_safe(
+            answer.model_dump(mode="python", warnings=False),
+            sensitive_markers=self._secret_markers,
+        )
+        return answer
+
+    def answer_v2_stream_json(
+        self,
+        payload: bytes | bytearray | memoryview,
+        stage_callback: Callable[[dict[str, Any]], None],
+    ) -> AssistantAnswerV2:
+        """Publish safe Chat boundaries; answer prose is released only after verification."""
+
+        self._assert_open()
+        if getattr(self, "_uat_capability", None) is None:
+            raise RuntimeConfigurationError(
+                "enhanced_experience_disabled",
+                "The enhanced Agent experience is not enabled for this runtime.",
+            )
+
+        def observed_stage(
+            stage_code: str,
+            state: Literal["started", "completed", "failed"],
+            *,
+            started_ns: int | None = None,
+            safe_counts: dict[str, int] | None = None,
+        ) -> int:
+            now_ns = time.perf_counter_ns()
+            stage_callback(
+                {
+                    "stage_code": stage_code,
+                    "state": state,
+                    "duration_ms": (
+                        None
+                        if state == "started" or started_ns is None
+                        else max(
+                            1,
+                            min(
+                                300_000,
+                                round((now_ns - started_ns) / 1_000_000),
+                            ),
+                        )
+                    ),
+                    "safe_counts": safe_counts or {},
+                }
+            )
+            return now_ns
+
+        validation_started = observed_stage("request_validation", "started")
+        try:
+            decoded = _decode_serialized_json_object(
+                payload,
+                invalid_code="answer_v2_request_invalid",
+            )
+            request = CaseConversationRequestV2.model_validate(decoded)
+            observed_stage(
+                "request_validation",
+                "completed",
+                started_ns=validation_started,
+                safe_counts={"turns": len(request.recent_turns)},
+            )
+        except Exception:
+            observed_stage(
+                "request_validation",
+                "failed",
+                started_ns=validation_started,
+            )
+            raise
+
+        binding_started = observed_stage("conversation_binding", "started")
+        try:
+            assert_result_hash(request.review_result)
+            if request.bound_result_sha256 != request.review_result.result_sha256:
+                raise RuntimeConflictError(
+                    "stale_conversation",
+                    "The conversation is bound to a stale review result.",
+                )
+            observed_stage(
+                "conversation_binding",
+                "completed",
+                started_ns=binding_started,
+                safe_counts={"turns": len(request.recent_turns)},
+            )
+        except Exception:
+            observed_stage(
+                "conversation_binding",
+                "failed",
+                started_ns=binding_started,
+            )
+            raise
+
+        answer = answer_case_conversation(
+            request,
+            analyzer=self._analyzer,
+            stage_callback=stage_callback,
+        )
+        result_validation_started = observed_stage("result_validation", "started")
+        try:
+            valid_fact_refs = {
+                (entry.kind, entry.reference_id)
+                for entry in request.review_result.fact_ledger.entries
+            }
+            if any(
+                (citation.kind, citation.reference_id) not in valid_fact_refs
+                for citation in answer.citations
+            ):
+                raise RuntimeExecutionError(
+                    "answer_grounding_invalid",
+                    "The Assistant answer failed its canonical grounding check.",
+                )
+            _assert_public_result_safe(
+                answer.model_dump(mode="python", warnings=False),
+                sensitive_markers=self._secret_markers,
+            )
+            observed_stage(
+                "result_validation",
+                "completed",
+                started_ns=result_validation_started,
+                safe_counts={"citations": len(answer.citations)},
+            )
+        except Exception:
+            observed_stage(
+                "result_validation",
+                "failed",
+                started_ns=result_validation_started,
+            )
+            raise
+        stage_callback(
+            {
+                "stage_code": "completed",
+                "state": "completed",
+                "duration_ms": None,
+                "safe_counts": {"citations": len(answer.citations)},
+            }
         )
         return answer
 
@@ -1530,6 +2010,7 @@ class AgentRuntime:
             assertion_trust_store=self._runtime_assertion_trust_store(),
             supporting_document_rejections=supporting_rejections,
             active_executor=active_executor,
+            uat_capability=getattr(self, "_uat_capability", None),
         )
 
 

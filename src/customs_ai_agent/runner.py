@@ -11,7 +11,9 @@ from __future__ import annotations
 import copy
 import json
 import math
+import time
 from os import PathLike
+from collections.abc import Callable
 from typing import Any, Literal, cast
 
 from customs_ai_agent.adapters.llm import (
@@ -54,6 +56,11 @@ from customs_ai_agent.schemas.models import (
 
 
 ReviewRequest = ReviewRunRequest | ReviewRunRequestV2
+WorkflowStageState = Literal["started", "completed", "failed"]
+WorkflowStageObserver = Callable[
+    [str, WorkflowStageState, dict[str, int], int | None],
+    None,
+]
 
 
 def _execution_document_values(document: Any) -> dict[str, Any]:
@@ -131,6 +138,7 @@ def _execute_review(
     env_file: str | PathLike[str] | None = None,
     *,
     initial_retrieval_attempt: int = 0,
+    stage_observer: WorkflowStageObserver | None = None,
 ) -> dict[str, Any]:
     """Execute one review without taking ownership of the caller's request.
 
@@ -178,7 +186,64 @@ def _execute_review(
     # while the remainder of the graph executes.
     del request
     try:
-        return graph.invoke(initial_state, config={"recursion_limit": 20})
+        if stage_observer is None:
+            return graph.invoke(initial_state, config={"recursion_limit": 20})
+        final_state = initial_state
+        task_started_ns: dict[str, int] = {}
+        for mode, event in graph.stream(
+            initial_state,
+            config={"recursion_limit": 20},
+            stream_mode=["debug", "values"],
+        ):
+            if not isinstance(event, dict):
+                continue
+            if mode == "values":
+                final_state = event
+                continue
+            if mode != "debug":
+                continue
+            event_type = event.get("type")
+            event_payload = event.get("payload")
+            if not isinstance(event_payload, dict):
+                continue
+            task_id = event_payload.get("id")
+            node_name = event_payload.get("name")
+            if not isinstance(task_id, str) or not isinstance(node_name, str):
+                continue
+            if event_type == "task":
+                task_started_ns[task_id] = time.perf_counter_ns()
+                stage_observer(node_name, "started", {}, None)
+                continue
+            if event_type != "task_result":
+                continue
+            started_ns = task_started_ns.pop(task_id, None)
+            duration_ms = (
+                max(1, min(300_000, round((time.perf_counter_ns() - started_ns) / 1_000_000)))
+                if started_ns is not None
+                else None
+            )
+            partial = event_payload.get("result")
+            counts_source = partial if isinstance(partial, dict) else final_state
+            safe_counts = {
+                "documents": len(
+                    counts_source.get("documents")
+                    or counts_source.get("extracted_documents")
+                    or counts_source.get("normalized_documents")
+                    or []
+                ),
+                "issues": len(counts_source.get("validation_issues") or []),
+                "findings": len(counts_source.get("regulatory_findings") or []),
+                "evidence": len(
+                    counts_source.get("rag_evidence")
+                    or counts_source.get("retrieval_results")
+                    or []
+                ),
+            }
+            state: WorkflowStageState = (
+                "failed" if event_payload.get("error") is not None else "completed"
+            )
+            stage_observer(node_name, state, safe_counts, duration_ms)
+        return final_state
     finally:
         # Defensive cleanup covers graph setup/runtime exceptions before the
         # classification node can consume and clear the one-shot store.
@@ -210,6 +275,7 @@ def run_review_v2(
     env_file: str | PathLike[str] | None = None,
     *,
     initial_retrieval_attempt: int = 0,
+    stage_observer: WorkflowStageObserver | None = None,
 ) -> dict[str, Any]:
     """Execute the additive text/image/PDF V2 workflow."""
 
@@ -221,6 +287,7 @@ def run_review_v2(
         analyzer=analyzer,
         env_file=env_file,
         initial_retrieval_attempt=initial_retrieval_attempt,
+        stage_observer=stage_observer,
     )
 
 

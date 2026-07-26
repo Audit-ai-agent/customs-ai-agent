@@ -40,6 +40,7 @@ AllowedToolName = Literal[
     "evidence.retrieve/v3",
     "human.request/v1",
     "explanation.compose/v1",
+    "explanation.compose/v2",
     "case.answer/v1",
 ]
 
@@ -780,7 +781,11 @@ class ReviewRunResultV3(ReviewRunResultV2):
             if not set(action.input_reference_ids).issubset(fact_reference_ids):
                 raise ValueError("planned action inputs must exist in the canonical fact ledger")
             expected_tool = primary_tool_by_gap_type[gap.gap_type]
-            if action.tool_name not in {expected_tool, "explanation.compose/v1"}:
+            if action.tool_name not in {
+                expected_tool,
+                "explanation.compose/v1",
+                "explanation.compose/v2",
+            }:
                 raise ValueError("planned Tool does not match the review gap policy")
             if action.tool_name == "document.reread_span/v1":
                 if any(

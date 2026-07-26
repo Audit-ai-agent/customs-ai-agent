@@ -1,0 +1,35 @@
+{
+  "controls": [
+    {
+      "allowed_tool": "document.reread_span/v1",
+      "control_id": "field-uncertainty-reread",
+      "expected_terminal": "deterministic_revalidation",
+      "gap_type": "field_uncertainty",
+      "max_calls_for_same_field": 1,
+      "outcome_write_authority": false
+    },
+    {
+      "allowed_tool": "evidence.retrieve/v3",
+      "control_id": "evidence-incomplete-retry",
+      "expected_terminal": "same_snapshot_provider_retrieved",
+      "gap_type": "evidence_incomplete",
+      "max_calls_for_same_field": 0,
+      "outcome_write_authority": false
+    },
+    {
+      "allowed_tool": "human.request/v1",
+      "control_id": "budget-exhaustion-human-review",
+      "expected_terminal": "human_review_required",
+      "gap_type": "evidence_incomplete",
+      "max_calls_for_same_field": 0,
+      "outcome_write_authority": false
+    }
+  ],
+  "dataset_sha256": "ab0f13955172c5e1d282f46f06af2f9f2e3d45b4d59aea708dcadbf12266b88f",
+  "limits": {
+    "auto_completion_enabled": false,
+    "max_cycles": 2,
+    "max_tool_calls": 6
+  },
+  "schema_version": "customs-uat-adaptive-controls/v1"
+}

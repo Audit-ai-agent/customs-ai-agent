@@ -2080,6 +2080,7 @@ def test_active_bounded_executor_runs_allowlisted_observation_then_code_reevalua
     )
     assert active.mode == "active"
     assert len(traces) == len(observations) <= 6
+    assert all(1 <= item.duration_ms <= 300_000 for item in traces)
     assert set(resolved) == {gaps[0].gap_id, gaps[1].gap_id}
     assert (
         "extraction",
@@ -2094,6 +2095,126 @@ def test_active_bounded_executor_runs_allowlisted_observation_then_code_reevalua
     assert any(
         item.tool_name == "human.request/v1" and item.status == "succeeded" for item in traces
     )
+
+
+def test_evidence_gap_uses_two_real_cycles_only_while_gap_remains_open(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    import customs_ai_agent.agentic as agentic
+
+    gap = _test_gap("evidence_incomplete", 1, "evidence-1")
+    monkeypatch.setattr(agentic, "load_release_profile", _active_profile)
+    uat_plan = agentic._compile_uat_bounded_retry_plan(
+        compile_shadow_plan([gap]),
+        [gap],
+    )
+    active = activate_bounded_plan(
+        uat_plan,
+        policy_id=AGENT_POLICY_ID,
+    )
+    evidence_actions = [
+        action for action in active.actions if action.tool_name == "evidence.retrieve/v3"
+    ]
+    assert len(evidence_actions) == 2
+    assert evidence_actions[1].reason_code == "evidence_retry_cycle_2_if_unresolved"
+
+    failed_calls = 0
+
+    def failing_retry(refs: tuple[str, ...]) -> BoundedToolResult:
+        nonlocal failed_calls
+        failed_calls += 1
+        return BoundedToolResult(
+            status="failed",
+            reason_code="injected_actual_provider_partial",
+            output_reference_ids=refs,
+        )
+
+    traces, observations, resolved = execute_active_bounded_plan(
+        active,
+        broker=BoundedToolBroker(evidence_retry=failing_retry),
+        reevaluate=lambda **_values: DeterministicReevaluationResult(
+            status="failed",
+            reason_code="gap_remains_open",
+        ),
+        policy_id=AGENT_POLICY_ID,
+    )
+    evidence_traces = [trace for trace in traces if trace.tool_name == "evidence.retrieve/v3"]
+    assert failed_calls == 2
+    assert [trace.cycle for trace in evidence_traces] == [0, 1]
+    assert [trace.status for trace in evidence_traces] == ["failed", "failed"]
+    assert not resolved
+    assert len(traces) == len(observations) <= 6
+
+    successful_calls = 0
+
+    def successful_retry(refs: tuple[str, ...]) -> BoundedToolResult:
+        nonlocal successful_calls
+        successful_calls += 1
+        return BoundedToolResult(
+            status="succeeded",
+            reason_code="actual_provider_complete",
+            output_reference_ids=refs,
+        )
+
+    traces, observations, resolved = execute_active_bounded_plan(
+        active,
+        broker=BoundedToolBroker(evidence_retry=successful_retry),
+        reevaluate=lambda **values: DeterministicReevaluationResult(
+            status="succeeded",
+            reason_code="deterministic_stages_reexecuted",
+            resolved_gap_ids=(values["action"].gap_id,),
+        ),
+        policy_id=AGENT_POLICY_ID,
+    )
+    evidence_traces = [trace for trace in traces if trace.tool_name == "evidence.retrieve/v3"]
+    assert successful_calls == 1
+    assert [trace.status for trace in evidence_traces] == ["succeeded", "deferred"]
+    second_observation = next(
+        item for item in observations if item.action_id == evidence_traces[1].action_id
+    )
+    assert second_observation.reason_code == "gap_already_resolved"
+    assert resolved == [gap.gap_id]
+
+
+def test_uat_retry_compiler_reserves_budget_and_rereads_each_field_once() -> None:
+    import customs_ai_agent.agentic as agentic
+
+    field_gaps = [
+        _test_gap("field_uncertainty", index, f"field-{index // 2}") for index in range(1, 10)
+    ]
+    evidence_gaps = [
+        _test_gap("evidence_incomplete", 100 + index, f"evidence-{index}") for index in range(4)
+    ]
+    other_gaps = [
+        _test_gap("validation_issue", 200 + index, f"issue-{index}") for index in range(4)
+    ]
+    gaps = [*reversed(field_gaps), *reversed(evidence_gaps), *reversed(other_gaps)]
+    selected_evidence_gap = min(evidence_gaps, key=lambda item: item.gap_id)
+
+    plan = agentic._compile_uat_bounded_retry_plan(
+        compile_shadow_plan(gaps),
+        gaps,
+    )
+
+    assert len(plan.actions) == agentic.MAX_TOOL_CALLS
+    evidence_actions = [
+        action for action in plan.actions if action.tool_name == "evidence.retrieve/v3"
+    ]
+    assert len(evidence_actions) == 2
+    assert {action.gap_id for action in evidence_actions} == {selected_evidence_gap.gap_id}
+    assert evidence_actions[0] == plan.actions[0]
+    assert evidence_actions[1].reason_code == "evidence_retry_cycle_2_if_unresolved"
+    explanation_actions = [
+        action for action in plan.actions if action.tool_name == "explanation.compose/v2"
+    ]
+    assert len(explanation_actions) == 1
+    reread_actions = [
+        action for action in plan.actions if action.tool_name == "document.reread_span/v1"
+    ]
+    reread_references = [
+        reference for action in reread_actions for reference in action.input_reference_ids
+    ]
+    assert len(reread_references) == len(set(reread_references))
 
 
 def test_release_calibration_cannot_clear_pairing_ambiguity(
@@ -2705,6 +2826,9 @@ def test_bounded_recovery_evaluation_meets_ninety_five_percent_without_policy_mu
             reevaluate=reevaluate,
             policy_id=AGENT_POLICY_ID,
         )
+        assert all(1 <= trace.duration_ms <= 300_000 for trace in _traces)
+        if index == 19:
+            assert any(trace.status == "failed" for trace in _traces)
         recovered += bool(resolved)
     assert recovered / 20 >= 0.95
 

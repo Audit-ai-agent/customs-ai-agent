@@ -1,14 +1,17 @@
 from __future__ import annotations
 
 import asyncio
+import copy
+import json
 import logging
 import os
 from contextlib import asynccontextmanager
+from datetime import datetime, timezone
 from typing import Any, AsyncIterator, Callable
 from uuid import uuid4
 
 from fastapi import FastAPI, Request
-from fastapi.responses import JSONResponse
+from fastapi.responses import JSONResponse, StreamingResponse
 
 from customs_ai_agent.adapters.retrieval_v3 import fetch_evidence_runtime_readiness_v3
 from customs_ai_agent.adapters.llm import DEFAULT_CLAUDE_MODEL
@@ -39,6 +42,15 @@ from customs_ai_agent.schemas.v3 import (
     ReviewRevisionRequestV1,
     ReviewRevisionResultV1,
 )
+from customs_ai_agent.schemas.experience import (
+    AssistantAnswerV2,
+    CaseConversationRequestV2,
+    ReviewExperienceEnvelopeV1,
+    ReviewStageEventV1,
+)
+from customs_ai_agent.schemas.v3 import canonical_json_sha256
+from customs_ai_agent.experience import experience_prompt_hashes, experience_schema_hashes
+from customs_ai_agent.meaning_catalog import meaning_catalog_sha256
 from customs_ai_agent.service.metadata import build_legacy_metadata, build_metadata
 from customs_ai_agent.service.release_admission import (
     ProductionReleaseAdmissionError,
@@ -83,11 +95,64 @@ class _UnavailableRuntime:
     review_v3_json = review_json
     revision_v3_json = review_json
     answer_v3_json = review_json
+    review_experience_json = review_json
+    answer_v2_json = review_json
+
+    def review_experience_stream_json(
+        self,
+        payload: bytes,
+        _stage_callback: Callable[[dict[str, Any]], None],
+    ) -> object:
+        return self.review_json(payload)
+
+    def answer_v2_stream_json(
+        self,
+        payload: bytes,
+        _stage_callback: Callable[[dict[str, Any]], None],
+    ) -> object:
+        return self.review_json(payload)
 
 
 def _request_id(request: Request) -> str:
     value = getattr(request.state, "request_id", None)
     return value if isinstance(value, str) else str(uuid4())
+
+
+def _stage_event(
+    *,
+    operation_id: str,
+    sequence: int,
+    stage_code: str,
+    state: str,
+    duration_ms: int | None = None,
+    safe_counts: dict[str, int] | None = None,
+) -> ReviewStageEventV1:
+    payload = {
+        "schema_version": "1.0",
+        "operation_id": operation_id,
+        "sequence": sequence,
+        "stage_code": stage_code,
+        "state": state,
+        "occurred_at": (datetime.now(timezone.utc).isoformat().replace("+00:00", "Z")),
+        "duration_ms": duration_ms,
+        "safe_counts": safe_counts or {},
+        "message_key": f"agent.stage.{stage_code}.{state}",
+    }
+    payload["event_sha256"] = canonical_json_sha256(payload)
+    return ReviewStageEventV1.model_validate(payload)
+
+
+def _ndjson(value: dict[str, Any]) -> bytes:
+    return (
+        json.dumps(
+            value,
+            ensure_ascii=False,
+            allow_nan=False,
+            separators=(",", ":"),
+            sort_keys=True,
+        )
+        + "\n"
+    ).encode("utf-8")
 
 
 def _error_response(request: Request, error: ServiceHttpError) -> JSONResponse:
@@ -198,6 +263,9 @@ def create_app(
     revision_result_schema = ReviewRevisionResultV1.model_json_schema(mode="validation")
     grounded_question_schema = GroundedQuestionV1.model_json_schema(mode="validation")
     grounded_answer_schema = GroundedAnswerV1.model_json_schema(mode="validation")
+    experience_envelope_schema = ReviewExperienceEnvelopeV1.model_json_schema(mode="validation")
+    conversation_request_schema = CaseConversationRequestV2.model_json_schema(mode="validation")
+    assistant_answer_schema = AssistantAnswerV2.model_json_schema(mode="validation")
     make_runtime = runtime_factory or _production_runtime
     make_readiness_probe = readiness_probe_factory or _production_readiness_probe
 
@@ -250,6 +318,26 @@ def create_app(
     app.state.service_settings = active_settings
     app.state.build_metadata = metadata
     app.state.build_metadata_v1 = legacy_metadata
+    experience_metadata = copy.deepcopy(metadata)
+    experience_metadata.update(
+        {
+            "service_api_version": "internal-agent-service/v3",
+            "enhanced_experience_enabled": active_settings.enhanced_agent_experience,
+            "uat_adaptive_active": active_settings.uat_adaptive_active,
+            "auto_completion_enabled": False,
+            "meaning_catalog_sha256": meaning_catalog_sha256(),
+            "experience_prompt_hashes": experience_prompt_hashes(),
+            "experience_schema_hashes": experience_schema_hashes(),
+        }
+    )
+    experience_metadata["capabilities"] = [
+        *experience_metadata["capabilities"],
+        "grounded_commercial_presentation",
+        "multiturn_case_assistant_v2",
+        "safe_ndjson_stage_events",
+        "loopback_uat_bounded_active_tools",
+    ]
+    app.state.build_metadata_v3 = experience_metadata
 
     async def admitted_body(request: Request) -> bytes:
         body_admission: asyncio.Semaphore = request.app.state.body_admission
@@ -622,6 +710,315 @@ def create_app(
                 "X-Idempotent-Replay": "true" if replayed else "false",
             },
             content=outcome.result,
+        )
+
+    @app.get(
+        "/internal/agent/v3/metadata",
+        summary="Enhanced Agent experience capability metadata",
+        responses={
+            200: {"content": {"application/json": {"schema": {"type": "object"}}}},
+            401: {"content": {"application/json": {"schema": ERROR_RESPONSE_SCHEMA}}},
+            403: {"content": {"application/json": {"schema": ERROR_RESPONSE_SCHEMA}}},
+        },
+    )
+    async def service_metadata_v3(request: Request) -> JSONResponse:
+        _authorize(request, active_settings)
+        return JSONResponse(
+            status_code=200,
+            headers=_NO_STORE_HEADERS,
+            content=request.app.state.build_metadata_v3,
+        )
+
+    async def _require_enhanced_ready(request: Request) -> AgentServiceController:
+        if not active_settings.enhanced_agent_experience:
+            raise ServiceHttpError(
+                "enhanced_experience_disabled",
+                503,
+                retryable=False,
+                execution_state="not-started",
+            )
+        controller: AgentServiceController = request.app.state.controller
+        if not await controller.ready():
+            raise ServiceHttpError(
+                "dependency_unready",
+                503,
+                retryable=True,
+                execution_state="not-started",
+            )
+        return controller
+
+    @app.post(
+        "/internal/agent/v3/reviews",
+        summary="Execute a review with verified user presentation",
+        openapi_extra={
+            "security": _BEARER_SECURITY,
+            "requestBody": {
+                "required": True,
+                "content": {"application/json": {"schema": review_request_v3_schema}},
+            },
+        },
+        responses={
+            200: {"content": {"application/json": {"schema": experience_envelope_schema}}},
+            422: {"content": {"application/json": {"schema": ERROR_RESPONSE_SCHEMA}}},
+            503: _PRE_EXECUTION_503_RESPONSE,
+        },
+    )
+    async def review_experience(request: Request) -> JSONResponse:
+        _authorize(request, active_settings)
+        payload = await admitted_body(request)
+        inspection = inspect_text_request(
+            payload,
+            active_settings,
+            accept_empty_visual_placeholders=True,
+        )
+        controller = await _require_enhanced_ready(request)
+        outcome, replayed = await controller.submit(
+            payload=payload,
+            review_run_id=f"experience:{inspection.review_run_id}",
+            request_hash=inspection.canonical_sha256,
+            runtime_method_name="review_experience_json",
+        )
+        if outcome.result is None:
+            raise ServiceHttpError(
+                outcome.error_code or "internal_error",
+                outcome.status_code,
+                retryable=outcome.retryable,
+                retry_after_seconds=outcome.retry_after_seconds,
+            )
+        return JSONResponse(
+            status_code=200,
+            headers={
+                **_NO_STORE_HEADERS,
+                "X-Idempotent-Replay": "true" if replayed else "false",
+            },
+            content=outcome.result,
+        )
+
+    @app.post(
+        "/internal/agent/v3/answers",
+        summary="Answer one multi-turn Case or customs question",
+        openapi_extra={
+            "security": _BEARER_SECURITY,
+            "requestBody": {
+                "required": True,
+                "content": {"application/json": {"schema": conversation_request_schema}},
+            },
+        },
+        responses={
+            200: {"content": {"application/json": {"schema": assistant_answer_schema}}},
+            409: {"content": {"application/json": {"schema": ERROR_RESPONSE_SCHEMA}}},
+            422: {"content": {"application/json": {"schema": ERROR_RESPONSE_SCHEMA}}},
+            503: _PRE_EXECUTION_503_RESPONSE,
+        },
+    )
+    async def answer_experience(request: Request) -> JSONResponse:
+        _authorize(request, active_settings)
+        payload = await admitted_body(request)
+        inspection = inspect_v3_auxiliary_request(
+            payload,
+            operation="answer_v2",
+            settings=active_settings,
+        )
+        controller = await _require_enhanced_ready(request)
+        outcome, replayed = await controller.submit(
+            payload=payload,
+            review_run_id=f"answer-v2:{inspection.replay_id}",
+            request_hash=inspection.canonical_sha256,
+            runtime_method_name="answer_v2_json",
+        )
+        if outcome.result is None:
+            raise ServiceHttpError(
+                outcome.error_code or "internal_error",
+                outcome.status_code,
+                retryable=outcome.retryable,
+                retry_after_seconds=outcome.retry_after_seconds,
+            )
+        return JSONResponse(
+            status_code=200,
+            headers={
+                **_NO_STORE_HEADERS,
+                "X-Idempotent-Replay": "true" if replayed else "false",
+            },
+            content=outcome.result,
+        )
+
+    @app.post(
+        "/internal/agent/v3/reviews/stream",
+        summary="Execute a review and stream safe verified stages as NDJSON",
+        openapi_extra={
+            "security": _BEARER_SECURITY,
+            "requestBody": {
+                "required": True,
+                "content": {"application/json": {"schema": review_request_v3_schema}},
+            },
+        },
+    )
+    async def review_experience_stream(request: Request) -> StreamingResponse:
+        _authorize(request, active_settings)
+        payload = await admitted_body(request)
+        inspection = inspect_text_request(
+            payload,
+            active_settings,
+            accept_empty_visual_placeholders=True,
+        )
+        controller = await _require_enhanced_ready(request)
+
+        async def generate() -> AsyncIterator[bytes]:
+            queue: asyncio.Queue[dict[str, Any]] = asyncio.Queue(maxsize=64)
+
+            def observe(event: dict[str, Any]) -> None:
+                if not queue.full():
+                    queue.put_nowait(event)
+
+            submitted = asyncio.create_task(
+                controller.submit(
+                    payload=payload,
+                    review_run_id=f"experience:{inspection.review_run_id}",
+                    request_hash=inspection.canonical_sha256,
+                    runtime_method_name="review_experience_stream_json",
+                    stage_callback=observe,
+                )
+            )
+            sequence = 0
+            while not submitted.done() or not queue.empty():
+                try:
+                    observed = await asyncio.wait_for(queue.get(), timeout=0.1)
+                except TimeoutError:
+                    continue
+                event = _stage_event(
+                    operation_id=inspection.review_run_id,
+                    sequence=sequence,
+                    stage_code=str(observed["stage_code"]),
+                    state=str(observed["state"]),
+                    duration_ms=observed.get("duration_ms"),
+                    safe_counts=observed.get("safe_counts") or {},
+                )
+                yield _ndjson(
+                    {
+                        "type": "stage_event",
+                        "event": event.model_dump(mode="json"),
+                    }
+                )
+                sequence += 1
+            outcome, _replayed = await submitted
+            if outcome.result is None:
+                yield _ndjson(
+                    {
+                        "type": "stage_event",
+                        "event": _stage_event(
+                            operation_id=inspection.review_run_id,
+                            sequence=sequence,
+                            stage_code="failed",
+                            state="failed",
+                        ).model_dump(mode="json"),
+                    }
+                )
+                yield _ndjson(
+                    {
+                        "type": "error",
+                        "error": {
+                            "code": outcome.error_code or "internal_error",
+                            "retryable": outcome.retryable,
+                        },
+                    }
+                )
+                return
+            yield _ndjson({"type": "result", "result": outcome.result})
+
+        return StreamingResponse(
+            generate(),
+            media_type="application/x-ndjson",
+            headers=_NO_STORE_HEADERS,
+        )
+
+    @app.post(
+        "/internal/agent/v3/answers/stream",
+        summary="Answer a multi-turn question and stream safe stages as NDJSON",
+        openapi_extra={
+            "security": _BEARER_SECURITY,
+            "requestBody": {
+                "required": True,
+                "content": {"application/json": {"schema": conversation_request_schema}},
+            },
+        },
+    )
+    async def answer_experience_stream(request: Request) -> StreamingResponse:
+        _authorize(request, active_settings)
+        payload = await admitted_body(request)
+        inspection = inspect_v3_auxiliary_request(
+            payload,
+            operation="answer_v2",
+            settings=active_settings,
+        )
+        controller = await _require_enhanced_ready(request)
+        operation_id = inspection.replay_id[-64:]
+
+        async def generate() -> AsyncIterator[bytes]:
+            queue: asyncio.Queue[dict[str, Any]] = asyncio.Queue(maxsize=64)
+
+            def observe(event: dict[str, Any]) -> None:
+                if not queue.full():
+                    queue.put_nowait(event)
+
+            submitted = asyncio.create_task(
+                controller.submit(
+                    payload=payload,
+                    review_run_id=f"answer-v2:{inspection.replay_id}",
+                    request_hash=inspection.canonical_sha256,
+                    runtime_method_name="answer_v2_stream_json",
+                    stage_callback=observe,
+                )
+            )
+            sequence = 0
+            while not submitted.done() or not queue.empty():
+                try:
+                    observed = await asyncio.wait_for(queue.get(), timeout=0.1)
+                except TimeoutError:
+                    continue
+                event = _stage_event(
+                    operation_id=operation_id,
+                    sequence=sequence,
+                    stage_code=str(observed["stage_code"]),
+                    state=str(observed["state"]),
+                    duration_ms=observed.get("duration_ms"),
+                    safe_counts=observed.get("safe_counts") or {},
+                )
+                yield _ndjson(
+                    {
+                        "type": "stage_event",
+                        "event": event.model_dump(mode="json"),
+                    }
+                )
+                sequence += 1
+            outcome, _replayed = await submitted
+            if outcome.result is None:
+                yield _ndjson(
+                    {
+                        "type": "stage_event",
+                        "event": _stage_event(
+                            operation_id=operation_id,
+                            sequence=sequence,
+                            stage_code="failed",
+                            state="failed",
+                        ).model_dump(mode="json"),
+                    }
+                )
+                yield _ndjson(
+                    {
+                        "type": "error",
+                        "error": {
+                            "code": outcome.error_code or "internal_error",
+                            "retryable": outcome.retryable,
+                        },
+                    }
+                )
+                return
+            yield _ndjson({"type": "result", "result": outcome.result})
+
+        return StreamingResponse(
+            generate(),
+            media_type="application/x-ndjson",
+            headers=_NO_STORE_HEADERS,
         )
 
     original_openapi = app.openapi
