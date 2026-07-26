@@ -9,6 +9,8 @@ composition boundary.
 from __future__ import annotations
 
 import copy
+import json
+import math
 from os import PathLike
 from typing import Any, Literal, cast
 
@@ -64,7 +66,13 @@ def _execution_document_values(document: Any) -> dict[str, Any]:
     return values
 
 
-def _build_initial_state(request: ReviewRequest) -> dict[str, Any]:
+def _build_initial_state(
+    request: ReviewRequest,
+    *,
+    initial_retrieval_attempt: int = 0,
+) -> dict[str, Any]:
+    if initial_retrieval_attempt < 0:
+        raise ValueError("initial_retrieval_attempt cannot be negative")
     if request.scenario_id:
         scenario = get_scenario(request.scenario_id)
         case_id = request.case_id or scenario["case_id"]
@@ -106,6 +114,7 @@ def _build_initial_state(request: ReviewRequest) -> dict[str, Any]:
         "regulatory_findings": [],
         "report_json": None,
         "retry_count": 0,
+        "retrieval_attempt": initial_retrieval_attempt,
         "current_stage": "created",
         "requires_human_review": False,
         "final_status": None,
@@ -120,6 +129,8 @@ def _execute_review(
     retriever: RegulationRetriever | None = None,
     analyzer: DocumentAnalyzer | None = None,
     env_file: str | PathLike[str] | None = None,
+    *,
+    initial_retrieval_attempt: int = 0,
 ) -> dict[str, Any]:
     """Execute one review without taking ownership of the caller's request.
 
@@ -146,7 +157,10 @@ def _execute_review(
             )
         active_retriever = retriever or MockRegulationRetriever()
         active_analyzer = None
-    initial_state = _build_initial_state(request)
+    initial_state = _build_initial_state(
+        request,
+        initial_retrieval_attempt=initial_retrieval_attempt,
+    )
     payload_store = SensitiveDocumentPayloadStore(
         {
             document.document_id: _execution_document_values(document)
@@ -194,6 +208,8 @@ def run_review_v2(
     retriever: RegulationRetriever | None = None,
     analyzer: DocumentAnalyzer | None = None,
     env_file: str | PathLike[str] | None = None,
+    *,
+    initial_retrieval_attempt: int = 0,
 ) -> dict[str, Any]:
     """Execute the additive text/image/PDF V2 workflow."""
 
@@ -204,6 +220,7 @@ def run_review_v2(
         retriever=retriever,
         analyzer=analyzer,
         env_file=env_file,
+        initial_retrieval_attempt=initial_retrieval_attempt,
     )
 
 
@@ -472,29 +489,243 @@ def run_review_result_v2(
     )
 
 
-def _apply_correction(state: dict[str, Any], correction: UserCorrection) -> None:
-    doc = state.get("extracted_documents", {}).get(correction.document_id)
-    if not doc:
-        return
+class CorrectionApplicationError(ValueError):
+    """A safe, fail-closed error raised when an approved correction cannot apply."""
+
+    def __init__(self, code: str, message: str) -> None:
+        super().__init__(f"{code}: {message}")
+        self.code = code
+
+
+def _canonical_json_value(value: Any, *, error_code: str) -> str:
+    """Return a type-preserving canonical JSON representation.
+
+    ``UserCorrection.value`` is intentionally an open JSON value in the public
+    contract. Direct workflow callers do not pass through the serialized API
+    boundary, so the runner must still reject Python-only or non-finite values.
+    """
+
+    stack = [value]
+    while stack:
+        item = stack.pop()
+        if item is None or type(item) in {bool, int, str}:
+            continue
+        if type(item) is float:
+            if not math.isfinite(item):
+                raise CorrectionApplicationError(
+                    error_code,
+                    "A correction contains a non-finite numeric value.",
+                )
+            continue
+        if type(item) is list:
+            stack.extend(item)
+            continue
+        if type(item) is dict and all(type(key) is str for key in item):
+            stack.extend(item.values())
+            continue
+        raise CorrectionApplicationError(
+            error_code,
+            "A correction contains a value outside the JSON data model.",
+        )
+    return json.dumps(
+        value,
+        ensure_ascii=False,
+        allow_nan=False,
+        separators=(",", ":"),
+        sort_keys=True,
+    )
+
+
+def _json_value_kind(value: Any) -> str:
+    if value is None:
+        return "null"
+    if type(value) is bool:
+        return "boolean"
+    if type(value) in {int, float}:
+        return "number"
+    if type(value) is str:
+        return "string"
+    if type(value) is list:
+        return "array"
+    if type(value) is dict:
+        return "object"
+    return "unsupported"
+
+
+def _resolve_correction_target(
+    state: dict[str, Any],
+    correction: UserCorrection,
+) -> dict[str, Any]:
+    extracted = state.get("extracted_documents")
+    if not isinstance(extracted, dict):
+        raise CorrectionApplicationError(
+            "correction_state_invalid",
+            "The extracted child state is unavailable.",
+        )
+    document = extracted.get(correction.document_id)
+    if not isinstance(document, dict):
+        raise CorrectionApplicationError(
+            "correction_document_missing",
+            "The approved correction document is absent from the child extraction.",
+        )
+
     parts = correction.field_path.split(".")
-    if parts[0] == "fields" and len(parts) == 2:
-        field_data = doc.get("fields", {}).get(parts[1])
-        if field_data:
-            field_data["value"] = correction.value
-            field_data["confidence"] = correction.confidence
-            field_data["value_source"] = "human_correction"
-    elif parts[0] == "line_items" and len(parts) == 3:
-        try:
-            index = int(parts[1])
-        except ValueError:
-            return
-        line_items = doc.get("line_items") or []
-        if 0 <= index < len(line_items):
-            field_data = line_items[index].get(parts[2])
-            if field_data:
-                field_data["value"] = correction.value
-                field_data["confidence"] = correction.confidence
-                field_data["value_source"] = "human_correction"
+    field_data: Any
+    if len(parts) == 2 and parts[0] == "fields" and parts[1]:
+        fields = document.get("fields")
+        if not isinstance(fields, dict) or parts[1] not in fields:
+            raise CorrectionApplicationError(
+                "correction_field_missing",
+                "The approved correction field is absent from the child extraction.",
+            )
+        field_data = fields[parts[1]]
+    elif (
+        len(parts) == 3
+        and parts[0] == "line_items"
+        and parts[1].isascii()
+        and parts[1].isdigit()
+        and parts[2]
+    ):
+        line_items = document.get("line_items")
+        index = int(parts[1])
+        if not isinstance(line_items, list) or not 0 <= index < len(line_items):
+            raise CorrectionApplicationError(
+                "correction_line_item_missing",
+                "The approved correction line item is absent from the child extraction.",
+            )
+        line_item = line_items[index]
+        if not isinstance(line_item, dict) or parts[2] not in line_item:
+            raise CorrectionApplicationError(
+                "correction_field_missing",
+                "The approved correction line-item field is absent from the child extraction.",
+            )
+        field_data = line_item[parts[2]]
+    else:
+        raise CorrectionApplicationError(
+            "correction_path_invalid",
+            "The approved correction path is not a supported field path.",
+        )
+
+    if not isinstance(field_data, dict) or "value" not in field_data:
+        raise CorrectionApplicationError(
+            "correction_field_invalid",
+            "The approved correction target is not a typed extracted field.",
+        )
+    return field_data
+
+
+def _normalized_correction_value(
+    state: dict[str, Any],
+    correction: UserCorrection,
+) -> Any:
+    documents = state.get("normalized_documents")
+    document = documents.get(correction.document_id) if isinstance(documents, dict) else None
+    if not isinstance(document, dict):
+        raise CorrectionApplicationError(
+            "correction_not_persisted",
+            "The corrected document is absent after normalization.",
+        )
+    parts = correction.field_path.split(".")
+    if len(parts) == 2 and parts[0] == "fields":
+        raw_fields = document.get("raw_fields")
+        if not isinstance(raw_fields, dict) or parts[1] not in raw_fields:
+            raise CorrectionApplicationError(
+                "correction_not_persisted",
+                "The corrected field is absent after normalization.",
+            )
+        return raw_fields[parts[1]]
+    line_items = document.get("line_items")
+    index = int(parts[1])
+    if not isinstance(line_items, list) or not 0 <= index < len(line_items):
+        raise CorrectionApplicationError(
+            "correction_not_persisted",
+            "The corrected line item is absent after normalization.",
+        )
+    line_item = line_items[index]
+    raw_fields = line_item.get("raw_fields") if isinstance(line_item, dict) else None
+    if not isinstance(raw_fields, dict) or parts[2] not in raw_fields:
+        raise CorrectionApplicationError(
+            "correction_not_persisted",
+            "The corrected line-item field is absent after normalization.",
+        )
+    return raw_fields[parts[2]]
+
+
+def _validate_corrections(corrections: list[UserCorrection]) -> None:
+    targets: dict[tuple[str, str], str] = {}
+    for correction in corrections:
+        encoded = _canonical_json_value(
+            correction.value,
+            error_code="correction_value_invalid",
+        )
+        target = (correction.document_id, correction.field_path)
+        if target in targets:
+            code = (
+                "duplicate_correction_target"
+                if targets[target] == encoded
+                else "conflicting_correction_target"
+            )
+            raise CorrectionApplicationError(
+                code,
+                "A revision contains more than one correction for the same target.",
+            )
+        targets[target] = encoded
+
+
+def _apply_correction(state: dict[str, Any], correction: UserCorrection) -> None:
+    field_data = _resolve_correction_target(state, correction)
+    current_value = field_data["value"]
+    _canonical_json_value(current_value, error_code="correction_field_invalid")
+    expected = _canonical_json_value(
+        correction.value,
+        error_code="correction_value_invalid",
+    )
+    if current_value is not None and _json_value_kind(current_value) != _json_value_kind(
+        correction.value
+    ):
+        raise CorrectionApplicationError(
+            "correction_value_type_mismatch",
+            "The correction value type does not match the extracted field type.",
+        )
+    field_data["value"] = copy.deepcopy(correction.value)
+    field_data["confidence"] = correction.confidence
+    field_data["value_source"] = "human_correction"
+    if (
+        _canonical_json_value(field_data["value"], error_code="correction_not_applied") != expected
+        or field_data.get("confidence") != correction.confidence
+        or field_data.get("value_source") != "human_correction"
+    ):
+        raise CorrectionApplicationError(
+            "correction_not_applied",
+            "The approved correction was not applied exactly.",
+        )
+
+
+def _verify_correction_persisted(
+    state: dict[str, Any],
+    correction: UserCorrection,
+) -> None:
+    expected = _canonical_json_value(
+        correction.value,
+        error_code="correction_value_invalid",
+    )
+    field_data = _resolve_correction_target(state, correction)
+    normalized_raw_value = _normalized_correction_value(state, correction)
+    if (
+        _canonical_json_value(field_data["value"], error_code="correction_not_persisted")
+        != expected
+        or _canonical_json_value(
+            normalized_raw_value,
+            error_code="correction_not_persisted",
+        )
+        != expected
+        or field_data.get("confidence") != correction.confidence
+        or field_data.get("value_source") != "human_correction"
+    ):
+        raise CorrectionApplicationError(
+            "correction_not_persisted",
+            "The approved correction did not survive the child review stages exactly.",
+        )
 
 
 def _merge(state: dict[str, Any], update: dict[str, Any]) -> dict[str, Any]:
@@ -521,17 +752,11 @@ def rerun_review(
         else UserCorrection.model_validate(correction)
         for correction in corrections
     ]
+    _validate_corrections(parsed)
     for correction in parsed:
         _apply_correction(next_state, correction)
     next_state["requires_human_review"] = False
     next_state["final_status"] = None
-    next_state["audit_trail"] = audit(
-        next_state,
-        "rerun_review",
-        "corrections_applied",
-        "Applied user corrections and reran deterministic review stages.",
-        {"correction_count": len(parsed)},
-    )
     for node in [
         normalize_documents,
         pair_documents,
@@ -546,6 +771,15 @@ def rerun_review(
                 next_state,
                 retrieve_regulations(next_state, active_retriever),
             )
+    for correction in parsed:
+        _verify_correction_persisted(next_state, correction)
+    next_state["audit_trail"] = audit(
+        next_state,
+        "rerun_review",
+        "corrections_applied",
+        "Applied user corrections and completed all deterministic child review stages.",
+        {"correction_count": len(parsed)},
+    )
     return next_state
 
 

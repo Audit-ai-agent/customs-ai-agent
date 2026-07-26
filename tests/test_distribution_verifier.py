@@ -46,6 +46,7 @@ METADATA = (
     f"Version: {EXPECTED_VERSION}\n"
     "Requires-Python: <3.12,>=3.11\n"
     "Requires-Dist: anthropic<1,>=0.117.0\n"
+    "Requires-Dist: cryptography<49,>=48.0.1\n"
     "Requires-Dist: fastapi<1,>=0.115\n"
     "Requires-Dist: jsonschema[format]<5,>=4.23\n"
     "Requires-Dist: langgraph<2,>=0.2.0\n"
@@ -88,6 +89,27 @@ def _write_wheel(
             / "contracts"
             / "evidence"
             / "runtime-release-v2.lock.json"
+        ).read_bytes()
+    provider_lock_name = "customs_ai_agent/contracts/evidence/provider-runtime-lock.json"
+    if provider_lock_name in payloads:
+        payloads[provider_lock_name] = (
+            ROOT
+            / "src"
+            / "customs_ai_agent"
+            / "contracts"
+            / "evidence"
+            / "provider-runtime-lock.json"
+        ).read_bytes()
+    v3_runtime_lock_name = "customs_ai_agent/contracts/evidence/v3/runtime-release-v3.lock.json"
+    if v3_runtime_lock_name in payloads:
+        payloads[v3_runtime_lock_name] = (
+            ROOT
+            / "src"
+            / "customs_ai_agent"
+            / "contracts"
+            / "evidence"
+            / "v3"
+            / "runtime-release-v3.lock.json"
         ).read_bytes()
     generated_payloads = {
         BUILD_MANIFEST_WHEEL_PATH: TEST_BUILD_MANIFEST,
@@ -217,6 +239,21 @@ def _write_sdist(
         / "evidence"
         / "runtime-release-v2.lock.json"
     ).read_bytes()
+    payloads["contracts/evidence/provider-runtime-lock.json"] = (
+        ROOT / "contracts" / "evidence" / "provider-runtime-lock.json"
+    ).read_bytes()
+    payloads["src/customs_ai_agent/contracts/evidence/provider-runtime-lock.json"] = (
+        ROOT / "src" / "customs_ai_agent" / "contracts" / "evidence" / "provider-runtime-lock.json"
+    ).read_bytes()
+    payloads["src/customs_ai_agent/contracts/evidence/v3/runtime-release-v3.lock.json"] = (
+        ROOT
+        / "src"
+        / "customs_ai_agent"
+        / "contracts"
+        / "evidence"
+        / "v3"
+        / "runtime-release-v3.lock.json"
+    ).read_bytes()
     payloads[BUILD_MANIFEST_SDIST_PATH] = TEST_BUILD_MANIFEST
     payloads.update(extra_files or {})
     root = f"{EXPECTED_IMPORT_PACKAGE}-{EXPECTED_VERSION}"
@@ -318,6 +355,7 @@ def test_project_metadata_limits_runtime_to_python_311_and_next_major_versions()
     assert project["requires-python"] == ">=3.11,<3.12"
     assert set(project["dependencies"]) == {
         "anthropic>=0.117.0,<1",
+        "cryptography>=48.0.1,<49",
         "fastapi>=0.115,<1",
         "jsonschema[format]>=4.23,<5",
         "langgraph>=0.2.0,<2",
@@ -337,6 +375,7 @@ def test_project_metadata_limits_runtime_to_python_311_and_next_major_versions()
         for requirement in locked_project["metadata"]["requires-dist"]
     } == {
         ("anthropic", ">=0.117.0,<1"),
+        ("cryptography", ">=48.0.1,<49"),
         ("fastapi", ">=0.115,<1"),
         ("jsonschema", ">=4.23,<5"),
         ("langgraph", ">=0.2.0,<2"),
@@ -363,7 +402,7 @@ def test_manifest_is_explicit_and_excludes_raw_documents_secrets_and_outputs() -
         "recursive-include tests *.py",
         "include tests/fixtures/evidence_runtime_v2/README.md",
         "include tests/fixtures/evidence_runtime_v2/provider-runtime-lock.json",
-        "recursive-include tools *.py",
+        "recursive-include tools *.py *.json",
         "global-exclude .env .env.*",
         "global-exclude *.pdf *.png *.jpg *.jpeg *.webp *.bmp *.gif *.tif *.tiff",
         "prune _artifacts",
@@ -737,6 +776,22 @@ def test_ci_hash_pins_wheel_install_and_supplies_archive_to_verifier() -> None:
     assert "agent-wheel-requirement.txt" in workflow
     assert "--require-hashes --requirements dist/agent-wheel-requirement.txt" in workflow
     assert '--wheel "$WHEEL"' in workflow
+
+
+def test_agent_container_build_frontend_and_base_image_are_digest_pinned() -> None:
+    dockerfile = (ROOT / "Dockerfile").read_text(encoding="utf-8")
+    lines = dockerfile.splitlines()
+
+    assert lines[0] == (
+        "# syntax=docker/dockerfile:1.7@sha256:"
+        "a57df69d0ea827fb7266491f2813635de6f17269be881f696fbfdf2d83dda33e"
+    )
+    python_image = next(line for line in lines if line.startswith("ARG PYTHON_IMAGE="))
+    assert python_image == (
+        "ARG PYTHON_IMAGE=python:3.11.15-slim-bookworm@sha256:"
+        "b18992999dbe963a45a8a4da40ac2b1975be1a776d939d098c647482bcad5cba"
+    )
+    assert "FROM ${PYTHON_IMAGE}" in lines
 
 
 @pytest.mark.parametrize(

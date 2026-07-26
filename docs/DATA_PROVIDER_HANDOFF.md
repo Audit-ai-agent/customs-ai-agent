@@ -79,6 +79,21 @@ caller-visible finite daemon isolation과 최대 32개 transport slot 뒤에서 
 evaluation report가 아직 없으므로 generation/evaluation hash를 임의 생성하거나 기존 3/58
 snapshot을 released로 표시하지 않는다.
 
+2026-07-22에 동기화한 provider build pin은 다음과 같다.
+
+- Data revision: `14cde864425eee615a2e3f6799f6f2719448aab9`
+- provider release: `evidence-api-v1.2.0`
+- provider build SHA-256: `d7d64cf3df464cfc934ca0f347c1b1c461916fe12671eeeaf59c1445872486d3`
+- provider source manifest SHA-256: `dd8ceb68c2da83d1fdb82f3d00f4f1137a559fcb577efdf86b6f87e52d84db1c`
+- canonical provider lock SHA-256: `d87f1b86af4812f3de7a2de070f23453c354c0be1534725950f154befffb557f`
+
+이 pin은 실행 이미지의 Provider shell을 정확히 식별하지만 sealed knowledge generation이나
+Evidence V3 정책 승인을 대신하지 않는다. Data build context의 requirement-policy와
+trusted-reviewers lock은 모두 `unreleased`이므로 Agent의 V3 runtime lock도 fail-closed를
+유지한다. `/internal/agent/v2/metadata`는 `evidence_provider_contract`에 위 8-field pin을,
+`evidence_runtime_release`와 `evidence_runtime_release_v3`에는 각각 독립 release 상태를
+노출한다.
+
 이 candidate에 맞춘 conformance provider 검증은 runtime evaluator의 명시적
 `--provider-conformance`에서만 수행하며, 다음 네 입력을 동시에 요구한다.
 

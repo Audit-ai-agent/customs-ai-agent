@@ -46,6 +46,29 @@ def test_production_settings_require_exact_build_identity() -> None:
     assert settings.evidence_token_header == "Authorization"
 
 
+@pytest.mark.parametrize(
+    ("name", "value"),
+    [
+        ("CUSTOMS_AGENT_MAX_DOCUMENTS", "5"),
+        ("CUSTOMS_AGENT_MAX_TEXT_CHARACTERS", "499999"),
+        ("CUSTOMS_AGENT_MAX_BODY_BYTES", str(2 * 1024 * 1024 - 1)),
+    ],
+)
+def test_production_transport_limits_are_contract_fixed(name: str, value: str) -> None:
+    source = {
+        "CUSTOMS_AGENT_ENVIRONMENT": "production",
+        "CUSTOMS_AGENT_BUILD_SHA": "1" * 40,
+        "CUSTOMS_AGENT_WHEEL_SHA256": "2" * 64,
+        "CUSTOMS_AGENT_SERVICE_BEARER_TOKEN": TEST_TOKEN,
+        "EVIDENCE_SERVICE_BASE_URL": "https://evidence.example.test",
+        "EVIDENCE_SERVICE_ALLOWED_ORIGINS": "https://evidence.example.test",
+        "EVIDENCE_SERVICE_TOKEN": "EvidenceBearer_abcdefghijklmnopqrstuvwxyz0123456789",
+        name: value,
+    }
+    with pytest.raises(ServiceConfigurationError, match="production_transport_limits_mismatch"):
+        ServiceSettings.from_environment(source)
+
+
 def test_production_settings_require_evidence_bearer_auth() -> None:
     source = {
         "CUSTOMS_AGENT_ENVIRONMENT": "production",
@@ -95,6 +118,22 @@ def test_replay_cache_limits_are_bounded_for_one_gib_container(
         name: value,
     }
     with pytest.raises(ServiceConfigurationError, match=error):
+        ServiceSettings.from_environment(source)
+
+
+def test_readiness_timeout_can_cover_a_bounded_slow_dependency() -> None:
+    source = {
+        "CUSTOMS_AGENT_SERVICE_BEARER_TOKEN": TEST_TOKEN,
+        "EVIDENCE_SERVICE_BASE_URL": "http://127.0.0.1:8010",
+        "CUSTOMS_AGENT_READINESS_TIMEOUT_SECONDS": "90",
+    }
+
+    assert ServiceSettings.from_environment(source).readiness_timeout_seconds == 90
+    source["CUSTOMS_AGENT_READINESS_TIMEOUT_SECONDS"] = "121"
+    with pytest.raises(
+        ServiceConfigurationError,
+        match="customs_agent_readiness_timeout_seconds_invalid",
+    ):
         ServiceSettings.from_environment(source)
 
 

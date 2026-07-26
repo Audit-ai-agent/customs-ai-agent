@@ -1,5 +1,6 @@
 from __future__ import annotations
 
+import copy
 import json
 import math
 import re
@@ -21,6 +22,11 @@ from customs_ai_agent.adapters.retrieval import (
     RetrievalError,
     validate_evidence_destination,
 )
+from customs_ai_agent.adapters.retrieval_v3 import ProductionHttpRegulationRetrieverV3
+from customs_ai_agent.assertion_trust import (
+    AssertionTrustStoreV1,
+    SupportingDocumentAssertionVerifier,
+)
 from customs_ai_agent.contracts import get_schema
 from customs_ai_agent.contracts.evidence_runtime_release import (
     EvidenceRuntimeReleaseLockError,
@@ -28,11 +34,51 @@ from customs_ai_agent.contracts.evidence_runtime_release import (
     load_released_evidence_runtime_identity,
 )
 from customs_ai_agent.ocr_release import ReleaseLockedOcrProvider
-from customs_ai_agent.runner import run_review_result_v2
+from customs_ai_agent.runner import (
+    CorrectionApplicationError,
+    rerun_review,
+    run_review_result_v2,
+    run_review_v2,
+    to_review_run_result_v2,
+)
+from customs_ai_agent.agentic import (
+    AGENT_POLICY_ID,
+    ActiveBoundedRuntimeOutcome,
+    BoundedToolBroker,
+    BoundedToolResult,
+    DeterministicReevaluationResult,
+    TrustedAssertionVerifier,
+    answer_grounded_question,
+    automatic_completion_unmet_reason_codes,
+    assert_result_hash,
+    execute_active_bounded_plan,
+    presented_requirement_codes_by_item,
+    runtime_release_identity,
+    to_review_run_result_v3,
+    verified_requirement_codes_by_item,
+)
+from customs_ai_agent.nodes.compliance import compliance_review
+from customs_ai_agent.nodes.report import generate_xai_report
+from customs_ai_agent.nodes.retrieve import retrieve_regulations
+from customs_ai_agent.nodes.route import route_to_human_or_complete
+from customs_ai_agent.policies.outcome import extraction_completion_blockers
 from customs_ai_agent.schemas.models import (
     ReviewRunRequestV2,
     ReviewRunResultV2,
     ServiceReviewRunRequestV2,
+    UserCorrection,
+)
+from customs_ai_agent.schemas.v3 import (
+    GroundedAnswerV1,
+    GroundedQuestionV1,
+    FactLedgerV1,
+    PlannedToolActionV1,
+    ReviewPlanProposalV1,
+    ReviewRevisionRequestV1,
+    ReviewRevisionResultV1,
+    ReviewRunResultV3,
+    ServiceReviewRunRequestV3,
+    review_result_v3_sha256,
 )
 
 
@@ -70,6 +116,10 @@ _SENSITIVE_FRAGMENT_STEP = 128
 _BASE64_RUN_PATTERN = re.compile(rf"[A-Za-z0-9+/=]{{{_SENSITIVE_FRAGMENT_CHARS},}}")
 _SERVICE_REQUEST_VALIDATOR = Draft202012Validator(
     get_schema("backend", "v2", "review-request"),
+    format_checker=FormatChecker(),
+)
+_SERVICE_REQUEST_V3_VALIDATOR = Draft202012Validator(
+    get_schema("backend", "v3", "review-request"),
     format_checker=FormatChecker(),
 )
 _EVIDENCE_BEARER_TOKEN = re.compile(r"^[A-Za-z0-9\-._~+/]+={0,8}$")
@@ -162,6 +212,40 @@ def _assert_plain_json_request(value: Any) -> None:
         )
 
 
+def _decode_serialized_json_object(
+    payload: bytes | bytearray | memoryview,
+    *,
+    invalid_code: str,
+) -> dict[str, Any]:
+    if type(payload) not in {bytes, bytearray, memoryview}:
+        raise RuntimeInputError(invalid_code, "The request must be UTF-8 JSON bytes.")
+    try:
+        payload_size = payload.nbytes if isinstance(payload, memoryview) else len(payload)
+        raw = bytes(payload)
+    except (BufferError, TypeError, ValueError):
+        raise RuntimeInputError(invalid_code, "The request bytes are unavailable.") from None
+    if payload_size > _MAX_SERVICE_REQUEST_JSON_BYTES or len(raw) > _MAX_SERVICE_REQUEST_JSON_BYTES:
+        del raw
+        raise RuntimeInputError("review_request_too_large", "The request exceeds the safety limit.")
+    try:
+        decoded = json.loads(
+            raw.decode("utf-8"),
+            object_pairs_hook=_reject_duplicate_json_keys,
+            parse_constant=_reject_nonfinite_json_constant,
+        )
+    except (UnicodeDecodeError, ValueError, RecursionError):
+        raise RuntimeInputError(
+            invalid_code,
+            "The request is not valid duplicate-key-free JSON.",
+        ) from None
+    finally:
+        del raw
+    if not isinstance(decoded, dict):
+        raise RuntimeInputError(invalid_code, "The request must contain one JSON object.")
+    _assert_plain_json_request(decoded)
+    return decoded
+
+
 def _contains_sensitive_fragment(value: str, marker: str) -> bool:
     """Detect full secrets and substantial raw-media fragments without echoing them."""
 
@@ -199,6 +283,10 @@ class RuntimeInputError(AgentRuntimeError):
     pass
 
 
+class RuntimeConflictError(AgentRuntimeError):
+    pass
+
+
 class RuntimeExecutionError(AgentRuntimeError):
     pass
 
@@ -220,12 +308,23 @@ class RuntimeConfig:
     evidence_allowed_origins: frozenset[str] = field(default_factory=frozenset)
     evidence_timeout_seconds: float = 60.0
     evidence_max_retries: int = 1
+    verification_assertion_verifier: TrustedAssertionVerifier | None = field(
+        default=None,
+        repr=False,
+    )
 
     def __post_init__(self) -> None:
         if not isinstance(self.claude_settings, ClaudeSettings):
             raise RuntimeConfigurationError(
                 "claude_settings_invalid",
                 "RuntimeConfig requires validated ClaudeSettings.",
+            )
+        if self.verification_assertion_verifier is not None and not callable(
+            self.verification_assertion_verifier
+        ):
+            raise RuntimeConfigurationError(
+                "verification_assertion_verifier_invalid",
+                "Supporting-document assertion verifier is invalid.",
             )
         if self.ocr_layout_provider is not None and not callable(
             getattr(self.ocr_layout_provider, "analyze", None)
@@ -324,6 +423,7 @@ class RuntimeConfig:
         evidence_allowed_origins: frozenset[str] = frozenset(),
         evidence_timeout_seconds: float = 60.0,
         evidence_max_retries: int = 1,
+        verification_assertion_verifier: TrustedAssertionVerifier | None = None,
     ) -> RuntimeConfig:
         """Load only allowlisted Claude settings; Evidence settings stay explicit."""
 
@@ -335,14 +435,28 @@ class RuntimeConfig:
             evidence_allowed_origins=evidence_allowed_origins,
             evidence_timeout_seconds=evidence_timeout_seconds,
             evidence_max_retries=evidence_max_retries,
+            verification_assertion_verifier=verification_assertion_verifier,
         )
 
 
-def _has_visual_documents(request: ServiceReviewRunRequestV2) -> bool:
+def _has_visual_documents(
+    request: ServiceReviewRunRequestV2 | ServiceReviewRunRequestV3,
+) -> bool:
     return any(
         document.image_pages or document.pdf_pages is not None
         for document in (request.documents or [])
     )
+
+
+def _project_service_request_v3_to_v2(
+    request: ServiceReviewRunRequestV3,
+) -> ServiceReviewRunRequestV2:
+    raw = request.model_dump(mode="python", warnings=False)
+    projected = {name: raw[name] for name in ServiceReviewRunRequestV2.model_fields if name in raw}
+    # Presence-only requirement codes are never derived from caller assertions.
+    # Evidence v3 policy and verification assertions are evaluated separately.
+    projected["uploaded_requirement_document_codes"] = []
+    return ServiceReviewRunRequestV2.model_validate(projected)
 
 
 def _input_base64_markers(request: ServiceReviewRunRequestV2) -> tuple[str, ...]:
@@ -387,6 +501,78 @@ def _assert_result_correlated(
         )
 
 
+def _assert_public_corrections_applied(
+    result: ReviewRunResultV3,
+    corrections: list[UserCorrection],
+) -> None:
+    """Bind every claimed human correction to the exact public child value."""
+
+    for correction in corrections:
+        documents = [
+            document
+            for document in result.document_results
+            if document.document_id == correction.document_id
+        ]
+        if len(documents) != 1:
+            raise RuntimeConflictError(
+                "correction_application_failed",
+                "An approved correction is not present exactly once in the child result.",
+            )
+        document = documents[0]
+        parts = correction.field_path.split(".")
+        if len(parts) == 2 and parts[0] == "fields":
+            fields = [field for field in document.fields if field.name == parts[1]]
+        elif (
+            len(parts) == 3
+            and parts[0] == "line_items"
+            and parts[1].isascii()
+            and parts[1].isdigit()
+            and 0 <= int(parts[1]) < len(document.line_items)
+        ):
+            fields = [
+                field
+                for field in document.line_items[int(parts[1])].fields
+                if field.name == parts[2]
+            ]
+        else:
+            fields = []
+        if len(fields) != 1:
+            raise RuntimeConflictError(
+                "correction_application_failed",
+                "An approved correction target is absent or ambiguous in the child result.",
+            )
+        public_field = fields[0]
+        try:
+            actual = json.dumps(
+                public_field.value,
+                ensure_ascii=False,
+                allow_nan=False,
+                separators=(",", ":"),
+                sort_keys=True,
+            )
+            expected = json.dumps(
+                correction.value,
+                ensure_ascii=False,
+                allow_nan=False,
+                separators=(",", ":"),
+                sort_keys=True,
+            )
+        except (TypeError, ValueError):
+            raise RuntimeConflictError(
+                "correction_application_failed",
+                "An approved correction is not representable in the child result.",
+            ) from None
+        if (
+            type(public_field.value) is not type(correction.value)
+            or actual != expected
+            or public_field.confidence != correction.confidence
+        ):
+            raise RuntimeConflictError(
+                "correction_application_failed",
+                "An approved correction was not reflected exactly in the child result.",
+            )
+
+
 def _assert_public_result_safe(
     value: Any,
     *,
@@ -427,6 +613,290 @@ def _assert_public_result_safe(
                 )
 
 
+class _RuntimeBoundedAdaptiveExecutor:
+    """Runtime-owned active Tool composition over the mandatory workflow.
+
+    The request cannot inject handlers. A span reread is bound to canonical
+    FactLedger field references and re-invokes the pinned Claude analyzer over
+    the immutable text request. Evidence retry reuses only the already-pinned
+    v3 retriever. Both paths then run code-owned compliance/outcome stages.
+    """
+
+    def __init__(
+        self,
+        *,
+        service_request: ServiceReviewRunRequestV2,
+        request: ServiceReviewRunRequestV3,
+        retriever: ProductionHttpRegulationRetrieverV3,
+        analyzer: ClaudeDocumentAnalyzer,
+        state: dict[str, Any],
+        result: ReviewRunResultV2,
+        supporting_document_rejections: list[str],
+        assertion_verifier: TrustedAssertionVerifier | None,
+    ) -> None:
+        self._service_request = service_request
+        self._request = request
+        self._retriever = retriever
+        self._analyzer = analyzer
+        self._state = copy.deepcopy(state)
+        self._result = result
+        self._supporting_rejections = list(supporting_document_rejections)
+        self._assertion_verifier = assertion_verifier
+        self._reference_kinds: dict[str, str] = {}
+        self._reference_documents: dict[str, str | None] = {}
+        self._pending_state: dict[str, Any] | None = None
+        self._next_retrieval_attempt = int(state.get("retrieval_attempt") or 0)
+
+    def _reserve_retrieval_attempt(self) -> int:
+        """Consume one process-local Evidence attempt before any Tool I/O.
+
+        A Tool observation can be rejected during deterministic reevaluation.
+        The HTTP request still happened, so its attempt number must never be
+        reused by a later Tool action even when the pending state is discarded.
+        """
+
+        attempt = self._next_retrieval_attempt
+        self._next_retrieval_attempt += 1
+        return attempt
+
+    def _finalize_state(
+        self,
+        state: dict[str, Any],
+    ) -> tuple[dict[str, Any], ReviewRunResultV2, list[str]]:
+        retrieval_request = state.get("retrieval_request") or {}
+        request_id = retrieval_request.get("request_id")
+        policies = (
+            self._retriever.policy_bindings(request_id) if isinstance(request_id, str) else {}
+        )
+        verified_by_item, supporting_rejections = verified_requirement_codes_by_item(
+            self._request.supporting_documents,
+            case_id=self._request.case_id,
+            review_as_of=self._request.review_as_of,
+            assertion_cutoff_at=self._request.assertion_cutoff_at,
+            retrieval_results=list(state.get("retrieval_results") or []),
+            policy_bindings=policies,
+            assertion_verifier=self._assertion_verifier,
+        )
+        next_state = copy.deepcopy(state)
+        next_state["verified_requirement_documents_by_item"] = verified_by_item
+        next_state["presented_requirement_documents_by_item"] = presented_requirement_codes_by_item(
+            self._request.supporting_documents,
+            retrieval_results=list(state.get("retrieval_results") or []),
+        )
+        # A prior route result is not an independent source of truth. Rebuild
+        # the human flag from provider/model facts, then let compliance/outcome
+        # derive it again from the complete state.
+        next_state["requires_human_review"] = bool(
+            next_state.get("model_errors")
+            or next_state.get("model_conflicts")
+            or extraction_completion_blockers(next_state)
+        )
+        next_state.update(compliance_review(next_state))
+        next_state.update(generate_xai_report(next_state))
+        next_state.update(route_to_human_or_complete(next_state))
+        provisional = to_review_run_result_v2(next_state)
+        observed_model = (
+            provisional.model_calls[0].model_id
+            if provisional.model_calls
+            else self._analyzer.model_id
+        )
+        runtime_release = runtime_release_identity(
+            model_id=observed_model,
+            evidence_snapshot_id=provisional.knowledge_snapshot_id,
+            evidence_runtime_v3_sha256=(
+                self._retriever.expected_identity.runtime_release_v3_sha256
+            ),
+            assertion_trust_store=(
+                self._assertion_verifier.store
+                if isinstance(
+                    self._assertion_verifier,
+                    SupportingDocumentAssertionVerifier,
+                )
+                else None
+            ),
+        )
+        calibration_blockers = automatic_completion_unmet_reason_codes(
+            provisional,
+            self._request,
+            runtime_release,
+            supporting_rejections=supporting_rejections,
+            require_completed_outcome=False,
+        )
+        # Calibration approval may remove only the release-calibration hold.
+        # It must never erase deterministic document-set/pairing blockers that
+        # were reconstructed above (for example duplicate required documents or
+        # a declared/observed document-type conflict).
+        if not calibration_blockers and not extraction_completion_blockers(next_state):
+            next_state["requires_human_review"] = False
+            next_state.update(
+                route_to_human_or_complete(
+                    next_state,
+                    extraction_release_approved=True,
+                )
+            )
+        final_result = to_review_run_result_v2(next_state)
+        return next_state, final_result, supporting_rejections
+
+    def _reread_span(self, reference_ids: tuple[str, ...]) -> BoundedToolResult:
+        document_ids = {
+            self._reference_documents.get(reference_id)
+            for reference_id in reference_ids
+            if self._reference_kinds.get(reference_id) == "field_source"
+        }
+        if (
+            len(document_ids) == 0
+            or None in document_ids
+            or any(self._reference_kinds.get(item) != "field_source" for item in reference_ids)
+        ):
+            return BoundedToolResult(status="failed", reason_code="span_reference_not_grounded")
+        request_document_ids = {
+            document.document_id for document in self._service_request.documents or []
+        }
+        if not document_ids.issubset(request_document_ids):
+            return BoundedToolResult(status="failed", reason_code="span_document_not_in_request")
+        retrieval_attempt = self._reserve_retrieval_attempt()
+        try:
+            self._retriever.preflight(self._service_request.review_as_of)
+            workflow_request = ReviewRunRequestV2.model_validate(
+                self._service_request.model_dump(mode="python", warnings=False)
+            )
+            self._pending_state = run_review_v2(
+                workflow_request,
+                retriever=self._retriever,
+                analyzer=self._analyzer,
+                initial_retrieval_attempt=retrieval_attempt,
+            )
+        except (LLMError, RetrievalError, ValidationError, ValueError):
+            self._pending_state = None
+            return BoundedToolResult(status="failed", reason_code="span_reread_failed")
+        except Exception:
+            self._pending_state = None
+            return BoundedToolResult(status="failed", reason_code="span_reread_failed")
+        return BoundedToolResult(
+            status="succeeded",
+            reason_code="source_bound_text_reread_completed",
+            output_reference_ids=reference_ids,
+        )
+
+    def _retry_evidence(self, reference_ids: tuple[str, ...]) -> BoundedToolResult:
+        if any(
+            self._reference_kinds.get(reference_id) not in {"evidence", "outcome"}
+            for reference_id in reference_ids
+        ):
+            return BoundedToolResult(status="failed", reason_code="evidence_reference_not_grounded")
+        retrieval_attempt = self._reserve_retrieval_attempt()
+        try:
+            next_state = copy.deepcopy(self._state)
+            next_state["retrieval_attempt"] = retrieval_attempt
+            next_state.update(retrieve_regulations(next_state, self._retriever))
+        except (RetrievalError, ValidationError, ValueError):
+            self._pending_state = None
+            return BoundedToolResult(status="failed", reason_code="evidence_retry_failed")
+        except Exception:
+            self._pending_state = None
+            return BoundedToolResult(status="failed", reason_code="evidence_retry_failed")
+        self._pending_state = next_state
+        return BoundedToolResult(
+            status="succeeded",
+            reason_code="pinned_evidence_retry_completed",
+            output_reference_ids=reference_ids,
+        )
+
+    def _reevaluate(
+        self,
+        *,
+        action: PlannedToolActionV1,
+        observation: BoundedToolResult,
+        affected_stages: tuple[str, ...],
+    ) -> DeterministicReevaluationResult:
+        pending = self._pending_state
+        self._pending_state = None
+        expected = (
+            (
+                "extraction",
+                "normalization",
+                "pairing",
+                "validation",
+                "compliance",
+                "outcome",
+            )
+            if action.tool_name == "document.reread_span/v1"
+            else ("evidence", "compliance", "outcome")
+        )
+        if observation.status != "succeeded" or pending is None or affected_stages != expected:
+            return DeterministicReevaluationResult(
+                status="failed",
+                reason_code="affected_stage_rerun_not_authorized",
+            )
+        try:
+            next_state, next_result, supporting_rejections = self._finalize_state(pending)
+        except (LLMError, RetrievalError, ValidationError, ValueError):
+            return DeterministicReevaluationResult(
+                status="failed",
+                reason_code="deterministic_stage_rerun_failed",
+            )
+        except Exception:
+            return DeterministicReevaluationResult(
+                status="failed",
+                reason_code="deterministic_stage_rerun_failed",
+            )
+        if action.tool_name == "document.reread_span/v1":
+            resolved = not next_result.model_errors and not next_result.model_conflicts
+        else:
+            resolved = (
+                next_result.retrieval_status == "ok"
+                and next_result.retrieval_coverage == "complete"
+                and not next_result.retrieval_errors
+            )
+        if not resolved:
+            return DeterministicReevaluationResult(
+                status="failed",
+                reason_code="deterministic_gap_remains_open",
+            )
+        self._state = next_state
+        self._result = next_result
+        self._supporting_rejections = supporting_rejections
+        return DeterministicReevaluationResult(
+            status="succeeded",
+            reason_code="affected_deterministic_stages_reexecuted",
+            resolved_gap_ids=(action.gap_id,),
+            output_reference_ids=(action.gap_id,),
+        )
+
+    def execute(
+        self,
+        *,
+        plan: ReviewPlanProposalV1,
+        fact_ledger: FactLedgerV1,
+    ) -> ActiveBoundedRuntimeOutcome:
+        self._reference_kinds = {entry.reference_id: entry.kind for entry in fact_ledger.entries}
+        self._reference_documents = {
+            entry.reference_id: entry.document_id for entry in fact_ledger.entries
+        }
+        traces, observations, resolved = execute_active_bounded_plan(
+            plan,
+            broker=BoundedToolBroker(
+                span_reread=self._reread_span,
+                evidence_retry=self._retry_evidence,
+            ),
+            reevaluate=self._reevaluate,
+            policy_id=AGENT_POLICY_ID,
+        )
+        failures: set[str] = set()
+        if len(traces) < len(plan.actions):
+            failures.add("agent_budget_exhausted")
+        if any(item.status != "succeeded" for item in observations):
+            failures.add("active_tool_execution_incomplete")
+        return ActiveBoundedRuntimeOutcome(
+            result=self._result,
+            supporting_document_rejections=tuple(self._supporting_rejections),
+            action_trace=tuple(traces),
+            observations=tuple(observations),
+            resolved_gap_ids=tuple(resolved),
+            failure_reason_codes=tuple(sorted(failures)),
+        )
+
+
 class AgentRuntime:
     """Service-facing Claude + OCR + Evidence HTTP composition root."""
 
@@ -435,7 +905,9 @@ class AgentRuntime:
         "_closed",
         "_config",
         "_retriever",
+        "_retriever_v3",
         "_secret_markers",
+        "_assertion_verifier",
     )
 
     def __init__(self, config: RuntimeConfig) -> None:
@@ -483,7 +955,9 @@ class AgentRuntime:
             )
         self._config = config
         self._retriever = retriever
+        self._retriever_v3: ProductionHttpRegulationRetrieverV3 | None = None
         self._analyzer = analyzer
+        self._assertion_verifier = config.verification_assertion_verifier
         self._closed = False
         self._secret_markers = tuple(
             marker
@@ -500,6 +974,17 @@ class AgentRuntime:
                 "runtime_closed",
                 "The Agent runtime is closed.",
             )
+
+    def _runtime_assertion_trust_store(self) -> AssertionTrustStoreV1 | None:
+        """Return only the store owned by the concrete runtime verifier.
+
+        Request data can never supply this identity.  Alternate verifier
+        implementations remain fail-closed on the packaged unreleased store.
+        """
+
+        if isinstance(self._assertion_verifier, SupportingDocumentAssertionVerifier):
+            return self._assertion_verifier.store
+        return None
 
     def close(self) -> None:
         """Close the runtime-owned Anthropic client.
@@ -648,19 +1133,52 @@ class AgentRuntime:
                 "Image and PDF reviews require an explicitly configured OCR/layout provider.",
             )
 
+        return self._execute_review(service_request, retriever=self._retriever)
+
+    def _get_retriever_v3(self) -> ProductionHttpRegulationRetrieverV3:
+        if self._retriever_v3 is not None:
+            return self._retriever_v3
+        token = (
+            self._config.evidence_service_token.get_secret_value()
+            if self._config.evidence_service_token is not None
+            else None
+        )
+        try:
+            retriever = ProductionHttpRegulationRetrieverV3(
+                self._config.evidence_base_url,
+                service_token=token,
+                allowed_origins=self._config.evidence_allowed_origins,
+                timeout_seconds=self._config.evidence_timeout_seconds,
+                max_retries=self._config.evidence_max_retries,
+            )
+        except Exception:
+            raise RuntimeConfigurationError(
+                "evidence_runtime_v3_unreleased",
+                "No exact approved Evidence v3 runtime is pinned for this Agent build.",
+            ) from None
+        self._retriever_v3 = retriever
+        return retriever
+
+    def _execute_review(
+        self,
+        service_request: ServiceReviewRunRequestV2,
+        *,
+        retriever: Any,
+    ) -> ReviewRunResultV2:
+
         sensitive_markers = self._secret_markers + _input_base64_markers(service_request)
         execution_failure: RuntimeExecutionError | None = None
         try:
             # Classification/extraction may invoke Claude. Production must
             # therefore attest the sealed Data dependency before entering the
             # workflow, even though each later retrieval re-attests independently.
-            self._retriever.preflight(service_request.review_as_of)
+            retriever.preflight(service_request.review_as_of)
             workflow_request = ReviewRunRequestV2.model_validate(
                 service_request.model_dump(mode="python", warnings=False)
             )
             result = run_review_result_v2(
                 workflow_request,
-                retriever=self._retriever,
+                retriever=retriever,
                 analyzer=self._analyzer,
             )
             if not isinstance(result, ReviewRunResultV2):
@@ -707,12 +1225,320 @@ class AgentRuntime:
             )
         raise execution_failure
 
+    def review_v3_json(
+        self,
+        payload: bytes | bytearray | memoryview,
+    ) -> ReviewRunResultV3:
+        decoded = _decode_serialized_json_object(payload, invalid_code="review_v3_request_invalid")
+        return self.review_v3(decoded)
+
+    def review_v3(
+        self,
+        request: ServiceReviewRunRequestV3 | dict[str, Any],
+        *,
+        _forced_human_review_reasons: tuple[str, ...] = (),
+    ) -> ReviewRunResultV3:
+        """Execute mandatory policy stages plus release-gated bounded adaptation."""
+
+        self._assert_open()
+        try:
+            payload = (
+                request.model_dump(mode="json", warnings=False)
+                if isinstance(request, ServiceReviewRunRequestV3)
+                else request
+            )
+        except Exception:
+            raise RuntimeInputError(
+                "review_v3_request_invalid",
+                "The V3 Agent request could not be serialized safely.",
+            ) from None
+        _assert_plain_json_request(payload)
+        if next(_SERVICE_REQUEST_V3_VALIDATOR.iter_errors(payload), None) is not None:
+            raise RuntimeInputError(
+                "review_v3_request_invalid",
+                "The V3 Agent request does not satisfy the service contract.",
+            )
+        try:
+            service_request = ServiceReviewRunRequestV3.model_validate(payload)
+        except ValidationError:
+            raise RuntimeInputError(
+                "review_v3_request_invalid",
+                "The V3 Agent request does not satisfy the service contract.",
+            ) from None
+        if _has_visual_documents(service_request):
+            raise RuntimeInputError(
+                "visual_input_not_supported",
+                "The V3 Production-candidate service is text-only.",
+            )
+
+        # V3 never projects self-asserted SupportingDocument codes into the V2
+        # presence-only field.  Only the provider-owned Evidence v3 policy can
+        # determine whether a requirement is verifiable; until an approved policy
+        # is pinned, constructing this retriever fails closed before Claude runs.
+        retriever_v3 = self._get_retriever_v3()
+        v2_request = _project_service_request_v3_to_v2(service_request)
+        v2_result, supporting_rejections, state = self._execute_review_v3(
+            v2_request,
+            request=service_request,
+            retriever=retriever_v3,
+        )
+        supporting_rejections = sorted({*supporting_rejections, *_forced_human_review_reasons})
+        active_executor = _RuntimeBoundedAdaptiveExecutor(
+            service_request=v2_request,
+            request=service_request,
+            retriever=retriever_v3,
+            analyzer=self._analyzer,
+            state=state,
+            result=v2_result,
+            supporting_document_rejections=supporting_rejections,
+            assertion_verifier=self._assertion_verifier,
+        )
+        result = to_review_run_result_v3(
+            v2_result,
+            service_request,
+            analyzer=self._analyzer,
+            evidence_runtime_v3_sha256=(retriever_v3.expected_identity.runtime_release_v3_sha256),
+            assertion_trust_store=self._runtime_assertion_trust_store(),
+            supporting_document_rejections=supporting_rejections,
+            active_executor=active_executor,
+        )
+        _assert_public_result_safe(
+            result.model_dump(mode="python", warnings=False),
+            sensitive_markers=self._secret_markers,
+        )
+        return result
+
+    def _execute_review_v3(
+        self,
+        service_request: ServiceReviewRunRequestV2,
+        *,
+        request: ServiceReviewRunRequestV3,
+        retriever: ProductionHttpRegulationRetrieverV3,
+        corrections: list[Any] | None = None,
+    ) -> tuple[ReviewRunResultV2, list[str], dict[str, Any]]:
+        try:
+            retriever.preflight(service_request.review_as_of)
+            workflow_request = ReviewRunRequestV2.model_validate(
+                service_request.model_dump(mode="python", warnings=False)
+            )
+            state = run_review_v2(
+                workflow_request,
+                retriever=retriever,
+                analyzer=self._analyzer,
+            )
+            if corrections:
+                # Human corrections never mutate the immutable parent request.
+                # They are applied to the extracted child state and all affected
+                # deterministic stages, including Evidence retrieval, are rerun.
+                state = rerun_review(state, corrections, retriever=retriever)
+            retrieval_request = state.get("retrieval_request") or {}
+            request_id = retrieval_request.get("request_id")
+            policies = retriever.policy_bindings(request_id) if isinstance(request_id, str) else {}
+            verified_by_item, supporting_rejections = verified_requirement_codes_by_item(
+                request.supporting_documents,
+                case_id=request.case_id,
+                review_as_of=request.review_as_of,
+                assertion_cutoff_at=request.assertion_cutoff_at,
+                retrieval_results=list(state.get("retrieval_results") or []),
+                policy_bindings=policies,
+                assertion_verifier=self._assertion_verifier,
+            )
+            state["verified_requirement_documents_by_item"] = verified_by_item
+            state["presented_requirement_documents_by_item"] = presented_requirement_codes_by_item(
+                request.supporting_documents,
+                retrieval_results=list(state.get("retrieval_results") or []),
+            )
+            for node in (compliance_review, generate_xai_report, route_to_human_or_complete):
+                state.update(node(state))
+            result = to_review_run_result_v2(state)
+            # Break the release-calibration bootstrap cycle without weakening a
+            # business Gate.  The default V2 route correctly holds every LLM
+            # extraction for human review.  For V3, evaluate all independently
+            # signed non-Outcome Gates first; only when every one passes may the
+            # code-owned Outcome policy be rerun with extraction calibration.
+            observed_model = (
+                result.model_calls[0].model_id if result.model_calls else self._analyzer.model_id
+            )
+            release_identity = runtime_release_identity(
+                model_id=observed_model,
+                evidence_snapshot_id=result.knowledge_snapshot_id,
+                evidence_runtime_v3_sha256=retriever.expected_identity.runtime_release_v3_sha256,
+                assertion_trust_store=self._runtime_assertion_trust_store(),
+            )
+            release_blockers = automatic_completion_unmet_reason_codes(
+                result,
+                request,
+                release_identity,
+                supporting_rejections=supporting_rejections,
+                require_completed_outcome=False,
+            )
+            if not release_blockers and not extraction_completion_blockers(state):
+                state["requires_human_review"] = False
+                state.update(
+                    route_to_human_or_complete(
+                        state,
+                        extraction_release_approved=True,
+                    )
+                )
+                result = to_review_run_result_v2(state)
+            _assert_result_correlated(service_request, result)
+            _assert_public_result_safe(
+                result.model_dump(mode="python"),
+                sensitive_markers=self._secret_markers,
+            )
+            return result, supporting_rejections, state
+        except AgentRuntimeError:
+            raise
+        except CorrectionApplicationError:
+            raise RuntimeConflictError(
+                "correction_application_failed",
+                "An approved correction could not be applied exactly to the child review.",
+            ) from None
+        except (LLMError, OcrLayoutProviderError, RetrievalError, ValidationError, ValueError):
+            raise RuntimeExecutionError(
+                "review_execution_failed",
+                "The V3 Agent review failed without exposing private execution details.",
+            ) from None
+
+    def answer_v3_json(
+        self,
+        payload: bytes | bytearray | memoryview,
+    ) -> GroundedAnswerV1:
+        self._assert_open()
+        decoded = _decode_serialized_json_object(payload, invalid_code="answer_request_invalid")
+        try:
+            question = GroundedQuestionV1.model_validate(decoded)
+            assert_result_hash(question.review_result)
+        except (ValidationError, ValueError):
+            raise RuntimeInputError(
+                "answer_request_invalid",
+                "The grounded-answer request is stale or invalid.",
+            ) from None
+        answer = answer_grounded_question(question, analyzer=self._analyzer)
+        _assert_public_result_safe(
+            answer.model_dump(mode="python", warnings=False),
+            sensitive_markers=self._secret_markers,
+        )
+        return answer
+
+    def revision_v3_json(
+        self,
+        payload: bytes | bytearray | memoryview,
+    ) -> ReviewRevisionResultV1:
+        self._assert_open()
+        decoded = _decode_serialized_json_object(payload, invalid_code="revision_request_invalid")
+        raw_parent = decoded.get("parent_result")
+        if isinstance(raw_parent, dict) and (
+            decoded.get("parent_result_sha256") != raw_parent.get("result_sha256")
+            or decoded.get("parent_input_manifest_sha256")
+            != raw_parent.get("input_manifest_sha256")
+        ):
+            raise RuntimeConflictError(
+                "stale_revision",
+                "The revision parent identity is stale.",
+            )
+        if isinstance(raw_parent, dict) and raw_parent.get(
+            "result_sha256"
+        ) != review_result_v3_sha256(raw_parent):
+            raise RuntimeConflictError(
+                "stale_revision",
+                "The revision parent result was modified after completion.",
+            )
+        try:
+            revision = ReviewRevisionRequestV1.model_validate(decoded)
+        except ValidationError:
+            raise RuntimeInputError(
+                "revision_request_invalid",
+                "The revision request is stale or invalid.",
+            ) from None
+        try:
+            assert_result_hash(revision.parent_result)
+        except ValueError:
+            raise RuntimeConflictError(
+                "stale_revision",
+                "The revision parent result was modified after completion.",
+            ) from None
+        corrections = [
+            decision.correction
+            for decision in revision.decisions
+            if decision.correction is not None
+        ]
+        forced_reasons = (
+            ("human_reviewer_rejected",)
+            if any(decision.decision == "reject_review" for decision in revision.decisions)
+            else ()
+        )
+        if corrections:
+            child = self._review_v3_with_corrections(
+                revision.revised_request,
+                corrections,
+                forced_human_review_reasons=forced_reasons,
+            )
+            _assert_public_corrections_applied(child, corrections)
+        else:
+            child = self.review_v3(
+                revision.revised_request,
+                _forced_human_review_reasons=forced_reasons,
+            )
+        result = ReviewRevisionResultV1(
+            parent_result_sha256=revision.parent_result_sha256,
+            child_result=child,
+            applied_decision_ids=[item.decision_id for item in revision.decisions],
+        )
+        _assert_public_result_safe(
+            result.model_dump(mode="python", warnings=False),
+            sensitive_markers=self._secret_markers,
+        )
+        return result
+
+    def _review_v3_with_corrections(
+        self,
+        request: ServiceReviewRunRequestV3,
+        corrections: list[Any],
+        *,
+        forced_human_review_reasons: tuple[str, ...] = (),
+    ) -> ReviewRunResultV3:
+        if _has_visual_documents(request):
+            raise RuntimeInputError(
+                "visual_input_not_supported",
+                "The V3 Production-candidate service is text-only.",
+            )
+        retriever = self._get_retriever_v3()
+        service_request = _project_service_request_v3_to_v2(request)
+        v2_result, supporting_rejections, state = self._execute_review_v3(
+            service_request,
+            request=request,
+            retriever=retriever,
+            corrections=corrections,
+        )
+        supporting_rejections = sorted({*supporting_rejections, *forced_human_review_reasons})
+        active_executor = _RuntimeBoundedAdaptiveExecutor(
+            service_request=service_request,
+            request=request,
+            retriever=retriever,
+            analyzer=self._analyzer,
+            state=state,
+            result=v2_result,
+            supporting_document_rejections=supporting_rejections,
+            assertion_verifier=self._assertion_verifier,
+        )
+        return to_review_run_result_v3(
+            v2_result,
+            request,
+            analyzer=self._analyzer,
+            evidence_runtime_v3_sha256=(retriever.expected_identity.runtime_release_v3_sha256),
+            assertion_trust_store=self._runtime_assertion_trust_store(),
+            supporting_document_rejections=supporting_rejections,
+            active_executor=active_executor,
+        )
+
 
 __all__ = [
     "AgentRuntime",
     "AgentRuntimeError",
     "RuntimeConfig",
     "RuntimeConfigurationError",
+    "RuntimeConflictError",
     "RuntimeExecutionError",
     "RuntimeInputError",
 ]

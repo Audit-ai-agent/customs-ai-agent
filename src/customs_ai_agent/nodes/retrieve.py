@@ -249,6 +249,7 @@ def _failed_update(
         retryable=retryable,
     ).model_dump(mode="json")
     return {
+        "retrieval_attempt": int(state.get("retrieval_attempt") or 0) + 1,
         "retrieval_request_id": request_id,
         "retrieval_request": request.model_dump(mode="json") if request else {},
         "retrieval_status": "failed",
@@ -273,9 +274,10 @@ def retrieve_regulations(
     state: dict[str, Any],
     retriever: RegulationRetriever,
 ) -> dict[str, Any]:
+    retrieval_attempt = int(state.get("retrieval_attempt") or 0)
     request_id = stable_retrieval_request_id(
         str(state["review_run_id"]),
-        int(state.get("retry_count") or 0),
+        retrieval_attempt,
     )
     document_type_conflicts = (state.get("pairing_result") or {}).get(
         "document_type_conflicts"
@@ -464,6 +466,7 @@ def retrieve_regulations(
         )
     )
     return {
+        "retrieval_attempt": retrieval_attempt + 1,
         "retrieval_request_id": request_id,
         "retrieval_request": request.model_dump(mode="json"),
         "retrieval_status": effective_status,

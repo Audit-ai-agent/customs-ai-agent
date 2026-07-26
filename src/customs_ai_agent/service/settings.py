@@ -7,6 +7,12 @@ from typing import Mapping
 
 from pydantic import SecretStr
 
+from customs_ai_agent.transport_limits import (
+    TEXT_FIRST_MAX_BODY_BYTES,
+    TEXT_FIRST_MAX_DOCUMENTS,
+    TEXT_FIRST_MAX_TEXT_CHARACTERS,
+)
+
 
 _GIT_SHA = re.compile(r"^[0-9a-f]{40}$")
 _SHA256 = re.compile(r"^[0-9a-f]{64}$")
@@ -85,9 +91,9 @@ class ServiceSettings:
     wheel_sha256: str = "unknown"
     host: str = "127.0.0.1"
     port: int = 8080
-    max_body_bytes: int = 2 * 1024 * 1024
-    max_documents: int = 6
-    max_text_characters: int = 500_000
+    max_body_bytes: int = TEXT_FIRST_MAX_BODY_BYTES
+    max_documents: int = TEXT_FIRST_MAX_DOCUMENTS
+    max_text_characters: int = TEXT_FIRST_MAX_TEXT_CHARACTERS
     body_read_timeout_seconds: float = 15.0
     max_concurrency: int = 2
     queue_wait_seconds: float = 1.0
@@ -131,6 +137,12 @@ class ServiceSettings:
                 raise ServiceConfigurationError("customs_agent_build_sha_invalid")
             if _SHA256.fullmatch(self.wheel_sha256) is None:
                 raise ServiceConfigurationError("customs_agent_wheel_sha256_invalid")
+            if (
+                self.max_body_bytes != TEXT_FIRST_MAX_BODY_BYTES
+                or self.max_documents != TEXT_FIRST_MAX_DOCUMENTS
+                or self.max_text_characters != TEXT_FIRST_MAX_TEXT_CHARACTERS
+            ):
+                raise ServiceConfigurationError("production_transport_limits_mismatch")
         elif self.build_sha != "unknown" and _GIT_SHA.fullmatch(self.build_sha) is None:
             raise ServiceConfigurationError("customs_agent_build_sha_invalid")
         elif self.wheel_sha256 != "unknown" and _SHA256.fullmatch(self.wheel_sha256) is None:
@@ -141,9 +153,9 @@ class ServiceSettings:
             raise ServiceConfigurationError("customs_agent_port_invalid")
         if not 1_024 <= self.max_body_bytes <= 32 * 1024 * 1024:
             raise ServiceConfigurationError("customs_agent_max_body_bytes_invalid")
-        if not 1 <= self.max_documents <= 20:
+        if not 1 <= self.max_documents <= TEXT_FIRST_MAX_DOCUMENTS:
             raise ServiceConfigurationError("customs_agent_max_documents_invalid")
-        if not 1 <= self.max_text_characters <= 500_000:
+        if not 1 <= self.max_text_characters <= TEXT_FIRST_MAX_TEXT_CHARACTERS:
             raise ServiceConfigurationError("customs_agent_max_text_characters_invalid")
         if not 0.1 <= self.body_read_timeout_seconds <= 120:
             raise ServiceConfigurationError("customs_agent_body_read_timeout_seconds_invalid")
@@ -161,7 +173,7 @@ class ServiceSettings:
             raise ServiceConfigurationError("customs_agent_replay_max_bytes_invalid")
         if not 0.1 <= self.readiness_ttl_seconds <= 60:
             raise ServiceConfigurationError("customs_agent_readiness_ttl_seconds_invalid")
-        if not 0.1 <= self.readiness_timeout_seconds <= 30:
+        if not 0.1 <= self.readiness_timeout_seconds <= 120:
             raise ServiceConfigurationError("customs_agent_readiness_timeout_seconds_invalid")
         if not 1 <= self.shutdown_grace_seconds <= 900:
             raise ServiceConfigurationError("customs_agent_shutdown_grace_seconds_invalid")
@@ -199,23 +211,23 @@ class ServiceSettings:
             max_body_bytes=_integer(
                 source,
                 "CUSTOMS_AGENT_MAX_BODY_BYTES",
-                2 * 1024 * 1024,
+                TEXT_FIRST_MAX_BODY_BYTES,
                 minimum=1_024,
                 maximum=32 * 1024 * 1024,
             ),
             max_documents=_integer(
                 source,
                 "CUSTOMS_AGENT_MAX_DOCUMENTS",
-                6,
+                TEXT_FIRST_MAX_DOCUMENTS,
                 minimum=1,
-                maximum=20,
+                maximum=TEXT_FIRST_MAX_DOCUMENTS,
             ),
             max_text_characters=_integer(
                 source,
                 "CUSTOMS_AGENT_MAX_TEXT_CHARACTERS",
-                500_000,
+                TEXT_FIRST_MAX_TEXT_CHARACTERS,
                 minimum=1,
-                maximum=500_000,
+                maximum=TEXT_FIRST_MAX_TEXT_CHARACTERS,
             ),
             body_read_timeout_seconds=_number(
                 source,
@@ -278,7 +290,7 @@ class ServiceSettings:
                 "CUSTOMS_AGENT_READINESS_TIMEOUT_SECONDS",
                 5,
                 minimum=0.1,
-                maximum=30,
+                maximum=120,
             ),
             shutdown_grace_seconds=_number(
                 source,

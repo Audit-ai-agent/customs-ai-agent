@@ -1,6 +1,7 @@
 from __future__ import annotations
 
 from dataclasses import dataclass
+from typing import Literal
 
 
 _MESSAGES = {
@@ -30,6 +31,16 @@ class ServiceHttpError(Exception):
     status_code: int
     retryable: bool = False
     retry_after_seconds: int | None = None
+    execution_state: Literal["not-started"] | None = None
+
+    def __post_init__(self) -> None:
+        if self.execution_state is not None and (
+            self.execution_state != "not-started"
+            or self.code != "dependency_unready"
+            or self.status_code != 503
+            or not self.retryable
+        ):
+            raise ValueError("not-started is reserved for retryable dependency admission failures")
 
     @property
     def public_message(self) -> str:

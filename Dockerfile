@@ -1,6 +1,6 @@
-# syntax=docker/dockerfile:1.7
+# syntax=docker/dockerfile:1.7@sha256:a57df69d0ea827fb7266491f2813635de6f17269be881f696fbfdf2d83dda33e
 
-ARG PYTHON_IMAGE=python:3.11.15-slim-bookworm
+ARG PYTHON_IMAGE=python:3.11.15-slim-bookworm@sha256:b18992999dbe963a45a8a4da40ac2b1975be1a776d939d098c647482bcad5cba
 FROM ${PYTHON_IMAGE}
 
 ARG AGENT_WHEEL=dist/wheel/customs_ai_agent-0.3.0-py3-none-any.whl

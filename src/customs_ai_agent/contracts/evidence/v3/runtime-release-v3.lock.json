@@ -1,0 +1,23 @@
+{
+  "contract": "evidence-runtime-release-consumer-lock",
+  "schema_version": "3.0",
+  "canonical_owner": "customs-data-platform",
+  "consumer": "customs-ai-agent",
+  "provider_runtime_lock_sha256": "d87f1b86af4812f3de7a2de070f23453c354c0be1534725950f154befffb557f",
+  "provider_runtime_identity": {
+    "contract": "evidence-runtime-release-provider-lock",
+    "provider_build_sha256": "d7d64cf3df464cfc934ca0f347c1b1c461916fe12671eeeaf59c1445872486d3",
+    "provider_release": "evidence-api-v1.2.0",
+    "provider_revision": "14cde864425eee615a2e3f6799f6f2719448aab9",
+    "provider_source_manifest_sha256": "dd8ceb68c2da83d1fdb82f3d00f4f1137a559fcb577efdf86b6f87e52d84db1c",
+    "readiness_schema_sha256": "0a0b50fef627ecbbad954af5878ccb3630ecc51f618132f8cfc674c324467a69",
+    "retrieval_schema_sha256": "531b59ba4e86f78cef20a4fca052996efd8b88c48853ac12113ca76e69cdd69a",
+    "schema_version": "1.0"
+  },
+  "retrieval_schema_sha256": "d20de13f4cc8db14a2cd3213e063916fd046922ae32687ac939dbb4019e485d6",
+  "readiness_schema_sha256": "3488e98b9899ce6cbb375fad4120360a2d4a77d82117ef56f098514547a7d882",
+  "requirement_policy_schema_sha256": "b1e9e5918d03c247d8503af861ee647451b0c2f378c1a9d2cc380f23ca26c226",
+  "release_state": "unreleased",
+  "identity": null,
+  "unreleased_reason": "Data has not emitted an approved requirement policy, reviewer trust store, and sealed Evidence V3 runtime identity."
+}

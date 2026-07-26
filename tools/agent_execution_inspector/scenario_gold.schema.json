@@ -1,0 +1,56 @@
+{
+  "$schema": "https://json-schema.org/draft/2020-12/schema",
+  "type": "object",
+  "additionalProperties": false,
+  "required": ["schema_version", "notice", "controls"],
+  "properties": {
+    "schema_version": {"const": "agent-execution-inspector-gold/v1"},
+    "notice": {"type": "string", "minLength": 1, "maxLength": 500},
+    "controls": {
+      "type": "array",
+      "minItems": 1,
+      "maxItems": 20,
+      "items": {"$ref": "#/$defs/control"}
+    }
+  },
+  "$defs": {
+    "control": {
+      "type": "object",
+      "additionalProperties": false,
+      "required": [
+        "scenario_id", "control_type", "classification_counts", "model_error_count",
+        "minimum_grounded_fields_per_document", "pairing_status", "required_issue_codes",
+        "forbidden_issue_codes", "supporting_verification_complete", "allowed_retrieval_status",
+        "allowed_retrieval_coverage", "finding_count", "allowed_assessment",
+        "review_disposition", "narrative_citation_completeness"
+      ],
+      "properties": {
+        "scenario_id": {"type": "string", "pattern": "^[A-Za-z0-9][A-Za-z0-9._:-]*$"},
+        "control_type": {"enum": ["diagnostic_positive_control", "production_candidate_positive_control", "defect_control", "fail_closed_control", "safety_false_positive_control"]},
+        "classification_counts": {
+          "type": "object",
+          "additionalProperties": false,
+          "properties": {
+            "invoice": {"type": "integer", "minimum": 0},
+            "packing_list": {"type": "integer", "minimum": 0},
+            "bill_of_lading": {"type": "integer", "minimum": 0},
+            "certificate_of_origin": {"type": "integer", "minimum": 0},
+            "unknown": {"type": "integer", "minimum": 0}
+          }
+        },
+        "model_error_count": {"type": "integer", "minimum": 0},
+        "minimum_grounded_fields_per_document": {"type": "integer", "minimum": 0},
+        "pairing_status": {"enum": ["deterministic", "ambiguous_document_set", "incomplete_document_set"]},
+        "required_issue_codes": {"type": "array", "uniqueItems": true, "items": {"type": "string"}},
+        "forbidden_issue_codes": {"type": "array", "uniqueItems": true, "items": {"type": "string"}},
+        "supporting_verification_complete": {"type": "boolean"},
+        "allowed_retrieval_status": {"type": "array", "minItems": 1, "uniqueItems": true, "items": {"enum": ["ok", "partial", "failed"]}},
+        "allowed_retrieval_coverage": {"type": "array", "minItems": 1, "uniqueItems": true, "items": {"enum": ["complete", "partial", "unknown"]}},
+        "finding_count": {"type": ["integer", "null"], "minimum": 0},
+        "allowed_assessment": {"type": "array", "minItems": 1, "uniqueItems": true, "items": {"enum": ["no_issue_detected", "issues_detected", "indeterminate"]}},
+        "review_disposition": {"const": "human_review_required"},
+        "narrative_citation_completeness": {"const": "1"}
+      }
+    }
+  }
+}

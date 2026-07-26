@@ -25,17 +25,17 @@ def stable_line_item_id(document_id: str, line_number: int) -> str:
     return f"{document_id[:prefix_length]}{separator}{digest}{suffix}"
 
 
-def stable_retrieval_request_id(review_run_id: str, retry_count: int) -> str:
+def stable_retrieval_request_id(review_run_id: str, retrieval_attempt: int) -> str:
     """Create a deterministic ID accepted by the Evidence HTTP request boundary."""
 
-    if retry_count < 0:
-        raise ValueError("retry_count cannot be negative")
-    suffix = f"-retrieve-{retry_count}"
+    if retrieval_attempt < 0:
+        raise ValueError("retrieval_attempt cannot be negative")
+    suffix = f"-retrieve-{retrieval_attempt}"
     candidate = f"{review_run_id}{suffix}"
     if _EVIDENCE_HTTP_REQUEST_ID.fullmatch(candidate):
         return candidate
     digest = hashlib.sha256(
-        f"evidence-retrieval-request-v1\0{review_run_id}\0{retry_count}".encode(),
+        f"evidence-retrieval-request-v1\0{review_run_id}\0{retrieval_attempt}".encode(),
     ).hexdigest()
     return f"retrieval-{digest}"
 

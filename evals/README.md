@@ -118,9 +118,11 @@ Evidence Live/Release PASS가 아니다. 역사 redacted report SHA-256은
 Evidence consumer snapshot의 고정 SHA-256은
 `531b59ba4e86f78cef20a4fca052996efd8b88c48853ac12113ca76e69cdd69a`다. evaluator는 실제 local
 schema bytes, lock SHA, 이 기대 SHA가 모두 같은지 API 호출 전에 확인한다. lock의 release
-metadata는 merged Data `main`의 release candidate `evidence-api-v1.1.0`,
-`8012f8ae5f530a4917b6d2790ee89a7e01fb5ee6`와 build SHA-256
-`df63a6d1bcfdcf5f1e2652684e6b0248d2daf1fe170ebc225a1400597f679cd7`다.
+metadata는 final Data provider build candidate `evidence-api-v1.2.0`,
+`14cde864425eee615a2e3f6799f6f2719448aab9`와 build SHA-256
+`d7d64cf3df464cfc934ca0f347c1b1c461916fe12671eeeaf59c1445872486d3`다.
+이 provider build pin은 Evidence V3 Production release 승인을 의미하지 않는다. 정책·검수자
+trust store·sealed knowledge generation이 발행되기 전까지 runtime release는 fail-closed다.
 
 이 candidate pin은 Data PR #1의 실제 merge commit `8012f8a...` clean tree에서
 생성·검증한 `provider-build.json`과 일치한다. release 이름은 계약 식별자이며 이번

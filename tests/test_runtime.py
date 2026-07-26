@@ -73,6 +73,7 @@ def test_top_level_package_exports_only_service_runtime_api() -> None:
         "AgentRuntimeError",
         "RuntimeConfig",
         "RuntimeConfigurationError",
+        "RuntimeConflictError",
         "RuntimeExecutionError",
         "RuntimeInputError",
     }

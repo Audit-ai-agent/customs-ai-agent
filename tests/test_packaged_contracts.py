@@ -25,6 +25,8 @@ EXPECTED_SCHEMAS = {
     ("backend", "v1", "review-result"),
     ("backend", "v2", "review-request"),
     ("backend", "v2", "review-result"),
+    ("backend", "v3", "review-request"),
+    ("backend", "v3", "review-result"),
     ("internal", "v1", "ocr-layout-ledger"),
     ("internal", "v2", "ocr-layout-ledger"),
     ("internal", "v1", "claude-text-candidate"),
@@ -169,7 +171,7 @@ def _pdf_request() -> dict[str, Any]:
     }
 
 
-def test_registry_contains_only_the_ten_versioned_release_schemas() -> None:
+def test_registry_contains_only_the_versioned_release_schemas() -> None:
     assert set(available_schemas()) == EXPECTED_SCHEMAS
 
 

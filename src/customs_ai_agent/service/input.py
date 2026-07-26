@@ -12,6 +12,7 @@ from starlette.requests import ClientDisconnect, Request
 
 from customs_ai_agent.service.errors import ServiceHttpError
 from customs_ai_agent.service.settings import ServiceSettings
+from customs_ai_agent.transport_limits import TEXT_FIRST_MAX_DOCUMENTS
 
 
 _RUN_ID = re.compile(r"^[A-Za-z0-9][A-Za-z0-9._:-]{0,127}$")
@@ -32,7 +33,7 @@ TEXT_REVIEW_REQUEST_SCHEMA: dict[str, Any] = {
         "documents": {
             "type": "array",
             "minItems": 1,
-            "maxItems": 20,
+            "maxItems": TEXT_FIRST_MAX_DOCUMENTS,
             "items": {
                 "type": "object",
                 "additionalProperties": False,
@@ -217,7 +218,45 @@ class InspectedRequest:
     canonical_sha256: str
 
 
-def inspect_text_request(payload: bytes, settings: ServiceSettings) -> InspectedRequest:
+@dataclass(frozen=True, slots=True)
+class InspectedAuxiliaryRequest:
+    replay_id: str
+    canonical_sha256: str
+
+
+def _reject_non_text_document_set(
+    documents: Any,
+    settings: ServiceSettings,
+    *,
+    accept_empty_visual_placeholders: bool,
+) -> None:
+    if not isinstance(documents, list) or not 1 <= len(documents) <= settings.max_documents:
+        raise ServiceHttpError("request_invalid", 422)
+    text_characters = 0
+    for document in documents:
+        if not isinstance(document, dict):
+            raise ServiceHttpError("request_invalid", 422)
+        image_pages = document.get("image_pages", [])
+        pdf_pages = document.get("pdf_pages")
+        if accept_empty_visual_placeholders:
+            if image_pages not in (None, []) or pdf_pages is not None:
+                raise ServiceHttpError("visual_input_not_supported", 422)
+        elif "image_pages" in document or "pdf_pages" in document:
+            raise ServiceHttpError("visual_input_not_supported", 422)
+        content_text = document.get("content_text")
+        if not isinstance(content_text, str):
+            raise ServiceHttpError("request_invalid", 422)
+        text_characters += len(content_text)
+        if text_characters > settings.max_text_characters:
+            raise ServiceHttpError("request_too_large", 413)
+
+
+def inspect_text_request(
+    payload: bytes,
+    settings: ServiceSettings,
+    *,
+    accept_empty_visual_placeholders: bool = False,
+) -> InspectedRequest:
     """Reject visual and non-reproducible requests before the core runtime."""
 
     try:
@@ -248,21 +287,11 @@ def inspect_text_request(payload: bytes, settings: ServiceSettings) -> Inspected
     if parsed_date.isoformat() != review_as_of:
         raise ServiceHttpError("request_invalid", 422)
 
-    documents = decoded.get("documents")
-    if not isinstance(documents, list) or not 1 <= len(documents) <= settings.max_documents:
-        raise ServiceHttpError("request_invalid", 422)
-    text_characters = 0
-    for document in documents:
-        if not isinstance(document, dict):
-            raise ServiceHttpError("request_invalid", 422)
-        if "image_pages" in document or "pdf_pages" in document:
-            raise ServiceHttpError("visual_input_not_supported", 422)
-        content_text = document.get("content_text")
-        if not isinstance(content_text, str):
-            raise ServiceHttpError("request_invalid", 422)
-        text_characters += len(content_text)
-        if text_characters > settings.max_text_characters:
-            raise ServiceHttpError("request_too_large", 413)
+    _reject_non_text_document_set(
+        decoded.get("documents"),
+        settings,
+        accept_empty_visual_placeholders=accept_empty_visual_placeholders,
+    )
 
     canonical = json.dumps(
         decoded,
@@ -278,11 +307,62 @@ def inspect_text_request(payload: bytes, settings: ServiceSettings) -> Inspected
     )
 
 
+def inspect_v3_auxiliary_request(
+    payload: bytes,
+    *,
+    operation: str,
+    settings: ServiceSettings,
+) -> InspectedAuxiliaryRequest:
+    """Inspect revision/answer envelopes without trusting nested result content."""
+
+    try:
+        decoded = json.loads(
+            payload.decode("utf-8"),
+            object_pairs_hook=_object_without_duplicates,
+            parse_constant=_reject_constant,
+        )
+    except (UnicodeDecodeError, ValueError, RecursionError):
+        raise ServiceHttpError("request_invalid", 422) from None
+    if not isinstance(decoded, dict):
+        raise ServiceHttpError("request_invalid", 422)
+    if operation == "revision":
+        parent = decoded.get("parent_request")
+        revised = decoded.get("revised_request")
+        if not isinstance(parent, dict) or not isinstance(revised, dict):
+            raise ServiceHttpError("required_field_missing", 422)
+        for nested_request in (parent, revised):
+            _reject_non_text_document_set(
+                nested_request.get("documents"),
+                settings,
+                accept_empty_visual_placeholders=True,
+            )
+        replay_id = revised.get("review_run_id")
+    elif operation == "answer":
+        replay_id = decoded.get("question_id")
+    else:
+        raise ValueError("unsupported V3 auxiliary operation")
+    if not isinstance(replay_id, str) or _RUN_ID.fullmatch(replay_id) is None:
+        raise ServiceHttpError("request_invalid", 422)
+    canonical = json.dumps(
+        decoded,
+        ensure_ascii=False,
+        allow_nan=False,
+        separators=(",", ":"),
+        sort_keys=True,
+    ).encode("utf-8")
+    return InspectedAuxiliaryRequest(
+        replay_id=replay_id,
+        canonical_sha256=hashlib.sha256(canonical).hexdigest(),
+    )
+
+
 __all__ = [
     "ERROR_RESPONSE_SCHEMA",
     "InspectedRequest",
+    "InspectedAuxiliaryRequest",
     "TEXT_REVIEW_REQUEST_SCHEMA",
     "inspect_text_request",
+    "inspect_v3_auxiliary_request",
     "raw_header_values",
     "read_bounded_json_body",
 ]

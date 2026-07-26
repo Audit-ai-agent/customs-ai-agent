@@ -89,6 +89,7 @@ def _classify_documents(
     model_calls = list(state.get("model_calls") or [])
     model_errors = list(state.get("model_errors") or [])
     model_conflicts = list(state.get("model_conflicts") or [])
+    declared_type_conflicts = list(state.get("declared_document_type_conflicts") or [])
     llm_mode = state.get("llm_mode") == "llm"
     circuit_failure: LLMError | None = None
     crop_budget = CropReadBudget()
@@ -213,6 +214,13 @@ def _classify_documents(
                             requires_human_review = True
                         if declared_type and declared_type != doc_type:
                             requires_human_review = True
+                            declared_type_conflicts.append(
+                                {
+                                    "document_id": doc["document_id"],
+                                    "declared_type": declared_type,
+                                    "observed_type": doc_type,
+                                }
+                            )
                 except LLMError as exc:
                     # Mapping/provider failures handled above are the only
                     # expected LLM errors. This guard preserves fail-closed
@@ -268,6 +276,7 @@ def _classify_documents(
         "model_calls": model_calls,
         "model_errors": model_errors,
         "model_conflicts": model_conflicts,
+        "declared_document_type_conflicts": declared_type_conflicts,
         "current_stage": "classify_documents",
         "requires_human_review": requires_human_review,
         "audit_trail": audit(
@@ -281,6 +290,7 @@ def _classify_documents(
                 "model_call_count": len(model_calls),
                 "model_error_count": len(model_errors),
                 "model_conflict_count": len(model_conflicts),
+                "declared_type_conflict_count": len(declared_type_conflicts),
             },
         ),
     }

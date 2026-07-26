@@ -12,6 +12,7 @@ from typing import Any, Callable, Protocol
 from customs_ai_agent.runtime import (
     AgentRuntimeError,
     RuntimeConfigurationError,
+    RuntimeConflictError,
     RuntimeExecutionError,
     RuntimeInputError,
 )
@@ -22,6 +23,12 @@ from customs_ai_agent.service.telemetry import ServiceMetrics, safe_log
 
 class ServiceRuntime(Protocol):
     def review_json(self, payload: bytes) -> Any: ...
+
+    def review_v3_json(self, payload: bytes) -> Any: ...
+
+    def revision_v3_json(self, payload: bytes) -> Any: ...
+
+    def answer_v3_json(self, payload: bytes) -> Any: ...
 
     def close(self) -> None: ...
 
@@ -140,6 +147,7 @@ class AgentServiceController:
         payload: bytes,
         review_run_id: str,
         request_hash: str,
+        runtime_method_name: str = "review_json",
     ) -> tuple[ServiceOutcome, bool]:
         self.metrics.increment("review_requests_total")
         async with self._state_lock:
@@ -166,7 +174,7 @@ class AgentServiceController:
                         retryable=True,
                         retry_after_seconds=max(1, round(self.settings.queue_wait_seconds)),
                     )
-                task = asyncio.create_task(self._run_once(payload))
+                task = asyncio.create_task(self._run_once(payload, runtime_method_name))
                 entry = _ReplayEntry(request_hash=request_hash, task=task)
                 self._replays[review_run_id] = entry
                 self._update_replay_metrics()
@@ -216,7 +224,11 @@ class AgentServiceController:
                 inflight=inflight,
             )
 
-    async def _run_once(self, payload: bytes) -> ServiceOutcome:
+    async def _run_once(
+        self,
+        payload: bytes,
+        runtime_method_name: str = "review_json",
+    ) -> ServiceOutcome:
         try:
             await asyncio.wait_for(
                 self._semaphore.acquire(),
@@ -248,7 +260,13 @@ class AgentServiceController:
         )
         started = time.perf_counter()
         loop = asyncio.get_running_loop()
-        worker = loop.run_in_executor(self._executor, self.runtime.review_json, payload)
+        runtime_method = getattr(self.runtime, runtime_method_name, None)
+        if not callable(runtime_method):
+            self.metrics.finish(0)
+            self._semaphore.release()
+            self.metrics.increment("review_failed_total")
+            return ServiceOutcome(status_code=503, error_code="capability_unavailable")
+        worker = loop.run_in_executor(self._executor, runtime_method, payload)
         try:
             result = await asyncio.wait_for(
                 asyncio.shield(worker),
@@ -270,6 +288,8 @@ class AgentServiceController:
             raise
         except RuntimeInputError:
             outcome = ServiceOutcome(status_code=422, error_code="request_invalid")
+        except RuntimeConflictError:
+            outcome = ServiceOutcome(status_code=409, error_code="stale_revision")
         except RuntimeConfigurationError:
             outcome = ServiceOutcome(
                 status_code=503,

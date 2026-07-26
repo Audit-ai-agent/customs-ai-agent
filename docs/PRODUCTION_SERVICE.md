@@ -8,21 +8,31 @@
 
 ```text
 Backend or trusted service
-  -> POST /internal/agent/v1/reviews
+  -> POST /internal/agent/v2/reviews
 AI Agent
   -> Claude text structured extraction
+  -> bounded Gap/Tool coordination
   -> Evidence readiness/retrieval HTTP
-  -> redacted ReviewResult V2
+  -> citation-verified narrative and grounded Case answer
+  -> redacted ReviewResult V3
 ```
 
-Agent의 유일한 제품 실행 엔진은 `AgentRuntime.review_json(raw_bytes)`다. ASGI 계층은 인증,
+V3 제품 심사의 유일한 비신뢰 입력 경계는 `AgentRuntime.review_v3_json(raw_bytes)`이다.
+legacy `/internal/agent/v1` transport의 `AgentRuntime.review_json(raw_bytes)`는 Agent
+Request/Result schema `2.0`을 사용하며 하위 호환 계약으로 유지한다. 즉 endpoint
+version `v1`과 payload schema `2.0`을 같은 버전으로 표현하지 않는다. ASGI 계층은 인증,
 streaming body 상한, text-only preflight, admission, 단일 프로세스 single-flight/replay 및
-HTTP 오류 변환만 담당한다. 기존 workflow, Claude grounding, Evidence Gate와 outcome 정책은
-변경하지 않는다.
+HTTP 오류 변환만 담당한다. Claude는 분류·추출, bounded 조사 제안, 사용자 표현만
+담당하며 Evidence·Finding·severity·outcome을 생성하거나 변경할 권한이 없다.
+서술과 Case Chat은 코드가 선택한 typed claim과 FactLedger ID를 정확히 인용해야 하고,
+인용·의미 검증에 실패하면 1회 재시도 후 결정론적 템플릿으로 대체한다.
 
-제품 Runtime은 Data의 `/internal/rag/v2/health/ready`와
-`/internal/rag/v2/retrieve`만 사용한다. 기존 v1 readiness/retriever는 CLI·evaluation의
-명시적 compatibility adapter이며 제품 RuntimeConfig에 선택 모드가 없다.
+ReviewResult V2를 반환하는 legacy 제품 경로는 Data의
+`/internal/rag/v2/health/ready`와 `/internal/rag/v2/retrieve`를 사용한다. ReviewResult V3
+제품 경로는 `ProductionHttpRegulationRetrieverV3`를 통해
+`/internal/rag/v3/health/ready`와 `/internal/rag/v3/retrieve`만 사용한다. 기존 Evidence v1
+readiness/retriever는 CLI·evaluation의 명시적 compatibility adapter이며 제품
+RuntimeConfig에 이를 선택하는 모드는 없다.
 
 ## API
 
@@ -33,10 +43,20 @@ HTTP 오류 변환만 담당한다. 기존 workflow, Claude grounding, Evidence 
 | `GET /internal/agent/v1/metadata` | Bearer | Agent build/wheel, text capability, model/prompt/schema/Data pin |
 | `GET /internal/agent/v1/metrics` | Bearer | ID label이 없는 process-local 집계 |
 | `POST /internal/agent/v1/reviews` | Bearer | text-only ReviewResult V2 실행 |
+| `GET /internal/agent/v2/metadata` | Bearer | V3 release·trust-store·실행 제한 identity |
+| `POST /internal/agent/v2/reviews` | Bearer | text-only bounded adaptive ReviewResult V3 실행 |
+| `POST /internal/agent/v2/revisions` | Bearer | parent request/result에 결박된 불변 child Run |
+| `POST /internal/agent/v2/answers` | Bearer | 현재 Run Evidence에 결박된 Case 질의 |
 
 OpenAPI endpoint를 런타임에 공개하지 않는다. canonical OpenAPI는
 `contracts/agent/service/v1/openapi.lock.json`의 hash·크기·route로 고정하고
 `tools/verify_service_openapi.py`로 drift를 검사한다.
+
+`POST` 실행 API가 dependency admission Gate에서 `controller.submit` 전에 거절한
+`503 dependency_unready`에만 `X-Agent-Execution-State: not-started`를 반환한다.
+Backend는 이 단일 header와 canonical 오류 body·`X-Request-ID`가 모두 일치할 때만
+동일 Job을 제한적으로 다시 전달할 수 있다. runtime worker가 시작된 뒤 발생한 동일
+503에는 이 header가 없으므로 호출-1회 장벽을 다시 열어서는 안 된다.
 
 ## 입력 불변식
 
@@ -47,9 +67,13 @@ OpenAPI endpoint를 런타임에 공개하지 않는다. canonical OpenAPI는
   동시에 body를 읽는 연결 수도 workflow concurrency와 같은 semaphore로 제한한다.
 - strict UTF-8, duplicate JSON key, NaN/Infinity를 거부한다.
 - `review_run_id`와 `review_as_of`는 service profile에서 반드시 명시한다.
-- `image_pages` 또는 `pdf_pages` key는 값이 `null`이어도 nested image decode, OCR, Claude,
-  Evidence 호출 전에 422 `visual_input_not_supported`로 거부한다.
-- Service document/text 상한은 core 상한보다 같거나 작아야 한다.
+- V1은 `image_pages`/`pdf_pages` key 자체를 거부한다. V3는 Backend의 표준
+  `model_dump` 호환을 위해 `image_pages=[]`, `pdf_pages=null`만 text placeholder로 수용하고,
+  하나라도 실제 visual payload가 있으면 Claude 호출 전 422로 거부한다. 권장
+  canonical wire는 두 필드를 아예 생략한다.
+- V3 text-first 계약은 body 2 MiB, primary 문서 6개, run 전체 text 500,000자로
+  고정한다. Production 설정이 이 값과 다르면 시작을 거부하며, review와
+  revision의 parent/child 요청에 동일한 제한을 적용한다.
 - Mock/scenario 실행은 service route에 존재하지 않는다.
 
 ## 인증과 네트워크
@@ -93,12 +117,16 @@ timeout 뒤의 새 요청으로 concurrency 상한을 우회할 수 없다.
   막기 위해 제거하지 않고, 단일 결과가 budget보다 크면 replay cache에 넣지 않는다.
 
 이 보장은 container 재시작 또는 여러 replica 사이에서는 유지되지 않는다. durable Case/Job
-idempotency는 Backend가 소유해야 한다. Backend 구현 전 여러 Agent replica를 active-active로
-사용해 exactly-once를 주장해서는 안 된다.
+idempotency는 `customs-backend`가 소유한다. Agent 단독의 process-local cache를 여러
+replica의 exactly-once 보장으로 표현해서는 안 된다.
 
 ## Readiness 의미
 
 `/health/ready` 200은 다음을 모두 뜻한다.
+
+- 런타임 소유 supporting-document assertion verifier가 구성되어 있고, 요청자가 자가 선언한
+  connector/human 문자열이 아니라 Agent가 소유한 active Ed25519 trust root로 Case·문서
+  전체 claims·Data policy·결정 lineage에 결박된 서명 영수증을 검증한다.
 
 - service 설정과 wheel-local contract/prompt metadata가 로드됐다.
 - packaged `runtime-release-v2.lock.json`이 `release_state=released`다.
@@ -110,8 +138,9 @@ idempotency는 Backend가 소유해야 한다. Backend 구현 전 여러 Agent r
 
 Claude API에 과금 probe를 보내지 않는다. 현재 팀 Data가 3/58이면 503이 정확한 결과다.
 conformance Provider의 200을 실제 법령 RAG 품질이나 전체 서비스 release로 표현하지 않는다.
-현재 packaged lock은 의도적으로 `unreleased`이므로 liveness는 200이지만 readiness와 review는
-503이다. 이 상태에서 Claude client나 review workflow를 시작하지 않는다.
+현재 Data release lock과 assertion trust-store는 의도적으로 `unreleased`이므로 liveness는
+200이지만 readiness와 review는 503이다. 이 상태에서 Claude client나 review workflow를
+시작하지 않는다.
 
 Evidence timeout은 socket idle timeout의 합이 아니라 한 operation의 절대 wall-clock
 deadline이다. readiness GET, retrieval POST, retry, header 검증, 최대 2 MiB의 64 KiB chunk
@@ -158,14 +187,17 @@ Release wheel/sdist는 일반 `uv build`가 아니라 exact clean Git commit을 
 build manifest가 포함된다. verifier는 package payload를 해당 Git object와 byte-for-byte 비교하고
 Docker build는 manifest commit과 `BUILD_SHA`가 다르면 중단한다.
 
-Base image tag도 실제 release pipeline에서 digest로 고정해야 한다. Dockerfile 기본 tag는
-개발 편의를 위한 것이며 digest 없는 build를 최종 release attestation으로 사용하지 않는다.
+Dockerfile frontend와 Python base의 기본값은 multi-platform manifest SHA-256 digest로
+고정한다. 다른 플랫폼 또는 patch image를 사용하려면 검토된 exact digest를
+`PYTHON_IMAGE` build argument로 명시하고 새 source/wheel/container release identity로
+다시 검증해야 한다. digest 없는 build는 release evidence로 인정하지 않는다.
 
 ## 명시적 비범위
 
 - OCR/image/PDF
-- Frontend, 제품 Backend, 사용자 인증, HITL
-- Operational DB와 Case/Job 저장
+- Frontend·Backend·사용자 인증·HITL·Operational DB·Case/Job 영속화의 소유
+  (이 기능은 형제 `customs-frontend`/`customs-backend` 제품 경계이며 Agent package에
+  복제하지 않는다.)
 - 58법령 수집 및 실제 RAG 품질
 - 자동 세관 승인 또는 법적 최종 판단
 

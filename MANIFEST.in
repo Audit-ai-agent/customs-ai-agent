@@ -21,7 +21,7 @@ recursive-include security *.toml
 recursive-include tests *.py
 include tests/fixtures/evidence_runtime_v2/README.md
 include tests/fixtures/evidence_runtime_v2/provider-runtime-lock.json
-recursive-include tools *.py
+recursive-include tools *.py *.json
 
 prune build
 prune dist
