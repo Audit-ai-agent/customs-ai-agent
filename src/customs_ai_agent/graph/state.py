@@ -33,6 +33,7 @@ class ReviewState(TypedDict, total=False):
     regulatory_findings: list[dict[str, Any]]
     report_json: dict[str, Any] | None
     retry_count: int
+    retrieval_attempt: int
     current_stage: str
     requires_human_review: bool
     final_status: str | None

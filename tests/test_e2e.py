@@ -1,3 +1,4 @@
+from customs_ai_agent.identifiers import stable_retrieval_request_id
 from customs_ai_agent.runner import run_review
 from customs_ai_agent.schemas.models import ReviewRunRequest
 
@@ -51,8 +52,19 @@ def test_missing_hs_code_needs_review():
 
 
 def test_low_confidence_self_correction_runs_once():
-    state = _run("low_confidence_self_correction")
+    review_run_id = "run-low-confidence-self-correction"
+    state = run_review(
+        ReviewRunRequest(
+            scenario_id="low_confidence_self_correction",
+            review_run_id=review_run_id,
+        )
+    )
     assert state["retry_count"] == 1
+    assert state["retrieval_attempt"] == 1
+    assert state["retrieval_request_id"] == stable_retrieval_request_id(
+        review_run_id,
+        0,
+    )
     assert state["final_status"] == "needs_review"
     assert "GROSS_WEIGHT_MISMATCH" not in _issue_codes(state)
     correction_events = [

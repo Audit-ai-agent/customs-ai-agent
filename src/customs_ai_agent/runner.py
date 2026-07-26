@@ -66,7 +66,13 @@ def _execution_document_values(document: Any) -> dict[str, Any]:
     return values
 
 
-def _build_initial_state(request: ReviewRequest) -> dict[str, Any]:
+def _build_initial_state(
+    request: ReviewRequest,
+    *,
+    initial_retrieval_attempt: int = 0,
+) -> dict[str, Any]:
+    if initial_retrieval_attempt < 0:
+        raise ValueError("initial_retrieval_attempt cannot be negative")
     if request.scenario_id:
         scenario = get_scenario(request.scenario_id)
         case_id = request.case_id or scenario["case_id"]
@@ -108,6 +114,7 @@ def _build_initial_state(request: ReviewRequest) -> dict[str, Any]:
         "regulatory_findings": [],
         "report_json": None,
         "retry_count": 0,
+        "retrieval_attempt": initial_retrieval_attempt,
         "current_stage": "created",
         "requires_human_review": False,
         "final_status": None,
@@ -122,6 +129,8 @@ def _execute_review(
     retriever: RegulationRetriever | None = None,
     analyzer: DocumentAnalyzer | None = None,
     env_file: str | PathLike[str] | None = None,
+    *,
+    initial_retrieval_attempt: int = 0,
 ) -> dict[str, Any]:
     """Execute one review without taking ownership of the caller's request.
 
@@ -148,7 +157,10 @@ def _execute_review(
             )
         active_retriever = retriever or MockRegulationRetriever()
         active_analyzer = None
-    initial_state = _build_initial_state(request)
+    initial_state = _build_initial_state(
+        request,
+        initial_retrieval_attempt=initial_retrieval_attempt,
+    )
     payload_store = SensitiveDocumentPayloadStore(
         {
             document.document_id: _execution_document_values(document)
@@ -196,6 +208,8 @@ def run_review_v2(
     retriever: RegulationRetriever | None = None,
     analyzer: DocumentAnalyzer | None = None,
     env_file: str | PathLike[str] | None = None,
+    *,
+    initial_retrieval_attempt: int = 0,
 ) -> dict[str, Any]:
     """Execute the additive text/image/PDF V2 workflow."""
 
@@ -206,6 +220,7 @@ def run_review_v2(
         retriever=retriever,
         analyzer=analyzer,
         env_file=env_file,
+        initial_retrieval_attempt=initial_retrieval_attempt,
     )
 
 

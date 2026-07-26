@@ -2617,6 +2617,56 @@ def test_active_broker_rejects_unknown_tool_and_repeated_field_reread(
     assert len(traces) <= active.tool_call_limit <= 6
 
 
+def test_runtime_reserves_unique_evidence_attempts_when_pending_state_is_discarded(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    import customs_ai_agent.runtime as runtime_module
+
+    request, result_v2, _result_v3 = _v3_result()
+    service_request = runtime_module._project_service_request_v3_to_v2(request)
+    observed_attempts: list[tuple[str, int]] = []
+
+    class Retriever:
+        def preflight(self, *_args, **_kwargs):
+            return None
+
+    def fake_review_v2(_request, **kwargs):
+        attempt = kwargs["initial_retrieval_attempt"]
+        observed_attempts.append(("reread", attempt))
+        return {"retrieval_attempt": attempt + 1}
+
+    def fake_retrieve(state, _retriever):
+        attempt = state["retrieval_attempt"]
+        observed_attempts.append(("retry", attempt))
+        return {"retrieval_attempt": attempt + 1}
+
+    monkeypatch.setattr(runtime_module, "run_review_v2", fake_review_v2)
+    monkeypatch.setattr(runtime_module, "retrieve_regulations", fake_retrieve)
+    executor = runtime_module._RuntimeBoundedAdaptiveExecutor(
+        service_request=service_request,
+        request=request,
+        retriever=Retriever(),
+        analyzer=SimpleNamespace(),
+        state={"retrieval_attempt": 1},
+        result=result_v2,
+        supporting_document_rejections=[],
+        assertion_verifier=None,
+    )
+    document_id = service_request.documents[0].document_id
+    executor._reference_kinds = {
+        "field-reference": "field_source",
+        "evidence-reference": "evidence",
+    }
+    executor._reference_documents = {"field-reference": document_id}
+
+    assert executor._reread_span(("field-reference",)).status == "succeeded"
+    # Simulate a failed deterministic reevaluation discarding the Tool state.
+    executor._pending_state = None
+    assert executor._retry_evidence(("evidence-reference",)).status == "succeeded"
+
+    assert observed_attempts == [("reread", 1), ("retry", 2)]
+
+
 def test_bounded_recovery_evaluation_meets_ninety_five_percent_without_policy_mutation(
     monkeypatch: pytest.MonkeyPatch,
 ) -> None:

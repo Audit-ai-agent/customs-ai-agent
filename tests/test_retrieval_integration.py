@@ -46,6 +46,7 @@ from customs_ai_agent.schemas.models import (
     stable_evidence_id,
 )
 from customs_ai_agent.fixtures.scenarios import SCENARIOS
+from customs_ai_agent.identifiers import stable_retrieval_request_id
 
 
 def _http_test_request() -> EvidenceRetrievalRequest:
@@ -1044,6 +1045,16 @@ def test_initial_and_rerun_status_sources_are_consistent():
     for state in (initial, rerun):
         assert state["final_status"] == state["report_json"]["overall_status"]
         assert state["requires_human_review"] is (state["final_status"] != "completed")
+    assert initial["retrieval_attempt"] == 1
+    assert rerun["retrieval_attempt"] == 2
+    assert initial["retrieval_request_id"] == stable_retrieval_request_id(
+        "run-consistency",
+        0,
+    )
+    assert rerun["retrieval_request_id"] == stable_retrieval_request_id(
+        "run-consistency",
+        1,
+    )
 
 
 def test_retriever_exception_never_leaks_exception_or_document_canary():

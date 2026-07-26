@@ -645,6 +645,19 @@ class _RuntimeBoundedAdaptiveExecutor:
         self._reference_kinds: dict[str, str] = {}
         self._reference_documents: dict[str, str | None] = {}
         self._pending_state: dict[str, Any] | None = None
+        self._next_retrieval_attempt = int(state.get("retrieval_attempt") or 0)
+
+    def _reserve_retrieval_attempt(self) -> int:
+        """Consume one process-local Evidence attempt before any Tool I/O.
+
+        A Tool observation can be rejected during deterministic reevaluation.
+        The HTTP request still happened, so its attempt number must never be
+        reused by a later Tool action even when the pending state is discarded.
+        """
+
+        attempt = self._next_retrieval_attempt
+        self._next_retrieval_attempt += 1
+        return attempt
 
     def _finalize_state(
         self,
@@ -741,6 +754,7 @@ class _RuntimeBoundedAdaptiveExecutor:
         }
         if not document_ids.issubset(request_document_ids):
             return BoundedToolResult(status="failed", reason_code="span_document_not_in_request")
+        retrieval_attempt = self._reserve_retrieval_attempt()
         try:
             self._retriever.preflight(self._service_request.review_as_of)
             workflow_request = ReviewRunRequestV2.model_validate(
@@ -750,6 +764,7 @@ class _RuntimeBoundedAdaptiveExecutor:
                 workflow_request,
                 retriever=self._retriever,
                 analyzer=self._analyzer,
+                initial_retrieval_attempt=retrieval_attempt,
             )
         except (LLMError, RetrievalError, ValidationError, ValueError):
             self._pending_state = None
@@ -769,8 +784,10 @@ class _RuntimeBoundedAdaptiveExecutor:
             for reference_id in reference_ids
         ):
             return BoundedToolResult(status="failed", reason_code="evidence_reference_not_grounded")
+        retrieval_attempt = self._reserve_retrieval_attempt()
         try:
             next_state = copy.deepcopy(self._state)
+            next_state["retrieval_attempt"] = retrieval_attempt
             next_state.update(retrieve_regulations(next_state, self._retriever))
         except (RetrievalError, ValidationError, ValueError):
             self._pending_state = None

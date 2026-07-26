@@ -1,5 +1,6 @@
 import pytest
 
+from customs_ai_agent.identifiers import stable_retrieval_request_id
 from customs_ai_agent.runner import (
     CorrectionApplicationError,
     rerun_review,
@@ -10,8 +11,20 @@ from customs_ai_agent.schemas.models import ReviewRunRequest, UserCorrection
 
 
 def test_rerun_applies_user_correction_and_revalidates():
-    state = run_review(ReviewRunRequest(scenario_id="invoice_total_mismatch"))
+    review_run_id = "run-correction-rerun"
+    state = run_review(
+        ReviewRunRequest(
+            scenario_id="invoice_total_mismatch",
+            review_run_id=review_run_id,
+        )
+    )
     assert state["final_status"] == "needs_review"
+    assert state["retry_count"] == 0
+    assert state["retrieval_attempt"] == 1
+    assert state["retrieval_request_id"] == stable_retrieval_request_id(
+        review_run_id,
+        0,
+    )
 
     corrected = rerun_review(
         state,
@@ -30,6 +43,12 @@ def test_rerun_applies_user_correction_and_revalidates():
         "12000"
     )
     assert corrected["normalized_documents"]["doc_inv"]["raw_fields"]["total_amount"] == ("12000")
+    assert corrected["retrieval_attempt"] == 2
+    assert corrected["retry_count"] == 0
+    assert corrected["retrieval_request_id"] == stable_retrieval_request_id(
+        review_run_id,
+        1,
+    )
     assert corrected["audit_trail"][-1]["event"] == "corrections_applied"
 
 
