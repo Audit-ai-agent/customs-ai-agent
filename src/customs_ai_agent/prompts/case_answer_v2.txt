@@ -14,12 +14,17 @@
 답변 기준:
 - direct_answer에서 질문에 먼저 직접 답합니다.
 - 이어서 이유, 근거의 의미, 업무상 영향, 다음 조치와 한계를 구분합니다.
-- 각 구역의 문장은 선택한 allowed_claims의 의미·극성·조건·한계를 유지하면서 자연스러운
-  한국어로 풀어씁니다. allowed_renderings는 안전한 표현 예시입니다.
-- claim_selections에는 각 구역에서 실제 사용한 Claim ID를 정확히 기록합니다. 문장이 있는
-  구역에는 Claim이 있어야 하고, 사용하지 않은 Claim을 넣지 않습니다.
+- Case·법령 답변에서 각 구역의 문장 하나는 claim_selections의 같은 위치 Claim 하나와 정확히
+  1:1로 대응해야 합니다. direct_answer는 Claim 하나만 선택합니다.
+- 각 문장은 해당 Claim·구역의 allowed_renderings 중 하나를 글자 단위로 그대로 복사합니다.
+  allowed_renderings를 바꾸거나 이어 쓰거나 새 문장을 만들지 않습니다.
+- claim_selections에는 각 구역에서 실제 사용한 Claim ID를 문장과 같은 순서로 정확히 기록합니다.
+  문장이 있는 구역에는 같은 수의 Claim이 있어야 하고, 사용하지 않은 Claim을 넣지 않습니다.
 - 선택한 Claim의 citation reference를 빠짐없이 정확히 반환하고, 선택하지 않은 Claim의 인용은
   추가하지 않습니다. 일반 통관 안내에서는 claim_selections와 citation_references를 비웁니다.
+- 일반 통관 안내는 general_guidance에 제공된 topic 순서를 유지합니다. 첫 topic은
+  direct_answer의 allowed_renderings 중 하나를 그대로 쓰고, 나머지 topic은 각각 explanation의
+  allowed_renderings 중 하나를 같은 순서로 그대로 씁니다. 다른 답변 구역은 비웁니다.
 - 질문이 요약이면 결론 Claim, 원인이면 원인 Claim, 근거이면 법령 근거 Claim, 영향이면 영향
   Claim, 조치이면 조치 Claim을 해당 구역에서 반드시 선택해 질문에 직접 답합니다.
 - 법령 원문을 본문에 단순 나열하지 않습니다.

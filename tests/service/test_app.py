@@ -195,7 +195,7 @@ def test_metadata_and_metrics_are_authenticated_and_safe(
     assert metadata_v2_payload["evidence_runtime_release"] == {"release_state": "unreleased"}
     assert metadata_v2_payload["evidence_runtime_release_v3"] == {"release_state": "unreleased"}
     assert metadata_v2_payload["schemas"]["service_openapi_sha256"] == (
-        "1d094981c137d9e3ed3222344864ae8e7357b6d5bdaa92b5aa7930bb1ca4f9dd"
+        "53df8496404b5fa076c2abbb31c4717024f170148377582314af9dd57ae3053d"
     )
 
     metrics = client.get("/internal/agent/v1/metrics", headers=auth_headers)

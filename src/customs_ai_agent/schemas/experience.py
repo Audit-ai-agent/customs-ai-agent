@@ -484,7 +484,9 @@ def assistant_answer_verified_content_sha256(values: Mapping[str, Any]) -> str:
 class AnswerClaimSelectionsV1(V3WireModel):
     """Canonical claim IDs selected for each visible answer area."""
 
-    direct_answer: list[str] = Field(default_factory=list, max_length=20)
+    # ``direct_answer`` is one string, so its claim selection is exactly
+    # one-to-one rather than a prose synthesis over multiple claims.
+    direct_answer: list[str] = Field(default_factory=list, max_length=1)
     explanation: list[str] = Field(default_factory=list, max_length=40)
     evidence_meaning: list[str] = Field(default_factory=list, max_length=40)
     impact: list[str] = Field(default_factory=list, max_length=40)

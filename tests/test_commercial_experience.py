@@ -14,8 +14,11 @@ from customs_ai_agent.build_info import package_code_snapshot_sha256
 from customs_ai_agent.contracts import generate_schema
 from customs_ai_agent.experience import (
     _answer_values_safe,
+    _candidate_presentation,
+    _claim,
     _classify_question_scope,
-    _literal_check,
+    _citation,
+    _presentation_statement_options,
     answer_case_conversation,
     build_answer_claim_catalog,
     build_canonical_claim_catalog,
@@ -25,6 +28,7 @@ from customs_ai_agent.experience import (
 from customs_ai_agent.meaning_catalog import (
     ACTION_MEANINGS,
     FINDING_MEANINGS,
+    GENERAL_CUSTOMS_GUIDANCE,
     ISSUE_MEANINGS,
     UNKNOWN_ACTION_TEXT,
     meaning_catalog_payload,
@@ -785,26 +789,100 @@ def test_adaptive_claude_audit_proves_calls_without_exposing_provider_ids_or_inp
     assert actual.close_count == 1
 
 
-@pytest.mark.parametrize(
-    "unsupported_text",
-    [
-        "현재 확인 결과 이 건의 관세율은 50%이며 3일 이내 제출해야 합니다.",
-        "이 심사 건은 통관이 승인되었으며 담당자 검토가 필요하지 않습니다.",
-    ],
-)
-def test_grounded_prose_rejects_unsupported_atomic_or_contradictory_claims(
-    unsupported_text: str,
-) -> None:
-    canonical_claims = [
-        "현재 자료만으로 심사 결과를 확정하기 어려워 담당자 확인이 필요합니다.",
-        "자동 처리는 차단되어 있습니다.",
+def test_presentation_rejects_opposite_meaning_even_when_it_contains_no_patterned_atom() -> None:
+    result = _v3_result()[2]
+    claims = build_canonical_claim_catalog(result)
+    first = claims[0]
+    call = StructuredAgenticResult(
+        value={
+            "statements": [
+                {
+                    "section_code": first.section_code,
+                    "role": first.role,
+                    "text": "담당자 판단을 기다리지 않아도 바로 후속 절차를 진행할 수 있습니다.",
+                    "source_claim_ids": [first.claim_id],
+                }
+            ]
+        },
+        model_id=result.runtime_release.model_id,
+        prompt_sha256="1" * 64,
+        output_schema_sha256="2" * 64,
+        semantic_output_schema_sha256="3" * 64,
+        request_id="request-presentation-opposite",
+        message_id="message-presentation-opposite",
+        input_tokens=10,
+        output_tokens=5,
+        latency_ms=1,
+    )
+
+    _sections, blockers = _candidate_presentation(
+        result,
+        claims,
+        call,
+        attempt_count=1,
+    )
+
+    assert "presentation_rendering_not_allowed" in blockers
+
+
+def test_presentation_options_chunk_claims_within_wire_limits() -> None:
+    claims = [
+        _claim(
+            "scope_and_limits",
+            "limitation",
+            f"검토 한계 {index}를 확인합니다.",
+            [_citation("outcome", f"outcome-{index}")],
+        )
+        for index in range(21)
     ]
 
-    assert not _literal_check(unsupported_text, canonical_claims)
-    assert _literal_check(
-        "현재 심사 결과는 담당자 확인이 필요하며 자동 처리는 차단되어 있습니다.",
-        canonical_claims,
+    options = _presentation_statement_options(claims)
+
+    assert [len(option["source_claim_ids"]) for option in options] == [20, 1]
+    assert {claim_id for option in options for claim_id in option["source_claim_ids"]} == {
+        claim.claim_id for claim in claims
+    }
+    assert all(
+        len(rendering) <= 4000 for option in options for rendering in option["allowed_renderings"]
     )
+
+
+def test_presentation_accepts_only_the_provider_owned_option_menu() -> None:
+    result = _v3_result()[2]
+    claims = build_canonical_claim_catalog(result)
+    options = _presentation_statement_options(claims)
+    call = StructuredAgenticResult(
+        value={
+            "statements": [
+                {
+                    "section_code": option["section_code"],
+                    "role": option["role"],
+                    "text": option["allowed_renderings"][0],
+                    "source_claim_ids": option["source_claim_ids"],
+                }
+                for option in options
+            ]
+        },
+        model_id=result.runtime_release.model_id,
+        prompt_sha256="1" * 64,
+        output_schema_sha256="2" * 64,
+        semantic_output_schema_sha256="3" * 64,
+        request_id="request-presentation-allowed-menu",
+        message_id="message-presentation-allowed-menu",
+        input_tokens=10,
+        output_tokens=5,
+        latency_ms=1,
+    )
+
+    sections, blockers = _candidate_presentation(
+        result,
+        claims,
+        call,
+        attempt_count=1,
+    )
+
+    assert blockers == []
+    assert sum(len(section.statements) for section in sections) == len(options)
 
 
 def test_chat_answer_catalog_exposes_human_readable_field_facts_with_exact_sources() -> None:
@@ -829,7 +907,7 @@ def test_chat_answer_catalog_exposes_human_readable_field_facts_with_exact_sourc
     )
 
 
-def test_chat_accepts_only_code_owned_framing_and_exact_selected_claim_citations() -> None:
+def test_chat_accepts_only_exact_code_owned_renderings_and_selected_claim_citations() -> None:
     result = _v3_result()[2]
     claim = next(
         item
@@ -874,23 +952,17 @@ def test_chat_accepts_only_code_owned_framing_and_exact_selected_claim_citations
         "문서에 기재된 값은",
     )
     assert paraphrased["direct_answer"] != claim.canonical_text
-    assert (
-        _answer_values_safe(
-            paraphrased,
-            claims=build_answer_claim_catalog(result),
-            guidance={},
-            allowed_context_ids=set(),
-            scope="case_grounded",
-        )
-        == []
+    assert "answer_direct_answer_rendering_not_allowed" in _answer_values_safe(
+        paraphrased,
+        claims=build_answer_claim_catalog(result),
+        guidance={},
+        allowed_context_ids=set(),
+        scope="case_grounded",
     )
 
     forged = dict(safe_values)
-    forged["direct_answer"] = (
-        f"질문에 바로 답변드리면, {claim.canonical_text} "
-        "따라서 별도 확인 없이 즉시 처리해도 됩니다."
-    )
-    assert "answer_direct_answer_unbound_literal" in _answer_values_safe(
+    forged["direct_answer"] = "담당자 판단을 기다리지 않아도 바로 후속 절차를 진행할 수 있습니다."
+    assert "answer_direct_answer_rendering_not_allowed" in _answer_values_safe(
         forged,
         claims=build_answer_claim_catalog(result),
         guidance={},
@@ -912,6 +984,38 @@ def test_chat_accepts_only_code_owned_framing_and_exact_selected_claim_citations
         allowed_context_ids=set(),
         scope="case_grounded",
     )
+
+
+def test_general_guidance_rejects_opposite_meaning_outside_approved_rendering() -> None:
+    values = {
+        "direct_answer": ("담당자 판단을 기다리지 않아도 바로 후속 절차를 진행할 수 있습니다."),
+        "explanation": [],
+        "evidence_meaning": [],
+        "impact": [],
+        "next_steps": [],
+        "limitations": [
+            "위 내용은 일반 통관 안내이며 현재 심사 건의 판정이나 법적 의무를 뜻하지 않습니다."
+        ],
+        "claim_selections": {
+            "direct_answer": [],
+            "explanation": [],
+            "evidence_meaning": [],
+            "impact": [],
+            "next_steps": [],
+        },
+        "citation_references": [],
+        "used_context_message_ids": [],
+    }
+
+    blockers = _answer_values_safe(
+        values,
+        claims=[],
+        guidance={"hsk": GENERAL_CUSTOMS_GUIDANCE["hsk"]},
+        allowed_context_ids=set(),
+        scope="general_customs_guidance",
+    )
+
+    assert "answer_guidance_rendering_not_allowed" in blockers
 
 
 class _DatasetScopeAnalyzer:

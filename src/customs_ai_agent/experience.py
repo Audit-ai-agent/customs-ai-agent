@@ -1,10 +1,8 @@
 from __future__ import annotations
 
 import hashlib
-import re
 import time
 from collections.abc import Callable, Iterable
-from dataclasses import dataclass
 from typing import Any, Literal
 
 from customs_ai_agent.adapters.llm import (
@@ -374,7 +372,7 @@ _CHAT_OUTPUT_SCHEMA: dict[str, Any] = {
             "properties": {
                 area: {
                     "type": "array",
-                    "maxItems": (20 if area == "direct_answer" else 40),
+                    "maxItems": (1 if area == "direct_answer" else 40),
                     "uniqueItems": True,
                     "items": {
                         "type": "string",
@@ -484,99 +482,6 @@ _SCOPE_CLASSIFIER_SCHEMA: dict[str, Any] = {
         },
     },
 }
-_GROUNDED_ATOM_PATTERNS = (
-    (
-        "date",
-        re.compile(r"(?<!\d)(?:\d{4}-\d{1,2}-\d{1,2}|\d{4}년\s*\d{1,2}월\s*\d{1,2}일)(?!\d)"),
-    ),
-    (
-        "law_reference",
-        re.compile(
-            r"제\s*\d+\s*조(?:의\s*\d+)?(?:\s*제?\s*\d+\s*항)?"
-            r"(?:\s*제?\s*\d+\s*호)?"
-        ),
-    ),
-    (
-        "hsk",
-        re.compile(
-            r"(?:HSK?|품목분류(?:코드)?|품목번호)\s*[:#]?\s*"
-            r"\d(?:[\d.\s-]{2,18}\d)",
-            re.IGNORECASE,
-        ),
-    ),
-    (
-        "percentage",
-        re.compile(r"(?<![\w])\d+(?:\.\d+)?\s*(?:%|퍼센트)(?![\w])", re.IGNORECASE),
-    ),
-    (
-        "money",
-        re.compile(
-            r"(?<![\w])(?:(?:USD|KRW|EUR|JPY|\$|₩)\s*"
-            r"(?:\d{1,3}(?:,\d{3})+|\d+)(?:\.\d+)?|"
-            r"(?:\d{1,3}(?:,\d{3})+|\d+)(?:\.\d+)?\s*"
-            r"(?:원|달러|유로|엔))(?![\w])",
-            re.IGNORECASE,
-        ),
-    ),
-    (
-        "measure",
-        re.compile(
-            r"(?<![\w])(?:\d{1,3}(?:,\d{3})+|\d+)(?:\.\d+)?\s*"
-            r"(?:개|건|장|매|상자|박스|포|kg|㎏|g|톤|t|L|리터|"
-            r"일|주|개월|년|시간|분|초|회|종)(?![\w])",
-            re.IGNORECASE,
-        ),
-    ),
-    (
-        "identifier",
-        re.compile(r"(?<![A-Za-z0-9])[A-Z]{2,10}[-/][A-Z0-9][A-Z0-9._/-]{2,63}"),
-    ),
-)
-_GROUNDED_PROPOSITION_PATTERNS = {
-    "customs_approval_asserted": re.compile(
-        r"(?:통관|수입|수출).{0,16}(?:승인|허가)(?:되|됐|완료|가능)"
-    ),
-    "customs_rejection_asserted": re.compile(r"(?:통관|수입|수출).{0,16}(?:거절|불허|금지|반려)"),
-    "human_review_not_required": re.compile(
-        r"(?:담당자|사람|인적).{0,16}(?:검토|확인).{0,16}"
-        r"(?:필요하지\s*않|불필요|생략|없이)"
-    ),
-    "human_review_required": re.compile(
-        r"(?:(?:담당자|사람|인적).{0,16}(?:검토|확인).{0,16}"
-        r"(?:필요|요구|해야|하여야)|(?:검토|확인).{0,16}(?:담당자|사람).{0,8}(?:필요|요구))"
-    ),
-    "processing_without_review_allowed": re.compile(
-        r"(?:별도|담당자|사람|인적).{0,16}(?:검토|확인).{0,16}"
-        r"(?:없이|생략).{0,16}(?:처리|진행|완료|승인)"
-    ),
-    "auto_completion_allowed": re.compile(
-        r"(?:자동\s*(?:처리|완료)|자동완료).{0,16}(?:가능|허용|활성|완료)"
-    ),
-    "auto_completion_blocked": re.compile(
-        r"(?:자동\s*(?:처리|완료)|자동완료).{0,16}"
-        r"(?:불가|차단|꺼짐|비활성|허용되지\s*않)"
-    ),
-    "no_issue_asserted": re.compile(
-        r"(?:문제|불일치|누락|위반).{0,12}(?:없|발견되지\s*않|확인하지\s*못)"
-    ),
-    "issue_asserted": re.compile(r"(?:문제|불일치|누락|위반).{0,12}(?:있|발견|확인되|발생)"),
-    "legal_obligation_asserted": re.compile(
-        r"(?:필수|의무|반드시|제출해야|제출하여야|준수해야|준수하여야)"
-    ),
-    "legal_exemption_asserted": re.compile(r"(?:면세|감면|면제|의무가\s*없|제출할\s*필요가\s*없)"),
-    "requirements_satisfied_asserted": re.compile(
-        r"(?:모든|전체).{0,12}(?:요건|의무).{0,12}(?:충족|완료)"
-    ),
-    "no_further_action_required": re.compile(
-        r"(?:추가|별도).{0,12}(?:조치|보완|확인).{0,12}(?:없|불필요|필요하지)"
-    ),
-}
-
-
-@dataclass(frozen=True)
-class _GroundedAtomicClaim:
-    kind: str
-    value: str
 
 
 def experience_schema_hashes() -> dict[str, str]:
@@ -638,9 +543,16 @@ def _claim(
     )
 
 
-def _framed_texts(text: str, prefixes: Iterable[str]) -> frozenset[str]:
+def _framed_texts(
+    text: str,
+    prefixes: Iterable[str],
+    *,
+    max_length: int,
+) -> frozenset[str]:
     canonical = " ".join(text.split())
-    return frozenset(f"{prefix}{canonical}" for prefix in prefixes)
+    return frozenset(
+        rendered for prefix in prefixes if len(rendered := f"{prefix}{canonical}") <= max_length
+    )
 
 
 def _presentation_renderings(
@@ -649,20 +561,92 @@ def _presentation_renderings(
     grouped = list(claims)
     if not grouped:
         return frozenset()
+    first = grouped[0]
+    if any(item.section_code != first.section_code or item.role != first.role for item in grouped):
+        return frozenset()
     canonical = " ".join(item.canonical_text for item in grouped)
-    return _framed_texts(canonical, _PRESENTATION_ROLE_PREFIXES[grouped[0].role])
+    return _framed_texts(
+        canonical,
+        _PRESENTATION_ROLE_PREFIXES[first.role],
+        max_length=4000,
+    )
+
+
+def _presentation_statement_options(
+    claims: Iterable[CanonicalClaimV1],
+) -> list[dict[str, Any]]:
+    """Return a finite, non-overlapping rendering menu owned by the provider.
+
+    Every canonical claim is placed in exactly one option. Claims can be
+    combined only when their section and semantic role are identical. The
+    model therefore chooses presentation style, but cannot author new factual
+    prose.
+    """
+
+    groups: dict[
+        tuple[PresentationSectionCode, PresentationStatementRole],
+        list[CanonicalClaimV1],
+    ] = {}
+    for claim in claims:
+        groups.setdefault((claim.section_code, claim.role), []).append(claim)
+    options: list[dict[str, Any]] = []
+    for (section, role), grouped in groups.items():
+        chunks: list[list[CanonicalClaimV1]] = []
+        current: list[CanonicalClaimV1] = []
+        current_citations: set[tuple[str, str]] = set()
+        for claim in grouped:
+            claim_citations = {
+                (str(citation.kind), citation.reference_id)
+                for citation in claim.citation_references
+            }
+            candidate = [*current, claim]
+            candidate_citations = current_citations | claim_citations
+            if current and (
+                len(candidate) > 20
+                or len(candidate_citations) > 100
+                or not _presentation_renderings(candidate)
+            ):
+                chunks.append(current)
+                current = [claim]
+                current_citations = claim_citations
+            else:
+                current = candidate
+                current_citations = candidate_citations
+        if current:
+            chunks.append(current)
+        for chunk in chunks:
+            renderings = sorted(_presentation_renderings(chunk))
+            if not renderings:
+                raise ValueError("canonical claim cannot be rendered within presentation limits")
+            options.append(
+                {
+                    "section_code": section,
+                    "role": role,
+                    "source_claim_ids": [claim.claim_id for claim in chunk],
+                    "allowed_renderings": renderings,
+                }
+            )
+    return options
 
 
 def _answer_renderings(claim: CanonicalClaimV1, area: str) -> frozenset[str]:
     if claim.role not in _ANSWER_AREA_ROLES[area]:
         return frozenset()
-    return _framed_texts(claim.canonical_text, _ANSWER_AREA_PREFIXES[area])
+    return _framed_texts(
+        claim.canonical_text,
+        _ANSWER_AREA_PREFIXES[area],
+        max_length=(4000 if area == "direct_answer" else 2000),
+    )
 
 
 def _guidance_renderings(text: str, area: str) -> frozenset[str]:
     if area not in {"direct_answer", "explanation"}:
         return frozenset()
-    return _framed_texts(text, _ANSWER_AREA_PREFIXES[area])
+    return _framed_texts(
+        text,
+        _ANSWER_AREA_PREFIXES[area],
+        max_length=(4000 if area == "direct_answer" else 2000),
+    )
 
 
 def _field_fact_claims(result: ReviewRunResultV3) -> list[CanonicalClaimV1]:
@@ -1060,25 +1044,6 @@ def _fallback_presentation(
     return GroundedPresentationV1.model_validate(payload)
 
 
-def _grounded_atomic_claims(value: str) -> set[_GroundedAtomicClaim]:
-    """Extract literals and high-risk proposition polarity for code-owned grounding."""
-
-    atoms: set[_GroundedAtomicClaim] = set()
-    for kind, pattern in _GROUNDED_ATOM_PATTERNS:
-        for match in pattern.finditer(value):
-            normalized = re.sub(r"[\s,]+", "", match.group(0)).upper()
-            atoms.add(_GroundedAtomicClaim(kind=kind, value=normalized))
-    for proposition, pattern in _GROUNDED_PROPOSITION_PATTERNS.items():
-        if pattern.search(value):
-            atoms.add(_GroundedAtomicClaim(kind="proposition", value=proposition))
-    return atoms
-
-
-def _literal_check(text: str, source_texts: Iterable[str]) -> bool:
-    allowed = _grounded_atomic_claims(" ".join(source_texts))
-    return _grounded_atomic_claims(text).issubset(allowed)
-
-
 def _candidate_presentation(
     result: ReviewRunResultV3,
     claims: list[CanonicalClaimV1],
@@ -1087,6 +1052,10 @@ def _candidate_presentation(
     attempt_count: int,
 ) -> tuple[list[GroundedPresentationSectionV1], list[str]]:
     claim_index = {claim.claim_id: claim for claim in claims}
+    option_index = {
+        tuple(option["source_claim_ids"]): frozenset(option["allowed_renderings"])
+        for option in _presentation_statement_options(claims)
+    }
     raw_statements = call.value.get("statements")
     if not isinstance(raw_statements, list):
         return [], ["presentation_statements_invalid"]
@@ -1125,8 +1094,9 @@ def _candidate_presentation(
             blockers.append("presentation_claim_reused")
             continue
         normalized_text = " ".join(text.split())
-        if not _literal_check(text, (item.canonical_text for item in typed_source)):
-            blockers.append("presentation_unbound_literal")
+        allowed_renderings = option_index.get(tuple(claim_ids), frozenset())
+        if normalized_text not in allowed_renderings:
+            blockers.append("presentation_rendering_not_allowed")
             continue
         used_claims.update(claim_ids)
         statements_by_section[section].append(_statement(typed_source, normalized_text))
@@ -1250,13 +1220,7 @@ def build_grounded_presentation(
                 task_id=EXPERIENCE_REPORT_PROMPT_ID,
                 system_prompt=load_experience_report_system_prompt(),
                 untrusted_context={
-                    "canonical_claims": [
-                        {
-                            **claim.model_dump(mode="json", warnings=False),
-                            "allowed_renderings": sorted(_presentation_renderings([claim])),
-                        }
-                        for claim in claims
-                    ],
+                    "allowed_statement_options": _presentation_statement_options(claims),
                     "fixed_headline": _headline(result),
                     "fixed_section_order": list(_SECTION_ORDER),
                     "previous_verification_failures": retry_blockers,
@@ -1829,14 +1793,14 @@ def _answer_values_safe(
                 if any(claim.role not in _ANSWER_AREA_ROLES[area] for claim in typed_claims):
                     blockers.append(f"answer_{area}_claim_role_invalid")
                     continue
-                if bool(typed_areas[area]) != bool(typed_claims):
+                if len(typed_areas[area]) != len(typed_claims):
                     blockers.append(f"answer_{area}_claim_coverage_invalid")
                     continue
-                if typed_areas[area] and not _literal_check(
-                    " ".join(typed_areas[area]),
-                    (claim.canonical_text for claim in typed_claims),
+                if any(
+                    text not in _answer_renderings(claim, area)
+                    for text, claim in zip(typed_areas[area], typed_claims, strict=True)
                 ):
-                    blockers.append(f"answer_{area}_unbound_literal")
+                    blockers.append(f"answer_{area}_rendering_not_allowed")
                     continue
                 for claim in typed_claims:
                     selected_claims[claim.claim_id] = claim
@@ -1847,11 +1811,25 @@ def _answer_values_safe(
         elif scope == "general_customs_guidance":
             if any(typed_selections.values()):
                 blockers.append("answer_guidance_claim_selection_not_allowed")
-            if not typed_areas["direct_answer"] or not _literal_check(
-                " ".join(text for texts in typed_areas.values() for text in texts),
-                guidance.values(),
+            guidance_values = list(guidance.values())
+            if (
+                not guidance_values
+                or len(typed_areas["direct_answer"]) != 1
+                or len(typed_areas["explanation"]) != max(0, len(guidance_values) - 1)
+                or any(typed_areas[area] for area in ("evidence_meaning", "impact", "next_steps"))
             ):
-                blockers.append("answer_guidance_unbound_literal")
+                blockers.append("answer_guidance_coverage_invalid")
+            elif typed_areas["direct_answer"][0] not in _guidance_renderings(
+                guidance_values[0], "direct_answer"
+            ) or any(
+                text not in _guidance_renderings(guidance_text, "explanation")
+                for text, guidance_text in zip(
+                    typed_areas["explanation"],
+                    guidance_values[1:],
+                    strict=True,
+                )
+            ):
+                blockers.append("answer_guidance_rendering_not_allowed")
             if typed_limitations != [_GENERAL_GUIDANCE_LIMITATION]:
                 blockers.append("answer_limitation_not_guidance_template")
         elif any(typed_selections.values()):
