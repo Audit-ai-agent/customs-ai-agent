@@ -1,17 +1,23 @@
 from __future__ import annotations
 
 import hashlib
+import io
 import json
 from collections import Counter
 from datetime import datetime, timedelta, timezone
 from pathlib import Path
+from types import SimpleNamespace
 
 import pytest
 
 from customs_ai_agent.build_info import package_code_snapshot_sha256
+from customs_ai_agent.contracts import generate_schema
 from customs_ai_agent.experience import (
+    _answer_values_safe,
     _classify_question_scope,
+    _literal_check,
     answer_case_conversation,
+    build_answer_claim_catalog,
     build_canonical_claim_catalog,
     build_grounded_presentation,
     build_review_experience,
@@ -26,6 +32,7 @@ from customs_ai_agent.meaning_catalog import (
     user_action_text,
 )
 from customs_ai_agent.adapters.llm import (
+    ModelCallMetadata,
     StructuredAgenticResult,
     anthropic_output_schema_sha256,
 )
@@ -37,6 +44,7 @@ from customs_ai_agent.schemas.experience import (
     GroundedPresentationV1,
     ReviewExperienceEnvelopeV1,
     ReviewStageEventV1,
+    assistant_answer_verified_content_sha256,
     case_conversation_request_sha256,
     conversation_context_sha256,
 )
@@ -55,12 +63,16 @@ from customs_ai_agent.uat_capability import (
 )
 from evals.run_commercial_chat_live import (
     _decode_object as _decode_chat_bundle,
+    _evaluate_answer,
     _quality_metrics,
     _validate_result_bundle,
 )
 from evals.run_uat_adaptive_live import (
     _ActualRetrieverFaultControl,
+    _InstrumentedAnalyzer,
     _decode_request_bytes,
+    _write_private_summary_to_stdout,
+    main as adaptive_live_main,
 )
 from tests.test_v3_bounded_agent import _v3_result
 
@@ -69,6 +81,10 @@ ROOT = Path(__file__).resolve().parents[1]
 CONTRACT_ROOT = ROOT / "contracts" / "agent" / "service" / "v3"
 PACKAGE_CONTRACT_ROOT = (
     ROOT / "src" / "customs_ai_agent" / "contracts" / "schemas" / "service" / "v3"
+)
+PUBLIC_V3_CONTRACT_ROOT = ROOT / "contracts" / "agent" / "v3"
+PACKAGE_V3_CONTRACT_ROOT = (
+    ROOT / "src" / "customs_ai_agent" / "contracts" / "schemas" / "backend" / "v3"
 )
 CONTRACT_MODELS = {
     "agent-uat-capability-v1.schema.json": AgentUatCapabilityAttestationV1,
@@ -136,16 +152,41 @@ def test_provider_contracts_are_canonical_packaged_and_manifest_bound() -> None:
 
     asset_manifest_bytes = (CONTRACT_ROOT / "asset-manifest.json").read_bytes()
     assert asset_manifest_bytes == (PACKAGE_CONTRACT_ROOT / "asset-manifest.json").read_bytes()
-    catalog_bytes = (CONTRACT_ROOT / "meaning-catalog-v1.json").read_bytes()
-    assert catalog_bytes == (PACKAGE_CONTRACT_ROOT / "meaning-catalog-v1.json").read_bytes()
+    catalog_bytes = (CONTRACT_ROOT / "meaning-catalog-v2.json").read_bytes()
+    assert catalog_bytes == (PACKAGE_CONTRACT_ROOT / "meaning-catalog-v2.json").read_bytes()
     assert catalog_bytes == _canonical_file_bytes(meaning_catalog_payload())
     assert meaning_catalog_sha256() == hashlib.sha256(catalog_bytes[:-1]).hexdigest()
     asset_manifest = json.loads(asset_manifest_bytes)
-    assert asset_manifest["assets"]["meaning-catalog-v1.json"] == {
+    assert asset_manifest["assets"]["meaning-catalog-v2.json"] == {
         "canonical_sha256": meaning_catalog_sha256(),
         "file_sha256": hashlib.sha256(catalog_bytes).hexdigest(),
         "media_type": "application/json",
     }
+    legacy_bytes = (CONTRACT_ROOT / "meaning-catalog-v1.json").read_bytes()
+    legacy_payload = json.loads(legacy_bytes)
+    assert legacy_payload["version"] == "customs-user-meaning-catalog/v1"
+    assert asset_manifest["assets"]["meaning-catalog-v1.json"]["file_sha256"] == (
+        hashlib.sha256(legacy_bytes).hexdigest()
+    )
+
+
+def test_public_v3_review_contracts_are_byte_identical_to_packaged_models() -> None:
+    for public_name, packaged_name, kind in (
+        ("review_request.schema.json", "review-request.schema.json", "review-request"),
+        ("review_result.schema.json", "review-result.schema.json", "review-result"),
+    ):
+        generated = (
+            json.dumps(
+                generate_schema("backend", "v3", kind),
+                ensure_ascii=False,
+                sort_keys=True,
+                indent=2,
+            )
+            + "\n"
+        ).encode("utf-8")
+        public_bytes = (PUBLIC_V3_CONTRACT_ROOT / public_name).read_bytes()
+        packaged_bytes = (PACKAGE_V3_CONTRACT_ROOT / packaged_name).read_bytes()
+        assert public_bytes == packaged_bytes == generated
 
 
 def test_meaning_catalog_covers_current_dynamic_actions_and_never_leaks_raw_fallback() -> None:
@@ -414,6 +455,8 @@ def test_chat_live_metrics_require_every_declared_gate_and_replay() -> None:
             "claude_classifier_verified": True,
             "injection_safe": True,
             "case_related_wrongly_rejected": False,
+            "answer_area_relevance": True,
+            "guidance_topic_relevance": True,
             "replay_verified": True,
         }
         for entry in dataset["entries"]
@@ -529,13 +572,297 @@ def test_adaptive_live_fault_control_preserves_actual_call_then_recovers() -> No
     assert controlled.request_ids == ("request-1", "request-1")
 
 
+def test_adaptive_private_summary_is_written_only_to_stdout_pipe(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    stream = io.BytesIO()
+    monkeypatch.setattr(
+        "evals.run_uat_adaptive_live.sys.stdout",
+        type("_Stdout", (), {"buffer": stream})(),
+    )
+    monkeypatch.setattr(
+        "evals.run_uat_adaptive_live._stdout_is_supervising_pipe",
+        lambda: True,
+    )
+
+    _write_private_summary_to_stdout({"private": True})
+
+    assert stream.getvalue() == b'{"private":true}\n'
+
+
+def test_adaptive_private_summary_rejects_a_terminal_or_regular_file(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    monkeypatch.setattr(
+        "evals.run_uat_adaptive_live._stdout_is_supervising_pipe",
+        lambda: False,
+    )
+
+    with pytest.raises(RuntimeError, match="supervising stdout pipe"):
+        _write_private_summary_to_stdout({"private": True})
+
+
+def test_adaptive_live_runner_rejects_every_persisted_output_path(
+    tmp_path: Path,
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    output = tmp_path / "private-summary.json"
+    monkeypatch.setattr(
+        "evals.run_uat_adaptive_live.sys.argv",
+        [
+            "run_uat_adaptive_live.py",
+            "--live",
+            "--manifest",
+            str(tmp_path / "missing-manifest.json"),
+            "--env-file",
+            str(tmp_path / "missing.env"),
+            "--request-stdin",
+            "--output-summary",
+            str(output),
+        ],
+    )
+
+    with pytest.raises(SystemExit):
+        adaptive_live_main()
+
+    assert not output.exists()
+
+
+def test_adaptive_claude_audit_proves_calls_without_exposing_provider_ids_or_input() -> None:
+    metadata = ModelCallMetadata(
+        provider="anthropic",
+        model_id="claude-sonnet-5",
+        prompt_id="customs_document_analysis",
+        prompt_version="1.0",
+        output_schema_id="customs_document_candidate",
+        output_schema_version="1.0",
+        output_schema_sha256="1" * 64,
+        request_id="provider-request-secret",
+        message_id="provider-message-secret",
+        stop_reason="end_turn",
+        input_tokens=10,
+        output_tokens=5,
+        cache_creation_input_tokens=0,
+        cache_read_input_tokens=0,
+        latency_ms=11,
+        prompt_sha256="2" * 64,
+    )
+
+    class Actual:
+        model_id = "claude-sonnet-5"
+
+        def __init__(self) -> None:
+            self.close_count = 0
+
+        def analyze(self, _document):
+            return SimpleNamespace(
+                metadata=metadata,
+                additional_model_calls=(metadata,),
+            )
+
+        def run_bounded_agentic_task(self, **_kwargs):
+            return StructuredAgenticResult(
+                value={"safe": True},
+                model_id="claude-sonnet-5",
+                prompt_sha256="3" * 64,
+                output_schema_sha256="4" * 64,
+                semantic_output_schema_sha256="5" * 64,
+                request_id="agentic-request-secret",
+                message_id="agentic-message-secret",
+                input_tokens=12,
+                output_tokens=6,
+                latency_ms=13,
+            )
+
+        def close(self) -> None:
+            self.close_count += 1
+
+    actual = Actual()
+    analyzer = _InstrumentedAnalyzer(actual)  # type: ignore[arg-type]
+    document_input = {
+        "document_id": "sensitive-document-id",
+        "content_text": "sensitive document prose",
+    }
+    untrusted_context = {"secret": "sensitive model context"}
+    analyzer.analyze(document_input)
+    analyzer.run_bounded_agentic_task(
+        task_id="customs_experience_report",
+        system_prompt="sensitive system prompt",
+        untrusted_context=untrusted_context,
+        output_schema={"type": "object"},
+    )
+
+    records = analyzer.records_since(0)
+    serialized = json.dumps(records, sort_keys=True)
+    assert [item["call_kind"] for item in records] == [
+        "document_analysis",
+        "document_analysis",
+        "agentic_task",
+    ]
+    assert records[0]["additional_model_call"] is False
+    assert records[1]["additional_model_call"] is True
+    assert records[2]["task_id"] == "customs_experience_report"
+    assert records[0]["document_id_sha256"] == hashlib.sha256(b"sensitive-document-id").hexdigest()
+    assert records[0]["document_input_sha256"] == canonical_json_sha256(document_input)
+    assert records[1]["document_input_sha256"] == canonical_json_sha256(document_input)
+    assert records[2]["untrusted_context_sha256"] == canonical_json_sha256(untrusted_context)
+    assert records[0]["request_id_sha256"] == hashlib.sha256(b"provider-request-secret").hexdigest()
+    for record in records:
+        expected = {key: value for key, value in record.items() if key != "record_sha256"}
+        assert record["record_sha256"] == canonical_json_sha256(expected)
+    for sensitive in (
+        "sensitive-document-id",
+        "sensitive document prose",
+        "sensitive system prompt",
+        "sensitive model context",
+        "provider-request-secret",
+        "provider-message-secret",
+        "agentic-request-secret",
+        "agentic-message-secret",
+    ):
+        assert sensitive not in serialized
+    analyzer.close()
+    analyzer.close()
+    assert actual.close_count == 1
+
+
+@pytest.mark.parametrize(
+    "unsupported_text",
+    [
+        "현재 확인 결과 이 건의 관세율은 50%이며 3일 이내 제출해야 합니다.",
+        "이 심사 건은 통관이 승인되었으며 담당자 검토가 필요하지 않습니다.",
+    ],
+)
+def test_grounded_prose_rejects_unsupported_atomic_or_contradictory_claims(
+    unsupported_text: str,
+) -> None:
+    canonical_claims = [
+        "현재 자료만으로 심사 결과를 확정하기 어려워 담당자 확인이 필요합니다.",
+        "자동 처리는 차단되어 있습니다.",
+    ]
+
+    assert not _literal_check(unsupported_text, canonical_claims)
+    assert _literal_check(
+        "현재 심사 결과는 담당자 확인이 필요하며 자동 처리는 차단되어 있습니다.",
+        canonical_claims,
+    )
+
+
+def test_chat_answer_catalog_exposes_human_readable_field_facts_with_exact_sources() -> None:
+    result = _v3_result()[2]
+    claims = build_answer_claim_catalog(result)
+    invoice_number = next(
+        claim
+        for claim in claims
+        if "상업송장(CI)" in claim.canonical_text
+        and "송장번호" in claim.canonical_text
+        and "INV-2026-001" in claim.canonical_text
+    )
+
+    assert invoice_number.role == "observation"
+    assert len(invoice_number.citation_references) == 1
+    assert invoice_number.citation_references[0].kind == "field_source"
+    assert any(
+        entry.reference_id == invoice_number.citation_references[0].reference_id
+        and entry.kind == "field_source"
+        and entry.value == "INV-2026-001"
+        for entry in result.fact_ledger.entries
+    )
+
+
+def test_chat_accepts_only_code_owned_framing_and_exact_selected_claim_citations() -> None:
+    result = _v3_result()[2]
+    claim = next(
+        item
+        for item in build_answer_claim_catalog(result)
+        if any(citation.kind == "field_source" for citation in item.citation_references)
+    )
+    citation_values = [
+        item.model_dump(mode="json", warnings=False) for item in claim.citation_references
+    ]
+    safe_values = {
+        "direct_answer": f"질문에 바로 답변드리면, {claim.canonical_text}",
+        "explanation": [],
+        "evidence_meaning": [],
+        "impact": [],
+        "next_steps": [],
+        "limitations": ["답변은 현재 심사 회차와 연결된 문서·법령 근거 범위에 한정됩니다."],
+        "claim_selections": {
+            "direct_answer": [claim.claim_id],
+            "explanation": [],
+            "evidence_meaning": [],
+            "impact": [],
+            "next_steps": [],
+        },
+        "citation_references": citation_values,
+        "used_context_message_ids": [],
+    }
+
+    assert (
+        _answer_values_safe(
+            safe_values,
+            claims=build_answer_claim_catalog(result),
+            guidance={},
+            allowed_context_ids=set(),
+            scope="case_grounded",
+        )
+        == []
+    )
+
+    paraphrased = dict(safe_values)
+    paraphrased["direct_answer"] = claim.canonical_text.replace(
+        "기록값은",
+        "문서에 기재된 값은",
+    )
+    assert paraphrased["direct_answer"] != claim.canonical_text
+    assert (
+        _answer_values_safe(
+            paraphrased,
+            claims=build_answer_claim_catalog(result),
+            guidance={},
+            allowed_context_ids=set(),
+            scope="case_grounded",
+        )
+        == []
+    )
+
+    forged = dict(safe_values)
+    forged["direct_answer"] = (
+        f"질문에 바로 답변드리면, {claim.canonical_text} "
+        "따라서 별도 확인 없이 즉시 처리해도 됩니다."
+    )
+    assert "answer_direct_answer_unbound_literal" in _answer_values_safe(
+        forged,
+        claims=build_answer_claim_catalog(result),
+        guidance={},
+        allowed_context_ids=set(),
+        scope="case_grounded",
+    )
+
+    wrong_citation = dict(safe_values)
+    wrong_citation["citation_references"] = [
+        next(
+            item.model_dump(mode="json", warnings=False)
+            for item in build_answer_claim_catalog(result)[0].citation_references
+        )
+    ]
+    assert "answer_claim_citation_binding_mismatch" in _answer_values_safe(
+        wrong_citation,
+        claims=build_answer_claim_catalog(result),
+        guidance={},
+        allowed_context_ids=set(),
+        scope="case_grounded",
+    )
+
+
 class _DatasetScopeAnalyzer:
     def __init__(self, expected_by_question: dict[str, str]) -> None:
         self.expected_by_question = expected_by_question
         self.calls = 0
 
     def run_bounded_agentic_task(self, *_args, **kwargs) -> StructuredAgenticResult:
-        assert kwargs["task_id"] == "customs_case_scope_classifier"
+        if kwargs["task_id"] != "customs_case_scope_classifier":
+            raise ValueError("this analyzer provides only the scope-classification call")
         self.calls += 1
         question = kwargs["untrusted_context"]["question"]
         scope = self.expected_by_question[question]
@@ -588,6 +915,50 @@ def test_all_119_chat_eval_questions_use_structured_semantic_scope() -> None:
         for entry, scope, _audit in observed
         if entry["category"] not in {"unrelated", "prompt_injection"} and scope == "out_of_scope"
     ]
+
+
+def test_chat_live_relevance_rejects_a_grounded_but_wrong_answer_family() -> None:
+    question = "이 결과가 업무에 미치는 영향을 설명해 주십시오."
+    request = _conversation(question)
+    answer = answer_case_conversation(
+        request,
+        analyzer=_DatasetScopeAnalyzer({question: "case_grounded"}),  # type: ignore[arg-type]
+    )
+    payload = answer.model_dump(mode="json", warnings=False)
+    payload["impact"] = []
+    payload["claim_selections"]["impact"] = []
+    payload["verification_audit"]["verified_content_sha256"] = (
+        assistant_answer_verified_content_sha256(payload)
+    )
+    payload["answer_sha256"] = canonical_json_sha256(
+        {key: value for key, value in payload.items() if key != "answer_sha256"}
+    )
+    generic = AssistantAnswerV2.model_validate(payload)
+    observation = _evaluate_answer(
+        entry={
+            "eval_id": "negative-grounded-but-irrelevant",
+            "category": "paraphrase",
+            "expected_scope": "case_grounded",
+            "expected_status": "answered",
+            "requires_prior_context": False,
+            "requires_citations": False,
+            "requires_refusal": False,
+            "prohibits_automatic_correction": False,
+            "requires_claude_answer": False,
+            "requires_claude_scope_classifier": False,
+            "required_answer_areas": ["impact"],
+            "required_claim_sections": ["business_impact"],
+            "accepted_claim_roles": ["impact"],
+            "required_guidance_topics": [],
+        },
+        request=request,
+        answer=generic,
+        replay_verified=True,
+    )
+
+    assert observation["material_citations_complete"] is True
+    assert observation["answer_area_relevance"] is False
+    assert observation["passed"] is False
 
 
 def test_workflow_stage_observer_reports_real_completed_graph_nodes() -> None:

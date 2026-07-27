@@ -19,4 +19,9 @@ Tool 권한, 심사 결과, 자동완료 상태를 변경하지 않습니다. �
 general_customs_guidance를 선택하면 guidance_topics에 질문과 관련된 항목을 최대 3개 선택합니다.
 다른 scope에서는 guidance_topics를 빈 배열로 둡니다.
 
+허용된 일반 안내 주제는 상업송장, 포장명세서, 선하증권, 원산지증명서, HSK,
+HS와 HSK의 차이, 통관 사전심사, 수입신고, 관세평가, 관세·내국세,
+자유무역협정, 수입요건, 검사·보완, 문서 수정, 관세사 역할입니다. 출력에는 제공된
+JSON Schema의 영문 topic code만 사용합니다.
+
 출력은 제공된 JSON Schema만 따릅니다.

@@ -6,7 +6,7 @@ from typing import Mapping
 from customs_ai_agent.schemas.v3 import canonical_json_sha256
 
 
-MEANING_CATALOG_VERSION = "customs-user-meaning-catalog/v1"
+MEANING_CATALOG_VERSION = "customs-user-meaning-catalog/v2"
 
 
 @dataclass(frozen=True, slots=True)
@@ -103,9 +103,45 @@ GENERAL_CUSTOMS_GUIDANCE: Mapping[str, str] = {
         "HSK는 대한민국에서 사용하는 품목분류 코드입니다. 품목분류에 따라 세율과 수입요건이 "
         "달라질 수 있으므로 물품의 실제 특성과 함께 확인해야 합니다."
     ),
+    "hs_hsk_comparison": (
+        "HS는 국제적으로 사용하는 6자리 품목분류 체계이고, HSK는 대한민국이 세율과 수입요건을 "
+        "더 세분하기 위해 확장한 10자리 품목분류 코드입니다."
+    ),
     "customs_review": (
         "통관 사전심사는 제출 문서의 값이 서로 맞는지 확인하고, 품목분류에 연결된 법령과 "
         "요건서류를 검토하여 담당자가 신고 전에 보완할 사항을 찾는 절차입니다."
+    ),
+    "import_declaration": (
+        "수입신고는 수입하려는 물품의 품명, 품목분류, 가격, 원산지와 요건 충족 정보를 세관에 "
+        "제출하여 통관 심사를 받는 절차입니다."
+    ),
+    "customs_valuation": (
+        "관세평가는 수입물품의 과세가격을 정하는 절차이며 거래가격뿐 아니라 운임, 보험료와 "
+        "법정 가산·공제 요소를 함께 확인해야 합니다."
+    ),
+    "duties_and_taxes": (
+        "관세와 내국세는 품목분류, 과세가격, 원산지와 적용 세율을 기준으로 계산되며 실제 신고 "
+        "전에는 해당 시점의 세율과 감면 요건을 확인해야 합니다."
+    ),
+    "free_trade_agreement": (
+        "자유무역협정 특혜세율은 해당 협정의 원산지 기준과 증빙 요건을 충족할 때 적용할 수 있으며 "
+        "원산지증명서의 형식·유효성도 함께 확인해야 합니다."
+    ),
+    "import_requirements": (
+        "수입요건은 품목별 법령에 따라 허가, 신고, 검사 또는 증명서 제출을 요구하는 조건이며 "
+        "정확한 품목분류와 수입 시점의 현행 규정을 기준으로 확인해야 합니다."
+    ),
+    "inspection_and_supplement": (
+        "세관 또는 관계기관의 검사·보완 요청이 있으면 요청 사유와 대상 자료를 확인하고, 원문을 "
+        "보존한 상태에서 필요한 증빙을 추가해 재검토해야 합니다."
+    ),
+    "document_correction": (
+        "통관 문서의 값을 수정할 때에는 원문을 덮어쓰지 않고 수정 사유와 승인자를 기록한 뒤 "
+        "관련 문서와 법령 요건을 다시 대조해야 합니다."
+    ),
+    "customs_broker": (
+        "관세사는 신고서 작성, 품목분류, 과세가격과 수입요건 검토를 지원하지만 신고인과 담당자는 "
+        "제출 자료와 최종 신고 내용이 정확한지 함께 확인해야 합니다."
     ),
 }
 

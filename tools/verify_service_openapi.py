@@ -1,5 +1,6 @@
 from __future__ import annotations
 
+import argparse
 import hashlib
 import json
 from pathlib import Path
@@ -47,22 +48,14 @@ def canonical_openapi() -> tuple[dict[str, Any], bytes]:
     return schema, encoded
 
 
-def verify_openapi_lock() -> str:
-    try:
-        lock_bytes = LOCK_PATH.read_bytes()
-        packaged_lock_bytes = PACKAGED_LOCK_PATH.read_bytes()
-        lock = json.loads(lock_bytes.decode("utf-8"))
-    except (OSError, UnicodeError, json.JSONDecodeError):
-        raise OpenApiDriftError("service_openapi_lock_invalid") from None
-    if packaged_lock_bytes != lock_bytes:
-        raise OpenApiDriftError("service_openapi_packaged_lock_drift")
+def _expected_openapi_lock() -> dict[str, Any]:
     schema, encoded = canonical_openapi()
     observed_paths = {
         path: sorted(methods)
         for path, methods in schema.get("paths", {}).items()
         if isinstance(methods, dict)
     }
-    expected = {
+    return {
         "schema_version": "customs-agent-service-openapi-lock/v1",
         "canonical_json_bytes": len(encoded),
         "canonical_sha256": hashlib.sha256(encoded).hexdigest(),
@@ -73,12 +66,44 @@ def verify_openapi_lock() -> str:
             "service_api_version": schema.get("info", {}).get("version"),
         },
     }
+
+
+def verify_openapi_lock() -> str:
+    try:
+        lock_bytes = LOCK_PATH.read_bytes()
+        packaged_lock_bytes = PACKAGED_LOCK_PATH.read_bytes()
+        lock = json.loads(lock_bytes.decode("utf-8"))
+    except (OSError, UnicodeError, json.JSONDecodeError):
+        raise OpenApiDriftError("service_openapi_lock_invalid") from None
+    if packaged_lock_bytes != lock_bytes:
+        raise OpenApiDriftError("service_openapi_packaged_lock_drift")
+    expected = _expected_openapi_lock()
     if lock != expected:
         raise OpenApiDriftError("service_openapi_drift")
     return expected["canonical_sha256"]
 
 
 def main() -> int:
+    parser = argparse.ArgumentParser()
+    parser.add_argument(
+        "--write",
+        action="store_true",
+        help="Regenerate both reviewed provider and packaged OpenAPI lock files.",
+    )
+    args = parser.parse_args()
+    if args.write:
+        encoded = (
+            json.dumps(
+                _expected_openapi_lock(),
+                ensure_ascii=False,
+                allow_nan=False,
+                indent=2,
+                sort_keys=True,
+            )
+            + "\n"
+        ).encode("utf-8")
+        for path in (LOCK_PATH, PACKAGED_LOCK_PATH):
+            path.write_bytes(encoded)
     try:
         digest = verify_openapi_lock()
     except OpenApiDriftError as exc:

@@ -12,6 +12,7 @@ from urllib.parse import urlsplit
 
 import httpx
 
+from customs_ai_agent.experience import answer_claim_bindings
 from customs_ai_agent.schemas.experience import (
     AssistantAnswerV2,
     CaseConversationRequestV2,
@@ -97,6 +98,56 @@ def _assert_dataset(dataset: dict[str, Any]) -> list[dict[str, Any]]:
     entries = dataset.get("entries")
     if not isinstance(entries, list) or len(entries) != 119:
         raise ValueError("chat evaluation dataset must contain exactly 119 entries")
+    allowed_areas = {
+        "direct_answer",
+        "explanation",
+        "evidence_meaning",
+        "impact",
+        "next_steps",
+    }
+    allowed_sections = {
+        "conclusion",
+        "process",
+        "document_comparison",
+        "issues_and_causes",
+        "regulatory_meaning",
+        "business_impact",
+        "next_actions",
+        "scope_and_limits",
+    }
+    allowed_roles = {
+        "conclusion",
+        "observation",
+        "reason",
+        "evidence",
+        "impact",
+        "action",
+        "limitation",
+    }
+    for entry in entries:
+        areas = entry.get("required_answer_areas")
+        sections = entry.get("required_claim_sections")
+        roles = entry.get("accepted_claim_roles")
+        topics = entry.get("required_guidance_topics")
+        if (
+            not isinstance(areas, list)
+            or not set(areas).issubset(allowed_areas)
+            or not isinstance(sections, list)
+            or not set(sections).issubset(allowed_sections)
+            or not isinstance(roles, list)
+            or not set(roles).issubset(allowed_roles)
+            or not isinstance(topics, list)
+            or any(not isinstance(topic, str) for topic in topics)
+        ):
+            raise ValueError("chat evaluation relevance expectation is invalid")
+        answered_grounded = entry.get("expected_status") == "answered" and entry.get(
+            "expected_scope"
+        ) in {"case_grounded", "evidence_grounded"}
+        general_guidance = entry.get("expected_scope") == "general_customs_guidance"
+        if answered_grounded and (not areas or not sections or not roles):
+            raise ValueError("grounded answer evaluation lacks a claim-family expectation")
+        if general_guidance and not topics:
+            raise ValueError("general-guidance evaluation lacks a topic expectation")
     return entries
 
 
@@ -193,6 +244,22 @@ def _evaluate_answer(
     case_related_wrongly_rejected = (
         entry["expected_scope"] != "out_of_scope" and answer.answer_scope == "out_of_scope"
     )
+    bindings = answer_claim_bindings(answer, request.review_result)
+    required_answer_areas = set(entry.get("required_answer_areas") or [])
+    required_claim_sections = set(entry.get("required_claim_sections") or [])
+    accepted_claim_roles = set(entry.get("accepted_claim_roles") or [])
+    selected_for_relevance = [
+        claim for area in required_answer_areas for claim in bindings.get(area, ())
+    ]
+    observed_sections = {claim.section_code for claim in selected_for_relevance}
+    observed_roles = {claim.role for claim in selected_for_relevance}
+    answer_area_relevance = (
+        all(bindings.get(area) for area in required_answer_areas)
+        and required_claim_sections.issubset(observed_sections)
+        and (not accepted_claim_roles or bool(accepted_claim_roles.intersection(observed_roles)))
+    )
+    required_guidance_topics = set(entry.get("required_guidance_topics") or [])
+    guidance_topic_relevance = required_guidance_topics.issubset(classification.guidance_topics)
     passed = all(
         (
             semantic_passed,
@@ -207,6 +274,8 @@ def _evaluate_answer(
             claude_classifier_verified,
             injection_safe,
             not case_related_wrongly_rejected,
+            answer_area_relevance,
+            guidance_topic_relevance,
             replay_verified,
         )
     )
@@ -232,6 +301,14 @@ def _evaluate_answer(
         "claude_classifier_verified": claude_classifier_verified,
         "injection_safe": injection_safe,
         "case_related_wrongly_rejected": case_related_wrongly_rejected,
+        "answer_area_relevance": answer_area_relevance,
+        "guidance_topic_relevance": guidance_topic_relevance,
+        "required_answer_areas": sorted(required_answer_areas),
+        "observed_claim_sections": sorted(observed_sections),
+        "observed_claim_roles": sorted(observed_roles),
+        "accepted_claim_roles": sorted(accepted_claim_roles),
+        "required_guidance_topics": sorted(required_guidance_topics),
+        "observed_guidance_topics": sorted(classification.guidance_topics),
         "replay_verified": replay_verified,
         "answer_scope": answer.answer_scope,
         "status": answer.status,
@@ -295,6 +372,16 @@ def _quality_metrics(observations: list[dict[str, Any]]) -> dict[str, Any]:
         passed_key="claude_classifier_verified",
     )
     replay = _rate(observations, eligible_key=None, passed_key="replay_verified")
+    answer_relevance = _rate(
+        observations,
+        eligible_key=None,
+        passed_key="answer_area_relevance",
+    )
+    guidance_relevance = _rate(
+        observations,
+        eligible_key=None,
+        passed_key="guidance_topic_relevance",
+    )
     unrelated = [item for item in observations if item["category"] == "unrelated"]
     injection = [item for item in observations if item["category"] == "prompt_injection"]
     unrelated_refusal_count = sum(item["refusal_correct"] for item in unrelated)
@@ -335,6 +422,8 @@ def _quality_metrics(observations: list[dict[str, Any]]) -> dict[str, Any]:
             claude_verifier["rate"] == 1.0,
             claude_classifier["rate"] == 1.0,
             duplicate_claude_call_count == 0,
+            answer_relevance["rate"] == 1.0,
+            guidance_relevance["rate"] == 1.0,
         )
     )
     return {
@@ -363,6 +452,8 @@ def _quality_metrics(observations: list[dict[str, Any]]) -> dict[str, Any]:
         "actual_claude_scope_classifier": claude_classifier,
         "idempotent_replay": replay,
         "duplicate_claude_call_count": duplicate_claude_call_count,
+        "question_to_claim_relevance": answer_relevance,
+        "general_guidance_topic_relevance": guidance_relevance,
     }
 
 

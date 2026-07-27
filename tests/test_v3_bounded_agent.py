@@ -2,6 +2,7 @@ from __future__ import annotations
 
 import hashlib
 import json
+from datetime import datetime, timedelta, timezone
 from types import SimpleNamespace
 
 import pytest
@@ -70,6 +71,7 @@ from customs_ai_agent.v3_semantics import (
     expected_narrative_claims,
     reconstruct_v3_current_semantics,
 )
+from customs_ai_agent.uat_capability import issue_uat_capability
 
 
 @pytest.fixture(autouse=True)
@@ -2101,9 +2103,27 @@ def test_evidence_gap_uses_two_real_cycles_only_while_gap_remains_open(
     monkeypatch: pytest.MonkeyPatch,
 ) -> None:
     import customs_ai_agent.agentic as agentic
+    import customs_ai_agent.uat_capability as uat_capability
 
     gap = _test_gap("evidence_incomplete", 1, "evidence-1")
-    monkeypatch.setattr(agentic, "load_release_profile", _active_profile)
+    inactive_profile = _active_profile()
+    inactive_profile.kill_switch_active = True
+    monkeypatch.setattr(agentic, "load_release_profile", lambda: inactive_profile)
+    monkeypatch.setattr(
+        uat_capability,
+        "package_code_snapshot_sha256",
+        lambda: "0" * 64,
+    )
+    runtime = _v3_result()[2].runtime_release
+    issued_at = datetime.now(timezone.utc)
+    capability = issue_uat_capability(
+        agent_commit=runtime.agent_git_sha or "0" * 40,
+        model_id=runtime.model_id,
+        evidence_runtime_v3_sha256=runtime.evidence_runtime_v3_sha256 or "e" * 64,
+        issued_at=issued_at,
+        expires_at=issued_at + timedelta(hours=1),
+        adaptive_active=True,
+    )
     uat_plan = agentic._compile_uat_bounded_retry_plan(
         compile_shadow_plan([gap]),
         [gap],
@@ -2111,6 +2131,8 @@ def test_evidence_gap_uses_two_real_cycles_only_while_gap_remains_open(
     active = activate_bounded_plan(
         uat_plan,
         policy_id=AGENT_POLICY_ID,
+        uat_capability=capability,
+        runtime_release=runtime,
     )
     evidence_actions = [
         action for action in active.actions if action.tool_name == "evidence.retrieve/v3"
@@ -2137,6 +2159,8 @@ def test_evidence_gap_uses_two_real_cycles_only_while_gap_remains_open(
             reason_code="gap_remains_open",
         ),
         policy_id=AGENT_POLICY_ID,
+        uat_capability=capability,
+        runtime_release=runtime,
     )
     evidence_traces = [trace for trace in traces if trace.tool_name == "evidence.retrieve/v3"]
     assert failed_calls == 2
@@ -2165,6 +2189,8 @@ def test_evidence_gap_uses_two_real_cycles_only_while_gap_remains_open(
             resolved_gap_ids=(values["action"].gap_id,),
         ),
         policy_id=AGENT_POLICY_ID,
+        uat_capability=capability,
+        runtime_release=runtime,
     )
     evidence_traces = [trace for trace in traces if trace.tool_name == "evidence.retrieve/v3"]
     assert successful_calls == 1
@@ -2214,6 +2240,7 @@ def test_uat_retry_compiler_reserves_budget_and_rereads_each_field_once() -> Non
     reread_references = [
         reference for action in reread_actions for reference in action.input_reference_ids
     ]
+    assert all(len(action.input_reference_ids) == 1 for action in reread_actions)
     assert len(reread_references) == len(set(reread_references))
 
 
@@ -2738,7 +2765,7 @@ def test_active_broker_rejects_unknown_tool_and_repeated_field_reread(
     assert len(traces) <= active.tool_call_limit <= 6
 
 
-def test_runtime_reserves_unique_evidence_attempts_when_pending_state_is_discarded(
+def test_runtime_reserves_unique_evidence_attempts_when_retry_state_is_discarded(
     monkeypatch: pytest.MonkeyPatch,
 ) -> None:
     import customs_ai_agent.runtime as runtime_module
@@ -2751,17 +2778,11 @@ def test_runtime_reserves_unique_evidence_attempts_when_pending_state_is_discard
         def preflight(self, *_args, **_kwargs):
             return None
 
-    def fake_review_v2(_request, **kwargs):
-        attempt = kwargs["initial_retrieval_attempt"]
-        observed_attempts.append(("reread", attempt))
-        return {"retrieval_attempt": attempt + 1}
-
     def fake_retrieve(state, _retriever):
         attempt = state["retrieval_attempt"]
         observed_attempts.append(("retry", attempt))
         return {"retrieval_attempt": attempt + 1}
 
-    monkeypatch.setattr(runtime_module, "run_review_v2", fake_review_v2)
     monkeypatch.setattr(runtime_module, "retrieve_regulations", fake_retrieve)
     executor = runtime_module._RuntimeBoundedAdaptiveExecutor(
         service_request=service_request,
@@ -2773,19 +2794,109 @@ def test_runtime_reserves_unique_evidence_attempts_when_pending_state_is_discard
         supporting_document_rejections=[],
         assertion_verifier=None,
     )
-    document_id = service_request.documents[0].document_id
     executor._reference_kinds = {
-        "field-reference": "field_source",
         "evidence-reference": "evidence",
     }
-    executor._reference_documents = {"field-reference": document_id}
 
-    assert executor._reread_span(("field-reference",)).status == "succeeded"
-    # Simulate a failed deterministic reevaluation discarding the Tool state.
+    assert executor._retry_evidence(("evidence-reference",)).status == "succeeded"
+    # Simulate a failed deterministic reevaluation discarding an HTTP result.
     executor._pending_state = None
     assert executor._retry_evidence(("evidence-reference",)).status == "succeeded"
 
-    assert observed_attempts == [("reread", 1), ("retry", 2)]
+    assert observed_attempts == [("retry", 1), ("retry", 2)]
+
+
+def test_runtime_rereads_one_exact_field_without_rag_and_keeps_uncalibrated_gap_open(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    import customs_ai_agent.runtime as runtime_module
+    from customs_ai_agent.adapters.retrieval import MockRegulationRetriever
+    from customs_ai_agent.schemas.v3 import PlannedToolActionV1
+    from tests.test_llm_workflow import StaticAnalyzer
+
+    request = _request(review_run_id="v3_exact_span_reread")
+    service_request = runtime_module._project_service_request_v3_to_v2(request)
+    workflow_request = ReviewRunRequestV2.model_validate(
+        service_request.model_dump(mode="python", warnings=False)
+    )
+    analyzer = StaticAnalyzer()
+    state = run_review_v2(
+        workflow_request,
+        retriever=MockRegulationRetriever(),
+        analyzer=analyzer,
+    )
+    analyzer.calls.clear()
+    result = to_review_run_result_v2(state)
+    ledger = build_fact_ledger(result).ledger
+    target = next(
+        entry
+        for entry in ledger.entries
+        if entry.kind == "field_source"
+        and entry.document_id == "doc_inv"
+        and entry.label.endswith(".invoice_no")
+    )
+
+    class Retriever:
+        expected_identity = SimpleNamespace(runtime_release_v3_sha256="e" * 64)
+
+        def policy_bindings(self, _request_id):
+            return {}
+
+        def retrieve(self, *_args, **_kwargs):
+            raise AssertionError("a field span reread must not call Evidence")
+
+    executor = runtime_module._RuntimeBoundedAdaptiveExecutor(
+        service_request=service_request,
+        request=request,
+        retriever=Retriever(),
+        analyzer=analyzer,
+        state=state,
+        result=result,
+        supporting_document_rejections=[],
+        assertion_verifier=None,
+    )
+    executor._reference_kinds = {entry.reference_id: entry.kind for entry in ledger.entries}
+    executor._reference_documents = {
+        entry.reference_id: entry.document_id for entry in ledger.entries
+    }
+    executor._field_targets = executor._index_field_targets()
+
+    observation = executor._reread_span((target.reference_id,))
+
+    assert observation.status == "succeeded"
+    assert observation.reason_code == "source_bound_field_reobserved_exactly"
+    assert analyzer.calls == ["doc_inv"]
+    gap_id = stable_object_id(
+        "gap",
+        {"gap_type": "field_uncertainty", "reference_id": target.reference_id},
+    )
+    action_payload = {
+        "tool_name": "document.reread_span/v1",
+        "gap_id": gap_id,
+        "reason_code": "field_confidence_below_threshold",
+        "input_reference_ids": [target.reference_id],
+    }
+    action = PlannedToolActionV1(
+        action_id=stable_object_id("action", action_payload),
+        **action_payload,
+    )
+    rerun = executor._reevaluate(
+        action=action,
+        observation=observation,
+        affected_stages=(
+            "extraction",
+            "normalization",
+            "pairing",
+            "validation",
+            "compliance",
+            "outcome",
+        ),
+    )
+
+    assert rerun.status == "succeeded"
+    assert rerun.reason_code == "affected_deterministic_stages_reexecuted_gap_open"
+    assert rerun.resolved_gap_ids == ()
+    assert rerun.output_reference_ids == (target.reference_id,)
 
 
 def test_bounded_recovery_evaluation_meets_ninety_five_percent_without_policy_mutation(

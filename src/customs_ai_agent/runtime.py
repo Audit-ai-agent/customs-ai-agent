@@ -17,6 +17,7 @@ from customs_ai_agent.adapters.llm import (
     ClaudeDocumentAnalyzer,
     ClaudeSettings,
     LLMError,
+    analysis_to_extracted_document,
 )
 from customs_ai_agent.adapters.ocr import OcrLayoutProvider, OcrLayoutProviderError
 from customs_ai_agent.adapters.retrieval import (
@@ -62,9 +63,12 @@ from customs_ai_agent.agentic import (
     verified_requirement_codes_by_item,
 )
 from customs_ai_agent.nodes.compliance import compliance_review
+from customs_ai_agent.nodes.normalize import normalize_documents
+from customs_ai_agent.nodes.pair import pair_documents
 from customs_ai_agent.nodes.report import generate_xai_report
 from customs_ai_agent.nodes.retrieve import retrieve_regulations
 from customs_ai_agent.nodes.route import route_to_human_or_complete
+from customs_ai_agent.nodes.validate import validate_cross_documents
 from customs_ai_agent.policies.outcome import extraction_completion_blockers
 from customs_ai_agent.schemas.models import (
     ReviewRunRequestV2,
@@ -83,6 +87,7 @@ from customs_ai_agent.schemas.v3 import (
     ReviewRunResultV3,
     ServiceReviewRunRequestV3,
     review_result_v3_sha256,
+    stable_object_id,
 )
 from customs_ai_agent.schemas.experience import (
     AgentUatCapabilityAttestationV1,
@@ -627,10 +632,12 @@ def _assert_public_result_safe(
 class _RuntimeBoundedAdaptiveExecutor:
     """Runtime-owned active Tool composition over the mandatory workflow.
 
-    The request cannot inject handlers. A span reread is bound to canonical
-    FactLedger field references and re-invokes the pinned Claude analyzer over
-    the immutable text request. Evidence retry reuses only the already-pinned
-    v3 retriever. Both paths then run code-owned compliance/outcome stages.
+    The request cannot inject handlers. A field reread is bound to one
+    canonical FactLedger field reference, re-invokes the pinned Claude
+    analyzer for only the owning immutable document, and accepts only an exact
+    re-observation of that field's value and source span. Evidence retry reuses
+    only the already-pinned v3 retriever. Both paths then run code-owned
+    deterministic stages.
     """
 
     def __init__(
@@ -655,6 +662,8 @@ class _RuntimeBoundedAdaptiveExecutor:
         self._assertion_verifier = assertion_verifier
         self._reference_kinds: dict[str, str] = {}
         self._reference_documents: dict[str, str | None] = {}
+        self._field_targets: dict[str, dict[str, Any]] = {}
+        self._pending_reobserved_references: set[str] = set()
         self._pending_state: dict[str, Any] | None = None
         self._next_retrieval_attempt = int(state.get("retrieval_attempt") or 0)
 
@@ -669,6 +678,84 @@ class _RuntimeBoundedAdaptiveExecutor:
         attempt = self._next_retrieval_attempt
         self._next_retrieval_attempt += 1
         return attempt
+
+    def _index_field_targets(self) -> dict[str, dict[str, Any]]:
+        targets: dict[str, dict[str, Any]] = {}
+        for document in self._result.document_results:
+            for document_field in document.fields:
+                reference_id = stable_object_id(
+                    "field",
+                    {
+                        "document_id": document.document_id,
+                        "field_path": f"fields.{document_field.name}",
+                        "source": document_field.source.model_dump(mode="json"),
+                    },
+                )
+                targets[reference_id] = {
+                    "document_id": document.document_id,
+                    "field_name": document_field.name,
+                    "line_item_id": None,
+                    # A reread observes the source value, not the later
+                    # code-normalized projection. Normalization is rerun as a
+                    # separate deterministic stage after the observation.
+                    "value": document_field.value,
+                    "source": document_field.source.model_dump(mode="json"),
+                }
+            for line_item in document.line_items:
+                for item_field in line_item.fields:
+                    reference_id = stable_object_id(
+                        "field",
+                        {
+                            "document_id": document.document_id,
+                            "field_path": (f"line_items.{line_item.item_id}.{item_field.name}"),
+                            "source": item_field.source.model_dump(mode="json"),
+                        },
+                    )
+                    targets[reference_id] = {
+                        "document_id": document.document_id,
+                        "field_name": item_field.name,
+                        "line_item_id": line_item.item_id,
+                        "value": item_field.value,
+                        "source": item_field.source.model_dump(mode="json"),
+                    }
+        return targets
+
+    @staticmethod
+    def _mapped_field(
+        mapped_document: dict[str, Any],
+        target: dict[str, Any],
+    ) -> dict[str, Any] | None:
+        line_item_id = target["line_item_id"]
+        field_name = target["field_name"]
+        if line_item_id is None:
+            value = (mapped_document.get("fields") or {}).get(field_name)
+            return value if isinstance(value, dict) else None
+        for line_item in mapped_document.get("line_items") or []:
+            if (
+                isinstance(line_item, dict)
+                and line_item.get("item_id") == line_item_id
+                and isinstance(line_item.get(field_name), dict)
+            ):
+                return line_item[field_name]
+        return None
+
+    @staticmethod
+    def _same_public_value(left: Any, right: Any) -> bool:
+        return json.dumps(
+            left,
+            ensure_ascii=False,
+            allow_nan=False,
+            separators=(",", ":"),
+            sort_keys=True,
+            default=str,
+        ) == json.dumps(
+            right,
+            ensure_ascii=False,
+            allow_nan=False,
+            separators=(",", ":"),
+            sort_keys=True,
+            default=str,
+        )
 
     def _finalize_state(
         self,
@@ -749,43 +836,114 @@ class _RuntimeBoundedAdaptiveExecutor:
         return next_state, final_result, supporting_rejections
 
     def _reread_span(self, reference_ids: tuple[str, ...]) -> BoundedToolResult:
-        document_ids = {
-            self._reference_documents.get(reference_id)
-            for reference_id in reference_ids
-            if self._reference_kinds.get(reference_id) == "field_source"
-        }
-        if (
-            len(document_ids) == 0
-            or None in document_ids
-            or any(self._reference_kinds.get(item) != "field_source" for item in reference_ids)
-        ):
+        self._pending_reobserved_references = set()
+        if len(reference_ids) != 1:
             return BoundedToolResult(status="failed", reason_code="span_reference_not_grounded")
-        request_document_ids = {
-            document.document_id for document in self._service_request.documents or []
-        }
-        if not document_ids.issubset(request_document_ids):
+        reference_id = reference_ids[0]
+        target = self._field_targets.get(reference_id)
+        if self._reference_kinds.get(reference_id) != "field_source" or target is None:
+            return BoundedToolResult(status="failed", reason_code="span_reference_not_grounded")
+        document = next(
+            (
+                item
+                for item in self._service_request.documents or []
+                if item.document_id == target["document_id"]
+            ),
+            None,
+        )
+        if document is None or not document.content_text:
             return BoundedToolResult(status="failed", reason_code="span_document_not_in_request")
-        retrieval_attempt = self._reserve_retrieval_attempt()
+        source = target["source"]
+        text_start = source.get("text_start")
+        text_end = source.get("text_end")
+        if (
+            isinstance(text_start, bool)
+            or isinstance(text_end, bool)
+            or not isinstance(text_start, int)
+            or not isinstance(text_end, int)
+            or not 0 <= text_start < text_end <= len(document.content_text)
+        ):
+            return BoundedToolResult(
+                status="failed",
+                reason_code="span_coordinates_not_grounded",
+            )
+        analysis_document = document.model_dump(mode="python", warnings=False)
         try:
-            self._retriever.preflight(self._service_request.review_as_of)
-            workflow_request = ReviewRunRequestV2.model_validate(
-                self._service_request.model_dump(mode="python", warnings=False)
+            analysis = self._analyzer.analyze(analysis_document)
+            mapped = analysis_to_extracted_document(
+                analysis_document,
+                analysis,
             )
-            self._pending_state = run_review_v2(
-                workflow_request,
-                retriever=self._retriever,
-                analyzer=self._analyzer,
-                initial_retrieval_attempt=retrieval_attempt,
-            )
+            fresh_field = self._mapped_field(mapped, target)
         except (LLMError, RetrievalError, ValidationError, ValueError):
             self._pending_state = None
             return BoundedToolResult(status="failed", reason_code="span_reread_failed")
         except Exception:
             self._pending_state = None
             return BoundedToolResult(status="failed", reason_code="span_reread_failed")
+        if fresh_field is None:
+            return BoundedToolResult(
+                status="failed",
+                reason_code="span_target_not_reobserved",
+            )
+        fresh_value = fresh_field.get("value")
+        fresh_evidence = fresh_field.get("evidence")
+        fresh_start = fresh_evidence.get("text_start") if isinstance(fresh_evidence, dict) else None
+        fresh_end = fresh_evidence.get("text_end") if isinstance(fresh_evidence, dict) else None
+        source_overlap = (
+            isinstance(fresh_start, int)
+            and not isinstance(fresh_start, bool)
+            and isinstance(fresh_end, int)
+            and not isinstance(fresh_end, bool)
+            and 0 <= fresh_start < fresh_end <= len(document.content_text)
+            and max(text_start, fresh_start) < min(text_end, fresh_end)
+        )
+        if not self._same_public_value(fresh_value, target["value"]) or not source_overlap:
+            return BoundedToolResult(
+                status="failed",
+                reason_code="span_reobservation_conflicted",
+            )
+        next_state = copy.deepcopy(self._state)
+        model_calls = list(next_state.get("model_calls") or [])
+        model_calls.append(
+            {
+                "document_id": document.document_id,
+                **analysis.metadata.as_audit_dict(),
+            }
+        )
+        model_calls.extend(
+            {
+                "document_id": document.document_id,
+                **item.as_audit_dict(),
+            }
+            for item in analysis.additional_model_calls
+        )
+        next_state["model_calls"] = model_calls
+        next_state["model_errors"] = [
+            *(next_state.get("model_errors") or []),
+            *analysis.additional_model_errors,
+        ]
+        next_state["model_conflicts"] = [
+            *(next_state.get("model_conflicts") or []),
+            *analysis.model_conflicts,
+        ]
+        if analysis.additional_model_errors or analysis.model_conflicts:
+            self._pending_state = None
+            return BoundedToolResult(
+                status="failed",
+                reason_code="span_reobservation_provider_conflict",
+            )
+        # The value is intentionally not replaced and its fixed 0.85
+        # uncalibrated confidence is never increased. Re-run only the
+        # deterministic downstream stages over the immutable extraction.
+        next_state.update(normalize_documents(next_state))
+        next_state.update(pair_documents(next_state))
+        next_state.update(validate_cross_documents(next_state))
+        self._pending_state = next_state
+        self._pending_reobserved_references = {reference_id}
         return BoundedToolResult(
             status="succeeded",
-            reason_code="source_bound_text_reread_completed",
+            reason_code="source_bound_field_reobserved_exactly",
             output_reference_ids=reference_ids,
         )
 
@@ -835,6 +993,7 @@ class _RuntimeBoundedAdaptiveExecutor:
             else ("evidence", "compliance", "outcome")
         )
         if observation.status != "succeeded" or pending is None or affected_stages != expected:
+            self._pending_reobserved_references = set()
             return DeterministicReevaluationResult(
                 status="failed",
                 reason_code="affected_stage_rerun_not_authorized",
@@ -842,17 +1001,46 @@ class _RuntimeBoundedAdaptiveExecutor:
         try:
             next_state, next_result, supporting_rejections = self._finalize_state(pending)
         except (LLMError, RetrievalError, ValidationError, ValueError):
+            self._pending_reobserved_references = set()
             return DeterministicReevaluationResult(
                 status="failed",
                 reason_code="deterministic_stage_rerun_failed",
             )
         except Exception:
+            self._pending_reobserved_references = set()
             return DeterministicReevaluationResult(
                 status="failed",
                 reason_code="deterministic_stage_rerun_failed",
             )
         if action.tool_name == "document.reread_span/v1":
-            resolved = not next_result.model_errors and not next_result.model_conflicts
+            reobserved_references = self._pending_reobserved_references
+            self._pending_reobserved_references = set()
+            exact_reobservation = (
+                bool(action.input_reference_ids)
+                and set(action.input_reference_ids) == reobserved_references
+                and not next_result.model_errors
+                and not next_result.model_conflicts
+            )
+            if not exact_reobservation:
+                return DeterministicReevaluationResult(
+                    status="failed",
+                    reason_code="deterministic_field_reobservation_not_grounded",
+                )
+            # A second observation is useful evidence that the deterministic
+            # downstream stages were rerun, but the current Claude extraction
+            # release remains fixed at an uncalibrated confidence of 0.85.
+            # Therefore the field_uncertainty Gap must stay open. Claiming it
+            # as resolved here would manufacture confidence that the provider
+            # did not supply.
+            self._state = next_state
+            self._result = next_result
+            self._supporting_rejections = supporting_rejections
+            return DeterministicReevaluationResult(
+                status="succeeded",
+                reason_code="affected_deterministic_stages_reexecuted_gap_open",
+                resolved_gap_ids=(),
+                output_reference_ids=tuple(sorted(reobserved_references)),
+            )
         else:
             resolved = (
                 next_result.retrieval_status == "ok"
@@ -885,6 +1073,8 @@ class _RuntimeBoundedAdaptiveExecutor:
         self._reference_documents = {
             entry.reference_id: entry.document_id for entry in fact_ledger.entries
         }
+        self._field_targets = self._index_field_targets()
+        self._pending_reobserved_references = set()
         observed_model = (
             self._result.model_calls[0].model_id
             if self._result.model_calls

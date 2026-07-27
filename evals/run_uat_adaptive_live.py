@@ -1,14 +1,23 @@
 from __future__ import annotations
 
 import argparse
+import hashlib
 import json
 import os
+import re
+import stat
 import sys
 from pathlib import Path
-from typing import Any, Literal
+from typing import Any, Literal, Mapping
 
 from dotenv import dotenv_values
 
+from customs_ai_agent.adapters.llm import (
+    ClaudeDocumentAnalyzer,
+    DocumentAnalysis,
+    ModelCallMetadata,
+    StructuredAgenticResult,
+)
 from customs_ai_agent.schemas.models import (
     EvidenceRetrievalRequest,
     EvidenceRetrievalResponse,
@@ -30,6 +39,7 @@ from tools.local_uat_agent_service.app import (
 
 FaultMode = Literal["none", "first_partial", "always_partial"]
 MAX_REQUEST_BYTES = 32 * 1024 * 1024
+_SAFE_REASON_CODE = re.compile(r"^[a-z0-9_]{1,128}$")
 
 
 def _canonical_bytes(value: Any) -> bytes:
@@ -40,6 +50,35 @@ def _canonical_bytes(value: Any) -> bytes:
         separators=(",", ":"),
         sort_keys=True,
     ).encode("utf-8")
+
+
+def _write_private_summary_to_stdout(value: Mapping[str, Any]) -> None:
+    """Write the private verification bundle only to the supervising process pipe."""
+
+    if not _stdout_is_supervising_pipe():
+        raise RuntimeError("private adaptive summary requires a supervising stdout pipe")
+    encoded = _canonical_bytes(value) + b"\n"
+    binary = getattr(sys.stdout, "buffer", None)
+    if binary is not None:
+        binary.write(encoded)
+        binary.flush()
+        return
+    sys.stdout.write(encoded.decode("utf-8"))
+    sys.stdout.flush()
+
+
+def _stdout_is_supervising_pipe() -> bool:
+    try:
+        descriptor = sys.stdout.fileno()
+        if os.name == "nt":
+            import ctypes
+            import msvcrt
+
+            handle = msvcrt.get_osfhandle(descriptor)
+            return ctypes.windll.kernel32.GetFileType(handle) == 3  # type: ignore[attr-defined]
+        return stat.S_ISFIFO(os.fstat(descriptor).st_mode)
+    except (AttributeError, OSError, ValueError):
+        return False
 
 
 def _load_object(path: Path) -> dict[str, Any]:
@@ -81,6 +120,146 @@ def _load_request_from_stdin() -> dict[str, Any]:
     if isinstance(raw, str):
         raw = raw.encode("utf-8")
     return _decode_request_bytes(raw)
+
+
+def _identifier_sha256(value: str) -> str:
+    return hashlib.sha256(value.encode("utf-8")).hexdigest()
+
+
+class _InstrumentedAnalyzer:
+    """Record safe proof that the pinned Claude transport was actually called.
+
+    The private supervising Harness needs an independent count of the initial
+    four document calls and any bounded span rereads. ReviewResult retains only
+    the final per-document call, so it cannot prove those additional calls by
+    itself. This wrapper records only identities, hashes, token counts, and
+    latency. It never records a document, prompt, model response, or provider
+    request/message identifier in plaintext.
+    """
+
+    def __init__(self, actual: ClaudeDocumentAnalyzer) -> None:
+        self._actual = actual
+        self._records: list[dict[str, Any]] = []
+        self._closed = False
+
+    @property
+    def model_id(self) -> str:
+        return self._actual.model_id
+
+    @property
+    def call_count(self) -> int:
+        return len(self._records)
+
+    def records_since(self, index: int) -> list[dict[str, Any]]:
+        if index < 0 or index > len(self._records):
+            raise ValueError("Claude audit cursor is outside the recorded call range")
+        return [dict(item) for item in self._records[index:]]
+
+    def _record_metadata(
+        self,
+        metadata: ModelCallMetadata,
+        *,
+        document_id_sha256: str,
+        document_input_sha256: str,
+        additional: bool,
+    ) -> None:
+        value: dict[str, Any] = {
+            "sequence": len(self._records) + 1,
+            "call_kind": "document_analysis",
+            "additional_model_call": additional,
+            "document_id_sha256": document_id_sha256,
+            "document_input_sha256": document_input_sha256,
+            "model_id": metadata.model_id,
+            "prompt_id": metadata.prompt_id,
+            "prompt_version": metadata.prompt_version,
+            "prompt_sha256": metadata.prompt_sha256,
+            "output_schema_id": metadata.output_schema_id,
+            "output_schema_version": metadata.output_schema_version,
+            "output_schema_sha256": metadata.output_schema_sha256,
+            "request_id_sha256": _identifier_sha256(metadata.request_id),
+            "message_id_sha256": _identifier_sha256(metadata.message_id),
+            "input_tokens": metadata.input_tokens,
+            "output_tokens": metadata.output_tokens,
+            "latency_ms": metadata.latency_ms,
+        }
+        value["record_sha256"] = canonical_json_sha256(value)
+        self._records.append(value)
+
+    def analyze(self, document: Mapping[str, Any]) -> DocumentAnalysis:
+        document_id = document.get("document_id")
+        if not isinstance(document_id, str) or not document_id:
+            raise ValueError("instrumented Claude analysis requires a document_id")
+        analysis = self._actual.analyze(document)
+        document_id_sha256 = _identifier_sha256(document_id)
+        document_input_sha256 = canonical_json_sha256(dict(document))
+        self._record_metadata(
+            analysis.metadata,
+            document_id_sha256=document_id_sha256,
+            document_input_sha256=document_input_sha256,
+            additional=False,
+        )
+        for metadata in analysis.additional_model_calls:
+            self._record_metadata(
+                metadata,
+                document_id_sha256=document_id_sha256,
+                document_input_sha256=document_input_sha256,
+                additional=True,
+            )
+        return analysis
+
+    def run_bounded_agentic_task(
+        self,
+        *,
+        task_id: str,
+        system_prompt: str,
+        untrusted_context: dict[str, Any],
+        output_schema: dict[str, Any],
+        max_tokens: int = 2048,
+    ) -> StructuredAgenticResult:
+        result = self._actual.run_bounded_agentic_task(
+            task_id=task_id,
+            system_prompt=system_prompt,
+            untrusted_context=untrusted_context,
+            output_schema=output_schema,
+            max_tokens=max_tokens,
+        )
+        raw_failure_codes = untrusted_context.get("previous_verification_failures", [])
+        if not isinstance(raw_failure_codes, list) or len(raw_failure_codes) > 32:
+            raise ValueError("verification failure-code audit is not bounded")
+        previous_verification_failure_codes = sorted(
+            {
+                item
+                for item in raw_failure_codes
+                if isinstance(item, str) and _SAFE_REASON_CODE.fullmatch(item)
+            }
+        )
+        if len(previous_verification_failure_codes) != len(set(raw_failure_codes)):
+            raise ValueError("verification failure-code audit contains an unsafe code")
+        value: dict[str, Any] = {
+            "sequence": len(self._records) + 1,
+            "call_kind": "agentic_task",
+            "task_id": task_id,
+            "untrusted_context_sha256": canonical_json_sha256(untrusted_context),
+            "previous_verification_failure_codes": (previous_verification_failure_codes),
+            "model_id": result.model_id,
+            "prompt_sha256": result.prompt_sha256,
+            "output_schema_sha256": result.output_schema_sha256,
+            "semantic_output_schema_sha256": result.semantic_output_schema_sha256,
+            "request_id_sha256": _identifier_sha256(result.request_id),
+            "message_id_sha256": _identifier_sha256(result.message_id),
+            "input_tokens": result.input_tokens,
+            "output_tokens": result.output_tokens,
+            "latency_ms": result.latency_ms,
+        }
+        value["record_sha256"] = canonical_json_sha256(value)
+        self._records.append(value)
+        return result
+
+    def close(self) -> None:
+        if self._closed:
+            return
+        self._closed = True
+        self._actual.close()
 
 
 class _ActualRetrieverFaultControl:
@@ -164,6 +343,7 @@ def _evidence_token(env_file: Path, name: str) -> str:
 def _run_control(
     runtime: LocalUatDiagnosticRuntime,
     actual: LoopbackEvidenceV3DiagnosticRetriever,
+    analyzer: _InstrumentedAnalyzer,
     request: ServiceReviewRunRequestV3,
     *,
     control_id: str,
@@ -185,6 +365,7 @@ def _run_control(
     runtime._core._retriever_v3 = controlled  # type: ignore[assignment] # noqa: SLF001
     runtime._retriever = controlled  # type: ignore[assignment] # noqa: SLF001
     before_posts = actual.successful_retrieval_post_count
+    before_claude_calls = analyzer.call_count
     try:
         envelope = runtime.review_experience_json(
             _canonical_bytes(control_request.model_dump(mode="json", warnings=False))
@@ -243,8 +424,27 @@ def _run_control(
         == {0, 1}
     )
     actual_posts = after_posts - before_posts
+    claude_call_audit = analyzer.records_since(before_claude_calls)
+    document_call_hashes = [
+        item["document_input_sha256"]
+        for item in claude_call_audit
+        if item["call_kind"] == "document_analysis" and item["additional_model_call"] is False
+    ]
+    document_call_frequencies = sorted(
+        document_call_hashes.count(item) for item in set(document_call_hashes)
+    )
+    field_gap_open = any(
+        gap.gap_type == "field_uncertainty" and gap.status != "resolved"
+        for gap in result.review_gaps
+    )
     passed = {
-        "field-uncertainty-reread": field_verified and actual_posts >= 2,
+        "field-uncertainty-reread": (
+            field_verified
+            and field_gap_open
+            and actual_posts == 1
+            and len(document_call_hashes) == 5
+            and document_call_frequencies == [1, 1, 1, 2]
+        ),
         "evidence-incomplete-retry": evidence_verified and actual_posts >= 2,
         "budget-exhaustion-human-review": (
             safe_failure_verified and budget_exhaustion_verified and actual_posts >= 3
@@ -256,6 +456,7 @@ def _run_control(
         "retrieval_request_ids": list(controlled.request_ids),
         "canonical_result": result.model_dump(mode="json", warnings=False),
         "experience_envelope": envelope.model_dump(mode="json", warnings=False),
+        "claude_call_audit": claude_call_audit,
     }
     return private_verification_bundle, passed
 
@@ -264,7 +465,8 @@ def main() -> int:
     parser = argparse.ArgumentParser(
         description=(
             "Run UAT bounded-active controls with actual Claude and the pinned "
-            "loopback three-law Evidence Provider. No document or model prose is persisted."
+            "loopback three-law Evidence Provider. The private canonical bundle is emitted "
+            "only through stdout for its supervising Harness to validate in memory."
         )
     )
     parser.add_argument("--live", action="store_true")
@@ -281,7 +483,12 @@ def main() -> int:
         "--evidence-token-env",
         default="EVIDENCE_SERVICE_TOKEN",
     )
-    parser.add_argument("--output-summary", required=True, type=Path)
+    parser.add_argument(
+        "--output-summary",
+        required=True,
+        choices=("-",),
+        help="Must be '-' so the private canonical verification bundle is never persisted.",
+    )
     args = parser.parse_args()
     if not args.live:
         parser.error("--live is required because this runner invokes Claude and Evidence HTTP")
@@ -306,11 +513,15 @@ def main() -> int:
         evidence_service_token=token,
     )
     actual_retriever = runtime._retriever  # noqa: SLF001
+    actual_analyzer = runtime._core._analyzer  # noqa: SLF001
+    instrumented_analyzer = _InstrumentedAnalyzer(actual_analyzer)
+    runtime._core._analyzer = instrumented_analyzer  # type: ignore[assignment] # noqa: SLF001
     try:
         control_runs = [
             _run_control(
                 runtime,
                 actual_retriever,
+                instrumented_analyzer,
                 request,
                 control_id="field-uncertainty-reread",
                 fault_mode="none",
@@ -318,6 +529,7 @@ def main() -> int:
             _run_control(
                 runtime,
                 actual_retriever,
+                instrumented_analyzer,
                 request,
                 control_id="evidence-incomplete-retry",
                 fault_mode="first_partial",
@@ -325,6 +537,7 @@ def main() -> int:
             _run_control(
                 runtime,
                 actual_retriever,
+                instrumented_analyzer,
                 request,
                 control_id="budget-exhaustion-human-review",
                 fault_mode="always_partial",
@@ -342,17 +555,11 @@ def main() -> int:
         ),
         "request_manifest_sha256": canonical_json_sha256(request),
         "controls": controls,
-        "contains_document_question_or_answer_prose": False,
+        "private_bundle_contains_document_or_model_prose": True,
         "known_gate_limitations": [],
     }
     summary["summary_sha256"] = canonical_json_sha256(summary)
-    encoded = _canonical_bytes(summary) + b"\n"
-    if args.output_summary == Path("-"):
-        getattr(sys.stdout, "buffer", sys.stdout).write(encoded)
-    else:
-        output = args.output_summary.expanduser().resolve()
-        output.parent.mkdir(parents=True, exist_ok=True)
-        output.write_bytes(encoded)
+    _write_private_summary_to_stdout(summary)
     return 0 if all(control_passes) else 1
 
 

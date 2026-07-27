@@ -2,9 +2,10 @@ from __future__ import annotations
 
 from collections.abc import Mapping, Sequence
 from datetime import datetime
+import re
 from typing import Any, Literal
 
-from pydantic import Field, model_validator
+from pydantic import Field, field_validator, model_validator
 
 from customs_ai_agent.schemas.v3 import (
     CitationReferenceV1,
@@ -82,7 +83,16 @@ class AnswerScopeClassificationAuditV1(V3WireModel):
             "bill_of_lading",
             "certificate_of_origin",
             "hsk",
+            "hs_hsk_comparison",
             "customs_review",
+            "import_declaration",
+            "customs_valuation",
+            "duties_and_taxes",
+            "free_trade_agreement",
+            "import_requirements",
+            "inspection_and_supplement",
+            "document_correction",
+            "customs_broker",
         ]
     ] = Field(default_factory=list, max_length=3)
 
@@ -134,14 +144,23 @@ class ExperienceVerificationAuditV1(V3WireModel):
     verifier_model_id: str | None = Field(default=None, min_length=1, max_length=128)
     verifier_prompt_sha256: str = Field(pattern=r"^[a-f0-9]{64}$")
     verifier_schema_sha256: str = Field(pattern=r"^[a-f0-9]{64}$")
+    verifier_context_sha256: str | None = Field(
+        default=None,
+        pattern=r"^[a-f0-9]{64}$",
+    )
     verified_content_sha256: str = Field(pattern=r"^[a-f0-9]{64}$")
     checked_statement_count: int = Field(ge=0, le=1000)
     reason_codes: list[str] = Field(default_factory=list, max_length=100)
 
     @model_validator(mode="after")
     def _verifier_identity_is_consistent(self) -> "ExperienceVerificationAuditV1":
-        if (self.entailment_verifier == "claude") != (self.verifier_model_id is not None):
+        claude = self.entailment_verifier == "claude"
+        if claude != (
+            self.verifier_model_id is not None and self.verifier_context_sha256 is not None
+        ):
             raise ValueError("entailment verifier identity is incomplete")
+        if not claude and self.verifier_context_sha256 is not None:
+            raise ValueError("a non-model verifier cannot claim a context identity")
         if self.status == "passed" and (not self.deterministic_checks_passed or self.reason_codes):
             raise ValueError("passed verification cannot contain blockers")
         if self.status == "fallback" and not self.reason_codes:
@@ -447,6 +466,7 @@ _ANSWER_VERIFIED_CONTENT_FIELDS = (
     "impact",
     "next_steps",
     "limitations",
+    "claim_selections",
     "citations",
     "suggested_questions",
     "used_context_message_ids",
@@ -459,6 +479,31 @@ def assistant_answer_verified_content_sha256(values: Mapping[str, Any]) -> str:
     return canonical_json_sha256(
         {field: values[field] for field in _ANSWER_VERIFIED_CONTENT_FIELDS}
     )
+
+
+class AnswerClaimSelectionsV1(V3WireModel):
+    """Canonical claim IDs selected for each visible answer area."""
+
+    direct_answer: list[str] = Field(default_factory=list, max_length=20)
+    explanation: list[str] = Field(default_factory=list, max_length=40)
+    evidence_meaning: list[str] = Field(default_factory=list, max_length=40)
+    impact: list[str] = Field(default_factory=list, max_length=40)
+    next_steps: list[str] = Field(default_factory=list, max_length=40)
+
+    @field_validator(
+        "direct_answer",
+        "explanation",
+        "evidence_meaning",
+        "impact",
+        "next_steps",
+    )
+    @classmethod
+    def _claim_ids_are_unique_and_typed(cls, value: list[str]) -> list[str]:
+        if len(value) != len(set(value)) or any(
+            re.fullmatch(r"experience_claim_[a-f0-9]{64}", item) is None for item in value
+        ):
+            raise ValueError("answer claim selections contain an invalid claim ID")
+        return value
 
 
 class AssistantAnswerV2(V3WireModel):
@@ -477,6 +522,7 @@ class AssistantAnswerV2(V3WireModel):
     impact: list[str] = Field(default_factory=list, max_length=20)
     next_steps: list[str] = Field(default_factory=list, max_length=20)
     limitations: list[str] = Field(default_factory=list, max_length=20)
+    claim_selections: AnswerClaimSelectionsV1 = Field(default_factory=AnswerClaimSelectionsV1)
     citations: list[CitationReferenceV1] = Field(default_factory=list, max_length=100)
     suggested_questions: list[str] = Field(default_factory=list, max_length=3)
     used_context_message_ids: list[str] = Field(default_factory=list, max_length=8)
@@ -567,6 +613,7 @@ __all__ = [
     "AgentUatCapabilityAttestationV1",
     "AnswerScopeClassificationAuditV1",
     "AnswerScopeV2",
+    "AnswerClaimSelectionsV1",
     "AssistantAnswerV2",
     "CanonicalClaimV1",
     "CaseConversationRequestV2",
