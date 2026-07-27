@@ -564,6 +564,12 @@ _GROUNDED_PROPOSITION_PATTERNS = {
         r"(?:필수|의무|반드시|제출해야|제출하여야|준수해야|준수하여야)"
     ),
     "legal_exemption_asserted": re.compile(r"(?:면세|감면|면제|의무가\s*없|제출할\s*필요가\s*없)"),
+    "requirements_satisfied_asserted": re.compile(
+        r"(?:모든|전체).{0,12}(?:요건|의무).{0,12}(?:충족|완료)"
+    ),
+    "no_further_action_required": re.compile(
+        r"(?:추가|별도).{0,12}(?:조치|보완|확인).{0,12}(?:없|불필요|필요하지)"
+    ),
 }
 
 

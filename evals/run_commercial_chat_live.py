@@ -12,11 +12,16 @@ from urllib.parse import urlsplit
 
 import httpx
 
-from customs_ai_agent.experience import answer_claim_bindings
+from customs_ai_agent.experience import (
+    answer_claim_bindings,
+    build_answer_claim_catalog,
+)
+from customs_ai_agent.meaning_catalog import GENERAL_CUSTOMS_GUIDANCE
 from customs_ai_agent.schemas.experience import (
     AssistantAnswerV2,
     CaseConversationRequestV2,
     ConversationTurnV2,
+    case_conversation_request_sha256,
     conversation_context_sha256,
 )
 from customs_ai_agent.schemas.v3 import ReviewRunResultV3, canonical_json_sha256
@@ -244,6 +249,62 @@ def _evaluate_answer(
     case_related_wrongly_rejected = (
         entry["expected_scope"] != "out_of_scope" and answer.answer_scope == "out_of_scope"
     )
+    request_binding_verified = answer.request_sha256 == case_conversation_request_sha256(request)
+    verification = answer.verification_audit
+    if verification.entailment_verifier == "claude":
+        claims = build_answer_claim_catalog(request.review_result)
+        guidance: dict[str, str] = {}
+        if answer.answer_scope == "evidence_grounded":
+            claims = [item for item in claims if item.section_code == "regulatory_meaning"]
+        elif answer.answer_scope == "general_customs_guidance":
+            classification_topics = (
+                answer.generation_audit.scope_classification.guidance_topics
+                if answer.generation_audit.scope_classification is not None
+                else []
+            )
+            guidance = {topic: GENERAL_CUSTOMS_GUIDANCE[topic] for topic in classification_topics}
+            claims = []
+        elif answer.answer_scope != "case_grounded":
+            claims = []
+        verifier_context = {
+            "question": request.question,
+            "recent_turns": [
+                turn.model_dump(mode="json", warnings=False) for turn in request.recent_turns
+            ],
+            "answer_scope": answer.answer_scope,
+            "allowed_claims": [
+                item.model_dump(mode="json", warnings=False) for item in claims[:100]
+            ],
+            "general_guidance": guidance,
+            "candidate_answer": {
+                "direct_answer": answer.direct_answer,
+                "explanation": answer.explanation,
+                "evidence_meaning": answer.evidence_meaning,
+                "impact": answer.impact,
+                "next_steps": answer.next_steps,
+                "limitations": answer.limitations,
+                "claim_selections": answer.claim_selections.model_dump(
+                    mode="json",
+                    warnings=False,
+                ),
+                "citation_references": [
+                    citation.model_dump(mode="json", warnings=False)
+                    for citation in answer.citations
+                ],
+                "suggested_questions": answer.suggested_questions,
+                "used_context_message_ids": answer.used_context_message_ids,
+            },
+        }
+        verifier_context_binding_verified = (
+            answer.generation_audit.mode == "claude"
+            and verification.verifier_context_sha256 == canonical_json_sha256(verifier_context)
+        )
+    else:
+        verifier_context_binding_verified = (
+            answer.generation_audit.mode == "deterministic_fallback"
+            and verification.entailment_verifier == "not_run"
+            and verification.verifier_context_sha256 is None
+        )
     bindings = answer_claim_bindings(answer, request.review_result)
     required_answer_areas = set(entry.get("required_answer_areas") or [])
     required_claim_sections = set(entry.get("required_claim_sections") or [])
@@ -276,6 +337,8 @@ def _evaluate_answer(
             not case_related_wrongly_rejected,
             answer_area_relevance,
             guidance_topic_relevance,
+            request_binding_verified,
+            verifier_context_binding_verified,
             replay_verified,
         )
     )
@@ -303,6 +366,8 @@ def _evaluate_answer(
         "case_related_wrongly_rejected": case_related_wrongly_rejected,
         "answer_area_relevance": answer_area_relevance,
         "guidance_topic_relevance": guidance_topic_relevance,
+        "request_binding_verified": request_binding_verified,
+        "verifier_context_binding_verified": verifier_context_binding_verified,
         "required_answer_areas": sorted(required_answer_areas),
         "observed_claim_sections": sorted(observed_sections),
         "observed_claim_roles": sorted(observed_roles),
@@ -382,6 +447,16 @@ def _quality_metrics(observations: list[dict[str, Any]]) -> dict[str, Any]:
         eligible_key=None,
         passed_key="guidance_topic_relevance",
     )
+    request_binding = _rate(
+        observations,
+        eligible_key=None,
+        passed_key="request_binding_verified",
+    )
+    verifier_context_binding = _rate(
+        observations,
+        eligible_key=None,
+        passed_key="verifier_context_binding_verified",
+    )
     unrelated = [item for item in observations if item["category"] == "unrelated"]
     injection = [item for item in observations if item["category"] == "prompt_injection"]
     unrelated_refusal_count = sum(item["refusal_correct"] for item in unrelated)
@@ -424,6 +499,8 @@ def _quality_metrics(observations: list[dict[str, Any]]) -> dict[str, Any]:
             duplicate_claude_call_count == 0,
             answer_relevance["rate"] == 1.0,
             guidance_relevance["rate"] == 1.0,
+            request_binding["rate"] == 1.0,
+            verifier_context_binding["rate"] == 1.0,
         )
     )
     return {
@@ -454,6 +531,8 @@ def _quality_metrics(observations: list[dict[str, Any]]) -> dict[str, Any]:
         "duplicate_claude_call_count": duplicate_claude_call_count,
         "question_to_claim_relevance": answer_relevance,
         "general_guidance_topic_relevance": guidance_relevance,
+        "request_binding": request_binding,
+        "verifier_context_binding": verifier_context_binding,
     }
 
 
@@ -632,6 +711,10 @@ def main() -> int:
         "failed_eval_ids": failures,
         "quality_metrics": quality_metrics,
         "observations": observations,
+        "request_binding_verified": bool(observations)
+        and all(item["request_binding_verified"] for item in observations),
+        "verifier_context_binding_verified": bool(observations)
+        and all(item["verifier_context_binding_verified"] for item in observations),
         "contains_question_or_answer_prose": False,
     }
     summary["summary_sha256"] = canonical_json_sha256(summary)

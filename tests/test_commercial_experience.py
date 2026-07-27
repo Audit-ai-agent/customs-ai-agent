@@ -506,6 +506,8 @@ def test_chat_live_metrics_require_every_declared_gate_and_replay() -> None:
             "case_related_wrongly_rejected": False,
             "answer_area_relevance": True,
             "guidance_topic_relevance": True,
+            "request_binding_verified": True,
+            "verifier_context_binding_verified": True,
             "replay_verified": True,
         }
         for entry in dataset["entries"]
@@ -516,11 +518,19 @@ def test_chat_live_metrics_require_every_declared_gate_and_replay() -> None:
     assert metrics["multi_turn_context"]["eligible_count"] == 10
     assert metrics["correction_not_automatically_applied"]["eligible_count"] == 3
     assert metrics["duplicate_claude_call_count"] == 0
+    assert metrics["request_binding"]["rate"] == 1.0
+    assert metrics["verifier_context_binding"]["rate"] == 1.0
 
     observations[0]["replay_verified"] = False
     failed = _quality_metrics(observations)
     assert failed["passed"] is False
     assert failed["duplicate_claude_call_count"] is None
+    observations[0]["replay_verified"] = True
+    observations[0]["request_binding_verified"] = False
+    assert _quality_metrics(observations)["passed"] is False
+    observations[0]["request_binding_verified"] = True
+    observations[0]["verifier_context_binding_verified"] = False
+    assert _quality_metrics(observations)["passed"] is False
     assert _quality_metrics([])["passed"] is False
 
 
@@ -933,6 +943,132 @@ class _DatasetScopeAnalyzer:
             output_tokens=5,
             latency_ms=1,
         )
+
+
+class _VerifiedChatAnalyzer:
+    def __init__(self, model_id: str) -> None:
+        self.model_id = model_id
+        self.calls = 0
+
+    def run_bounded_agentic_task(self, *_args, **kwargs) -> StructuredAgenticResult:
+        self.calls += 1
+        task_id = kwargs["task_id"]
+        schema = kwargs["output_schema"]
+        if task_id == "customs_case_scope_classifier":
+            value = {
+                "answer_scope": "case_grounded",
+                "reason_code": "semantic_intent_classified",
+                "guidance_topics": [],
+            }
+        elif task_id == "customs_case_answer_v2":
+            claim = next(
+                item
+                for item in kwargs["untrusted_context"]["allowed_claims"]
+                if item["section_code"] == "conclusion"
+            )
+            value = {
+                "direct_answer": claim["canonical_text"],
+                "explanation": [],
+                "evidence_meaning": [],
+                "impact": [],
+                "next_steps": [],
+                "limitations": ["답변은 현재 심사 회차와 연결된 문서·법령 근거 범위에 한정됩니다."],
+                "claim_selections": {
+                    "direct_answer": [claim["claim_id"]],
+                    "explanation": [],
+                    "evidence_meaning": [],
+                    "impact": [],
+                    "next_steps": [],
+                },
+                "citation_references": claim["citation_references"],
+                "suggested_questions": [],
+                "used_context_message_ids": [],
+            }
+        elif task_id == "customs_case_answer_verifier":
+            value = {"supported": True, "reason_codes": []}
+        else:  # pragma: no cover - a regression should expose the unexpected task
+            raise AssertionError(f"unexpected task: {task_id}")
+        return StructuredAgenticResult(
+            value=value,
+            model_id=self.model_id,
+            prompt_sha256=hashlib.sha256(kwargs["system_prompt"].encode("utf-8")).hexdigest(),
+            output_schema_sha256=anthropic_output_schema_sha256(schema),
+            semantic_output_schema_sha256=canonical_json_sha256(schema),
+            request_id=f"request-verified-chat-{self.calls}",
+            message_id=f"message-verified-chat-{self.calls}",
+            input_tokens=10,
+            output_tokens=5,
+            latency_ms=1,
+        )
+
+
+def test_chat_live_evaluator_independently_verifies_request_and_verifier_context() -> None:
+    request = _conversation("현재 심사 결과의 결론을 알려 주십시오.")
+    answer = answer_case_conversation(
+        request,
+        analyzer=_VerifiedChatAnalyzer(request.review_result.runtime_release.model_id),  # type: ignore[arg-type]
+    )
+    entry = {
+        "eval_id": "request-and-verifier-context-binding",
+        "category": "paraphrase",
+        "expected_scope": "case_grounded",
+        "expected_status": "answered",
+        "requires_prior_context": False,
+        "requires_citations": True,
+        "requires_refusal": False,
+        "prohibits_automatic_correction": False,
+        "requires_claude_answer": True,
+        "requires_claude_scope_classifier": True,
+        "required_answer_areas": ["direct_answer"],
+        "required_claim_sections": ["conclusion"],
+        "accepted_claim_roles": ["conclusion"],
+        "required_guidance_topics": [],
+    }
+
+    observation = _evaluate_answer(
+        entry=entry,
+        request=request,
+        answer=answer,
+        replay_verified=True,
+    )
+    assert observation["request_binding_verified"] is True
+    assert observation["verifier_context_binding_verified"] is True
+    assert observation["passed"] is True
+
+    raw = answer.model_dump(mode="json", warnings=False)
+    raw["verification_audit"]["verifier_context_sha256"] = "0" * 64
+    raw["answer_sha256"] = canonical_json_sha256(
+        {key: value for key, value in raw.items() if key != "answer_sha256"}
+    )
+    wrong_context = AssistantAnswerV2.model_validate(raw)
+    assert (
+        _evaluate_answer(
+            entry=entry,
+            request=request,
+            answer=wrong_context,
+            replay_verified=True,
+        )["verifier_context_binding_verified"]
+        is False
+    )
+
+    raw = answer.model_dump(mode="json", warnings=False)
+    raw["request_sha256"] = "0" * 64
+    raw["verification_audit"]["verified_content_sha256"] = assistant_answer_verified_content_sha256(
+        raw
+    )
+    raw["answer_sha256"] = canonical_json_sha256(
+        {key: value for key, value in raw.items() if key != "answer_sha256"}
+    )
+    wrong_request = AssistantAnswerV2.model_validate(raw)
+    assert (
+        _evaluate_answer(
+            entry=entry,
+            request=request,
+            answer=wrong_request,
+            replay_verified=True,
+        )["request_binding_verified"]
+        is False
+    )
 
 
 def test_all_119_chat_eval_questions_use_structured_semantic_scope() -> None:
