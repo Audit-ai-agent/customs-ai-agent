@@ -166,6 +166,10 @@ class ServiceSettings:
             raise ServiceConfigurationError("customs_agent_wheel_sha256_invalid")
         if not self.host or any(character.isspace() for character in self.host):
             raise ServiceConfigurationError("customs_agent_host_invalid")
+        if (
+            self.enhanced_agent_experience or self.uat_adaptive_active
+        ) and self.host != "127.0.0.1":
+            raise ServiceConfigurationError("local_uat_enhanced_bind_host_not_loopback")
         if not 1 <= self.port <= 65_535:
             raise ServiceConfigurationError("customs_agent_port_invalid")
         if not 1_024 <= self.max_body_bytes <= 32 * 1024 * 1024:
