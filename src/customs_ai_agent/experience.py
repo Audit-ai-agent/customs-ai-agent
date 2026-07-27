@@ -1,7 +1,9 @@
 from __future__ import annotations
 
 import hashlib
+import re
 import time
+import unicodedata
 from collections.abc import Callable, Iterable
 from typing import Any, Literal
 
@@ -129,22 +131,13 @@ _SECTION_TITLES: dict[PresentationSectionCode, str] = {
     "next_actions": "담당자의 다음 조치",
     "scope_and_limits": "검토 범위와 한계",
 }
-_PRESENTATION_ROLE_PREFIXES: dict[PresentationStatementRole, tuple[str, ...]] = {
-    "conclusion": ("", "검토 결과를 먼저 말씀드리면, "),
-    "observation": ("", "확인 결과, "),
-    "reason": ("", "그 이유를 설명드리면, "),
-    "evidence": ("", "법령 근거를 확인한 결과, "),
-    "impact": ("", "업무상 의미를 말씀드리면, "),
-    "action": ("", "담당자가 다음으로 할 일은, "),
-    "limitation": ("", "검토 범위를 함께 안내드리면, "),
-}
-_ANSWER_AREA_PREFIXES: dict[str, tuple[str, ...]] = {
-    "direct_answer": ("", "질문에 바로 답변드리면, "),
-    "explanation": ("", "확인된 내용을 설명드리면, "),
-    "evidence_meaning": ("", "법령 근거를 기준으로 보면, "),
-    "impact": ("", "업무상 영향은 다음과 같습니다. "),
-    "next_steps": ("", "다음 조치는 다음과 같습니다. "),
-}
+_ANSWER_AREAS: tuple[str, ...] = (
+    "direct_answer",
+    "explanation",
+    "evidence_meaning",
+    "impact",
+    "next_steps",
+)
 _ANSWER_AREA_ROLES: dict[str, frozenset[PresentationStatementRole]] = {
     "direct_answer": frozenset(
         {"conclusion", "observation", "reason", "evidence", "impact", "action", "limitation"}
@@ -245,6 +238,88 @@ _FIELD_PRIORITY = {
         )
     )
 }
+
+# Claude may write the connective, explanatory prose, but factual atoms remain
+# provider-owned.  These patterns intentionally target values whose invention
+# would materially change a customs review: numbers/units, document and HSK
+# identifiers, law names, institutions and opaque internal identifiers.  The
+# semantic verifier remains responsible for contradictions that contain no new
+# lexical atom.
+_URL_RE = re.compile(r"(?i)(?:https?://|www\.)\S+")
+_HTML_RE = re.compile(r"<\s*/?\s*[A-Za-z][^>]*>")
+_OPAQUE_INTERNAL_RE = re.compile(
+    r"(?i)(?:experience_claim|statement|fact|issue|finding|ev|outcome)_[a-f0-9]{32,}"
+    r"|(?<![A-Fa-f0-9])[A-Fa-f0-9]{64}(?![A-Fa-f0-9])"
+)
+_NUMBER_RE = re.compile(
+    r"(?<![0-9])(?P<number>\d+(?:,\d{3})*(?:\.\d+)?)"
+    r"\s*(?P<unit>%|원|달러|유로|엔|kg|㎏|g|톤|개|건|종|회|일|개월|년|월|조|항|호)?"
+    r"(?![0-9])",
+    re.IGNORECASE,
+)
+_ALPHANUMERIC_IDENTIFIER_RE = re.compile(
+    r"(?<![A-Za-z0-9])(?=[A-Za-z0-9._:/-]{3,}(?![A-Za-z0-9._:/-]))"
+    r"(?=[A-Za-z0-9._:/-]*[A-Za-z])(?=[A-Za-z0-9._:/-]*\d)"
+    r"[A-Za-z0-9][A-Za-z0-9._:/-]*"
+)
+_UPPERCASE_IDENTIFIER_RE = re.compile(
+    r"(?<![A-Za-z0-9])(?:[A-Z]{2,}(?:[-_/][A-Z0-9]+)*)(?![A-Za-z0-9])"
+)
+_KOREAN_LAW_RE = re.compile(
+    r"(?<![가-힣])(?:[가-힣]{2,30}(?:시행규칙|시행령|법률|고시)|[가-힣]{2,30}법)"
+    r"(?=$|[\s.,;:!?()\[\]{}“”\"']|은|는|이|가|을|를|의|에|에서|으로|로|과|와|도|만)"
+)
+_NON_LAW_SUFFIXES = (
+    "방법",
+    "기법",
+    "해법",
+    "문법",
+    "어법",
+    "용법",
+    "화법",
+    "농법",
+    "공법",
+    "수법",
+    "비법",
+    "요법",
+)
+_KOREAN_INSTITUTION_RE = re.compile(
+    r"(?<![가-힣])(?:[가-힣]{2,24}\s*)"
+    r"(?:관세청|세관|주식회사|유한회사|법인|은행|항만공사|항만|공항)"
+    r"(?=$|[\s.,;:!?()\[\]{}“”\"']|은|는|이|가|을|를|의|에|에서|으로|로|과|와|도|만)"
+)
+_ASCII_ORGANIZATION_RE = re.compile(
+    r"(?<![A-Za-z])(?:[A-Z][A-Za-z&.-]*\s+){0,4}"
+    r"(?:CORP(?:ORATION)?|CO(?:MPANY)?|LTD|INC|LLC)(?![A-Za-z])",
+    re.IGNORECASE,
+)
+_COUNTRY_RE = re.compile(
+    r"(?<![가-힣])(?:대한민국|한국|중국|일본|미국|독일|프랑스|영국|베트남|태국|"
+    r"인도네시아|인도|호주|캐나다|러시아|대만|홍콩|싱가포르|말레이시아|필리핀|"
+    r"네덜란드|이탈리아|스페인|브라질|멕시코)"
+    r"(?=$|[\s.,;:!?()\[\]{}“”\"']|은|는|이|가|을|를|의|에|에서|으로|로|과|와|도|만|산)"
+)
+_KOREAN_PORT_RE = re.compile(
+    r"(?<![가-힣])(?:[가-힣]{2,24}(?:항구|항))"
+    r"(?=$|[\s.,;:!?()\[\]{}“”\"']|은|는|이|가|을|를|의|에|에서|으로|로|과|와|도|만)"
+)
+_NON_PORT_SUFFIXES = ("사항", "문항", "조항", "항목")
+_GENERAL_GUIDANCE_CASE_ASSERTION_RE = re.compile(
+    r"(?:현재|이|해당)\s*(?:심사\s*건|건|case).{0,40}"
+    r"(?:판정|결과|의무|적용|승인|자동\s*완료|문제\s*(?:없|있))",
+    re.IGNORECASE,
+)
+_COUNT_UNITS = {"개": "count", "건": "count", "종": "count"}
+_PRESENTATION_MIN_TOTAL_MATERIAL_CHARS = 650
+_PRESENTATION_MIN_SECTION_CHARS = 28
+_PRESENTATION_MIN_MATERIAL_STATEMENT_CHARS = 18
+_PRESENTATION_MIN_KOREAN_RATIO = 0.65
+
+
+def answer_limitation_source(scope: AnswerScopeV2) -> str:
+    return _GENERAL_GUIDANCE_LIMITATION if scope == "general_customs_guidance" else _CASE_LIMITATION
+
+
 _PRESENTATION_OUTPUT_SCHEMA: dict[str, Any] = {
     "type": "object",
     "additionalProperties": False,
@@ -543,44 +618,113 @@ def _claim(
     )
 
 
-def _framed_texts(
+def _normalized_prose(value: str) -> str:
+    return " ".join(unicodedata.normalize("NFKC", value).split())
+
+
+def _normalized_atom(value: str) -> str:
+    normalized = unicodedata.normalize("NFKC", value)
+    return re.sub(r"\s+", "", normalized).replace(",", "").casefold().strip(".,;:()[]{}“”\"'")
+
+
+def _factual_atoms(text: str) -> frozenset[str]:
+    """Extract high-risk lexical facts without attempting semantic reasoning.
+
+    This deliberately errs on the side of rejecting a Claude candidate.  A
+    rejected candidate is regenerated once and then replaced by a detailed
+    deterministic report/answer, so false positives reduce fluency rather than
+    safety.
+    """
+
+    text = unicodedata.normalize("NFKC", text)
+    atoms: set[str] = set()
+    for match in _NUMBER_RE.finditer(text):
+        number = match.group("number").replace(",", "")
+        atoms.add(f"number:{number}")
+        unit = (match.group("unit") or "").casefold()
+        if unit:
+            atoms.add(f"number-unit:{number}:{_COUNT_UNITS.get(unit, unit)}")
+    for pattern, prefix in (
+        (_ALPHANUMERIC_IDENTIFIER_RE, "identifier"),
+        (_UPPERCASE_IDENTIFIER_RE, "identifier"),
+        (_KOREAN_LAW_RE, "law"),
+        (_KOREAN_INSTITUTION_RE, "entity"),
+        (_ASCII_ORGANIZATION_RE, "entity"),
+        (_COUNTRY_RE, "entity"),
+        (_KOREAN_PORT_RE, "entity"),
+    ):
+        for match in pattern.finditer(text):
+            atom = _normalized_atom(match.group(0))
+            if prefix == "law" and atom.endswith(_NON_LAW_SUFFIXES):
+                continue
+            if pattern is _KOREAN_PORT_RE and atom.endswith(_NON_PORT_SUFFIXES):
+                continue
+            if atom:
+                atoms.add(f"{prefix}:{atom}")
+    for match in re.finditer(r"[“\"]([^“”\"\r\n]{1,80})[”\"]", text):
+        literal = _normalized_atom(match.group(1))
+        if literal:
+            atoms.add(f"value:{literal}")
+    labelled_value = re.compile(
+        r"(?:원산지|선적항|양륙항|도착항|출발항|선박명|통화|판매자|구매자|수출자|"
+        r"수입자|송하인|수하인)(?:은|는|이|가|:)?\s*[“\"]?"
+        r"([A-Za-z가-힣][A-Za-z가-힣0-9 .,&()/_-]{0,40}?)"
+        r"(?:[”\"]?(?:입니다|이며|이고|로 확인|으로 확인|로 기재|으로 기재))"
+    )
+    for match in labelled_value.finditer(text):
+        atom = _normalized_atom(match.group(1))
+        if atom:
+            atoms.add(f"value:{atom}")
+    return frozenset(atoms)
+
+
+def _grounded_prose_blockers(
     text: str,
-    prefixes: Iterable[str],
+    source_texts: Iterable[str],
     *,
-    max_length: int,
-) -> frozenset[str]:
-    canonical = " ".join(text.split())
-    return frozenset(
-        rendered for prefix in prefixes if len(rendered := f"{prefix}{canonical}") <= max_length
-    )
+    prefix: str,
+    minimum_chars: int = 1,
+    require_formal_korean: bool = True,
+) -> list[str]:
+    normalized = _normalized_prose(text)
+    source = "\n".join(_normalized_prose(item) for item in source_texts)
+    blockers: list[str] = []
+    if len(normalized) < minimum_chars:
+        blockers.append(f"{prefix}_too_short")
+    if any(
+        ord(character) < 32 and character not in "\t\n\r" for character in text
+    ) or _HTML_RE.search(normalized):
+        blockers.append(f"{prefix}_unsafe_markup")
+    if _URL_RE.search(normalized):
+        blockers.append(f"{prefix}_url_not_allowed")
+    if _OPAQUE_INTERNAL_RE.search(normalized):
+        blockers.append(f"{prefix}_internal_identifier_not_allowed")
+    if not _factual_atoms(normalized).issubset(_factual_atoms(source)):
+        blockers.append(f"{prefix}_unsupported_factual_atom")
+    if require_formal_korean and not normalized.endswith("니다."):
+        blockers.append(f"{prefix}_formal_style_required")
+    return blockers
 
 
-def _presentation_renderings(
-    claims: Iterable[CanonicalClaimV1],
-) -> frozenset[str]:
-    grouped = list(claims)
-    if not grouped:
-        return frozenset()
-    first = grouped[0]
-    if any(item.section_code != first.section_code or item.role != first.role for item in grouped):
-        return frozenset()
-    canonical = " ".join(item.canonical_text for item in grouped)
-    return _framed_texts(
-        canonical,
-        _PRESENTATION_ROLE_PREFIXES[first.role],
-        max_length=4000,
+def _korean_letter_ratio(text: str) -> float:
+    hangul = sum("가" <= character <= "힣" for character in text)
+    latin = sum(
+        ("a" <= character.casefold() <= "z") for character in text if len(character.casefold()) == 1
     )
+    denominator = hangul + latin
+    return hangul / denominator if denominator else 0.0
 
 
 def _presentation_statement_options(
     claims: Iterable[CanonicalClaimV1],
 ) -> list[dict[str, Any]]:
-    """Return a finite, non-overlapping rendering menu owned by the provider.
+    """Return non-overlapping factual claim groups for Claude to explain.
 
     Every canonical claim is placed in exactly one option. Claims can be
-    combined only when their section and semantic role are identical. The
-    model therefore chooses presentation style, but cannot author new factual
-    prose.
+    combined only when their section and semantic role are identical.  Unlike
+    the former finite rendering menu, the model authors new explanatory prose;
+    the claim IDs, protected factual atoms and independent entailment verifier
+    keep that prose grounded.
     """
 
     groups: dict[
@@ -601,10 +745,11 @@ def _presentation_statement_options(
             }
             candidate = [*current, claim]
             candidate_citations = current_citations | claim_citations
+            candidate_source = " ".join(item.canonical_text for item in candidate)
             if current and (
                 len(candidate) > 20
                 or len(candidate_citations) > 100
-                or not _presentation_renderings(candidate)
+                or len(candidate_source) > 4000
             ):
                 chunks.append(current)
                 current = [claim]
@@ -615,38 +760,32 @@ def _presentation_statement_options(
         if current:
             chunks.append(current)
         for chunk in chunks:
-            renderings = sorted(_presentation_renderings(chunk))
-            if not renderings:
-                raise ValueError("canonical claim cannot be rendered within presentation limits")
             options.append(
                 {
                     "section_code": section,
                     "role": role,
                     "source_claim_ids": [claim.claim_id for claim in chunk],
-                    "allowed_renderings": renderings,
+                    "canonical_claims": [
+                        {
+                            "claim_id": claim.claim_id,
+                            "canonical_text": claim.canonical_text,
+                            "citation_references": [
+                                citation.model_dump(mode="json", warnings=False)
+                                for citation in claim.citation_references
+                            ],
+                        }
+                        for claim in chunk
+                    ],
+                    "protected_factual_atoms": sorted(
+                        _factual_atoms(" ".join(claim.canonical_text for claim in chunk))
+                    ),
                 }
             )
     return options
 
 
-def _answer_renderings(claim: CanonicalClaimV1, area: str) -> frozenset[str]:
-    if claim.role not in _ANSWER_AREA_ROLES[area]:
-        return frozenset()
-    return _framed_texts(
-        claim.canonical_text,
-        _ANSWER_AREA_PREFIXES[area],
-        max_length=(4000 if area == "direct_answer" else 2000),
-    )
-
-
-def _guidance_renderings(text: str, area: str) -> frozenset[str]:
-    if area not in {"direct_answer", "explanation"}:
-        return frozenset()
-    return _framed_texts(
-        text,
-        _ANSWER_AREA_PREFIXES[area],
-        max_length=(4000 if area == "direct_answer" else 2000),
-    )
+def _claim_sources(claims: Iterable[CanonicalClaimV1]) -> list[str]:
+    return [claim.canonical_text for claim in claims]
 
 
 def _field_fact_claims(result: ReviewRunResultV3) -> list[CanonicalClaimV1]:
@@ -1053,7 +1192,9 @@ def _candidate_presentation(
 ) -> tuple[list[GroundedPresentationSectionV1], list[str]]:
     claim_index = {claim.claim_id: claim for claim in claims}
     option_index = {
-        tuple(option["source_claim_ids"]): frozenset(option["allowed_renderings"])
+        tuple(option["source_claim_ids"]): tuple(
+            claim_index[claim_id] for claim_id in option["source_claim_ids"]
+        )
         for option in _presentation_statement_options(claims)
     }
     raw_statements = call.value.get("statements")
@@ -1094,9 +1235,18 @@ def _candidate_presentation(
             blockers.append("presentation_claim_reused")
             continue
         normalized_text = " ".join(text.split())
-        allowed_renderings = option_index.get(tuple(claim_ids), frozenset())
-        if normalized_text not in allowed_renderings:
-            blockers.append("presentation_rendering_not_allowed")
+        option_claims = option_index.get(tuple(claim_ids))
+        if option_claims is None:
+            blockers.append("presentation_claim_group_invalid")
+            continue
+        prose_blockers = _grounded_prose_blockers(
+            normalized_text,
+            _claim_sources(option_claims),
+            prefix="presentation",
+            minimum_chars=_PRESENTATION_MIN_MATERIAL_STATEMENT_CHARS,
+        )
+        if prose_blockers:
+            blockers.extend(prose_blockers)
             continue
         used_claims.update(claim_ids)
         statements_by_section[section].append(_statement(typed_source, normalized_text))
@@ -1104,6 +1254,24 @@ def _candidate_presentation(
         blockers.append("presentation_claim_coverage_incomplete")
     if any(not statements_by_section[section] for section in _SECTION_ORDER):
         blockers.append("presentation_section_missing")
+    section_texts = {
+        section: " ".join(statement.text for statement in statements_by_section[section])
+        for section in _SECTION_ORDER
+    }
+    if any(
+        len(section_texts[section]) < _PRESENTATION_MIN_SECTION_CHARS for section in _SECTION_ORDER
+    ):
+        blockers.append("presentation_section_too_short")
+    material_text = " ".join(
+        statement.text
+        for section in _SECTION_ORDER
+        for statement in statements_by_section[section]
+        if statement.material
+    )
+    if len(material_text) < _PRESENTATION_MIN_TOTAL_MATERIAL_CHARS:
+        blockers.append("presentation_material_content_too_short")
+    if _korean_letter_ratio(material_text) < _PRESENTATION_MIN_KOREAN_RATIO:
+        blockers.append("presentation_korean_ratio_too_low")
     return (
         [
             GroundedPresentationSectionV1(
@@ -1220,9 +1388,20 @@ def build_grounded_presentation(
                 task_id=EXPERIENCE_REPORT_PROMPT_ID,
                 system_prompt=load_experience_report_system_prompt(),
                 untrusted_context={
-                    "allowed_statement_options": _presentation_statement_options(claims),
+                    "required_claim_groups": _presentation_statement_options(claims),
                     "fixed_headline": _headline(result),
                     "fixed_section_order": list(_SECTION_ORDER),
+                    "quality_requirements": {
+                        "minimum_total_material_characters": (
+                            _PRESENTATION_MIN_TOTAL_MATERIAL_CHARS
+                        ),
+                        "minimum_section_characters": _PRESENTATION_MIN_SECTION_CHARS,
+                        "minimum_material_statement_characters": (
+                            _PRESENTATION_MIN_MATERIAL_STATEMENT_CHARS
+                        ),
+                        "minimum_korean_letter_ratio": _PRESENTATION_MIN_KOREAN_RATIO,
+                        "formal_sentence_ending": "니다.",
+                    },
                     "previous_verification_failures": retry_blockers,
                 },
                 output_schema=_PRESENTATION_OUTPUT_SCHEMA,
@@ -1801,7 +1980,7 @@ def _answer_values_safe(
     claim_index = {claim.claim_id: claim for claim in claims}
     selected_claims: dict[str, CanonicalClaimV1] = {}
     raw_selections = values.get("claim_selections")
-    expected_areas = set(_ANSWER_AREA_PREFIXES)
+    expected_areas = set(_ANSWER_AREAS)
     if (
         not isinstance(raw_selections, dict)
         or set(raw_selections) != expected_areas
@@ -1827,45 +2006,67 @@ def _answer_values_safe(
                 if any(claim.role not in _ANSWER_AREA_ROLES[area] for claim in typed_claims):
                     blockers.append(f"answer_{area}_claim_role_invalid")
                     continue
-                if len(typed_areas[area]) != len(typed_claims):
+                if bool(typed_areas[area]) != bool(typed_claims):
                     blockers.append(f"answer_{area}_claim_coverage_invalid")
                     continue
-                if any(
-                    text not in _answer_renderings(claim, area)
-                    for text, claim in zip(typed_areas[area], typed_claims, strict=True)
-                ):
-                    blockers.append(f"answer_{area}_rendering_not_allowed")
-                    continue
+                for text in typed_areas[area]:
+                    blockers.extend(
+                        _grounded_prose_blockers(
+                            text,
+                            _claim_sources(typed_claims),
+                            prefix=f"answer_{area}",
+                            minimum_chars=18,
+                        )
+                    )
                 for claim in typed_claims:
                     selected_claims[claim.claim_id] = claim
             if not typed_areas["direct_answer"] or not typed_selections["direct_answer"]:
                 blockers.append("answer_direct_answer_missing")
-            if typed_limitations != [_CASE_LIMITATION]:
-                blockers.append("answer_limitation_not_grounded_template")
+            if not typed_limitations:
+                blockers.append("answer_limitation_missing")
+            for limitation in typed_limitations:
+                blockers.extend(
+                    _grounded_prose_blockers(
+                        limitation,
+                        [_CASE_LIMITATION],
+                        prefix="answer_limitation",
+                        minimum_chars=18,
+                    )
+                )
         elif scope == "general_customs_guidance":
             if any(typed_selections.values()):
                 blockers.append("answer_guidance_claim_selection_not_allowed")
             guidance_values = list(guidance.values())
             if (
                 not guidance_values
-                or len(typed_areas["direct_answer"]) != 1
-                or len(typed_areas["explanation"]) != max(0, len(guidance_values) - 1)
+                or not typed_areas["direct_answer"]
                 or any(typed_areas[area] for area in ("evidence_meaning", "impact", "next_steps"))
             ):
                 blockers.append("answer_guidance_coverage_invalid")
-            elif typed_areas["direct_answer"][0] not in _guidance_renderings(
-                guidance_values[0], "direct_answer"
-            ) or any(
-                text not in _guidance_renderings(guidance_text, "explanation")
-                for text, guidance_text in zip(
-                    typed_areas["explanation"],
-                    guidance_values[1:],
-                    strict=True,
+            else:
+                for area in ("direct_answer", "explanation"):
+                    for text in typed_areas[area]:
+                        blockers.extend(
+                            _grounded_prose_blockers(
+                                text,
+                                guidance_values,
+                                prefix=f"answer_guidance_{area}",
+                                minimum_chars=18,
+                            )
+                        )
+                        if _GENERAL_GUIDANCE_CASE_ASSERTION_RE.search(text):
+                            blockers.append("answer_guidance_case_assertion_not_allowed")
+            if not typed_limitations:
+                blockers.append("answer_limitation_missing")
+            for limitation in typed_limitations:
+                blockers.extend(
+                    _grounded_prose_blockers(
+                        limitation,
+                        [_GENERAL_GUIDANCE_LIMITATION],
+                        prefix="answer_guidance_limitation",
+                        minimum_chars=18,
+                    )
                 )
-            ):
-                blockers.append("answer_guidance_rendering_not_allowed")
-            if typed_limitations != [_GENERAL_GUIDANCE_LIMITATION]:
-                blockers.append("answer_limitation_not_guidance_template")
         elif any(typed_selections.values()):
             blockers.append("answer_claim_selection_not_allowed")
 
@@ -2002,24 +2203,24 @@ def answer_case_conversation(
                     "allowed_claims": [
                         {
                             **item.model_dump(mode="json", warnings=False),
-                            "allowed_renderings": {
-                                area: sorted(_answer_renderings(item, area))
-                                for area in _ANSWER_AREA_PREFIXES
-                                if _answer_renderings(item, area)
-                            },
+                            "allowed_answer_areas": sorted(
+                                area
+                                for area, roles in _ANSWER_AREA_ROLES.items()
+                                if item.role in roles
+                            ),
+                            "protected_factual_atoms": sorted(_factual_atoms(item.canonical_text)),
                         }
                         for item in claims
                     ],
                     "general_guidance": {
                         topic: {
                             "canonical_text": text,
-                            "allowed_renderings": {
-                                area: sorted(_guidance_renderings(text, area))
-                                for area in ("direct_answer", "explanation")
-                            },
+                            "allowed_answer_areas": ["direct_answer", "explanation"],
+                            "protected_factual_atoms": sorted(_factual_atoms(text)),
                         }
                         for topic, text in guidance.items()
                     },
+                    "fixed_limitation_source": (answer_limitation_source(scope)),
                     "recent_turns": [
                         turn.model_dump(mode="json", warnings=False)
                         for turn in request.recent_turns
@@ -2073,6 +2274,7 @@ def answer_case_conversation(
                 "answer_scope": scope,
                 "allowed_claims": [item.model_dump(mode="json", warnings=False) for item in claims],
                 "general_guidance": guidance,
+                "fixed_limitation_source": (answer_limitation_source(scope)),
                 "candidate_answer": normalized_candidate,
             }
             try:
@@ -2183,6 +2385,7 @@ def answer_case_conversation(
 
 
 __all__ = [
+    "answer_limitation_source",
     "answer_claim_bindings",
     "answer_case_conversation",
     "build_answer_claim_catalog",

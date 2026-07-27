@@ -18,7 +18,9 @@ from customs_ai_agent.experience import (
     _claim,
     _classify_question_scope,
     _citation,
+    _grounded_prose_blockers,
     _presentation_statement_options,
+    answer_claim_bindings,
     answer_case_conversation,
     build_answer_claim_catalog,
     build_canonical_claim_catalog,
@@ -897,19 +899,27 @@ def test_adaptive_claude_audit_proves_calls_without_exposing_provider_ids_or_inp
     assert actual.close_count == 1
 
 
-def test_presentation_rejects_opposite_meaning_even_when_it_contains_no_patterned_atom() -> None:
+def test_presentation_lexical_gate_defers_atom_free_contradiction_to_entailment_verifier() -> None:
     result = _v3_result()[2]
     claims = build_canonical_claim_catalog(result)
-    first = claims[0]
+    options = _presentation_statement_options(claims)
+    first = options[0]
     call = StructuredAgenticResult(
         value={
             "statements": [
                 {
-                    "section_code": first.section_code,
-                    "role": first.role,
-                    "text": "담당자 판단을 기다리지 않아도 바로 후속 절차를 진행할 수 있습니다.",
-                    "source_claim_ids": [first.claim_id],
+                    "section_code": option["section_code"],
+                    "role": option["role"],
+                    "text": (
+                        "담당자 판단을 기다리지 않아도 바로 후속 절차를 진행할 수 있습니다."
+                        if option is first
+                        else " ".join(
+                            claim["canonical_text"] for claim in option["canonical_claims"]
+                        )
+                    ),
+                    "source_claim_ids": option["source_claim_ids"],
                 }
+                for option in options
             ]
         },
         model_id=result.runtime_release.model_id,
@@ -923,14 +933,17 @@ def test_presentation_rejects_opposite_meaning_even_when_it_contains_no_patterne
         latency_ms=1,
     )
 
-    _sections, blockers = _candidate_presentation(
+    sections, blockers = _candidate_presentation(
         result,
         claims,
         call,
         attempt_count=1,
     )
 
-    assert "presentation_rendering_not_allowed" in blockers
+    # No new protected factual atom was invented.  Semantic contradiction is
+    # intentionally decided by the mandatory, separate Claude entailment call.
+    assert blockers == []
+    assert sections[0].statements[0].text != claims[0].canonical_text
 
 
 def test_presentation_options_chunk_claims_within_wire_limits() -> None:
@@ -950,25 +963,34 @@ def test_presentation_options_chunk_claims_within_wire_limits() -> None:
     assert {claim_id for option in options for claim_id in option["source_claim_ids"]} == {
         claim.claim_id for claim in claims
     }
+    assert all("allowed_renderings" not in option for option in options)
     assert all(
-        len(rendering) <= 4000 for option in options for rendering in option["allowed_renderings"]
+        len(" ".join(item["canonical_text"] for item in option["canonical_claims"])) <= 4000
+        for option in options
     )
 
 
-def test_presentation_accepts_only_the_provider_owned_option_menu() -> None:
+def test_presentation_accepts_natural_non_byte_equivalent_grounded_paraphrase() -> None:
     result = _v3_result()[2]
     claims = build_canonical_claim_catalog(result)
     options = _presentation_statement_options(claims)
+    texts = [
+        (
+            "확인된 사실을 이해하기 쉽게 설명하면, "
+            + " ".join(claim["canonical_text"] for claim in option["canonical_claims"])
+        )
+        for option in options
+    ]
     call = StructuredAgenticResult(
         value={
             "statements": [
                 {
                     "section_code": option["section_code"],
                     "role": option["role"],
-                    "text": option["allowed_renderings"][0],
+                    "text": text,
                     "source_claim_ids": option["source_claim_ids"],
                 }
-                for option in options
+                for option, text in zip(options, texts, strict=True)
             ]
         },
         model_id=result.runtime_release.model_id,
@@ -991,6 +1013,105 @@ def test_presentation_accepts_only_the_provider_owned_option_menu() -> None:
 
     assert blockers == []
     assert sum(len(section.statements) for section in sections) == len(options)
+    assert all(
+        statement.text.startswith("확인된 사실을 이해하기 쉽게 설명하면, ")
+        for section in sections
+        for statement in section.statements
+    )
+
+
+class _GroundedPresentationAnalyzer:
+    def __init__(self, model_id: str, *, reject_entailment: bool = False) -> None:
+        self.model_id = model_id
+        self.reject_entailment = reject_entailment
+        self.report_calls = 0
+        self.verifier_calls = 0
+
+    def run_bounded_agentic_task(self, *_args, **kwargs) -> StructuredAgenticResult:
+        task_id = kwargs["task_id"]
+        schema = kwargs["output_schema"]
+        if task_id == "customs_experience_report":
+            self.report_calls += 1
+            groups = kwargs["untrusted_context"]["required_claim_groups"]
+            value = {
+                "statements": [
+                    {
+                        "section_code": group["section_code"],
+                        "role": group["role"],
+                        "text": (
+                            "담당자가 결과를 이해하기 쉽도록 확인 내용을 설명하면, "
+                            + " ".join(
+                                claim["canonical_text"] for claim in group["canonical_claims"]
+                            )
+                        ),
+                        "source_claim_ids": group["source_claim_ids"],
+                    }
+                    for group in groups
+                ]
+            }
+        elif task_id == "customs_experience_entailment":
+            self.verifier_calls += 1
+            value = {
+                "verdicts": [
+                    {
+                        "statement_id": statement["statement_id"],
+                        "supported": not self.reject_entailment,
+                        "reason_code": (
+                            "supported" if not self.reject_entailment else "semantic_contradiction"
+                        ),
+                    }
+                    for statement in kwargs["untrusted_context"]["candidate_statements"]
+                ]
+            }
+        else:  # pragma: no cover
+            raise AssertionError(f"unexpected task: {task_id}")
+        return StructuredAgenticResult(
+            value=value,
+            model_id=self.model_id,
+            prompt_sha256=hashlib.sha256(kwargs["system_prompt"].encode("utf-8")).hexdigest(),
+            output_schema_sha256=anthropic_output_schema_sha256(schema),
+            semantic_output_schema_sha256=canonical_json_sha256(schema),
+            request_id=f"request-{task_id}",
+            message_id=f"message-{task_id}",
+            input_tokens=10,
+            output_tokens=5,
+            latency_ms=1,
+        )
+
+
+def test_presentation_uses_fluent_claude_prose_only_after_independent_entailment() -> None:
+    result = _v3_result()[2]
+    analyzer = _GroundedPresentationAnalyzer(result.runtime_release.model_id)
+
+    presentation = build_grounded_presentation(result, analyzer=analyzer)  # type: ignore[arg-type]
+
+    assert presentation.generation_audit.mode == "claude"
+    assert presentation.verification_audit.entailment_verifier == "claude"
+    assert presentation.verification_audit.status == "passed"
+    assert analyzer.report_calls == 1
+    assert analyzer.verifier_calls == 1
+    assert all(
+        statement.text.startswith("담당자가 결과를 이해하기 쉽도록 확인 내용을 설명하면, ")
+        for section in presentation.sections
+        for statement in section.statements
+    )
+
+
+def test_presentation_regenerates_once_then_uses_detailed_fallback_on_entailment_failure() -> None:
+    result = _v3_result()[2]
+    analyzer = _GroundedPresentationAnalyzer(
+        result.runtime_release.model_id,
+        reject_entailment=True,
+    )
+
+    presentation = build_grounded_presentation(result, analyzer=analyzer)  # type: ignore[arg-type]
+
+    assert analyzer.report_calls == 2
+    assert analyzer.verifier_calls == 2
+    assert presentation.generation_audit.mode == "deterministic_fallback"
+    assert presentation.generation_audit.attempt_count == 2
+    assert presentation.verification_audit.status == "fallback"
+    assert "semantic_contradiction" in presentation.verification_audit.reason_codes
 
 
 def test_chat_answer_catalog_exposes_human_readable_field_facts_with_exact_sources() -> None:
@@ -1015,7 +1136,7 @@ def test_chat_answer_catalog_exposes_human_readable_field_facts_with_exact_sourc
     )
 
 
-def test_chat_accepts_only_exact_code_owned_renderings_and_selected_claim_citations() -> None:
+def test_chat_accepts_natural_grounded_paraphrase_and_exact_selected_claim_citations() -> None:
     result = _v3_result()[2]
     claim = next(
         item
@@ -1055,22 +1176,27 @@ def test_chat_accepts_only_exact_code_owned_renderings_and_selected_claim_citati
     )
 
     paraphrased = dict(safe_values)
-    paraphrased["direct_answer"] = claim.canonical_text.replace(
-        "기록값은",
-        "문서에 기재된 값은",
+    paraphrased["direct_answer"] = (
+        "질문하신 문서 값을 확인한 결과, "
+        + claim.canonical_text.replace("기록값은", "문서에 기재된 값은")
     )
-    assert paraphrased["direct_answer"] != claim.canonical_text
-    assert "answer_direct_answer_rendering_not_allowed" in _answer_values_safe(
-        paraphrased,
-        claims=build_answer_claim_catalog(result),
-        guidance={},
-        allowed_context_ids=set(),
-        scope="case_grounded",
+    assert paraphrased["direct_answer"] != safe_values["direct_answer"]
+    assert (
+        _answer_values_safe(
+            paraphrased,
+            claims=build_answer_claim_catalog(result),
+            guidance={},
+            allowed_context_ids=set(),
+            scope="case_grounded",
+        )
+        == []
     )
 
     forged = dict(safe_values)
-    forged["direct_answer"] = "담당자 판단을 기다리지 않아도 바로 후속 절차를 진행할 수 있습니다."
-    assert "answer_direct_answer_rendering_not_allowed" in _answer_values_safe(
+    forged["direct_answer"] = (
+        "송장번호는 INV-2099-999이며 담당자 판단 없이 바로 처리할 수 있습니다."
+    )
+    assert "answer_direct_answer_unsupported_factual_atom" in _answer_values_safe(
         forged,
         claims=build_answer_claim_catalog(result),
         guidance={},
@@ -1094,9 +1220,9 @@ def test_chat_accepts_only_exact_code_owned_renderings_and_selected_claim_citati
     )
 
 
-def test_general_guidance_rejects_opposite_meaning_outside_approved_rendering() -> None:
+def test_general_guidance_rejects_unsupported_factual_atom_outside_safe_catalog() -> None:
     values = {
-        "direct_answer": ("담당자 판단을 기다리지 않아도 바로 후속 절차를 진행할 수 있습니다."),
+        "direct_answer": ("HSK 9999999999는 이 심사 건에 자동 적용된 번호입니다."),
         "explanation": [],
         "evidence_meaning": [],
         "impact": [],
@@ -1123,7 +1249,109 @@ def test_general_guidance_rejects_opposite_meaning_outside_approved_rendering() 
         scope="general_customs_guidance",
     )
 
-    assert "answer_guidance_rendering_not_allowed" in blockers
+    assert "answer_guidance_direct_answer_unsupported_factual_atom" in blockers
+
+
+@pytest.mark.parametrize(
+    ("candidate", "source"),
+    [
+        (
+            "품목분류번호(HSK)는0303540001입니다.",
+            "품목분류번호(HSK)는 0303540000입니다.",
+        ),
+        (
+            "확인된 금액은9999원입니다.",
+            "확인된 금액은 1000원입니다.",
+        ),
+        (
+            "품목분류번호(ＨＳＫ)는０３０３５４０００１입니다.",
+            "품목분류번호(HSK)는 0303540000입니다.",
+        ),
+        (
+            "존재하지 않는 수입안전법을 적용합니다.",
+            "현재 근거는 관세법 제1조입니다.",
+        ),
+        (
+            "부산세관에서 승인한 결과입니다.",
+            "현재 심사는 내부 사전심사 결과입니다.",
+        ),
+        (
+            "원산지는 중국입니다.",
+            "원산지는 “대한민국”으로 확인되었습니다.",
+        ),
+        (
+            "물품은 부산항에서 출발한 것으로 확인되었습니다.",
+            "물품은 인천항에서 출발한 것으로 확인되었습니다.",
+        ),
+        (
+            "자세한 내용은 https://example.invalid 에서 확인합니다.",
+            "현재 심사 회차의 근거만 사용합니다.",
+        ),
+    ],
+)
+def test_grounded_prose_rejects_unsupported_atoms_even_without_whitespace(
+    candidate: str,
+    source: str,
+) -> None:
+    assert _grounded_prose_blockers(
+        candidate,
+        [source],
+        prefix="test",
+    )
+
+
+def test_grounded_prose_allows_natural_method_explanation_without_treating_method_as_law() -> None:
+    assert (
+        _grounded_prose_blockers(
+            "담당자가 확인할 방법을 이해하기 쉽게 설명합니다.",
+            ["담당자가 문서 대조 결과를 확인합니다."],
+            prefix="test",
+        )
+        == []
+    )
+
+
+def test_grounded_prose_allows_same_source_value_without_copying_quote_style() -> None:
+    assert (
+        _grounded_prose_blockers(
+            "원산지는 대한민국입니다.",
+            ["원산지는 “대한민국”으로 확인되었습니다."],
+            prefix="test",
+        )
+        == []
+    )
+
+
+def test_general_guidance_cannot_be_rewritten_as_current_case_determination() -> None:
+    values = {
+        "direct_answer": "이 심사 건의 결과에는 별도 문제가 없습니다.",
+        "explanation": [],
+        "evidence_meaning": [],
+        "impact": [],
+        "next_steps": [],
+        "limitations": [
+            "위 내용은 일반 통관 안내이며 현재 심사 건의 판정이나 법적 의무를 뜻하지 않습니다."
+        ],
+        "claim_selections": {
+            "direct_answer": [],
+            "explanation": [],
+            "evidence_meaning": [],
+            "impact": [],
+            "next_steps": [],
+        },
+        "citation_references": [],
+        "used_context_message_ids": [],
+    }
+
+    blockers = _answer_values_safe(
+        values,
+        claims=[],
+        guidance={"customs_review": GENERAL_CUSTOMS_GUIDANCE["customs_review"]},
+        allowed_context_ids=set(),
+        scope="general_customs_guidance",
+    )
+
+    assert "answer_guidance_case_assertion_not_allowed" in blockers
 
 
 class _DatasetScopeAnalyzer:
@@ -1212,6 +1440,128 @@ class _VerifiedChatAnalyzer:
             output_tokens=5,
             latency_ms=1,
         )
+
+
+class _NaturalChatAnalyzer:
+    def __init__(
+        self,
+        model_id: str,
+        *,
+        forge_number: bool = False,
+        reject_entailment: bool = False,
+    ) -> None:
+        self.model_id = model_id
+        self.forge_number = forge_number
+        self.reject_entailment = reject_entailment
+        self.answer_calls = 0
+        self.verifier_calls = 0
+
+    def run_bounded_agentic_task(self, *_args, **kwargs) -> StructuredAgenticResult:
+        task_id = kwargs["task_id"]
+        schema = kwargs["output_schema"]
+        if task_id == "customs_case_scope_classifier":
+            value = {
+                "answer_scope": "case_grounded",
+                "reason_code": "semantic_intent_classified",
+                "guidance_topics": [],
+            }
+        elif task_id == "customs_case_answer_v2":
+            self.answer_calls += 1
+            claim = next(
+                item
+                for item in kwargs["untrusted_context"]["allowed_claims"]
+                if item["section_code"] == "conclusion"
+            )
+            direct = "질문하신 결론을 먼저 쉽게 설명하면, " + claim["canonical_text"]
+            if self.forge_number:
+                direct = f"{direct[:-1]} 다만 확인되지 않은 금액은9999원입니다."
+            value = {
+                "direct_answer": direct,
+                "explanation": [],
+                "evidence_meaning": [],
+                "impact": [],
+                "next_steps": [],
+                "limitations": [
+                    "이 설명은 현재 심사 회차에 연결된 문서와 법령 근거 안에서만 유효합니다."
+                ],
+                "claim_selections": {
+                    "direct_answer": [claim["claim_id"]],
+                    "explanation": [],
+                    "evidence_meaning": [],
+                    "impact": [],
+                    "next_steps": [],
+                },
+                "citation_references": claim["citation_references"],
+                "suggested_questions": [],
+                "used_context_message_ids": [],
+            }
+        elif task_id == "customs_case_answer_verifier":
+            self.verifier_calls += 1
+            value = {
+                "supported": not self.reject_entailment,
+                "reason_codes": ([] if not self.reject_entailment else ["semantic_contradiction"]),
+            }
+        else:  # pragma: no cover
+            raise AssertionError(f"unexpected task: {task_id}")
+        return StructuredAgenticResult(
+            value=value,
+            model_id=self.model_id,
+            prompt_sha256=hashlib.sha256(kwargs["system_prompt"].encode("utf-8")).hexdigest(),
+            output_schema_sha256=anthropic_output_schema_sha256(schema),
+            semantic_output_schema_sha256=canonical_json_sha256(schema),
+            request_id=f"request-natural-chat-{task_id}",
+            message_id=f"message-natural-chat-{task_id}",
+            input_tokens=10,
+            output_tokens=5,
+            latency_ms=1,
+        )
+
+
+def test_chat_uses_natural_non_byte_equivalent_prose_after_atom_and_entailment_checks() -> None:
+    request = _conversation("현재 심사 결과의 결론을 이해하기 쉽게 설명해 주십시오.")
+    analyzer = _NaturalChatAnalyzer(request.review_result.runtime_release.model_id)
+
+    answer = answer_case_conversation(request, analyzer=analyzer)  # type: ignore[arg-type]
+
+    selected = answer_claim_bindings(answer, request.review_result)["direct_answer"][0]
+    assert answer.generation_audit.mode == "claude"
+    assert answer.verification_audit.status == "passed"
+    assert answer.direct_answer != selected.canonical_text
+    assert answer.direct_answer.startswith("질문하신 결론을 먼저 쉽게 설명하면, ")
+    assert analyzer.answer_calls == 1
+    assert analyzer.verifier_calls == 1
+
+
+def test_chat_rejects_new_number_before_verifier_and_falls_back_after_one_retry() -> None:
+    request = _conversation("현재 심사 결과의 결론을 설명해 주십시오.")
+    analyzer = _NaturalChatAnalyzer(
+        request.review_result.runtime_release.model_id,
+        forge_number=True,
+    )
+
+    answer = answer_case_conversation(request, analyzer=analyzer)  # type: ignore[arg-type]
+
+    assert analyzer.answer_calls == 2
+    assert analyzer.verifier_calls == 0
+    assert answer.generation_audit.mode == "deterministic_fallback"
+    assert answer.verification_audit.status == "fallback"
+
+
+def test_chat_regenerates_once_then_falls_back_when_entailment_verifier_rejects() -> None:
+    request = _conversation("현재 심사 결과의 결론을 설명해 주십시오.")
+    analyzer = _NaturalChatAnalyzer(
+        request.review_result.runtime_release.model_id,
+        reject_entailment=True,
+    )
+
+    answer = answer_case_conversation(request, analyzer=analyzer)  # type: ignore[arg-type]
+
+    assert analyzer.answer_calls == 2
+    assert analyzer.verifier_calls == 2
+    assert answer.generation_audit.mode == "deterministic_fallback"
+    assert answer.generation_audit.attempt_count == 2
+    assert answer.verification_audit.status == "fallback"
+    assert "answer_entailment_failed" in answer.verification_audit.reason_codes
 
 
 def test_chat_live_evaluator_independently_verifies_request_and_verifier_context() -> None:

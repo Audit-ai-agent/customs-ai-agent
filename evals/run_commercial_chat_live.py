@@ -13,6 +13,7 @@ from urllib.parse import urlsplit
 import httpx
 
 from customs_ai_agent.experience import (
+    answer_limitation_source,
     answer_claim_bindings,
     build_answer_claim_catalog,
 )
@@ -276,6 +277,7 @@ def _evaluate_answer(
                 item.model_dump(mode="json", warnings=False) for item in claims[:100]
             ],
             "general_guidance": guidance,
+            "fixed_limitation_source": answer_limitation_source(answer.answer_scope),
             "candidate_answer": {
                 "direct_answer": answer.direct_answer,
                 "explanation": answer.explanation,
