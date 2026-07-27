@@ -10,6 +10,7 @@ from types import SimpleNamespace
 
 import pytest
 
+from customs_ai_agent.agentic import to_review_run_result_v3
 from customs_ai_agent.build_info import package_code_snapshot_sha256
 from customs_ai_agent.contracts import generate_schema, schema_sha256
 from customs_ai_agent.experience import (
@@ -59,7 +60,7 @@ from customs_ai_agent.schemas.models import (
     EvidenceRetrievalResponse,
 )
 from customs_ai_agent.schemas.v3 import canonical_json_sha256, stable_object_id
-from customs_ai_agent.runner import run_review_v2
+from customs_ai_agent.runner import run_review_result_v2, run_review_v2
 from customs_ai_agent.schemas.models import ReviewRunRequestV2
 from customs_ai_agent.uat_capability import (
     UAT_ALLOWED_TOOLS,
@@ -70,6 +71,7 @@ from customs_ai_agent.uat_capability import (
     issue_uat_capability,
     load_uat_capability,
 )
+from customs_ai_agent.v3_semantics import reconstruct_v3_current_semantics
 from evals.run_commercial_chat_live import (
     _decode_object as _decode_chat_bundle,
     _evaluate_answer,
@@ -308,6 +310,72 @@ def test_deterministic_presentation_has_all_sections_and_is_fact_bound() -> None
     )
     assert envelope.envelope_sha256 == canonical_json_sha256(
         envelope.model_dump(mode="json", exclude={"envelope_sha256"}, warnings=False)
+    )
+
+
+def test_repeated_issue_codes_keep_occurrence_specific_claims_and_fallback_statements() -> None:
+    base_request = _v3_result()[0]
+    documents = [base_request.documents[0]]
+    result_v2 = run_review_result_v2(
+        ReviewRunRequestV2(
+            case_id="repeated-issue-case",
+            documents=documents,
+            review_run_id="repeated-issue-run",
+            review_as_of=base_request.review_as_of,
+        )
+    )
+    result = to_review_run_result_v3(
+        result_v2,
+        base_request.model_copy(
+            update={
+                "case_id": "repeated-issue-case",
+                "documents": documents,
+                "review_run_id": "repeated-issue-run",
+            }
+        ),
+        evidence_runtime_v3_sha256="e" * 64,
+    )
+    assert [issue.issue_code for issue in result.validation_issues] == [
+        "REQUIRED_DOCUMENT_MISSING",
+        "REQUIRED_DOCUMENT_MISSING",
+    ]
+    semantics = reconstruct_v3_current_semantics(result)
+
+    claims = build_canonical_claim_catalog(result)
+    issue_claims = [
+        claim
+        for claim in claims
+        if any(citation.kind == "issue" for citation in claim.citation_references)
+    ]
+    claim_ids = [claim.claim_id for claim in claims]
+    cited_issue_ids = {
+        citation.reference_id
+        for claim in issue_claims
+        for citation in claim.citation_references
+        if citation.kind == "issue"
+    }
+
+    assert len(claim_ids) == len(set(claim_ids))
+    assert cited_issue_ids == set(semantics.issue_reference_ids)
+    envelope = build_review_experience(
+        result,
+        analyzer=None,
+        capability=_capability(),
+    )
+    statement_ids = [
+        statement.statement_id
+        for section in envelope.user_presentation.sections
+        for statement in section.statements
+    ]
+    assert len(statement_ids) == len(set(statement_ids))
+    fact_refs = {
+        (entry.kind, entry.reference_id) for entry in envelope.canonical_result.fact_ledger.entries
+    }
+    assert all(
+        (citation.kind, citation.reference_id) in fact_refs
+        for section in envelope.user_presentation.sections
+        for statement in section.statements
+        for citation in statement.citation_references
     )
 
 

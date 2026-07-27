@@ -57,6 +57,7 @@ from customs_ai_agent.schemas.v3 import (
     stable_object_id,
 )
 from customs_ai_agent.security_guard import prompt_injection_unmet_reason_codes
+from customs_ai_agent.v3_semantics import reconstruct_v3_current_semantics
 
 
 ExperienceStageCallback = Callable[[dict[str, Any]], None]
@@ -859,6 +860,13 @@ def answer_claim_bindings(
 
 def build_canonical_claim_catalog(result: ReviewRunResultV3) -> list[CanonicalClaimV1]:
     facts = {(entry.kind, entry.reference_id): entry for entry in result.fact_ledger.entries}
+    current_semantics = reconstruct_v3_current_semantics(result)
+    expected_occurrence_references = [
+        *(("issue", reference_id) for reference_id in current_semantics.issue_reference_ids),
+        *(("finding", reference_id) for reference_id in current_semantics.finding_reference_ids),
+    ]
+    if any(reference not in facts for reference in expected_occurrence_references):
+        raise ValueError("canonical occurrence reference is absent from the FactLedger")
     outcome_entry = next(entry for entry in result.fact_ledger.entries if entry.kind == "outcome")
     outcome = _citation("outcome", outcome_entry.reference_id)
     claims: list[CanonicalClaimV1] = []
@@ -911,15 +919,11 @@ def build_canonical_claim_catalog(result: ReviewRunResultV3) -> list[CanonicalCl
             )
         )
     if result.validation_issues:
-        for issue in result.validation_issues:
-            reference = next(
-                (
-                    reference_id
-                    for kind, reference_id in facts
-                    if kind == "issue" and facts[(kind, reference_id)].label == issue.issue_code
-                ),
-                outcome_entry.reference_id,
-            )
+        for issue, reference in zip(
+            result.validation_issues,
+            current_semantics.issue_reference_ids,
+            strict=True,
+        ):
             meaning = user_meaning_for_issue(issue.issue_code)
             claims.extend(
                 [
@@ -961,16 +965,11 @@ def build_canonical_claim_catalog(result: ReviewRunResultV3) -> list[CanonicalCl
             )
         )
     if result.regulatory_findings:
-        for finding in result.regulatory_findings:
-            reference = next(
-                (
-                    reference_id
-                    for kind, reference_id in facts
-                    if kind == "finding"
-                    and facts[(kind, reference_id)].label == finding.finding_code
-                ),
-                outcome_entry.reference_id,
-            )
+        for finding, reference in zip(
+            result.regulatory_findings,
+            current_semantics.finding_reference_ids,
+            strict=True,
+        ):
             meaning = user_meaning_for_finding(finding.finding_code)
             claims.extend(
                 [
@@ -1097,6 +1096,9 @@ def build_canonical_claim_catalog(result: ReviewRunResultV3) -> list[CanonicalCl
     present = {item.section_code for item in claims}
     if present != set(_SECTION_ORDER):
         raise ValueError("canonical presentation catalog is incomplete")
+    claim_ids = [item.claim_id for item in claims]
+    if len(claim_ids) != len(set(claim_ids)):
+        raise ValueError("canonical presentation claim IDs must be unique")
     return claims
 
 
