@@ -277,16 +277,10 @@ def test_verifier_receipts_are_bound_to_exact_presentation_and_answer_content() 
     presentation_payload = presentation.model_dump(mode="json", warnings=False)
     first_statement = presentation_payload["sections"][0]["statements"][0]
     first_statement["text"] = "원래 검증 내용과 반대되는 임의 설명입니다."
-    statement_body = {
-        key: value for key, value in first_statement.items() if key != "statement_id"
-    }
+    statement_body = {key: value for key, value in first_statement.items() if key != "statement_id"}
     first_statement["statement_id"] = stable_object_id("statement", statement_body)
     presentation_payload["presentation_sha256"] = canonical_json_sha256(
-        {
-            key: value
-            for key, value in presentation_payload.items()
-            if key != "presentation_sha256"
-        }
+        {key: value for key, value in presentation_payload.items() if key != "presentation_sha256"}
     )
     with pytest.raises(ValueError, match="verifier receipt"):
         GroundedPresentationV1.model_validate(presentation_payload)
@@ -296,11 +290,7 @@ def test_verifier_receipts_are_bound_to_exact_presentation_and_answer_content() 
     answer_payload = answer.model_dump(mode="json", warnings=False)
     answer_payload["direct_answer"] = "검증된 답변과 무관한 임의 답변입니다."
     answer_payload["answer_sha256"] = canonical_json_sha256(
-        {
-            key: value
-            for key, value in answer_payload.items()
-            if key != "answer_sha256"
-        }
+        {key: value for key, value in answer_payload.items() if key != "answer_sha256"}
     )
     with pytest.raises(ValueError, match="verifier receipt"):
         AssistantAnswerV2.model_validate(answer_payload)
@@ -536,6 +526,7 @@ def test_adaptive_live_fault_control_preserves_actual_call_then_recovers() -> No
     assert first.results[0].coverage == "partial"
     assert second == response
     assert controlled.successful_retrieval_post_count == 2
+    assert controlled.request_ids == ("request-1", "request-1")
 
 
 class _DatasetScopeAnalyzer:

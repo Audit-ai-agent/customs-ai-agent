@@ -214,9 +214,7 @@ def presentation_verified_content_sha256(
     return canonical_json_sha256(
         {
             "headline": headline,
-            "sections": [
-                section.model_dump(mode="json", warnings=False) for section in sections
-            ],
+            "sections": [section.model_dump(mode="json", warnings=False) for section in sections],
         }
     )
 

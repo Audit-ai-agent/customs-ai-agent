@@ -101,6 +101,7 @@ class _ActualRetrieverFaultControl:
         self._actual = actual
         self._fault_mode = fault_mode
         self._retrieve_count = 0
+        self._request_ids: list[str] = []
 
     @property
     def expected_identity(self):
@@ -109,6 +110,10 @@ class _ActualRetrieverFaultControl:
     @property
     def successful_retrieval_post_count(self) -> int:
         return self._actual.successful_retrieval_post_count
+
+    @property
+    def request_ids(self) -> tuple[str, ...]:
+        return tuple(self._request_ids)
 
     def preflight(self, *args: Any, **kwargs: Any):
         return self._actual.preflight(*args, **kwargs)
@@ -121,6 +126,7 @@ class _ActualRetrieverFaultControl:
         request: EvidenceRetrievalRequest,
     ) -> EvidenceRetrievalResponse:
         response = self._actual.retrieve(request)
+        self._request_ids.append(request.request_id)
         self._retrieve_count += 1
         inject = self._fault_mode == "always_partial" or (
             self._fault_mode == "first_partial" and self._retrieve_count == 1
@@ -162,14 +168,26 @@ def _run_control(
     *,
     control_id: str,
     fault_mode: FaultMode,
-) -> dict[str, Any]:
+) -> tuple[dict[str, Any], bool]:
+    suffix = {
+        "field-uncertainty-reread": "field-reread",
+        "evidence-incomplete-retry": "evidence-retry",
+        "budget-exhaustion-human-review": "budget-exhaustion",
+    }[control_id]
+    control_request = ServiceReviewRunRequestV3.model_validate(
+        {
+            **request.model_dump(mode="json", warnings=False),
+            "review_run_id": f"{request.review_run_id}-{suffix}",
+            "case_id": f"{request.case_id}-{suffix}",
+        }
+    )
     controlled = _ActualRetrieverFaultControl(actual, fault_mode=fault_mode)
     runtime._core._retriever_v3 = controlled  # type: ignore[assignment] # noqa: SLF001
     runtime._retriever = controlled  # type: ignore[assignment] # noqa: SLF001
     before_posts = actual.successful_retrieval_post_count
     try:
         envelope = runtime.review_experience_json(
-            _canonical_bytes(request.model_dump(mode="json", warnings=False))
+            _canonical_bytes(control_request.model_dump(mode="json", warnings=False))
         )
     finally:
         runtime._core._retriever_v3 = actual  # noqa: SLF001
@@ -232,24 +250,14 @@ def _run_control(
             safe_failure_verified and budget_exhaustion_verified and actual_posts >= 3
         ),
     }[control_id]
-    return {
+    private_verification_bundle = {
         "control_id": control_id,
-        "passed": passed,
-        "actual_retrieval_post_count": actual_posts,
-        "result_sha256": result.result_sha256,
-        "envelope_sha256": envelope.envelope_sha256,
-        "action_trace_sha256": canonical_json_sha256(
-            [item.model_dump(mode="json", warnings=False) for item in result.action_trace]
-        ),
-        "tool_status": tool_status,
-        "review_disposition": result.review_disposition,
-        "execution_status": result.execution_status,
-        "active_failure_codes": sorted(active_failure_codes),
-        "field_reread_verified": field_verified,
-        "same_provider_evidence_retry_verified": evidence_verified,
-        "safe_failure_human_review_verified": safe_failure_verified,
-        "two_cycle_budget_exhaustion_verified": budget_exhaustion_verified,
+        "control_request": control_request.model_dump(mode="json", warnings=False),
+        "retrieval_request_ids": list(controlled.request_ids),
+        "canonical_result": result.model_dump(mode="json", warnings=False),
+        "experience_envelope": envelope.model_dump(mode="json", warnings=False),
     }
+    return private_verification_bundle, passed
 
 
 def main() -> int:
@@ -299,7 +307,7 @@ def main() -> int:
     )
     actual_retriever = runtime._retriever  # noqa: SLF001
     try:
-        controls = [
+        control_runs = [
             _run_control(
                 runtime,
                 actual_retriever,
@@ -324,23 +332,28 @@ def main() -> int:
         ]
     finally:
         runtime.close()
+    controls = [item for item, _passed in control_runs]
+    control_passes = [passed for _item, passed in control_runs]
     summary: dict[str, Any] = {
-        "schema_version": "customs-uat-adaptive-live-summary/v1",
+        "schema_version": "customs-uat-adaptive-live-private-summary/v2",
         "manifest_sha256": manifest.manifest_sha256,
         "evidence_runtime_v3_sha256": (
             manifest.evidence_runtime_identity.runtime_release_v3_sha256
         ),
         "request_manifest_sha256": canonical_json_sha256(request),
         "controls": controls,
-        "passed_count": sum(item["passed"] for item in controls),
         "contains_document_question_or_answer_prose": False,
         "known_gate_limitations": [],
     }
     summary["summary_sha256"] = canonical_json_sha256(summary)
-    output = args.output_summary.expanduser().resolve()
-    output.parent.mkdir(parents=True, exist_ok=True)
-    output.write_bytes(_canonical_bytes(summary) + b"\n")
-    return 0 if all(item["passed"] for item in controls) else 1
+    encoded = _canonical_bytes(summary) + b"\n"
+    if args.output_summary == Path("-"):
+        getattr(sys.stdout, "buffer", sys.stdout).write(encoded)
+    else:
+        output = args.output_summary.expanduser().resolve()
+        output.parent.mkdir(parents=True, exist_ok=True)
+        output.write_bytes(encoded)
+    return 0 if all(control_passes) else 1
 
 
 if __name__ == "__main__":

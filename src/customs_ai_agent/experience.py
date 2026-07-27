@@ -1359,9 +1359,7 @@ def _fallback_answer(
             entailment_verifier="not_run",
             verifier_prompt_sha256=experience_prompt_hashes()["chat_verifier"],
             verifier_schema_sha256=experience_schema_hashes()["chat_verifier"],
-            verified_content_sha256=assistant_answer_verified_content_sha256(
-                answer_content
-            ),
+            verified_content_sha256=assistant_answer_verified_content_sha256(answer_content),
             checked_statement_count=(
                 1
                 + len(explanation)
