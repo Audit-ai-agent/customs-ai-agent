@@ -20,6 +20,16 @@ UAT_ALLOWED_TOOLS = (
     "human.request/v1",
     "explanation.compose/v2",
 )
+# ReviewResultV3 is a frozen public contract. Its canonical plan/trace can only
+# represent the inherited v1 explanation action. The UAT-only v2 renderer is
+# attested by UAT_ALLOWED_TOOLS and recorded additively in the Experience
+# envelope instead of widening that public contract.
+UAT_CANONICAL_REVIEW_TOOLS = (
+    "document.reread_span/v1",
+    "evidence.retrieve/v3",
+    "human.request/v1",
+    "explanation.compose/v1",
+)
 UAT_RESOLVABLE_GAPS = ("field_uncertainty", "evidence_incomplete")
 
 
@@ -201,6 +211,7 @@ def assert_runtime_uat_capability(
 
 __all__ = [
     "UAT_ALLOWED_TOOLS",
+    "UAT_CANONICAL_REVIEW_TOOLS",
     "UAT_RESOLVABLE_GAPS",
     "UAT_TOOL_REGISTRY_ID",
     "UatCapabilityError",

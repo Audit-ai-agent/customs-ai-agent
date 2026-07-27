@@ -806,10 +806,11 @@ def _compile_uat_bounded_retry_plan(
 
     Production keeps its frozen one-action-per-Gap plan. The UAT capability
     explicitly authorizes two cycles, so code guarantees the two recoverable
-    tools are present, reserves one conditional same-Provider Evidence retry,
-    and replaces the legacy explanation action with the UAT v2 renderer. The
-    resulting plan remains at most six actions and retains the exact Claude
-    coordinator identity.
+    tools are present and reserves one conditional same-Provider Evidence
+    retry. ReviewResultV3 is frozen, so its plan retains the v1 explanation
+    action. The separately attested v2 user renderer is recorded only in the
+    additive Experience envelope. The resulting plan remains at most six
+    actions and retains the exact Claude coordinator identity.
     """
 
     if not gaps:
@@ -879,7 +880,7 @@ def _compile_uat_bounded_retry_plan(
     for gap in field_gaps:
         add_action(action_for_gap(gap), action_limit=primary_action_limit)
     for action in plan.actions:
-        if action.tool_name in {"explanation.compose/v1", "explanation.compose/v2"}:
+        if action.tool_name == "explanation.compose/v1":
             continue
         # The expiring UAT policy permits two attempts for one deterministically
         # selected Evidence Gap, not one attempt for every Evidence Gap.
@@ -916,17 +917,17 @@ def _compile_uat_bounded_retry_plan(
         )
     explanation_gap = evidence_gap or ordered_gaps[0]
     explanation_payload = {
-        "tool_name": "explanation.compose/v2",
+        "tool_name": "explanation.compose/v1",
         "gap_id": explanation_gap.gap_id,
-        "reason_code": "compose_verified_user_experience",
+        "reason_code": "compose_canonical_v3_explanation",
         "input_reference_ids": explanation_gap.source_reference_ids,
     }
     selected.append(
         PlannedToolActionV1(
             action_id=stable_object_id("action", explanation_payload),
-            tool_name="explanation.compose/v2",
+            tool_name="explanation.compose/v1",
             gap_id=explanation_gap.gap_id,
-            reason_code="compose_verified_user_experience",
+            reason_code="compose_canonical_v3_explanation",
             input_reference_ids=explanation_gap.source_reference_ids,
         )
     )
@@ -1206,7 +1207,7 @@ def activate_bounded_plan(
     uat_allowed_tools: frozenset[str] = frozenset()
     if uat_capability is not None and runtime_release is not None:
         from customs_ai_agent.uat_capability import (
-            UAT_ALLOWED_TOOLS,
+            UAT_CANONICAL_REVIEW_TOOLS,
             assert_runtime_uat_capability,
         )
 
@@ -1217,7 +1218,7 @@ def activate_bounded_plan(
             evidence_runtime_v3_sha256=runtime_release.evidence_runtime_v3_sha256,
         )
         if uat_authorized:
-            uat_allowed_tools = frozenset(UAT_ALLOWED_TOOLS)
+            uat_allowed_tools = frozenset(UAT_CANONICAL_REVIEW_TOOLS)
     if not production_authorized and not uat_authorized:
         raise BoundedToolPolicyError("active bounded execution is not release-authorized")
     allowed_tools = (
@@ -1278,7 +1279,7 @@ def execute_active_bounded_plan(
     uat_allowed_tools: frozenset[str] = frozenset()
     if uat_capability is not None and runtime_release is not None:
         from customs_ai_agent.uat_capability import (
-            UAT_ALLOWED_TOOLS,
+            UAT_CANONICAL_REVIEW_TOOLS,
             assert_runtime_uat_capability,
         )
 
@@ -1289,7 +1290,7 @@ def execute_active_bounded_plan(
             evidence_runtime_v3_sha256=runtime_release.evidence_runtime_v3_sha256,
         )
         if uat_authorized:
-            uat_allowed_tools = frozenset(UAT_ALLOWED_TOOLS)
+            uat_allowed_tools = frozenset(UAT_CANONICAL_REVIEW_TOOLS)
     if not production_authorized and not uat_authorized:
         raise BoundedToolPolicyError("active bounded execution is not release-authorized")
     allowed_tools = (
@@ -1333,7 +1334,7 @@ def execute_active_bounded_plan(
             status = "succeeded"
             reason_code = "human_review_request_recorded"
             output_references = [action.gap_id]
-        elif action.tool_name in {"explanation.compose/v1", "explanation.compose/v2"}:
+        elif action.tool_name == "explanation.compose/v1":
             status = "succeeded"
             reason_code = "explanation_rendered_after_deterministic_reevaluation"
             output_references = [action.gap_id]

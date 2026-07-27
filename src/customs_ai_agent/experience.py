@@ -1367,7 +1367,11 @@ def build_grounded_presentation(
         raise
 
 
-def build_user_action_events(result: ReviewRunResultV3) -> list[UserActionEventV1]:
+def build_user_action_events(
+    result: ReviewRunResultV3,
+    *,
+    presentation: GroundedPresentationV1 | None = None,
+) -> list[UserActionEventV1]:
     events: list[UserActionEventV1] = []
     for action in result.required_actions:
         payload = {
@@ -1422,6 +1426,33 @@ def build_user_action_events(result: ReviewRunResultV3) -> list[UserActionEventV
                 }
             )
         )
+    if presentation is not None:
+        statement_ids = sorted(
+            {
+                statement.statement_id
+                for section in presentation.sections
+                for statement in section.statements
+            }
+        )[:100]
+        payload = {
+            "schema_version": "1.0",
+            "action_code": "explanation.compose/v2",
+            "title": "사용자용 심사 설명을 작성했습니다",
+            "description": (
+                "검증된 심사 사실과 근거만 사용해 사용자용 설명을 작성하고 "
+                "근거 결박 검사를 완료했습니다."
+            ),
+            "status": "completed",
+            "source_reference_ids": statement_ids,
+        }
+        events.append(
+            UserActionEventV1.model_validate(
+                {
+                    "event_id": stable_object_id("user_action", payload),
+                    **payload,
+                }
+            )
+        )
     return events
 
 
@@ -1442,7 +1473,10 @@ def build_review_experience(
         "canonical_result": result,
         "user_presentation": presentation,
         "capability_attestation": capability,
-        "user_action_events": build_user_action_events(result),
+        "user_action_events": build_user_action_events(
+            result,
+            presentation=presentation,
+        ),
     }
     payload["envelope_sha256"] = canonical_json_sha256(payload)
     return ReviewExperienceEnvelopeV1.model_validate(payload)

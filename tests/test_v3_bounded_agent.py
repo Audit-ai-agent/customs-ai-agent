@@ -2231,7 +2231,7 @@ def test_uat_retry_compiler_reserves_budget_and_rereads_each_field_once() -> Non
     assert evidence_actions[0] == plan.actions[0]
     assert evidence_actions[1].reason_code == "evidence_retry_cycle_2_if_unresolved"
     explanation_actions = [
-        action for action in plan.actions if action.tool_name == "explanation.compose/v2"
+        action for action in plan.actions if action.tool_name == "explanation.compose/v1"
     ]
     assert len(explanation_actions) == 1
     reread_actions = [

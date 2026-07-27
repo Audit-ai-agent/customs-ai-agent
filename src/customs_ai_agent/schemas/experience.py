@@ -363,6 +363,11 @@ class ReviewExperienceEnvelopeV1(V3WireModel):
         fact_refs = {
             (entry.kind, entry.reference_id) for entry in self.canonical_result.fact_ledger.entries
         }
+        presentation_statement_ids = {
+            statement.statement_id
+            for section in self.user_presentation.sections
+            for statement in section.statements
+        }
         for section in self.user_presentation.sections:
             for statement in section.statements:
                 if any(
@@ -370,6 +375,19 @@ class ReviewExperienceEnvelopeV1(V3WireModel):
                     for citation in statement.citation_references
                 ):
                     raise ValueError("experience statement cites an unknown canonical fact")
+        explanation_events = [
+            event
+            for event in self.user_action_events
+            if event.action_code == "explanation.compose/v2"
+        ]
+        if len(explanation_events) != 1:
+            raise ValueError("experience envelope requires one v2 explanation action event")
+        if self.capability_attestation.tool_registry_id != "customs-agent-tools/text-uat-v2":
+            raise ValueError("v2 explanation requires the exact UAT Tool registry")
+        if not explanation_events[0].source_reference_ids or not set(
+            explanation_events[0].source_reference_ids
+        ).issubset(presentation_statement_ids):
+            raise ValueError("v2 explanation event must reference presentation statements")
         expected = canonical_json_sha256(
             self.model_dump(
                 mode="json",

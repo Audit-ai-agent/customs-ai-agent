@@ -11,7 +11,7 @@ from types import SimpleNamespace
 import pytest
 
 from customs_ai_agent.build_info import package_code_snapshot_sha256
-from customs_ai_agent.contracts import generate_schema
+from customs_ai_agent.contracts import generate_schema, schema_sha256
 from customs_ai_agent.experience import (
     _answer_values_safe,
     _candidate_presentation,
@@ -60,6 +60,8 @@ from customs_ai_agent.schemas.v3 import canonical_json_sha256, stable_object_id
 from customs_ai_agent.runner import run_review_v2
 from customs_ai_agent.schemas.models import ReviewRunRequestV2
 from customs_ai_agent.uat_capability import (
+    UAT_ALLOWED_TOOLS,
+    UAT_CANONICAL_REVIEW_TOOLS,
     UatCapabilityError,
     assert_runtime_uat_capability,
     capability_file_sha256,
@@ -98,6 +100,15 @@ CONTRACT_MODELS = {
     "review-experience-envelope-v1.schema.json": ReviewExperienceEnvelopeV1,
     "review-stage-event-v1.schema.json": ReviewStageEventV1,
 }
+BASELINE_REVIEW_RESULT_V3_FILE_SHA256 = (
+    "72e70f901ef0bc7402159f4a1d1e25043effa02213f450ac017b611aaa37f912"
+)
+BASELINE_REVIEW_REQUEST_V2_FILE_SHA256 = (
+    "2d8f2472d81b9ce2b5e453bf0c1b77a8d282e7d8811b202d2c2a0c91d5d30a09"
+)
+BASELINE_REVIEW_RESULT_V2_FILE_SHA256 = (
+    "c414f598af34fbcf4377337a6c8831da2362c535ab9f567b0da6e7fc5f809497"
+)
 
 
 def _canonical_file_bytes(value: object) -> bytes:
@@ -192,6 +203,39 @@ def test_public_v3_review_contracts_are_byte_identical_to_packaged_models() -> N
         public_bytes = (PUBLIC_V3_CONTRACT_ROOT / public_name).read_bytes()
         packaged_bytes = (PACKAGE_V3_CONTRACT_ROOT / packaged_name).read_bytes()
         assert public_bytes == packaged_bytes == generated
+        if kind == "review-result":
+            assert hashlib.sha256(public_bytes).hexdigest() == (
+                BASELINE_REVIEW_RESULT_V3_FILE_SHA256
+            )
+            assert schema_sha256("backend", "v3", "review-result") == (
+                BASELINE_REVIEW_RESULT_V3_FILE_SHA256
+            )
+            assert b"explanation.compose/v2" not in public_bytes
+
+
+def test_frozen_v2_contract_bytes_remain_identical_to_the_pre_task_baseline() -> None:
+    expected = {
+        "review_request.schema.json": BASELINE_REVIEW_REQUEST_V2_FILE_SHA256,
+        "review_result.schema.json": BASELINE_REVIEW_RESULT_V2_FILE_SHA256,
+    }
+    packaged_names = {
+        "review_request.schema.json": "review-request.schema.json",
+        "review_result.schema.json": "review-result.schema.json",
+    }
+    for public_name, expected_sha256 in expected.items():
+        public_bytes = (ROOT / "contracts" / "agent" / "v2" / public_name).read_bytes()
+        packaged_bytes = (
+            ROOT
+            / "src"
+            / "customs_ai_agent"
+            / "contracts"
+            / "schemas"
+            / "backend"
+            / "v2"
+            / packaged_names[public_name]
+        ).read_bytes()
+        assert public_bytes == packaged_bytes
+        assert hashlib.sha256(public_bytes).hexdigest() == expected_sha256
 
 
 def test_meaning_catalog_covers_current_dynamic_actions_and_never_leaks_raw_fallback() -> None:
@@ -240,6 +284,26 @@ def test_deterministic_presentation_has_all_sections_and_is_fact_bound() -> None
     assert all(set(statement.source_claim_ids).issubset(claim_ids) for statement in statements)
     assert all(statement.citation_references for statement in statements if statement.material)
     assert envelope.user_presentation.generation_audit.mode == "deterministic_fallback"
+    explanation_events = [
+        event
+        for event in envelope.user_action_events
+        if event.action_code == "explanation.compose/v2"
+    ]
+    assert len(explanation_events) == 1
+    assert set(explanation_events[0].source_reference_ids).issubset(
+        {statement.statement_id for statement in statements}
+    )
+    assert "explanation.compose/v2" in UAT_ALLOWED_TOOLS
+    assert "explanation.compose/v2" not in UAT_CANONICAL_REVIEW_TOOLS
+    assert "explanation.compose/v1" in UAT_CANONICAL_REVIEW_TOOLS
+    assert all(
+        action.tool_name != "explanation.compose/v2"
+        for action in envelope.canonical_result.review_plan.actions
+    )
+    assert all(
+        trace.tool_name != "explanation.compose/v2"
+        for trace in envelope.canonical_result.action_trace
+    )
     assert envelope.envelope_sha256 == canonical_json_sha256(
         envelope.model_dump(mode="json", exclude={"envelope_sha256"}, warnings=False)
     )
