@@ -45,6 +45,9 @@ from customs_ai_agent.schemas.experience import (
     PresentationStatementRole,
     ReviewExperienceEnvelopeV1,
     UserActionEventV1,
+    assistant_answer_verified_content_sha256,
+    case_conversation_request_sha256,
+    presentation_verified_content_sha256,
 )
 from customs_ai_agent.schemas.v3 import (
     CitationReferenceV1,
@@ -56,6 +59,12 @@ from customs_ai_agent.security_guard import prompt_injection_unmet_reason_codes
 
 
 ExperienceStageCallback = Callable[[dict[str, Any]], None]
+
+_SAFE_SUGGESTED_QUESTIONS = [
+    "이 결과가 나온 가장 중요한 이유는 무엇입니까?",
+    "담당자가 먼저 확인할 항목은 무엇입니까?",
+    "연결된 법령 근거가 이 심사 건에서 어떤 의미입니까?",
+]
 
 
 def _stage_started(
@@ -679,9 +688,10 @@ def _fallback_presentation(
     ]
     prompt_hash = experience_prompt_hashes()["presentation"]
     schema_hash = experience_schema_hashes()["presentation"]
+    headline = _headline(result)
     payload = {
         "schema_version": "1.0",
-        "headline": _headline(result),
+        "headline": headline,
         "sections": sections,
         "generation_audit": ExperienceGenerationAuditV1(
             mode="deterministic_fallback",
@@ -696,6 +706,10 @@ def _fallback_presentation(
             entailment_verifier="not_run",
             verifier_prompt_sha256=experience_prompt_hashes()["entailment"],
             verifier_schema_sha256=experience_schema_hashes()["entailment"],
+            verified_content_sha256=presentation_verified_content_sha256(
+                headline,
+                sections,
+            ),
             checked_statement_count=sum(len(item.statements) for item in sections),
             reason_codes=sorted(set(reason_codes or ["claude_presentation_unavailable"])),
         ),
@@ -936,9 +950,10 @@ def build_grounded_presentation(
             if blockers:
                 retry_blockers = blockers
                 continue
+            headline = _headline(result)
             payload = {
                 "schema_version": "1.0",
-                "headline": _headline(result),
+                "headline": headline,
                 "sections": sections,
                 "generation_audit": ExperienceGenerationAuditV1(
                     mode="claude",
@@ -958,6 +973,10 @@ def build_grounded_presentation(
                     verifier_model_id=verification.model_id,
                     verifier_prompt_sha256=verification.prompt_sha256,
                     verifier_schema_sha256=verification.output_schema_sha256,
+                    verified_content_sha256=presentation_verified_content_sha256(
+                        headline,
+                        sections,
+                    ),
                     checked_statement_count=sum(len(item.statements) for item in sections),
                 ),
             }
@@ -1309,8 +1328,8 @@ def _fallback_answer(
         ]
     else:
         limitations = ["답변은 현재 심사 회차와 연결된 문서·법령 근거 범위에 한정됩니다."]
-    payload = {
-        "schema_version": "2.0",
+    answer_content = {
+        "request_sha256": case_conversation_request_sha256(request),
         "answer_scope": scope,
         "status": status,
         "direct_answer": direct,
@@ -1320,12 +1339,12 @@ def _fallback_answer(
         "next_steps": next_steps,
         "limitations": limitations,
         "citations": citations if status == "answered" else [],
-        "suggested_questions": [
-            "이 결과가 나온 가장 중요한 이유는 무엇입니까?",
-            "담당자가 먼저 확인할 항목은 무엇입니까?",
-            "연결된 법령 근거가 이 심사 건에서 어떤 의미입니까?",
-        ],
+        "suggested_questions": _SAFE_SUGGESTED_QUESTIONS,
         "used_context_message_ids": [turn.message_id for turn in request.recent_turns],
+    }
+    payload = {
+        "schema_version": "2.0",
+        **answer_content,
         "generation_audit": ExperienceGenerationAuditV1(
             mode="deterministic_fallback",
             task_id=CASE_ANSWER_V2_PROMPT_ID,
@@ -1340,7 +1359,17 @@ def _fallback_answer(
             entailment_verifier="not_run",
             verifier_prompt_sha256=experience_prompt_hashes()["chat_verifier"],
             verifier_schema_sha256=experience_schema_hashes()["chat_verifier"],
-            checked_statement_count=(1 + len(explanation) + len(evidence_meaning) + len(impact)),
+            verified_content_sha256=assistant_answer_verified_content_sha256(
+                answer_content
+            ),
+            checked_statement_count=(
+                1
+                + len(explanation)
+                + len(evidence_meaning)
+                + len(impact)
+                + len(next_steps)
+                + len(limitations)
+            ),
             reason_codes=sorted(set(reasons or ["claude_answer_unavailable"])),
         ),
     }
@@ -1537,7 +1566,10 @@ def answer_case_conversation(
                             item.model_dump(mode="json", warnings=False) for item in claims
                         ],
                         "general_guidance": guidance,
-                        "candidate_answer": call.value,
+                        "candidate_answer": {
+                            **call.value,
+                            "suggested_questions": _SAFE_SUGGESTED_QUESTIONS,
+                        },
                     },
                     output_schema=_ANSWER_VERIFIER_SCHEMA,
                     max_tokens=1024,
@@ -1568,8 +1600,8 @@ def answer_case_conversation(
                 CitationReferenceV1.model_validate(item)
                 for item in call.value["citation_references"]
             ]
-            payload = {
-                "schema_version": "2.0",
+            answer_content = {
+                "request_sha256": case_conversation_request_sha256(request),
                 "answer_scope": scope,
                 "status": fixed_status,
                 "direct_answer": " ".join(call.value["direct_answer"].split()),
@@ -1581,10 +1613,15 @@ def answer_case_conversation(
                 "next_steps": [" ".join(item.split()) for item in call.value["next_steps"]],
                 "limitations": [" ".join(item.split()) for item in call.value["limitations"]],
                 "citations": citations,
-                "suggested_questions": [
-                    " ".join(item.split()) for item in call.value["suggested_questions"]
-                ],
+                # Follow-up prompts are product navigation, not model claims.
+                # Keep them deterministic so unverified Claude prose cannot be
+                # surfaced outside the claim/citation verifier.
+                "suggested_questions": _SAFE_SUGGESTED_QUESTIONS,
                 "used_context_message_ids": call.value["used_context_message_ids"],
+            }
+            payload = {
+                "schema_version": "2.0",
+                **answer_content,
                 "generation_audit": ExperienceGenerationAuditV1(
                     mode="claude",
                     task_id=CASE_ANSWER_V2_PROMPT_ID,
@@ -1604,6 +1641,9 @@ def answer_case_conversation(
                     verifier_model_id=verifier.model_id,
                     verifier_prompt_sha256=verifier.prompt_sha256,
                     verifier_schema_sha256=verifier.output_schema_sha256,
+                    verified_content_sha256=assistant_answer_verified_content_sha256(
+                        answer_content
+                    ),
                     checked_statement_count=(
                         1
                         + len(call.value["explanation"])

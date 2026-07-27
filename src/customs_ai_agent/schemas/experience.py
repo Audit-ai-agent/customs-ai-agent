@@ -1,5 +1,6 @@
 from __future__ import annotations
 
+from collections.abc import Mapping, Sequence
 from datetime import datetime
 from typing import Any, Literal
 
@@ -133,6 +134,7 @@ class ExperienceVerificationAuditV1(V3WireModel):
     verifier_model_id: str | None = Field(default=None, min_length=1, max_length=128)
     verifier_prompt_sha256: str = Field(pattern=r"^[a-f0-9]{64}$")
     verifier_schema_sha256: str = Field(pattern=r"^[a-f0-9]{64}$")
+    verified_content_sha256: str = Field(pattern=r"^[a-f0-9]{64}$")
     checked_statement_count: int = Field(ge=0, le=1000)
     reason_codes: list[str] = Field(default_factory=list, max_length=100)
 
@@ -203,6 +205,22 @@ class GroundedPresentationSectionV1(V3WireModel):
     )
 
 
+def presentation_verified_content_sha256(
+    headline: str,
+    sections: Sequence[GroundedPresentationSectionV1],
+) -> str:
+    """Hash the exact report content that the verifier approved."""
+
+    return canonical_json_sha256(
+        {
+            "headline": headline,
+            "sections": [
+                section.model_dump(mode="json", warnings=False) for section in sections
+            ],
+        }
+    )
+
+
 class GroundedPresentationV1(V3WireModel):
     schema_version: Literal["1.0"] = "1.0"
     headline: str = Field(min_length=1, max_length=300)
@@ -230,6 +248,10 @@ class GroundedPresentationV1(V3WireModel):
         ]
         if len(statement_ids) != len(set(statement_ids)):
             raise ValueError("presentation statement IDs must be unique")
+        if self.verification_audit.verified_content_sha256 != (
+            presentation_verified_content_sha256(self.headline, self.sections)
+        ):
+            raise ValueError("presentation verifier receipt is not bound to its visible content")
         expected = canonical_json_sha256(
             self.model_dump(
                 mode="json",
@@ -411,8 +433,39 @@ class CaseConversationRequestV2(V3WireModel):
         return self
 
 
+def case_conversation_request_sha256(request: CaseConversationRequestV2) -> str:
+    """Canonical binding for one question, result, and Backend-owned context."""
+
+    return canonical_json_sha256(request.model_dump(mode="json", warnings=False))
+
+
+_ANSWER_VERIFIED_CONTENT_FIELDS = (
+    "request_sha256",
+    "answer_scope",
+    "status",
+    "direct_answer",
+    "explanation",
+    "evidence_meaning",
+    "impact",
+    "next_steps",
+    "limitations",
+    "citations",
+    "suggested_questions",
+    "used_context_message_ids",
+)
+
+
+def assistant_answer_verified_content_sha256(values: Mapping[str, Any]) -> str:
+    """Hash every user-visible or lineage-bearing value approved by the verifier."""
+
+    return canonical_json_sha256(
+        {field: values[field] for field in _ANSWER_VERIFIED_CONTENT_FIELDS}
+    )
+
+
 class AssistantAnswerV2(V3WireModel):
     schema_version: Literal["2.0"] = "2.0"
+    request_sha256: str = Field(pattern=r"^[a-f0-9]{64}$")
     answer_scope: AnswerScopeV2
     status: Literal[
         "answered",
@@ -450,6 +503,11 @@ class AssistantAnswerV2(V3WireModel):
             "out_of_scope",
         }:
             raise ValueError("answer status is inconsistent with its scope")
+        values = self.model_dump(mode="json", warnings=False)
+        if self.verification_audit.verified_content_sha256 != (
+            assistant_answer_verified_content_sha256(values)
+        ):
+            raise ValueError("assistant verifier receipt is not bound to its visible content")
         expected = canonical_json_sha256(
             self.model_dump(mode="json", exclude={"answer_sha256"}, warnings=False)
         )

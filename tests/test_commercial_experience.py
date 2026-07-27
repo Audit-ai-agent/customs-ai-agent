@@ -34,15 +34,17 @@ from customs_ai_agent.schemas.experience import (
     AssistantAnswerV2,
     CaseConversationRequestV2,
     ConversationTurnV2,
+    GroundedPresentationV1,
     ReviewExperienceEnvelopeV1,
     ReviewStageEventV1,
+    case_conversation_request_sha256,
     conversation_context_sha256,
 )
 from customs_ai_agent.schemas.models import (
     EvidenceRetrievalRequest,
     EvidenceRetrievalResponse,
 )
-from customs_ai_agent.schemas.v3 import canonical_json_sha256
+from customs_ai_agent.schemas.v3 import canonical_json_sha256, stable_object_id
 from customs_ai_agent.runner import run_review_v2
 from customs_ai_agent.schemas.models import ReviewRunRequestV2
 from customs_ai_agent.uat_capability import (
@@ -243,8 +245,9 @@ def test_presentation_and_chat_stage_events_wrap_actual_work_in_order() -> None:
 
 
 def test_chat_v2_scope_classifier_failure_requests_clarification() -> None:
+    request = _conversation("이 결과가 업무에 미치는 영향을 설명해 주십시오.")
     answer = answer_case_conversation(
-        _conversation("이 결과가 업무에 미치는 영향을 설명해 주십시오."),
+        request,
         analyzer=None,
     )
 
@@ -252,6 +255,55 @@ def test_chat_v2_scope_classifier_failure_requests_clarification() -> None:
     assert answer.status == "clarification_needed"
     assert answer.generation_audit.scope_classification is not None
     assert answer.generation_audit.scope_classification.mode == "fallback"
+    assert answer.request_sha256 == case_conversation_request_sha256(request)
+    assert answer.suggested_questions == [
+        "이 결과가 나온 가장 중요한 이유는 무엇입니까?",
+        "담당자가 먼저 확인할 항목은 무엇입니까?",
+        "연결된 법령 근거가 이 심사 건에서 어떤 의미입니까?",
+    ]
+    assert answer.verification_audit.checked_statement_count == (
+        1
+        + len(answer.explanation)
+        + len(answer.evidence_meaning)
+        + len(answer.impact)
+        + len(answer.next_steps)
+        + len(answer.limitations)
+    )
+
+
+def test_verifier_receipts_are_bound_to_exact_presentation_and_answer_content() -> None:
+    result = _v3_result()[2]
+    presentation = build_grounded_presentation(result, analyzer=None)
+    presentation_payload = presentation.model_dump(mode="json", warnings=False)
+    first_statement = presentation_payload["sections"][0]["statements"][0]
+    first_statement["text"] = "원래 검증 내용과 반대되는 임의 설명입니다."
+    statement_body = {
+        key: value for key, value in first_statement.items() if key != "statement_id"
+    }
+    first_statement["statement_id"] = stable_object_id("statement", statement_body)
+    presentation_payload["presentation_sha256"] = canonical_json_sha256(
+        {
+            key: value
+            for key, value in presentation_payload.items()
+            if key != "presentation_sha256"
+        }
+    )
+    with pytest.raises(ValueError, match="verifier receipt"):
+        GroundedPresentationV1.model_validate(presentation_payload)
+
+    request = _conversation("이 결과가 업무에 미치는 영향을 설명해 주십시오.")
+    answer = answer_case_conversation(request, analyzer=None)
+    answer_payload = answer.model_dump(mode="json", warnings=False)
+    answer_payload["direct_answer"] = "검증된 답변과 무관한 임의 답변입니다."
+    answer_payload["answer_sha256"] = canonical_json_sha256(
+        {
+            key: value
+            for key, value in answer_payload.items()
+            if key != "answer_sha256"
+        }
+    )
+    with pytest.raises(ValueError, match="verifier receipt"):
+        AssistantAnswerV2.model_validate(answer_payload)
 
 
 def test_chat_v2_prompt_injection_is_the_only_deterministic_scope_guard() -> None:
