@@ -312,6 +312,55 @@ def test_chat_v2_scope_classifier_failure_requests_clarification() -> None:
     )
 
 
+@pytest.mark.parametrize(
+    ("scope", "guidance_topics"),
+    [
+        ("general_customs_guidance", []),
+        ("general_customs_guidance", ["hsk", "hsk"]),
+        ("case_grounded", ["hsk"]),
+        ("evidence_grounded", ["invoice"]),
+    ],
+)
+def test_chat_v2_invalid_scope_guidance_topic_combinations_fail_safe(
+    scope: str,
+    guidance_topics: list[str],
+) -> None:
+    request = _conversation("HSK가 무엇인지 설명해 주십시오.")
+
+    class InvalidScopeAnalyzer:
+        def run_bounded_agentic_task(self, *_args, **kwargs) -> StructuredAgenticResult:
+            schema = kwargs["output_schema"]
+            return StructuredAgenticResult(
+                value={
+                    "answer_scope": scope,
+                    "reason_code": "semantic_intent_classified",
+                    "guidance_topics": guidance_topics,
+                },
+                model_id=request.review_result.runtime_release.model_id,
+                prompt_sha256=hashlib.sha256(kwargs["system_prompt"].encode("utf-8")).hexdigest(),
+                output_schema_sha256=anthropic_output_schema_sha256(schema),
+                semantic_output_schema_sha256=canonical_json_sha256(schema),
+                request_id="request-invalid-guidance-topics",
+                message_id="message-invalid-guidance-topics",
+                input_tokens=10,
+                output_tokens=5,
+                latency_ms=1,
+            )
+
+    answer = answer_case_conversation(  # type: ignore[arg-type]
+        request,
+        analyzer=InvalidScopeAnalyzer(),
+    )
+
+    assert answer.answer_scope == "clarification_needed"
+    assert answer.status == "clarification_needed"
+    classification = answer.generation_audit.scope_classification
+    assert classification is not None
+    assert classification.mode == "fallback"
+    assert classification.reason_code == "scope_classifier_failed"
+    assert classification.guidance_topics == []
+
+
 def test_verifier_receipts_are_bound_to_exact_presentation_and_answer_content() -> None:
     result = _v3_result()[2]
     presentation = build_grounded_presentation(result, analyzer=None)

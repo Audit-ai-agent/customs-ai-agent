@@ -1558,8 +1558,16 @@ def _classify_question_scope(
             not isinstance(raw_scope, str)
             or not isinstance(reason_code, str)
             or not isinstance(guidance_topics, list)
+            or any(not isinstance(topic, str) for topic in guidance_topics)
         ):
             raise ValueError("scope_classifier_output_invalid")
+        if raw_scope == "general_customs_guidance":
+            if not 1 <= len(guidance_topics) <= 3 or len(guidance_topics) != len(
+                set(guidance_topics)
+            ):
+                raise ValueError("scope_classifier_guidance_topics_invalid")
+        elif guidance_topics:
+            raise ValueError("scope_classifier_guidance_topics_not_allowed")
         scope: AnswerScopeV2 = raw_scope  # type: ignore[assignment]
         if scope == "evidence_grounded" and not request.review_result.rag_evidence:
             scope = "insufficient_evidence"
