@@ -6,6 +6,7 @@ from typing import Any, Callable
 
 from fastapi.testclient import TestClient
 
+from customs_ai_agent.runtime import RuntimeConfigurationError
 from customs_ai_agent.service.app import create_app
 from tests.service.conftest import FakeResult, FakeRuntime, settings_with
 
@@ -60,6 +61,66 @@ class ObservedRuntime(FakeRuntime):
             }
         )
         return FakeResult("run-service-1")
+
+
+class ExpiredCapabilityRuntime(FakeRuntime):
+    def __init__(self) -> None:
+        super().__init__()
+        self.capability_checks = 0
+
+    def assert_uat_capability_current(self, *, require_active: bool = False) -> None:
+        assert require_active is False
+        self.capability_checks += 1
+        raise RuntimeConfigurationError(
+            "uat_capability_invalid_or_expired",
+            "expired test capability",
+        )
+
+
+def test_all_enhanced_endpoints_reject_expired_capability_before_external_calls(
+    service_settings,
+    valid_payload,
+    auth_headers,
+) -> None:
+    runtime = ExpiredCapabilityRuntime()
+    readiness_calls = 0
+
+    def probe() -> object:
+        nonlocal readiness_calls
+        readiness_calls += 1
+        return object()
+
+    settings = settings_with(
+        service_settings,
+        enhanced_agent_experience=True,
+        uat_adaptive_active=True,
+    )
+    app = create_app(
+        settings,
+        runtime_factory=lambda _settings: runtime,
+        readiness_probe_factory=lambda _settings: probe,
+    )
+    requests = (
+        ("/internal/agent/v3/reviews", valid_payload),
+        ("/internal/agent/v3/reviews/stream", valid_payload),
+        (
+            "/internal/agent/v3/answers",
+            {"conversation_id": "conversation-expired-1"},
+        ),
+        (
+            "/internal/agent/v3/answers/stream",
+            {"conversation_id": "conversation-expired-1"},
+        ),
+    )
+    with TestClient(app, raise_server_exceptions=False) as client:
+        for path, payload in requests:
+            response = client.post(path, headers=auth_headers, json=payload)
+            assert response.status_code == 503
+            assert response.json()["error"]["code"] == ("uat_capability_invalid_or_expired")
+
+    assert runtime.capability_checks == 4
+    assert readiness_calls == 0
+    assert runtime.calls == 0
 
 
 def test_review_stream_forwards_only_runtime_observed_stages_and_replays_them(

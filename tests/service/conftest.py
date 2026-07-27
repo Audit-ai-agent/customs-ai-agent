@@ -52,6 +52,10 @@ class FakeRuntime:
     def answer_v3_json(self, payload: bytes) -> FakeResult:
         return self.review_json(payload)
 
+    def assert_uat_capability_current(self, *, require_active: bool = False) -> object:
+        del require_active
+        return object()
+
     def close(self) -> None:
         self.close_calls += 1
 

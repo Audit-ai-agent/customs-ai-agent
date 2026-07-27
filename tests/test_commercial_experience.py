@@ -61,6 +61,7 @@ from customs_ai_agent.runner import run_review_v2
 from customs_ai_agent.schemas.models import ReviewRunRequestV2
 from customs_ai_agent.uat_capability import (
     UatCapabilityError,
+    assert_runtime_uat_capability,
     capability_file_sha256,
     issue_uat_capability,
     load_uat_capability,
@@ -448,6 +449,49 @@ def test_uat_capability_is_current_code_bound_file_bound_and_expiring(
             require_active=True,
             now=issued_at + timedelta(hours=2),
         )
+
+
+@pytest.mark.parametrize(
+    ("offset", "expected"),
+    [
+        (timedelta(microseconds=-1), True),
+        (timedelta(0), False),
+        (timedelta(microseconds=1), False),
+    ],
+)
+def test_runtime_uat_capability_has_an_exact_exclusive_expiry_boundary(
+    offset: timedelta,
+    expected: bool,
+) -> None:
+    issued_at = datetime(2026, 7, 27, 0, 0, tzinfo=timezone.utc)
+    capability = _capability(now=issued_at)
+
+    assert (
+        assert_runtime_uat_capability(
+            capability,
+            agent_code_snapshot_sha256=package_code_snapshot_sha256(),
+            model_id="claude-sonnet-5",
+            evidence_runtime_v3_sha256="e" * 64,
+            expected_agent_commit="1" * 40,
+            require_active=False,
+            now=capability.expires_at + offset,
+        )
+        is expected
+    )
+
+
+def test_runtime_uat_capability_revalidates_its_self_hash_and_exact_identity() -> None:
+    capability = _capability()
+    capability.model_id = "claude-drifted-model"
+
+    assert not assert_runtime_uat_capability(
+        capability,
+        agent_code_snapshot_sha256=package_code_snapshot_sha256(),
+        model_id="claude-drifted-model",
+        evidence_runtime_v3_sha256="e" * 64,
+        expected_agent_commit="1" * 40,
+        require_active=False,
+    )
 
 
 def test_commercial_eval_assets_have_exact_declared_population_and_hashes() -> None:

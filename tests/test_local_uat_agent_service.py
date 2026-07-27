@@ -4,6 +4,7 @@ import base64
 import hashlib
 import inspect
 import json
+from dataclasses import replace
 from pathlib import Path
 from typing import Any
 
@@ -15,7 +16,7 @@ from pydantic import SecretStr
 
 import customs_ai_agent.adapters.retrieval_v3 as production_retrieval_v3
 import customs_ai_agent.assertion_trust as assertion_trust
-from customs_ai_agent.runtime import RuntimeExecutionError
+from customs_ai_agent.runtime import RuntimeConfigurationError, RuntimeExecutionError
 from customs_ai_agent.service.settings import ServiceSettings
 from tests.test_evidence_v3_consumer import _identity
 from tests.test_v3_conformance_runner import _result
@@ -792,6 +793,40 @@ def test_uat_health_metadata_and_v2_routes_are_explicit_and_safe(tmp_path: Path)
         "ANTHROPIC_API_KEY",
     ):
         assert secret not in encoded
+
+
+def test_enhanced_uat_health_rejects_expired_capability_before_evidence_probe(
+    tmp_path: Path,
+) -> None:
+    manifest = replace(
+        _load_manifest(
+            tmp_path,
+            evidence_mode="preserved-3law-v3-scenario-eval",
+        ),
+        enhanced_experience_enabled=True,
+    )
+    readiness_calls = 0
+
+    def probe() -> object:
+        nonlocal readiness_calls
+        readiness_calls += 1
+        return object()
+
+    class ExpiredRuntime(_RouteRuntime):
+        def assert_uat_capability_current(self, *, require_active: bool = False) -> None:
+            assert require_active is False
+            raise RuntimeConfigurationError(
+                "uat_capability_invalid_or_expired",
+                "expired test capability",
+            )
+
+    app = _app(manifest, ExpiredRuntime(), probe=probe)
+    with TestClient(app, raise_server_exceptions=False) as client:
+        response = client.get("/health/uat-ready")
+
+    assert response.status_code == 503
+    assert response.json()["error"]["code"] == "uat_capability_invalid_or_expired"
+    assert readiness_calls == 0
 
 
 def test_preserved_three_law_mode_is_visible_but_stays_non_release(

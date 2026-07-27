@@ -30,6 +30,7 @@ from customs_ai_agent.assertion_trust import (
     AssertionTrustStoreV1,
     SupportingDocumentAssertionVerifier,
 )
+from customs_ai_agent.build_info import package_code_snapshot_sha256
 from customs_ai_agent.contracts import get_schema
 from customs_ai_agent.contracts.evidence_runtime_release import (
     EvidenceRuntimeReleaseLockError,
@@ -1146,6 +1147,7 @@ class AgentRuntime:
         "_secret_markers",
         "_assertion_verifier",
         "_uat_capability",
+        "_uat_expected_agent_commit",
     )
 
     def __init__(self, config: RuntimeConfig) -> None:
@@ -1197,6 +1199,7 @@ class AgentRuntime:
         self._analyzer = analyzer
         self._assertion_verifier = config.verification_assertion_verifier
         self._uat_capability: AgentUatCapabilityAttestationV1 | None = None
+        self._uat_expected_agent_commit: str | None = None
         self._closed = False
         self._secret_markers = tuple(
             marker
@@ -1213,6 +1216,53 @@ class AgentRuntime:
                 "runtime_closed",
                 "The Agent runtime is closed.",
             )
+
+    def assert_uat_capability_current(
+        self,
+        *,
+        require_active: bool = False,
+    ) -> AgentUatCapabilityAttestationV1:
+        """Revalidate the time-bound local-UAT authority without I/O.
+
+        The service transport calls this before dependency readiness, and the
+        direct runtime methods call it again before Claude or Evidence. This
+        prevents a capability that expired after process startup from becoming
+        a reusable in-memory bearer capability.
+        """
+
+        self._assert_open()
+        capability = getattr(self, "_uat_capability", None)
+        if not isinstance(capability, AgentUatCapabilityAttestationV1):
+            raise RuntimeConfigurationError(
+                "uat_capability_invalid_or_expired",
+                "The local-UAT capability is absent, expired, or identity-mismatched.",
+            )
+        retriever = getattr(self, "_retriever_v3", None)
+        expected_identity = getattr(retriever, "expected_identity", None)
+        evidence_identity = getattr(
+            expected_identity,
+            "runtime_release_v3_sha256",
+            None,
+        )
+        from customs_ai_agent.uat_capability import assert_runtime_uat_capability
+
+        if not assert_runtime_uat_capability(
+            capability,
+            agent_code_snapshot_sha256=package_code_snapshot_sha256(),
+            model_id=self._analyzer.model_id,
+            evidence_runtime_v3_sha256=evidence_identity,
+            expected_agent_commit=getattr(
+                self,
+                "_uat_expected_agent_commit",
+                None,
+            ),
+            require_active=require_active,
+        ):
+            raise RuntimeConfigurationError(
+                "uat_capability_invalid_or_expired",
+                "The local-UAT capability is absent, expired, or identity-mismatched.",
+            )
+        return capability
 
     def _runtime_assertion_trust_store(self) -> AssertionTrustStoreV1 | None:
         """Return only the store owned by the concrete runtime verifier.
@@ -1716,12 +1766,7 @@ class AgentRuntime:
         """
 
         self._assert_open()
-        capability = getattr(self, "_uat_capability", None)
-        if capability is None:
-            raise RuntimeConfigurationError(
-                "enhanced_experience_disabled",
-                "The enhanced Agent experience is not enabled for this runtime.",
-            )
+        capability = self.assert_uat_capability_current()
         result = self.review_v3_json(payload)
         envelope = build_review_experience(
             result,
@@ -1744,12 +1789,7 @@ class AgentRuntime:
         """Execute v3 while publishing only safe, actually observed stage boundaries."""
 
         self._assert_open()
-        capability = getattr(self, "_uat_capability", None)
-        if capability is None:
-            raise RuntimeConfigurationError(
-                "enhanced_experience_disabled",
-                "The enhanced Agent experience is not enabled for this runtime.",
-            )
+        capability = self.assert_uat_capability_current()
         document_analysis_started_ns: int | None = None
 
         def emit_started(stage_code: str) -> int:
@@ -1926,11 +1966,7 @@ class AgentRuntime:
         payload: bytes | bytearray | memoryview,
     ) -> AssistantAnswerV2:
         self._assert_open()
-        if getattr(self, "_uat_capability", None) is None:
-            raise RuntimeConfigurationError(
-                "enhanced_experience_disabled",
-                "The enhanced Agent experience is not enabled for this runtime.",
-            )
+        self.assert_uat_capability_current()
         decoded = _decode_serialized_json_object(
             payload,
             invalid_code="answer_v2_request_invalid",
@@ -1968,11 +2004,7 @@ class AgentRuntime:
         """Publish safe Chat boundaries; answer prose is released only after verification."""
 
         self._assert_open()
-        if getattr(self, "_uat_capability", None) is None:
-            raise RuntimeConfigurationError(
-                "enhanced_experience_disabled",
-                "The enhanced Agent experience is not enabled for this runtime.",
-            )
+        self.assert_uat_capability_current()
 
         def observed_stage(
             stage_code: str,

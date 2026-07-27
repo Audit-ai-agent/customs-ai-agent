@@ -83,6 +83,13 @@ _PRE_EXECUTION_503_RESPONSE: dict[str, Any] = {
 class _UnavailableRuntime:
     """Keep liveness observable while production release admission is closed."""
 
+    def assert_uat_capability_current(self, *, require_active: bool = False) -> None:
+        del require_active
+        raise RuntimeConfigurationError(
+            "runtime_dependency_unready",
+            "The Agent runtime dependency Gate is closed.",
+        )
+
     def review_json(self, _payload: bytes) -> object:
         raise RuntimeConfigurationError(
             "runtime_dependency_unready",
@@ -738,6 +745,17 @@ def create_app(
                 execution_state="not-started",
             )
         controller: AgentServiceController = request.app.state.controller
+        try:
+            # This is deliberately ordered before dependency readiness. An
+            # expired or identity-drifted local capability must produce zero
+            # Claude, Evidence, or Tool calls.
+            controller.assert_uat_capability_current(require_active=False)
+        except RuntimeConfigurationError:
+            raise ServiceHttpError(
+                "uat_capability_invalid_or_expired",
+                503,
+                retryable=False,
+            ) from None
         if not await controller.ready():
             raise ServiceHttpError(
                 "dependency_unready",

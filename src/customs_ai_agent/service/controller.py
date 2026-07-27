@@ -47,6 +47,8 @@ class ServiceRuntime(Protocol):
         stage_callback: Callable[[dict[str, Any]], None],
     ) -> Any: ...
 
+    def assert_uat_capability_current(self, *, require_active: bool = False) -> Any: ...
+
     def close(self) -> None: ...
 
 
@@ -107,6 +109,17 @@ class AgentServiceController:
     @property
     def closing(self) -> bool:
         return self._closing
+
+    def assert_uat_capability_current(self, *, require_active: bool = False) -> None:
+        """Fail before readiness I/O when enhanced UAT authority is stale."""
+
+        checker = getattr(self.runtime, "assert_uat_capability_current", None)
+        if not callable(checker):
+            raise RuntimeConfigurationError(
+                "uat_capability_unavailable",
+                "The runtime does not expose a local-UAT capability boundary.",
+            )
+        checker(require_active=require_active)
 
     def _update_replay_metrics(self) -> None:
         self.metrics.set_replay_cache(

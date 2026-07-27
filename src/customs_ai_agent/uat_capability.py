@@ -160,24 +160,42 @@ def assert_runtime_uat_capability(
     agent_code_snapshot_sha256: str,
     model_id: str,
     evidence_runtime_v3_sha256: str | None,
+    expected_agent_commit: str | None = None,
+    require_active: bool = True,
+    now: datetime | None = None,
 ) -> bool:
     if capability is None:
         return False
-    now = datetime.now(timezone.utc)
+    try:
+        # The capability is mutable as an in-process Pydantic object. Rebuild
+        # it from its complete wire representation at every authority boundary
+        # so its self-hash, lifetime, and exact schema are checked again.
+        current_capability = AgentUatCapabilityAttestationV1.model_validate(
+            capability.model_dump(mode="json", warnings=False)
+        )
+    except Exception:
+        return False
+    current = now or datetime.now(timezone.utc)
+    if current.tzinfo is None:
+        return False
     return (
-        capability.environment == "local_uat"
-        and capability.loopback_only is True
-        and capability.evidence_profile == "preserved-3law-v3-scenario-eval"
-        and capability.issued_at <= now < capability.expires_at
-        and capability.agent_code_snapshot_sha256 == agent_code_snapshot_sha256
-        and capability.model_id == model_id
-        and capability.prompt_bundle_sha256 == _bundle_sha256(experience_prompt_hashes())
-        and capability.schema_bundle_sha256 == _bundle_sha256(experience_schema_hashes())
-        and capability.tool_registry_id == UAT_TOOL_REGISTRY_ID
-        and capability.tool_registry_sha256 == _tool_registry_sha256()
-        and capability.evidence_runtime_v3_sha256 == evidence_runtime_v3_sha256
-        and capability.adaptive_active
-        and capability.auto_completion_enabled is False
+        current_capability.environment == "local_uat"
+        and current_capability.loopback_only is True
+        and current_capability.evidence_profile == "preserved-3law-v3-scenario-eval"
+        and current_capability.issued_at <= current < current_capability.expires_at
+        and (
+            expected_agent_commit is None
+            or current_capability.agent_commit == expected_agent_commit
+        )
+        and current_capability.agent_code_snapshot_sha256 == agent_code_snapshot_sha256
+        and current_capability.model_id == model_id
+        and current_capability.prompt_bundle_sha256 == _bundle_sha256(experience_prompt_hashes())
+        and current_capability.schema_bundle_sha256 == _bundle_sha256(experience_schema_hashes())
+        and current_capability.tool_registry_id == UAT_TOOL_REGISTRY_ID
+        and current_capability.tool_registry_sha256 == _tool_registry_sha256()
+        and current_capability.evidence_runtime_v3_sha256 == evidence_runtime_v3_sha256
+        and (not require_active or current_capability.adaptive_active)
+        and current_capability.auto_completion_enabled is False
     )
 
 

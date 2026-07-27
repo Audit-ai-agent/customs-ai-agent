@@ -29,7 +29,12 @@ from customs_ai_agent.assertion_trust import (
     SupportingDocumentAssertionVerifier,
 )
 from customs_ai_agent.contracts.evidence_v3 import EvidenceRuntimeReleaseIdentityV3
-from customs_ai_agent.runtime import AgentRuntime, RuntimeExecutionError, RuntimeInputError
+from customs_ai_agent.runtime import (
+    AgentRuntime,
+    RuntimeConfigurationError,
+    RuntimeExecutionError,
+    RuntimeInputError,
+)
 from customs_ai_agent.experience import build_review_experience
 from customs_ai_agent.schemas.v3 import (
     ReviewRevisionResultV1,
@@ -687,13 +692,17 @@ class LocalUatDiagnosticRuntime:
     def answer_v3_json(self, payload: bytes) -> Any:
         return self._core.answer_v3_json(payload)
 
+    def assert_uat_capability_current(
+        self,
+        *,
+        require_active: bool = False,
+    ) -> AgentUatCapabilityAttestationV1:
+        return self._core.assert_uat_capability_current(
+            require_active=require_active,
+        )
+
     def review_experience_json(self, payload: bytes) -> Any:
-        capability = self._core._uat_capability
-        if capability is None:
-            raise RuntimeExecutionError(
-                "uat_capability_unavailable",
-                "The enhanced LOCAL UAT capability is unavailable.",
-            )
+        capability = self.assert_uat_capability_current()
         result = _diagnostic_result(self._core.review_v3_json(payload))
         return build_review_experience(
             result,
@@ -771,6 +780,7 @@ def build_local_uat_runtime(
         if manifest.assertion_trust_store is not None
         else None
     )
+    core._uat_expected_agent_commit = manifest.agent_commit
     capability: AgentUatCapabilityAttestationV1 | None = None
     if manifest.enhanced_experience_enabled:
         if (
@@ -956,6 +966,11 @@ def _compose_local_uat_app(
     @app.get("/health/uat-ready", summary="LOCAL UAT dependency readiness")
     async def uat_ready(request: Request) -> JSONResponse:
         controller = request.app.state.controller
+        if manifest.enhanced_experience_enabled:
+            try:
+                controller.assert_uat_capability_current(require_active=False)
+            except RuntimeConfigurationError:
+                return _boundary_error("uat_capability_invalid_or_expired")
         if not await controller.ready():
             return _boundary_error("uat_dependency_unready")
         return JSONResponse(
