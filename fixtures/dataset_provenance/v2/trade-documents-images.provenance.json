@@ -1,0 +1,58 @@
+{
+  "schema_version": "customs-dataset-provenance/v2",
+  "provenance_revision": 2,
+  "dataset": {
+    "id": "trade_documents_images",
+    "version": "source-v1"
+  },
+  "classification": "user_provided_synthetic_document_images",
+  "canonical_storage": {
+    "workspace_relative_path": "_local/data/trade_documents_images/source-v1",
+    "raw_workspace_relative_path": "_local/data/trade_documents_images/source-v1/raw",
+    "tracked_in_git": false,
+    "immutable_raw": true,
+    "runner_access_policy": "canonical_only_after_relocation_verification"
+  },
+  "origin": {
+    "description": "user-supplied synthetic CI/PL/B/L image corpus",
+    "generator": {
+      "name": "unknown",
+      "version": "unknown",
+      "seed": "unknown"
+    },
+    "legacy_source_reference": {
+      "workspace_relative_path": "trade_documents_images",
+      "status": "retired",
+      "preserved": false,
+      "runner_eligible": false
+    },
+    "legacy_canonical_registration": {
+      "workspace_relative_path": "_artifacts/datasets/trade_documents_images/source-v1",
+      "status": "retired",
+      "preserved": false,
+      "runner_eligible": false,
+      "provenance_v1_sha256": "8f625c206981798e5ecfd0a790449fe2bd3fc62ad42aa7b1d36a235b69330aad"
+    }
+  },
+  "integrity": {
+    "raw_file_count": 3002,
+    "raw_bytes": 260248817,
+    "raw_checksums_workspace_relative_path": "_local/data/trade_documents_images/source-v1/checksums.sha256",
+    "raw_checksums_sha256": "f720c8a58dfc2563c4425539fb51230eac9f036385fa3df21fae415a4be8ce1a",
+    "inventory_workspace_relative_path": "_local/data/trade_documents_images/source-v1/dataset-inventory.json",
+    "inventory_sha256": "fff84fc91c8dd545ee6f14bdf77c00974e12b297e69b54c9ea05c3221453e947",
+    "supplemental_readme_sha256": "80edd388bd40c68b6c1c4cae6ddb6b9538502bc2a85d801707844ba1e6d591f0"
+  },
+  "truth_and_rights": {
+    "ground_truth_status": "candidate_unverified",
+    "generation_provenance_status": "unknown",
+    "public_redistribution_rights": "not_confirmed",
+    "raw_allowed_in_git_or_public_portfolio": false
+  },
+  "migration": {
+    "migration_id": "TASK-0028-dataset-canonical-relocation",
+    "contract_issued_at": "2026-08-01T07:58:13+09:00",
+    "relocation_manifest_workspace_relative_path": "_local/data/dataset-relocation-manifest.v1.json",
+    "completion_policy": "manifest_verified_and_both_legacy_paths_absent"
+  }
+}

@@ -40,7 +40,7 @@ variable or patch its packaged Production lock.
 
 The `preserved-3law-v3-scenario-eval` manifest must instead set
 `assertion_fixture_mode=LOOPBACK_TEST_ONLY_HUMAN_APPROVER` and bind an absolute
-`_secrets` path plus SHA-256 for its one-key, public-only Agent trust store.
+`_local/secrets` path plus SHA-256 for its one-key, public-only Agent trust store.
 The other profiles must keep all assertion fixture fields disabled. Private
 signing key material is never part of the Agent manifest or metadata.
 

@@ -357,6 +357,13 @@ def _assert_evidence_policy_identity(
         raise LocalUatConfigurationError("uat_evidence_policy_identity_mismatch")
 
 
+def _is_local_uat_secret_path(path: Path) -> bool:
+    parts = tuple(part.casefold() for part in path.parts)
+    return any(
+        parts[index : index + 2] == ("_local", "secrets") for index in range(max(0, len(parts) - 1))
+    )
+
+
 def _load_uat_assertion_trust_store(
     path_value: object,
     expected_sha256: object,
@@ -375,7 +382,7 @@ def _load_uat_assertion_trust_store(
         raise LocalUatConfigurationError("uat_assertion_trust_store_path_invalid")
     try:
         resolved = path.resolve(strict=True)
-        if not resolved.is_file() or "_secrets" not in {part.casefold() for part in resolved.parts}:
+        if not resolved.is_file() or not _is_local_uat_secret_path(resolved):
             raise LocalUatConfigurationError("uat_assertion_trust_store_path_invalid")
         raw = resolved.read_bytes()
     except LocalUatConfigurationError:
@@ -497,9 +504,9 @@ def load_local_uat_manifest(path: str | os.PathLike[str]) -> LocalUatManifest:
             resolved_capability_path = capability_path.resolve(strict=True)
         except OSError:
             raise LocalUatConfigurationError("uat_capability_unavailable") from None
-        if not resolved_capability_path.is_file() or "_secrets" not in {
-            part.casefold() for part in resolved_capability_path.parts
-        }:
+        if not resolved_capability_path.is_file() or not _is_local_uat_secret_path(
+            resolved_capability_path
+        ):
             raise LocalUatConfigurationError("uat_capability_path_invalid")
         capability_path_value = str(resolved_capability_path)
     elif any(

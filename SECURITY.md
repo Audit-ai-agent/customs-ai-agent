@@ -112,7 +112,7 @@ container/seccomp, memory/CPU quota 같은 강제 격리는 운영 전 별도 �
 
 ## Network와 secret
 
-- local secret의 단일 기준은 저장소 밖 `project/_secrets/.env`다. repo/worktree별 `.env` 복제를
+- local secret의 단일 기준은 저장소 밖 `project/_local/secrets/.env`다. repo/worktree별 `.env` 복제를
   금지한다.
 - env file은 `--env-file`로만 지정하고 Claude/Evidence allowlist만 읽는다. process 환경을
   변경하지 않는다.

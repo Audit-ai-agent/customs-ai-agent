@@ -1,11 +1,12 @@
 # Trade Documents Images — source-v1 descriptor
 
 이 디렉터리는 이미지 원본이 아니라 사용자가 제공한 합성 통관 문서 데이터셋의 추적 가능한
-descriptor다. 사용자가 2026-07-18에 복원한 workspace root
-`trade_documents_images/`는 원본 참고본으로 그대로 보존한다. Agent runner가 읽는 유일한
-canonical raw는 Git 밖의
-`_artifacts/datasets/trade_documents_images/source-v1/raw/`다. root 경로로의 자동 fallback은
-허용하지 않는다.
+descriptor다. 2026-07-18에 복원한 root 참고본은 canonical 등록본과 3,002개
+파일의 상대경로·크기·SHA-256을 두 번 대조한 뒤 TASK-0028에서 retired됐다. Agent
+runner가 읽는 유일한 canonical raw는 Git 밖의
+`_local/data/trade_documents_images/source-v1/raw/`다. 실행 전에 DatasetProvenanceV2와
+`_local/data/dataset-relocation-manifest.v1.json`을 검증하며, 폐기된 root·`_artifacts/datasets`
+경로로의 fallback은 허용하지 않는다.
 
 복원 원본과 canonical raw는 두 방식으로 대조했다. 전체 3,002개 파일의 상대경로·크기·SHA-256
 비교 결과 mismatch는 0이며, 양쪽 모두 260,248,817 bytes다. 기존 3,001개
@@ -54,15 +55,16 @@ API를 이용한 비공개 평가 허용은 raw의 공개 재배포 권리를 �
 
 ## 사용 규칙
 
-1. root 원본과 canonical raw의 bytes와 파일명은 수정하지 않는다.
-2. runner에는 canonical `_artifacts/.../source-v1/raw`만 명시하고 root fallback을 금지한다.
-3. 실행 전에 `dataset.lock.json`과 로컬 inventory/checksum을 대조한다.
+1. canonical raw의 bytes와 파일명은 수정하지 않는다.
+2. runner에는 canonical `_local/data/.../source-v1/raw`만 명시하고 폐기 경로 fallback을 금지한다.
+3. 실행 전에 `dataset.lock.json`, Agent-owned relocation binding, workspace relocation
+   manifest, DatasetProvenanceV2, 로컬 inventory/checksum을 모두 대조한다.
 4. CI/PL/BL은 같은 shipment 단위로 split하여 case leakage를 금지한다.
 5. manifest 값은 `manifest_observation`이며 사람이 확정한 field/layout gold가 아니다.
 6. 모델 출력을 다시 gold로 저장하지 않는다.
 7. full gold는 생성 원장 복구 또는 독립 annotation과 adjudication으로 별도 파생한다.
 8. 검수되지 않은 anomaly 추정은 점수화하지 않고, 직접 재검수로 무효화된 라벨을 재사용하지 않는다.
-9. root 원본은 전체 Gate 두 번 통과와 사용자 승인 전까지 삭제하지 않는다.
+9. retired root와 이전 `_artifacts/datasets` 등록본이 다시 생기면 검증을 실패시킨다.
 
 ## 초기 고정 표본
 
@@ -80,7 +82,7 @@ API를 이용한 비공개 평가 허용은 raw의 공개 재배포 권리를 �
 `evals/trade_documents_images/v1/diagnostic-selection-v1.json`의 해시 순위 12개
 triplet(36장)으로 고정한다. 최초
 `derived/diagnostic-selection/v1` worklist/Gate는 12개 `pending_first_review`인 역사적
-snapshot으로 유지한다. 로컬 `_artifacts`의
+snapshot으로 유지한다. 로컬 canonical data의
 `derived/{independent-review-a,independent-review-b,adjudicated-gold}/v1`도 감사용 역사
 artifact일 뿐 현재 canonical Gold가 아니다.
 

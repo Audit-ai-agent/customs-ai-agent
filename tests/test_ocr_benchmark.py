@@ -1157,6 +1157,31 @@ def test_wheel_attestation_script_verifies_exact_record_inventory(
     }
 
 
+def _compile_adjacent_cached_bytecode(
+    source: Path,
+    *,
+    invalidation_mode: py_compile.PycInvalidationMode = py_compile.PycInvalidationMode.TIMESTAMP,
+    optimization: int = 0,
+) -> Path:
+    """Compile into the tested install even when the harness redirects global pycache."""
+
+    cache_tag = sys.implementation.cache_tag
+    assert cache_tag is not None
+    optimization_suffix = f".opt-{optimization}" if optimization else ""
+    destination = (
+        source.parent / "__pycache__" / f"{source.stem}.{cache_tag}{optimization_suffix}.pyc"
+    )
+    destination.parent.mkdir(parents=True, exist_ok=True)
+    result = py_compile.compile(
+        str(source),
+        cfile=str(destination),
+        doraise=True,
+        invalidation_mode=invalidation_mode,
+        optimize=optimization,
+    )
+    return Path(result)
+
+
 @pytest.mark.parametrize(
     ("invalidation_mode", "optimization"),
     [
@@ -1173,11 +1198,10 @@ def test_wheel_attestation_script_accepts_source_equivalent_cached_bytecode(
 ) -> None:
     site_packages, record_path = _write_synthetic_wheel_install(tmp_path)
     source = site_packages / "customs_ai_agent" / "module.py"
-    py_compile.compile(
-        str(source),
-        doraise=True,
+    _compile_adjacent_cached_bytecode(
+        source,
         invalidation_mode=invalidation_mode,
-        optimize=optimization,
+        optimization=optimization,
     )
 
     payload = _run_wheel_attestation_script(site_packages)
@@ -1196,9 +1220,8 @@ def test_wheel_attestation_script_rejects_unchecked_hash_cached_bytecode(
 ) -> None:
     site_packages, _ = _write_synthetic_wheel_install(tmp_path)
     source = site_packages / "customs_ai_agent" / "module.py"
-    py_compile.compile(
-        str(source),
-        doraise=True,
+    _compile_adjacent_cached_bytecode(
+        source,
         invalidation_mode=py_compile.PycInvalidationMode.UNCHECKED_HASH,
     )
 
@@ -1218,7 +1241,7 @@ def test_wheel_attestation_script_rejects_invalid_cached_bytecode_envelope(
 ) -> None:
     site_packages, _ = _write_synthetic_wheel_install(tmp_path)
     source = site_packages / "customs_ai_agent" / "module.py"
-    pyc_path = Path(py_compile.compile(str(source), doraise=True))
+    pyc_path = _compile_adjacent_cached_bytecode(source)
     observed = bytearray(pyc_path.read_bytes())
     if mutation == "magic":
         observed[0] ^= 0x01
@@ -1242,7 +1265,7 @@ def test_wheel_attestation_script_rejects_modified_cached_bytecode(
 ) -> None:
     site_packages, _ = _write_synthetic_wheel_install(tmp_path)
     source = site_packages / "customs_ai_agent" / "module.py"
-    pyc_path = Path(py_compile.compile(str(source), doraise=True))
+    pyc_path = _compile_adjacent_cached_bytecode(source)
     observed = pyc_path.read_bytes()
     replacement = compile(
         b"VALUE = 2\n",
@@ -1267,7 +1290,7 @@ def test_wheel_attestation_script_rejects_sourceless_cached_bytecode(
 ) -> None:
     site_packages, _ = _write_synthetic_wheel_install(tmp_path)
     source = site_packages / "customs_ai_agent" / "module.py"
-    pyc_path = Path(py_compile.compile(str(source), doraise=True))
+    pyc_path = _compile_adjacent_cached_bytecode(source)
     source.unlink()
 
     payload = _run_wheel_attestation_script(site_packages)
@@ -1286,7 +1309,7 @@ def test_wheel_attestation_script_rejects_unrecorded_sourceless_cached_bytecode(
     site_packages, _ = _write_synthetic_wheel_install(tmp_path)
     source = site_packages / "customs_ai_agent" / "rogue.py"
     source.write_text("VALUE = 'rogue'\n", encoding="utf-8")
-    pyc_path = Path(py_compile.compile(str(source), doraise=True))
+    pyc_path = _compile_adjacent_cached_bytecode(source)
     source.unlink()
 
     payload = _run_wheel_attestation_script(site_packages)
@@ -1304,7 +1327,7 @@ def test_wheel_attestation_script_rejects_foreign_cache_tag(
 ) -> None:
     site_packages, _ = _write_synthetic_wheel_install(tmp_path)
     source = site_packages / "customs_ai_agent" / "module.py"
-    pyc_path = Path(py_compile.compile(str(source), doraise=True))
+    pyc_path = _compile_adjacent_cached_bytecode(source)
     foreign = pyc_path.with_name(pyc_path.name.replace("cpython-311", "cpython-310"))
     pyc_path.rename(foreign)
 

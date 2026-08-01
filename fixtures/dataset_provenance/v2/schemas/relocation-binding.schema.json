@@ -1,0 +1,51 @@
+{
+  "$schema": "https://json-schema.org/draft/2020-12/schema",
+  "$id": "urn:customs:dataset-relocation-binding:v1",
+  "type": "object",
+  "additionalProperties": false,
+  "required": ["schema_version", "migration_id", "workspace_layout_version", "contract_issued_at", "manifest_workspace_relative_path", "datasets"],
+  "properties": {
+    "schema_version": {"const": "customs-dataset-relocation-binding/v1"},
+    "migration_id": {"const": "TASK-0028-dataset-canonical-relocation"},
+    "workspace_layout_version": {"const": "local-data/v1"},
+    "contract_issued_at": {"type": "string", "format": "date-time"},
+    "manifest_workspace_relative_path": {"const": "_local/data/dataset-relocation-manifest.v1.json"},
+    "datasets": {
+      "type": "array",
+      "minItems": 1,
+      "maxItems": 2,
+      "items": {"$ref": "#/$defs/datasetEntry"}
+    }
+  },
+  "$defs": {
+    "sha256": {"type": "string", "pattern": "^[0-9a-f]{64}$"},
+    "datasetEntry": {
+      "type": "object",
+      "additionalProperties": false,
+      "required": ["dataset_id", "dataset_version", "canonical_dataset_workspace_relative_path", "canonical_raw_workspace_relative_path", "provenance_workspace_relative_path", "provenance_sha256", "legacy_source_workspace_relative_path", "legacy_canonical_workspace_relative_path", "raw_integrity"],
+      "properties": {
+        "dataset_id": {"enum": ["trade_document_triplets", "trade_documents_images"]},
+        "dataset_version": {"const": "source-v1"},
+        "canonical_dataset_workspace_relative_path": {"type": "string", "pattern": "^_local/data/"},
+        "canonical_raw_workspace_relative_path": {"type": "string", "pattern": "^_local/data/.+/raw$"},
+        "provenance_workspace_relative_path": {"type": "string", "pattern": "^_local/data/.+/provenance.json$"},
+        "provenance_sha256": {"$ref": "#/$defs/sha256"},
+        "legacy_source_workspace_relative_path": {"type": "string", "minLength": 1},
+        "legacy_canonical_workspace_relative_path": {"type": "string", "pattern": "^_artifacts/datasets/"},
+        "raw_integrity": {
+          "type": "object",
+          "additionalProperties": false,
+          "required": ["raw_file_count", "raw_bytes", "raw_checksums_workspace_relative_path", "raw_checksums_sha256", "inventory_workspace_relative_path", "inventory_sha256"],
+          "properties": {
+            "raw_file_count": {"type": "integer", "minimum": 1},
+            "raw_bytes": {"type": "integer", "minimum": 1},
+            "raw_checksums_workspace_relative_path": {"type": "string", "pattern": "^_local/data/"},
+            "raw_checksums_sha256": {"$ref": "#/$defs/sha256"},
+            "inventory_workspace_relative_path": {"type": "string", "pattern": "^_local/data/"},
+            "inventory_sha256": {"$ref": "#/$defs/sha256"}
+          }
+        }
+      }
+    }
+  }
+}

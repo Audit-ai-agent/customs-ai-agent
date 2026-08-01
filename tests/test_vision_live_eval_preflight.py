@@ -25,6 +25,15 @@ from tools.build_trade_image_diagnostic_selection import (
 )
 
 
+@pytest.fixture(autouse=True)
+def _verified_dataset_provenance(monkeypatch):
+    monkeypatch.setattr(
+        run_claude_vision,
+        "verify_dataset_provenance",
+        lambda *_args, **_kwargs: None,
+    )
+
+
 def _forbid_analyzer_creation(*_args, **_kwargs):
     raise AssertionError("failed preflight must not create a provider client")
 

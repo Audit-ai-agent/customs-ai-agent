@@ -211,7 +211,7 @@ uv run --locked customs-ai-agent run --scenario happy_path
 uv run --locked customs-ai-agent run --scenario happy_path `
   --rag-url http://127.0.0.1:8010 --review-as-of 2026-07-10
 uv run --locked customs-ai-agent run --scenario happy_path --llm-mode llm `
-  --env-file ..\_secrets\.env --rag-url http://127.0.0.1:8010
+  --env-file ..\_local\secrets\.env --rag-url http://127.0.0.1:8010
 ```
 
 `run`은 V1 scenario/text 호환 명령이다. 실제 로컬 파일은 새 `review` 명령을 사용한다.
@@ -241,7 +241,7 @@ try:
             evidence_base_url=evidence_url,
             evidence_service_token=evidence_token,
             evidence_allowed_origins=frozenset({evidence_url}),
-            env_file="../_secrets/.env",
+            env_file="../_local/secrets/.env",
         )
     ) as runtime:
         result = runtime.review_json(
@@ -379,7 +379,7 @@ $OcrModelAssetsLockSha256 = "<MODEL_ASSETS_LOCK_SHA256>"
 uv run --locked customs-ai-agent review `
   --manifest .\local-eval\review-manifest.json `
   --out ..\_artifacts\local-review-v2.json `
-  --env-file ..\_secrets\.env `
+  --env-file ..\_local\secrets\.env `
   --rag-url http://127.0.0.1:8010 `
   --ocr-provider paddle `
   --ocr-python <OCR_PROVIDER_PYTHON> `
@@ -439,7 +439,7 @@ vision 이후 workflow를 반복 검증하는 모드다.
 uv run --locked customs-ai-agent review `
   --manifest .\local-eval\review-manifest.json `
   --out ..\_artifacts\local-review-v2.json `
-  --env-file ..\_secrets\.env `
+  --env-file ..\_local\secrets\.env `
   --rag-url http://127.0.0.1:8010 `
   --ocr-provider ledger
 ```
@@ -461,7 +461,7 @@ CLI 표준 출력에도 입력 경로와 원문을 표시하지 않는다. 공�
 
 ## 단일 `.env`
 
-local secret 기준은 네 저장소 밖 `project/_secrets/.env` 한 파일이다. 각 repo/worktree에 `.env`를
+local secret 기준은 네 저장소 밖 `project/_local/secrets/.env` 한 파일이다. 각 repo/worktree에 `.env`를
 복제하지 않는다.
 
 ```dotenv

@@ -21,6 +21,7 @@ from typing import Any, Callable, Iterable, Iterator
 
 from jsonschema import Draft202012Validator, FormatChecker, ValidationError
 from evals.release_holdout_protocol import RELEASE_INVALIDATION_CODE
+from tools.dataset_provenance import DatasetProvenanceError, verify_dataset_provenance
 
 
 DATASET_ID = "trade_document_triplets"
@@ -65,6 +66,13 @@ DEFAULT_WORKFLOW_DESCRIPTOR = (
     / "trade_document_triplets"
     / "v1"
     / "workflow-boundary.descriptor.json"
+)
+DEFAULT_DATASET_LOCK = (
+    Path(__file__).resolve().parents[1]
+    / "evals"
+    / "trade_document_triplets"
+    / "v1"
+    / "dataset.lock.json"
 )
 _ISO_6346_CONTAINER_PATTERN = re.compile(r"^[A-Z]{3}[UJZ]\d{7}$")
 _ISO_6346_LETTER_VALUES = {
@@ -1580,6 +1588,7 @@ def _parse_args() -> argparse.Namespace:
         description="Build separated Gold, controlled defects, and C/O fixtures."
     )
     parser.add_argument("--dataset-root", required=True, type=Path)
+    parser.add_argument("--dataset-lock", type=Path, default=DEFAULT_DATASET_LOCK)
     parser.add_argument("--output-root", required=True, type=Path)
     parser.add_argument("--schema-root", type=Path, default=DEFAULT_SCHEMA_ROOT)
     parser.add_argument("--co-design", type=Path, default=DEFAULT_CO_DESIGN)
@@ -1595,6 +1604,10 @@ def _parse_args() -> argparse.Namespace:
 def main() -> int:
     args = _parse_args()
     try:
+        verify_dataset_provenance(
+            args.dataset_lock,
+            expected_dataset_root=args.dataset_root,
+        )
         manifest = build_evaluation_assets(
             args.dataset_root,
             args.output_root,
@@ -1603,6 +1616,9 @@ def main() -> int:
             workflow_descriptor_path=args.workflow_descriptor,
             refresh=args.refresh,
         )
+    except DatasetProvenanceError as exc:
+        print(f"evaluation asset build failed: {exc.code}")
+        return 1
     except EvalAssetError as exc:
         print(f"evaluation asset build failed: {exc}")
         return 1

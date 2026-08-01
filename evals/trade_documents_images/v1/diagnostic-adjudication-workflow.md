@@ -41,14 +41,14 @@ reconciliation report에 명시해야 하며 서로 바꾸어 주장하면 안 �
 ## 2026-07-18 상태
 
 최초
-`_artifacts/datasets/trade_documents_images/source-v1/derived/diagnostic-selection/v1`
+`_local/data/trade_documents_images/source-v1/derived/diagnostic-selection/v1`
 worklist/Gate는 12개 `pending_first_review`인 역사적 snapshot으로 보존된다.
 
 현재 canonical adjudication은 두 **독립 AI 시각 reviewer**의 별도 annotation을 reconciliation한
 다음 경로다.
 
 ```text
-_artifacts/datasets/trade_documents_images/source-v1/derived/
+_local/data/trade_documents_images/source-v1/derived/
   independent-review-a/v1/annotations.jsonl
   independent-review-b/v1/annotations.jsonl
   adjudicated-gold/v1/

@@ -26,6 +26,7 @@ from customs_ai_agent.nodes.normalize import (
 )
 from customs_ai_agent.nodes.pair import pair_documents
 from customs_ai_agent.nodes.validate import validate_cross_documents
+from tools.dataset_provenance import DatasetProvenanceError, verify_dataset_provenance
 
 
 REPORT_SCHEMA = "deterministic-validation-evaluation-report/v5"
@@ -47,7 +48,7 @@ EXPECTED_SPLIT_COUNTS = {
     "locked_test": 20,
 }
 CONTROLLED_CASE_SEED = "trade-document-triplets-rule-coverage-v1-public-development"
-CANONICAL_DATASET_LOCK_SHA256 = "a5fcdff268fc17651f90235e9f65283e2a2913c2d1aa8466a9b96e3908f3f030"
+CANONICAL_DATASET_LOCK_SHA256 = "78b4da7184f500716b7a2191cec42ec98fcf89b2c16b325fbc4c1d67c31273ad"
 CANONICAL_SELECTION_DESCRIPTOR_SHA256 = (
     "cd64db824947be629063533e4dbaa29e6baa31ac46b09973786140418ec87101"
 )
@@ -1202,6 +1203,7 @@ def _parse_args() -> argparse.Namespace:
 def main() -> int:
     args = _parse_args()
     try:
+        verify_dataset_provenance(args.dataset_lock)
         exit_code, report = evaluate(
             args.defects,
             negative_controls_path=args.negative_controls,
@@ -1209,6 +1211,20 @@ def main() -> int:
             selection_descriptor_path=args.selection_descriptor,
             dataset_lock_path=args.dataset_lock,
         )
+    except DatasetProvenanceError as exc:
+        print(
+            json.dumps(
+                {
+                    "schema_version": REPORT_SCHEMA,
+                    "scope": "RELATION_AWARE_RULE_COVERAGE_DEVELOPMENT",
+                    "status": "FAIL",
+                    "release_eligible": False,
+                    "error": exc.code,
+                },
+                sort_keys=True,
+            )
+        )
+        return 2
     except DeterministicEvaluationError as exc:
         print(
             json.dumps(

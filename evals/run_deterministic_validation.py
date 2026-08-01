@@ -26,6 +26,7 @@ from customs_ai_agent.nodes.normalize import (
 from customs_ai_agent.nodes.pair import pair_documents
 from customs_ai_agent.nodes.validate import validate_cross_documents
 from evals.release_holdout_protocol import RELEASE_INVALIDATION_CODE
+from tools.dataset_provenance import DatasetProvenanceError, verify_dataset_provenance
 
 
 REPORT_SCHEMA = "deterministic-validation-evaluation-report/v4"
@@ -43,7 +44,7 @@ EXPECTED_SPLIT_COUNTS = {
     "locked_test": 20,
 }
 CONTROLLED_CASE_SEED = "trade-document-triplets-evaluation-v2-controlled-development"
-CANONICAL_DATASET_LOCK_SHA256 = "a5fcdff268fc17651f90235e9f65283e2a2913c2d1aa8466a9b96e3908f3f030"
+CANONICAL_DATASET_LOCK_SHA256 = "78b4da7184f500716b7a2191cec42ec98fcf89b2c16b325fbc4c1d67c31273ad"
 CANONICAL_DIAGNOSTIC_SPLIT_BYTES_SHA256 = (
     "d7e6b86ef19bbae838a7f5da7b94428637481ab5c15d9599ee3af3e86bda7b64"
 )
@@ -904,12 +905,27 @@ def _parse_args() -> argparse.Namespace:
 def main() -> int:
     args = _parse_args()
     try:
+        verify_dataset_provenance(args.dataset_lock)
         exit_code, report = evaluate(
             args.defects,
             manifest_path=args.manifest,
             splits_path=args.splits,
             dataset_lock_path=args.dataset_lock,
         )
+    except DatasetProvenanceError as exc:
+        print(
+            json.dumps(
+                {
+                    "schema_version": REPORT_SCHEMA,
+                    "scope": "CONTROLLED_SINGLE_MUTATION_DEVELOPMENT",
+                    "status": "FAIL",
+                    "release_eligible": False,
+                    "error": exc.code,
+                },
+                sort_keys=True,
+            )
+        )
+        return 2
     except DeterministicEvaluationError as exc:
         print(
             json.dumps(

@@ -157,7 +157,7 @@ def _write_uat_assertion_trust_store(
         ],
     }
     payload["trust_store_sha256"] = assertion_trust._sha256(payload)
-    path = tmp_path / "_secrets" / "uat" / "assertion-trust-store.json"
+    path = tmp_path / "_local" / "secrets" / "uat" / "assertion-trust-store.json"
     path.parent.mkdir(parents=True, exist_ok=True)
     path.write_text(json.dumps(payload), encoding="utf-8")
     return path, payload, private
@@ -476,6 +476,21 @@ def test_scenario_eval_rejects_stale_or_non_secret_assertion_trust_paths(
             evidence_mode="preserved-3law-v3-scenario-eval",
             assertion_fixture_mode="LOOPBACK_TEST_ONLY_HUMAN_APPROVER",
             assertion_trust_store_path=str(outside.resolve()),
+            assertion_trust_store_sha256=valid_store["trust_store_sha256"],
+        )
+
+    retired = tmp_path / "_secrets" / "uat" / valid_path.name
+    retired.parent.mkdir(parents=True)
+    retired.write_bytes(valid_path.read_bytes())
+    with pytest.raises(
+        LocalUatConfigurationError,
+        match="uat_assertion_trust_store_path_invalid",
+    ):
+        _load_manifest(
+            tmp_path,
+            evidence_mode="preserved-3law-v3-scenario-eval",
+            assertion_fixture_mode="LOOPBACK_TEST_ONLY_HUMAN_APPROVER",
+            assertion_trust_store_path=str(retired.resolve()),
             assertion_trust_store_sha256=valid_store["trust_store_sha256"],
         )
 

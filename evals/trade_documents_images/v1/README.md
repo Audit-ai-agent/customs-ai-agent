@@ -2,10 +2,11 @@
 
 ## 입력 경로와 등록 경계
 
-사용자가 복원한 workspace root `trade_documents_images/`는 byte-for-byte 원본 참고본이다.
-평가 runner는 `_artifacts/datasets/trade_documents_images/source-v1/raw/`만 canonical
-입력으로 사용하며 root를 대체 경로로 탐색하지 않는다. 양쪽은 3,002개 파일,
-260,248,817 bytes, 상대경로·크기·SHA-256 mismatch 0으로 2026-07-18에 재검증됐다.
+2026-07-18에 복원한 root 참고본과 등록본은 3,002개 파일, 260,248,817 bytes,
+상대경로·크기·SHA-256 mismatch 0으로 재검증한 뒤 TASK-0028에서 retired됐다.
+평가 runner는 `_local/data/trade_documents_images/source-v1/raw/`만 canonical 입력으로
+사용하며, V2 provenance·relocation manifest가 없거나 폐기 경로가 다시 존재하면
+OCR·Claude·Evidence 호출 전에 실패한다.
 
 이 등록은 source bytes 무결성을 증명할 뿐 3,000장 전체의 field/OCR/bbox/table/finding
 Gold를 만들지 않는다. README가 참조하는 `shipments_master.json`은 여전히 누락됐고, 전체
@@ -32,7 +33,7 @@ SHA-256 순위를 계산한 결정론적 진단 표본이다. CI·PL·B/L은 Cas
 Gold가 아니다. 최초로 생성된 pending worklist는 다음 경로에 역사적 증거로 남아 있다.
 
 ```text
-_artifacts/datasets/trade_documents_images/source-v1/
+_local/data/trade_documents_images/source-v1/
   derived/diagnostic-selection/v1/adjudications.jsonl
 ```
 
@@ -75,7 +76,7 @@ invalidation으로 고정한다.
 canonical 파생물은 별도 경로에 있다.
 
 ```text
-_artifacts/datasets/trade_documents_images/source-v1/derived/
+_local/data/trade_documents_images/source-v1/derived/
   independent-review-a/v1/annotations.jsonl
   independent-review-b/v1/annotations.jsonl
   adjudicated-gold/v1/

@@ -25,6 +25,7 @@ from customs_ai_agent.schemas.models import (
     MAX_IMAGE_LONG_EDGE,
     MAX_IMAGE_VISUAL_TOKENS,
 )
+from tools.dataset_provenance import DatasetProvenanceError, verify_dataset_provenance
 
 
 RENDER_SCHEMA = "trade-document-render-manifest/v2"
@@ -44,6 +45,13 @@ FONT_ASSETS = {
         "sha256": "cc037385e4d55bfde89b13e03091ee93bf40c0c52ddd391ff031ab276f13b8e9",
     },
 }
+DEFAULT_DATASET_LOCK = (
+    Path(__file__).resolve().parents[1]
+    / "evals"
+    / "trade_document_triplets"
+    / "v1"
+    / "dataset.lock.json"
+)
 FONT_LICENSE = {
     "name": "Bitstream Vera Fonts Copyright",
     "filename": "bitstream-vera-license.txt",
@@ -1090,6 +1098,7 @@ def _parse_args() -> argparse.Namespace:
         description="Render fixed CI/PL/B/L/C/O PDF+PNG fixtures and layout Gold."
     )
     parser.add_argument("--dataset-root", required=True, type=Path)
+    parser.add_argument("--dataset-lock", type=Path, default=DEFAULT_DATASET_LOCK)
     parser.add_argument("--evaluation-root", required=True, type=Path)
     parser.add_argument("--output-root", required=True, type=Path)
     parser.add_argument("--max-cases", type=int)
@@ -1100,6 +1109,10 @@ def _parse_args() -> argparse.Namespace:
 def main() -> int:
     args = _parse_args()
     try:
+        verify_dataset_provenance(
+            args.dataset_lock,
+            expected_dataset_root=args.dataset_root,
+        )
         manifest = render_dataset(
             args.dataset_root,
             args.evaluation_root,
@@ -1107,6 +1120,9 @@ def main() -> int:
             max_cases=args.max_cases,
             refresh=args.refresh,
         )
+    except DatasetProvenanceError as exc:
+        print(f"document render failed: {exc.code}")
+        return 1
     except RenderError as exc:
         print(f"document render failed: {exc}")
         return 1

@@ -1,7 +1,11 @@
 {
-  "artifact_relative_path": "_artifacts/datasets/trade_document_triplets/source-v1",
+  "artifact_relative_path": "_local/data/trade_document_triplets/source-v1",
   "dataset_id": "trade_document_triplets",
   "dataset_version": "source-v1",
+  "lock_revision": 2,
+  "reissued_at": "2026-08-01T07:58:13+09:00",
+  "supersedes_lock_sha256": "a5fcdff268fc17651f90235e9f65283e2a2913c2d1aa8466a9b96e3908f3f030",
+  "reissue_reason": "bind canonical _local/data storage and retire duplicate workspace roots",
   "descriptor_contains_business_values": false,
   "defect_intent_status": "unknown",
   "expected_registration": {
@@ -41,6 +45,21 @@
   ],
   "registration_tool": "tools/register_trade_document_triplets.py",
   "raw_dataset_contains_business_values": true,
+  "dataset_provenance_v2": {
+    "schema_version": "customs-dataset-provenance-binding/v2",
+    "migration_id": "TASK-0028-dataset-canonical-relocation",
+    "binding_repository_relative_path": "fixtures/dataset_provenance/v2/relocation-binding.json",
+    "binding_sha256": "07f43423e592bc01202f77410183fd736071c698baeab0542735bd6cbc2450c6",
+    "relocation_manifest_workspace_relative_path": "_local/data/dataset-relocation-manifest.v1.json",
+    "canonical_dataset_workspace_relative_path": "_local/data/trade_document_triplets/source-v1",
+    "canonical_raw_workspace_relative_path": "_local/data/trade_document_triplets/source-v1/raw",
+    "provenance_workspace_relative_path": "_local/data/trade_document_triplets/source-v1/provenance.json",
+    "legacy_source_workspace_relative_path": "가상데이터(CI_PL_BL)",
+    "legacy_canonical_workspace_relative_path": "_artifacts/datasets/trade_document_triplets/source-v1",
+    "root_reference_preserved": false,
+    "root_reference_status": "retired",
+    "fallback_to_legacy_paths_allowed": false
+  },
   "schema_version": "trade-document-triplets-dataset-lock/v1",
   "value_bearing_artifacts_committable": false
 }

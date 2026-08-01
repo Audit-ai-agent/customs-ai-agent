@@ -289,11 +289,19 @@ def test_dataset_lock_pins_the_supplied_source_without_business_values():
     lock = json.loads(lock_path.read_text(encoding="utf-8"))
 
     assert lock["dataset_id"] == DATASET_ID
+    assert lock["lock_revision"] == 2
+    assert lock["artifact_relative_path"] == ("_local/data/trade_document_triplets/source-v1")
     assert lock["defect_intent_status"] == "unknown"
     assert "contains_business_values" not in lock
     assert lock["descriptor_contains_business_values"] is False
     assert lock["raw_dataset_contains_business_values"] is True
     assert lock["value_bearing_artifacts_committable"] is False
+    provenance_v2 = lock["dataset_provenance_v2"]
+    assert provenance_v2["schema_version"] == "customs-dataset-provenance-binding/v2"
+    assert provenance_v2["migration_id"] == "TASK-0028-dataset-canonical-relocation"
+    assert provenance_v2["root_reference_preserved"] is False
+    assert provenance_v2["root_reference_status"] == "retired"
+    assert provenance_v2["fallback_to_legacy_paths_allowed"] is False
     assert lock["expected_registration"] == {
         "case_count": 100,
         "document_count": 300,

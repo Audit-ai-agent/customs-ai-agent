@@ -215,7 +215,7 @@ def _fixture_files(tmp_path, *, mutate=None):
         json.dumps(selection, indent=2, sort_keys=True) + "\n",
         encoding="utf-8",
     )
-    artifact_root = tmp_path / "_artifacts"
+    artifact_root = tmp_path / "_local" / "data" / "trade_documents_images" / "source-v1"
     review_a_path = artifact_root / "reviews" / "a.jsonl"
     review_b_path = artifact_root / "reviews" / "b.jsonl"
     _write_jsonl(review_a_path, review_a)
@@ -413,11 +413,11 @@ def test_selection_digest_is_pinned(tmp_path):
         _build(files, expected_selection_sha256="0" * 64)
 
 
-def test_value_bearing_gold_cannot_be_written_outside_artifacts(tmp_path):
+def test_value_bearing_gold_cannot_be_written_outside_canonical_data(tmp_path):
     files = _fixture_files(tmp_path)
     outside_output = tmp_path / "synthetic-repository" / "generated-gold"
 
-    with pytest.raises(ReviewReconciliationError, match="must remain under _artifacts"):
+    with pytest.raises(ReviewReconciliationError, match="must remain under canonical _local/data"):
         _build(files, output_dir=outside_output)
 
 

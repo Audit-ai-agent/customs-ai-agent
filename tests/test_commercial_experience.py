@@ -557,7 +557,7 @@ def test_uat_capability_is_current_code_bound_file_bound_and_expiring(
     issued_at = datetime.now(timezone.utc)
     capability = _capability(now=issued_at)
     assert capability.agent_code_snapshot_sha256 == package_code_snapshot_sha256()
-    target = tmp_path / "_secrets" / "uat" / "capability.json"
+    target = tmp_path / "_local" / "secrets" / "uat" / "capability.json"
     target.parent.mkdir(parents=True)
     target.write_bytes(_canonical_file_bytes(capability.model_dump(mode="json", warnings=False)))
     file_sha = capability_file_sha256(target)

@@ -2,7 +2,8 @@
 
 이 디렉터리는 Git에 넣을 수 있는 계약·설계만 보관한다. 사용자가 제공한 CI/PL/B/L 값과
 파생 PDF·PNG·Gold는 로컬
-`_artifacts/datasets/trade_document_triplets/source-v1/derived/`에만 생성한다.
+`_local/data/trade_document_triplets/source-v1/derived/`에만 생성한다. 모든 runner는
+DatasetProvenanceV2·relocation manifest·retired legacy path 부재를 먼저 검증한다.
 
 ## 정답 계층
 
@@ -31,29 +32,29 @@ not_applicable
 ```powershell
 uv run --locked python -m tools.register_trade_document_triplets `
   --source-root <USER_SOURCE> `
-  --dataset-root <ARTIFACT_DATASET_ROOT>
+  --dataset-root <CANONICAL_DATASET_ROOT>
 
 uv run --locked python -m tools.repair_trade_triplet_container_mutation `
-  --source-root <ARTIFACT_DATASET_ROOT>/derived/evaluation/v2 `
-  --output-root <ARTIFACT_DATASET_ROOT>/derived/evaluation/v2-container-repair-v1
+  --source-root <CANONICAL_DATASET_ROOT>/derived/evaluation/v2 `
+  --output-root <CANONICAL_DATASET_ROOT>/derived/evaluation/v2-container-repair-v1
 
 uv run --locked python -m evals.run_deterministic_validation `
-  --defects <ARTIFACT_DATASET_ROOT>/derived/evaluation/v2-container-repair-v1/injected-defects/cases.jsonl `
-  --manifest <ARTIFACT_DATASET_ROOT>/derived/evaluation/v2-container-repair-v1/manifest.json `
-  --splits <ARTIFACT_DATASET_ROOT>/derived/evaluation-splits/v2/splits.json `
+  --defects <CANONICAL_DATASET_ROOT>/derived/evaluation/v2-container-repair-v1/injected-defects/cases.jsonl `
+  --manifest <CANONICAL_DATASET_ROOT>/derived/evaluation/v2-container-repair-v1/manifest.json `
+  --splits <CANONICAL_DATASET_ROOT>/derived/evaluation-splits/v2/splits.json `
   --dataset-lock evals/trade_document_triplets/v1/dataset.lock.json `
   --out <RUN_ARTIFACT_ROOT>/deterministic-validation.json
 
 uv run --locked python -m tools.build_trade_triplet_rule_coverage `
-  --dataset-root <ARTIFACT_DATASET_ROOT> `
-  --output-root <ARTIFACT_DATASET_ROOT>/derived/evaluation/rule-coverage-v1 `
+  --dataset-root <CANONICAL_DATASET_ROOT> `
+  --output-root <CANONICAL_DATASET_ROOT>/derived/evaluation/rule-coverage-v1 `
   --descriptor evals/trade_document_triplets/v1/rule-coverage-v1.descriptor.json `
   --dataset-lock evals/trade_document_triplets/v1/dataset.lock.json
 
 uv run --locked python -m evals.run_rule_coverage_validation `
-  --defects <ARTIFACT_DATASET_ROOT>/derived/evaluation/rule-coverage-v1/injected-defects/cases.jsonl `
-  --negative-controls <ARTIFACT_DATASET_ROOT>/derived/evaluation/rule-coverage-v1/negative-controls/cases.jsonl `
-  --manifest <ARTIFACT_DATASET_ROOT>/derived/evaluation/rule-coverage-v1/manifest.json `
+  --defects <CANONICAL_DATASET_ROOT>/derived/evaluation/rule-coverage-v1/injected-defects/cases.jsonl `
+  --negative-controls <CANONICAL_DATASET_ROOT>/derived/evaluation/rule-coverage-v1/negative-controls/cases.jsonl `
+  --manifest <CANONICAL_DATASET_ROOT>/derived/evaluation/rule-coverage-v1/manifest.json `
   --selection-descriptor evals/trade_document_triplets/v1/rule-coverage-v1.descriptor.json `
   --dataset-lock evals/trade_document_triplets/v1/dataset.lock.json `
   --out <RUN_ARTIFACT_ROOT>/rule-coverage-validation.json
@@ -63,9 +64,9 @@ uv run --locked python -m evals.run_workflow_boundary_validation `
   --out <RUN_ARTIFACT_ROOT>/workflow-boundary-validation.json
 
 uv run --locked python -m tools.render_trade_document_fixtures `
-  --dataset-root <ARTIFACT_DATASET_ROOT> `
-  --evaluation-root <ARTIFACT_DATASET_ROOT>/derived/evaluation/v2-container-repair-v1 `
-  --output-root <ARTIFACT_DATASET_ROOT>/derived/rendered/v2-container-repair-v1
+  --dataset-root <CANONICAL_DATASET_ROOT> `
+  --evaluation-root <CANONICAL_DATASET_ROOT>/derived/evaluation/v2-container-repair-v1 `
+  --output-root <CANONICAL_DATASET_ROOT>/derived/rendered/v2-container-repair-v1
 ```
 
 등록은 source bytes와 pinned `dataset.lock.json`을 함께 검증한다. Renderer는 ReportLab invariant

@@ -36,7 +36,7 @@ Normalization, arithmetic, cross-document validation, Evidence API verification,
 severity, and outcome remain deterministic. Provider/schema/grounding failure never falls back to
 the rule extractor. LLM mode also requires an explicit retriever to prevent silent Mock RAG.
 
-The local canonical configuration remains outside product repositories in one `_secrets/.env`.
+The local canonical configuration remains outside product repositories in one `_local/secrets/.env`.
 An explicit env file supplies only allowlisted Claude/Evidence values to settings objects without
 changing `os.environ`; an already-set process value takes precedence. The evaluated runtime is
 pinned to `claude-sonnet-5` and `https://api.anthropic.com`. Anthropic endpoint/header/auth-token

@@ -12,6 +12,8 @@ from collections import Counter
 from pathlib import Path
 from typing import Any
 
+from tools.dataset_provenance import DatasetProvenanceError, verify_dataset_provenance
+
 
 SELECTION_ID = "trade-images-hash-ranked-diagnostic-v1"
 SELECTION_SCHEMA = "trade-image-diagnostic-selection/v1"
@@ -558,6 +560,10 @@ def _parse_args() -> argparse.Namespace:
 def main() -> int:
     args = _parse_args()
     try:
+        verify_dataset_provenance(
+            args.fixture_lock,
+            expected_raw_root=args.dataset_root,
+        )
         selection, initial_worklist, _initial_gate = build_diagnostic_selection(
             args.dataset_root,
             args.inventory,
@@ -579,6 +585,9 @@ def main() -> int:
             _json_bytes(gate),
             refresh=True,
         )
+    except DatasetProvenanceError as exc:
+        print(f"diagnostic selection failed: {exc.code}")
+        return 1
     except DiagnosticSelectionError as exc:
         print(f"diagnostic selection failed: {exc}")
         return 1
