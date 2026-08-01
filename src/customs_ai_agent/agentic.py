@@ -1595,14 +1595,35 @@ def _runtime_release(
     *,
     evidence_runtime_v3_sha256: str | None,
     assertion_trust_store: AssertionTrustStoreV1 | None = None,
+    uat_capability: AgentUatCapabilityAttestationV1 | None = None,
 ) -> RuntimeReleaseIdentityV1:
     observed_model = result.model_calls[0].model_id if result.model_calls else DEFAULT_CLAUDE_MODEL
-    return runtime_release_identity(
+    release = runtime_release_identity(
         model_id=observed_model,
         evidence_snapshot_id=result.knowledge_snapshot_id,
         evidence_runtime_v3_sha256=evidence_runtime_v3_sha256,
         assertion_trust_store=assertion_trust_store,
     )
+    if uat_capability is None:
+        return release
+
+    # A source checkout has no packaged wheel manifest, so its otherwise exact
+    # runtime identity cannot name a Git commit.  Local UAT already loads a
+    # file-hash-bound, time-limited capability against the harness manifest.
+    # Revalidate every immutable runtime binding here before using that trusted
+    # commit in the canonical result consumed by Backend.
+    from customs_ai_agent.uat_capability import assert_runtime_uat_capability
+
+    if not assert_runtime_uat_capability(
+        uat_capability,
+        agent_code_snapshot_sha256=release.agent_code_snapshot_sha256,
+        model_id=release.model_id,
+        evidence_runtime_v3_sha256=release.evidence_runtime_v3_sha256,
+        expected_agent_commit=uat_capability.agent_commit,
+        require_active=False,
+    ):
+        raise ValueError("uat capability does not bind the canonical runtime release")
+    return release.model_copy(update={"agent_git_sha": uat_capability.agent_commit})
 
 
 def _detect_text_language(text: str | None) -> str:
@@ -1917,6 +1938,7 @@ def to_review_run_result_v3(
             current,
             evidence_runtime_v3_sha256=evidence_runtime_v3_sha256,
             assertion_trust_store=assertion_trust_store,
+            uat_capability=uat_capability,
         )
         current_eligibility = _completion_eligibility(
             current,

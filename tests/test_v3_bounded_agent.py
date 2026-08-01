@@ -157,6 +157,61 @@ def test_v3_result_uses_the_explicit_runtime_assertion_trust_store_identity() ->
     assert result.runtime_release.assertion_trust_store_sha256 != "b" * 64
 
 
+def test_v3_result_binds_only_an_exact_uat_commit_into_the_canonical_runtime(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    import customs_ai_agent.agentic as agentic
+    import customs_ai_agent.uat_capability as uat_capability
+
+    request, result_v2, baseline = _v3_result()
+    monkeypatch.setattr(uat_capability, "package_code_snapshot_sha256", lambda: "0" * 64)
+    issued_at = datetime.now(timezone.utc)
+
+    def capability(*, model_id: str, evidence_sha: str):
+        return issue_uat_capability(
+            agent_commit="1" * 40,
+            model_id=model_id,
+            evidence_runtime_v3_sha256=evidence_sha,
+            issued_at=issued_at,
+            expires_at=issued_at + timedelta(hours=1),
+            adaptive_active=False,
+        )
+
+    exact = capability(
+        model_id=baseline.runtime_release.model_id,
+        evidence_sha="e" * 64,
+    )
+    bound = to_review_run_result_v3(
+        result_v2,
+        request,
+        evidence_runtime_v3_sha256="e" * 64,
+        uat_capability=exact,
+    )
+    assert baseline.runtime_release.agent_git_sha == "0" * 40
+    assert bound.runtime_release.agent_git_sha == "1" * 40
+
+    for mismatched in (
+        capability(model_id="claude-mismatched-model", evidence_sha="e" * 64),
+        capability(model_id=baseline.runtime_release.model_id, evidence_sha="f" * 64),
+    ):
+        with pytest.raises(ValueError, match="does not bind the canonical runtime release"):
+            to_review_run_result_v3(
+                result_v2,
+                request,
+                evidence_runtime_v3_sha256="e" * 64,
+                uat_capability=mismatched,
+            )
+
+    code_mismatch = exact.model_copy(update={"agent_code_snapshot_sha256": "2" * 64})
+    with pytest.raises(ValueError, match="does not bind the canonical runtime release"):
+        agentic.to_review_run_result_v3(
+            result_v2,
+            request,
+            evidence_runtime_v3_sha256="e" * 64,
+            uat_capability=code_mismatch,
+        )
+
+
 def test_prompt_injection_guard_forces_indeterminate_without_mutating_review_facts() -> None:
     request = _request()
     attacked_documents = [
