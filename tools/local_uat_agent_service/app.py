@@ -831,6 +831,11 @@ def _uat_metadata(
     capability: AgentUatCapabilityAttestationV1 | None = None,
 ) -> dict[str, Any]:
     metadata = copy.deepcopy(dict(base))
+    if capability is not None:
+        if manifest.agent_commit is None or capability.agent_commit != manifest.agent_commit:
+            raise LocalUatConfigurationError("uat_capability_commit_mismatch")
+        metadata["agent"]["build_sha"] = manifest.agent_commit
+        metadata["runtime_release"]["agent_git_sha"] = manifest.agent_commit
     metadata["status"] = "ready"
     metadata["service_mode"] = "local_user_uat_diagnostic"
     metadata["assurance_level"] = "diagnostic"

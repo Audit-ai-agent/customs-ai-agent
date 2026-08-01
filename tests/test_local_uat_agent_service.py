@@ -5,6 +5,7 @@ import hashlib
 import inspect
 import json
 from dataclasses import replace
+from datetime import datetime, timezone
 from pathlib import Path
 from typing import Any
 
@@ -17,6 +18,7 @@ from pydantic import SecretStr
 import customs_ai_agent.adapters.retrieval_v3 as production_retrieval_v3
 import customs_ai_agent.assertion_trust as assertion_trust
 from customs_ai_agent.runtime import RuntimeConfigurationError, RuntimeExecutionError
+from customs_ai_agent.schemas.experience import AgentUatCapabilityAttestationV1
 from customs_ai_agent.service.settings import ServiceSettings
 from tests.test_evidence_v3_consumer import _identity
 from tests.test_v3_conformance_runner import _result
@@ -32,6 +34,7 @@ from tools.local_uat_agent_service.app import (
     _readiness_policy,
     LocalUatManifest,
     _compose_local_uat_app,
+    _uat_metadata,
     create_local_uat_app,
     load_local_uat_manifest,
     local_uat_service_settings,
@@ -250,6 +253,37 @@ def _app(
         readiness_probe=probe,
         model_id="claude-sonnet-5",
     )
+
+
+def test_enhanced_uat_metadata_binds_the_validated_capability_commit(
+    tmp_path: Path,
+) -> None:
+    commit = "1" * 40
+    manifest = replace(
+        _load_manifest(tmp_path),
+        enhanced_experience_enabled=True,
+        agent_commit=commit,
+    )
+    capability = AgentUatCapabilityAttestationV1.model_construct(
+        agent_commit=commit,
+        capability_sha256="2" * 64,
+        expires_at=datetime(2026, 8, 2, tzinfo=timezone.utc),
+    )
+    observed = _uat_metadata(
+        {
+            "agent": {"build_sha": "unknown"},
+            "model": {"id": "unbound"},
+            "runtime_release": {"agent_git_sha": None},
+            "agentic_limits": {},
+            "automatic_completion_release": {},
+        },
+        manifest,
+        model_id="claude-sonnet-5",
+        capability=capability,
+    )
+
+    assert observed["agent"]["build_sha"] == commit
+    assert observed["runtime_release"]["agent_git_sha"] == commit
 
 
 def test_manifest_requires_explicit_non_release_policy_and_literal_loopback(
