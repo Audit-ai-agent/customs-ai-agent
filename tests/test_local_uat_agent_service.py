@@ -549,7 +549,7 @@ def test_non_scenario_profiles_reject_assertion_fixture_activation(tmp_path: Pat
 def test_actual_store_profile_has_a_bounded_longer_http_budget() -> None:
     assert _evidence_timeout_seconds("synthetic-v3") == 30.0
     assert _evidence_timeout_seconds("preserved-3law-v3-diagnostic") == 195.0
-    assert _evidence_timeout_seconds("preserved-3law-v3-scenario-eval") == 285.0
+    assert _evidence_timeout_seconds("preserved-3law-v3-scenario-eval") == 300.0
     assert _readiness_policy("synthetic-v3") == (5.0, 5.0)
     assert _readiness_policy("preserved-3law-v3-diagnostic") == (60.0, 90.0)
     assert _readiness_policy("preserved-3law-v3-scenario-eval") == (60.0, 90.0)

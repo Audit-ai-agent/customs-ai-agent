@@ -230,12 +230,12 @@ def test_packaged_v3_contract_hashes_are_provider_frozen_and_release_is_unreleas
         "contract": "evidence-runtime-release-provider-lock",
         "schema_version": "1.0",
         "provider_release": "evidence-api-v1.2.0",
-        "provider_revision": "89fe32ed43686fe7e1eb07bb8b8841c6ff393b05",
+        "provider_revision": "c9214d17343cec21a575ffde979f045169c7a341",
         "provider_build_sha256": (
-            "583ae05e9c3deacc3b50072781c95a059190a4def2cc29a8848469eb42bffc60"
+            "16da9abf8b528815ffa3363cdb9424533edc78bb82f417dc25a56a31966bfeaa"
         ),
         "provider_source_manifest_sha256": (
-            "fd4b7f6fd0d6b01917480ba8285ac0092525da41ddcc77ff91505cf82a513094"
+            "0c99c24ff4bc51d3f458bbb093666952c36a2942f4967141e0e35bcb06ad5158"
         ),
         "retrieval_schema_sha256": (
             "531b59ba4e86f78cef20a4fca052996efd8b88c48853ac12113ca76e69cdd69a"

@@ -276,7 +276,7 @@ _SDIST_PACKAGED_PROVIDER_RUNTIME_LOCK: Final = (
     "src/customs_ai_agent/contracts/evidence/provider-runtime-lock.json"
 )
 _EXPECTED_PROVIDER_RUNTIME_LOCK_SHA256: Final = (
-    "1fcb0fbe554a5bafff908c6963b3b5f6ceb6b499dae1ef380e4e63ef8b1590f8"
+    "e3e16ef56e2e2ce7106b7a5dce2eb3b3fb2618e7658f97742c76bbf47de99a5e"
 )
 _WHEEL_V3_RUNTIME_RELEASE_LOCK: Final = (
     "customs_ai_agent/contracts/evidence/v3/runtime-release-v3.lock.json"
@@ -727,11 +727,11 @@ def _assert_provider_runtime_lock(payload: bytes, *, distribution_kind: str) -> 
         or lock.get("contract") != "evidence-runtime-release-provider-lock"
         or lock.get("schema_version") != "1.0"
         or lock.get("provider_release") != "evidence-api-v1.2.0"
-        or lock.get("provider_revision") != "89fe32ed43686fe7e1eb07bb8b8841c6ff393b05"
+        or lock.get("provider_revision") != "c9214d17343cec21a575ffde979f045169c7a341"
         or lock.get("provider_build_sha256")
-        != "583ae05e9c3deacc3b50072781c95a059190a4def2cc29a8848469eb42bffc60"
+        != "16da9abf8b528815ffa3363cdb9424533edc78bb82f417dc25a56a31966bfeaa"
         or lock.get("provider_source_manifest_sha256")
-        != "fd4b7f6fd0d6b01917480ba8285ac0092525da41ddcc77ff91505cf82a513094"
+        != "0c99c24ff4bc51d3f458bbb093666952c36a2942f4967141e0e35bcb06ad5158"
     ):
         raise DistributionVerificationError(
             f"{distribution_kind} Evidence provider runtime lock is invalid"
