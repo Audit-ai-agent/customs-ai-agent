@@ -119,8 +119,8 @@ Evidence consumer snapshot의 고정 SHA-256은
 `531b59ba4e86f78cef20a4fca052996efd8b88c48853ac12113ca76e69cdd69a`다. evaluator는 실제 local
 schema bytes, lock SHA, 이 기대 SHA가 모두 같은지 API 호출 전에 확인한다. lock의 release
 metadata는 final Data provider build candidate `evidence-api-v1.2.0`,
-`aae07d01508dbe8eb299663f3cc1d9ee24f9d29d`와 build SHA-256
-`83f410ffc47854b2648c81a06ed4d9ec3b15f3bda940175c556cc7c8dea41018`다.
+`7df26860e3d31eef4545fae8851b6f16d17a331d`와 build SHA-256
+`286499b70d2689060699ef99a84636774612bb8355ac2d537b0f0efea477b51d`다.
 이 provider build pin은 Evidence V3 Production release 승인을 의미하지 않는다. 정책·검수자
 trust store·sealed knowledge generation이 발행되기 전까지 runtime release는 fail-closed다.
 

@@ -266,7 +266,7 @@ def test_checkout_and_packaged_v2_release_resources_are_byte_identical() -> None
         ).read_bytes()
     )
     assert hashlib.sha256(provider_lock).hexdigest() == (
-        "7427a38d0efb4075952274a85ef32ee65959fd4a638911d5d2819c737f52b64f"
+        "71c0ff5db125267fbeca3ab448bdd9f830c8046e00d5e82898c2f4231bb98da5"
     )
 
 
@@ -274,12 +274,12 @@ def test_packaged_provider_runtime_pin_is_exact_and_tamper_evident(
     monkeypatch: pytest.MonkeyPatch,
 ) -> None:
     identity = load_pinned_evidence_provider_runtime_identity()
-    assert identity.provider_revision == "aae07d01508dbe8eb299663f3cc1d9ee24f9d29d"
+    assert identity.provider_revision == "7df26860e3d31eef4545fae8851b6f16d17a331d"
     assert identity.provider_build_sha256 == (
-        "83f410ffc47854b2648c81a06ed4d9ec3b15f3bda940175c556cc7c8dea41018"
+        "286499b70d2689060699ef99a84636774612bb8355ac2d537b0f0efea477b51d"
     )
     assert identity.provider_source_manifest_sha256 == (
-        "224b794fe4312514f461d6ee269211e0ab0f152cdaa670079db5f82d6d42a2b1"
+        "3c085dba66bb3b546cc117124c224b36ccfa86b622123c74578d29fb86325c1c"
     )
 
     original = release_module._read_resource_bytes
@@ -794,7 +794,7 @@ def test_release_lock_builder_requires_exact_data_code_and_schema_lock() -> None
     fixture_root = Path(__file__).parent / "fixtures" / "evidence_runtime_v2"
     lock_bytes = (fixture_root / "provider-runtime-lock.json").read_bytes()
     assert hashlib.sha256(lock_bytes).hexdigest() == (
-        "7427a38d0efb4075952274a85ef32ee65959fd4a638911d5d2819c737f52b64f"
+        "71c0ff5db125267fbeca3ab448bdd9f830c8046e00d5e82898c2f4231bb98da5"
     )
     expected = json.loads(lock_bytes)
     identity = _identity(

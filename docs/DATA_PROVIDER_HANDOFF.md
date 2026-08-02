@@ -81,11 +81,11 @@ snapshot을 released로 표시하지 않는다.
 
 2026-08-03에 동기화한 provider build pin은 다음과 같다.
 
-- Data revision: `aae07d01508dbe8eb299663f3cc1d9ee24f9d29d`
+- Data revision: `7df26860e3d31eef4545fae8851b6f16d17a331d`
 - provider release: `evidence-api-v1.2.0`
-- provider build SHA-256: `83f410ffc47854b2648c81a06ed4d9ec3b15f3bda940175c556cc7c8dea41018`
-- provider source manifest SHA-256: `224b794fe4312514f461d6ee269211e0ab0f152cdaa670079db5f82d6d42a2b1`
-- canonical provider lock SHA-256: `7427a38d0efb4075952274a85ef32ee65959fd4a638911d5d2819c737f52b64f`
+- provider build SHA-256: `286499b70d2689060699ef99a84636774612bb8355ac2d537b0f0efea477b51d`
+- provider source manifest SHA-256: `3c085dba66bb3b546cc117124c224b36ccfa86b622123c74578d29fb86325c1c`
+- canonical provider lock SHA-256: `71c0ff5db125267fbeca3ab448bdd9f830c8046e00d5e82898c2f4231bb98da5`
 
 이 pin은 실행 이미지의 Provider shell을 정확히 식별하지만 sealed knowledge generation이나
 Evidence V3 정책 승인을 대신하지 않는다. Data build context의 requirement-policy와

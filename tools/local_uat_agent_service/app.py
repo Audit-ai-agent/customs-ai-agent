@@ -146,7 +146,8 @@ _ASSERTION_FIXTURE_MODE = "LOOPBACK_TEST_ONLY_HUMAN_APPROVER"
 _UAT_APPROVER_AUTHORITY_ID = (
     "backend:principal-sha256:6cc4551495f1ec8da505fdeaa4f34c17eeb8c234bcaeb6ca184f92a0cdd6318d"
 )
-_THREE_LAW_EVIDENCE_HTTP_TIMEOUT_SECONDS = 195.0
+_THREE_LAW_DIAGNOSTIC_HTTP_TIMEOUT_SECONDS = 195.0
+_THREE_LAW_SCENARIO_EVAL_HTTP_TIMEOUT_SECONDS = 255.0
 _SERVICE_ENV_KEYS = frozenset(
     {
         "CUSTOMS_AGENT_SERVICE_BEARER_TOKEN",
@@ -325,9 +326,11 @@ def _evidence_timeout_seconds(mode: EvidenceMode) -> float:
     # before and after retrieval under its own 180-second service deadline.
     # Its HTTP consumer must have a strictly larger budget so a valid terminal
     # response is not discarded at the same deadline boundary.
-    return (
-        _THREE_LAW_EVIDENCE_HTTP_TIMEOUT_SECONDS if mode in _ACTUAL_STORE_EVIDENCE_MODES else 30.0
-    )
+    if mode == "preserved-3law-v3-scenario-eval":
+        return _THREE_LAW_SCENARIO_EVAL_HTTP_TIMEOUT_SECONDS
+    if mode == "preserved-3law-v3-diagnostic":
+        return _THREE_LAW_DIAGNOSTIC_HTTP_TIMEOUT_SECONDS
+    return 30.0
 
 
 def _readiness_policy(mode: EvidenceMode) -> tuple[float, float]:
