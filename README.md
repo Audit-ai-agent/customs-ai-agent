@@ -194,10 +194,22 @@ Python 3.11과 `uv` lockfile을 기준으로 한다.
 ```powershell
 uv sync --locked --group dev
 uv run --locked ruff check .
+uv run --locked ruff format --check src tests evals tools
 uv run --locked mypy
-uv run --locked pytest -q
-# 개발용 build만 생성한다. 배포 산출물은 아래 exact-commit builder를 사용한다.
-uv build --wheel
+uv run --locked python tools/verify_service_openapi.py
+uv run --locked pytest -q `
+  tests/service/test_openapi.py `
+  tests/test_packaged_contracts.py `
+  tests/test_evidence_contract_lock.py `
+  tests/test_evidence_runtime_release_v2.py `
+  tests/test_evidence_v3_consumer.py `
+  tests/test_v1_wire_compatibility.py
+```
+
+전체 회귀와 배포 인증은 Release 판정 때만 실행한다. 배포 산출물은 exact-commit
+builder를 사용한다.
+
+```powershell
 $BuildSha = git rev-parse HEAD
 uv run --locked python -m tools.build_release_distributions `
   --expected-git-sha $BuildSha --output-root dist --replace

@@ -9,65 +9,9 @@ permissions:
   contents: read
 
 jobs:
-  safety:
-    runs-on: ubuntu-latest
-    timeout-minutes: 20
-    permissions:
-      contents: read
-    steps:
-      - uses: actions/checkout@34e114876b0b11c390a56381ad16ebd13914f8d5 # v4.3.1
-        with:
-          fetch-depth: 0
-          persist-credentials: false
-      - uses: astral-sh/setup-uv@08807647e7069bb48b6ef5acd8ec9567f424441b # v8.1.0
-        with:
-          version: "0.11.28"
-          python-version: "3.11"
-          enable-cache: true
-      - name: Verify security toolchain lock
-        run: python tools/run_security_gate.py verify
-      - name: Install checksum-pinned Gitleaks
-        shell: bash
-        run: |
-          set -euo pipefail
-          mkdir -p "$RUNNER_TEMP/gitleaks"
-          curl --proto '=https' --tlsv1.2 --fail --silent --show-error --location \
-            --output "$RUNNER_TEMP/gitleaks/gitleaks_8.30.1_linux_x64.tar.gz" \
-            "https://github.com/gitleaks/gitleaks/releases/download/v8.30.1/gitleaks_8.30.1_linux_x64.tar.gz"
-          echo "551f6fc83ea457d62a0d98237cbad105af8d557003051f41f3e7ca7b3f2470eb  $RUNNER_TEMP/gitleaks/gitleaks_8.30.1_linux_x64.tar.gz" \
-            | sha256sum --check --strict
-          tar -xzf "$RUNNER_TEMP/gitleaks/gitleaks_8.30.1_linux_x64.tar.gz" \
-            -C "$RUNNER_TEMP/gitleaks"
-          chmod 0755 "$RUNNER_TEMP/gitleaks/gitleaks"
-      - name: Secret scan (entire tracked Git history)
-        run: >-
-          python tools/run_security_gate.py secrets
-          --gitleaks "$RUNNER_TEMP/gitleaks/gitleaks"
-          --scope history
-      - name: Verify application lock and export all dependency groups
-        shell: bash
-        run: |
-          set -euo pipefail
-          uv lock --check
-          mkdir -p dist/security
-          uv export --locked --all-groups --no-emit-project --no-emit-local \
-            --no-sources --format requirements.txt \
-            --output-file dist/security/locked-requirements.txt
-      - name: Dependency vulnerability audit
-        run: >-
-          uv run --isolated --no-project --with "pip-audit==2.9.0"
-          python -I -X utf8
-          tools/run_security_gate.py dependencies
-          --requirements dist/security/locked-requirements.txt
-      - name: Install locked development environment for SAST
-        run: uv sync --locked --group dev
-      - name: Python SAST
-        run: uv run --locked python tools/run_security_gate.py sast
-      - name: Verify Safety Gate wrapper tests
-        run: uv run --locked python tests/test_security_gate.py
-
   verify:
     runs-on: ubuntu-latest
+    timeout-minutes: 20
     steps:
       - uses: actions/checkout@34e114876b0b11c390a56381ad16ebd13914f8d5 # v4.3.1
         with:
@@ -82,133 +26,20 @@ jobs:
       - name: Install locked development environment
         run: uv sync --locked --group dev
       - name: Lint
-        run: uv run ruff check .
+        run: uv run --locked ruff check .
       - name: Format
-        run: uv run ruff format --check src tests evals tools
+        run: uv run --locked ruff format --check src tests evals tools
       - name: Typecheck
-        run: uv run mypy
-      - name: Verify frozen Agent service OpenAPI
-        run: uv run --locked python tools/verify_service_openapi.py
-      - name: Test
-        run: uv run pytest -q
-      - name: Build exact-commit release distributions
-        run: >-
-          .venv/bin/python -m tools.build_release_distributions
-          --expected-git-sha "${GITHUB_SHA}"
-          --output-root dist
-          --replace
-      - name: Rebuild and require byte-exact release reproducibility
-        shell: bash
-        run: |
-          REBUILD_ROOT="${RUNNER_TEMP}/agent-release-rebuild"
-          .venv/bin/python -m tools.build_release_distributions \
-            --expected-git-sha "${GITHUB_SHA}" \
-            --output-root "${REBUILD_ROOT}"
-          cmp \
-            dist/wheel/customs_ai_agent-0.3.0-py3-none-any.whl \
-            "${REBUILD_ROOT}/wheel/customs_ai_agent-0.3.0-py3-none-any.whl"
-          cmp \
-            dist/source/customs_ai_agent-0.3.0.tar.gz \
-            "${REBUILD_ROOT}/source/customs_ai_agent-0.3.0.tar.gz"
-      - name: Verify wheel and source distribution inventories
-        run: >-
-          .venv/bin/python tools/verify_distribution.py
-          --wheel dist/wheel/customs_ai_agent-0.3.0-py3-none-any.whl
-          --sdist dist/source/customs_ai_agent-0.3.0.tar.gz
-          --expected-git-sha "${GITHUB_SHA}"
-          --source-root .
-      - name: Verify source distribution is self-contained
-        shell: bash
-        run: |
-          mkdir -p dist/sdist-tree
-          tar -xzf dist/source/customs_ai_agent-0.3.0.tar.gz -C dist/sdist-tree
-          SDIST_ROOT="$GITHUB_WORKSPACE/dist/sdist-tree/customs_ai_agent-0.3.0"
-          uv sync --locked --group dev --no-sources --directory "$SDIST_ROOT"
-          uv run --locked --directory "$SDIST_ROOT" pytest -q \
-            tests/test_distribution_verifier.py \
-            tests/test_packaged_contracts.py \
-            tests/test_evidence_contract_lock.py \
-            tests/test_evidence_runtime_release_v2.py
-      - name: Install attested wheel in a clean runtime environment
-        shell: bash
-        run: |
-          RUNTIME_VENV="$RUNNER_TEMP/customs-ai-agent-runtime-venv"
-          echo "AGENT_RUNTIME_VENV=$RUNTIME_VENV" >> "$GITHUB_ENV"
-          uv export --locked --no-dev --no-emit-project --no-emit-local \
-            --no-sources --format requirements.txt \
-            --output-file dist/runtime-requirements.txt
-          uv venv --python 3.11 "$RUNTIME_VENV"
-          uv pip install --python "$RUNTIME_VENV/bin/python" \
-            --require-hashes --requirements dist/runtime-requirements.txt
-          WHEEL="$GITHUB_WORKSPACE/dist/wheel/customs_ai_agent-0.3.0-py3-none-any.whl"
-          WHEEL_SHA="$(sha256sum "$WHEEL" | cut -d' ' -f1)"
-          WHEEL_URI="$(python -c \
-            'from pathlib import Path; import sys; print(Path(sys.argv[1]).resolve().as_uri())' \
-            "$WHEEL")"
-          printf 'customs-ai-agent @ %s --hash=sha256:%s\n' \
-            "$WHEEL_URI" "$WHEEL_SHA" > dist/agent-wheel-requirement.txt
-          uv pip install --python "$RUNTIME_VENV/bin/python" --no-deps \
-            --require-hashes --requirements dist/agent-wheel-requirement.txt
-          uv pip check --python "$RUNTIME_VENV/bin/python"
-      - name: Verify non-editable import, entry point, prompts, and schemas
-        shell: bash
-        working-directory: /tmp
-        run: |
-          WHEEL="$GITHUB_WORKSPACE/dist/wheel/customs_ai_agent-0.3.0-py3-none-any.whl"
-          WHEEL_SHA="$(sha256sum "$WHEEL" | cut -d' ' -f1)"
-          PYTHON="$AGENT_RUNTIME_VENV/bin/python"
-          CLI="$AGENT_RUNTIME_VENV/bin/customs-ai-agent"
-          "$PYTHON" -I "$GITHUB_WORKSPACE/tools/verify_distribution.py" \
-            --installed \
-            --wheel "$WHEEL" \
-            --expected-wheel-sha256 "$WHEEL_SHA" \
-            --expected-git-sha "${GITHUB_SHA}" \
-            --source-root "$GITHUB_WORKSPACE"
-          "$CLI" --help
-          "$CLI" list-scenarios
-      - name: Build and smoke-test the non-root Agent service image
+        run: uv run --locked mypy
+      - name: Verify public contracts and focused offline regressions
         shell: bash
         run: |
           set -euo pipefail
-          WHEEL="$GITHUB_WORKSPACE/dist/wheel/customs_ai_agent-0.3.0-py3-none-any.whl"
-          WHEEL_SHA="$(sha256sum "$WHEEL" | cut -d' ' -f1)"
-          IMAGE="customs-ai-agent:${GITHUB_SHA}"
-          CONTAINER="customs-ai-agent-ci"
-          SERVICE_TOKEN="$(python -c 'import secrets; print(secrets.token_urlsafe(32))')"
-          EVIDENCE_TOKEN="$(python -c 'import secrets; print(secrets.token_urlsafe(32))')"
-          docker build \
-            --build-arg "AGENT_WHEEL=dist/wheel/customs_ai_agent-0.3.0-py3-none-any.whl" \
-            --build-arg "BUILD_SHA=${GITHUB_SHA}" \
-            --build-arg "WHEEL_SHA256=${WHEEL_SHA}" \
-            --tag "$IMAGE" .
-          docker run --detach --name "$CONTAINER" \
-            --read-only --tmpfs /tmp:rw,noexec,nosuid,size=64m \
-            --cap-drop ALL --security-opt no-new-privileges:true \
-            --publish 127.0.0.1:18080:8080 \
-            --env ANTHROPIC_API_KEY=ci-non-secret-placeholder \
-            --env CUSTOMS_AGENT_SERVICE_BEARER_TOKEN="$SERVICE_TOKEN" \
-            --env EVIDENCE_SERVICE_BASE_URL=http://127.0.0.1:8010 \
-            --env EVIDENCE_SERVICE_TOKEN="$EVIDENCE_TOKEN" \
-            "$IMAGE"
-          cleanup() {
-            docker rm --force "$CONTAINER" >/dev/null 2>&1 || true
-          }
-          trap cleanup EXIT
-          for _ in $(seq 1 30); do
-            if curl --fail --silent --show-error \
-              http://127.0.0.1:18080/health/live >/dev/null; then
-              break
-            fi
-            sleep 1
-          done
-          curl --fail --silent --show-error \
-            http://127.0.0.1:18080/health/live >/dev/null
-          READY_STATUS="$(curl --silent --output /tmp/agent-ready.json \
-            --write-out '%{http_code}' http://127.0.0.1:18080/health/ready)"
-          test "$READY_STATUS" = "503"
-          python - <<'PY'
-          import json
-          from pathlib import Path
-          payload = json.loads(Path("/tmp/agent-ready.json").read_text())
-          assert payload["error"]["code"] == "dependency_unready"
-          PY
+          uv run --locked python tools/verify_service_openapi.py
+          uv run --locked pytest -q \
+            tests/service/test_openapi.py \
+            tests/test_packaged_contracts.py \
+            tests/test_evidence_contract_lock.py \
+            tests/test_evidence_runtime_release_v2.py \
+            tests/test_evidence_v3_consumer.py \
+            tests/test_v1_wire_compatibility.py

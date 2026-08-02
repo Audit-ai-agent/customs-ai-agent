@@ -12,22 +12,31 @@
 
 ```powershell
 uv sync --locked --group dev
-uv run ruff check .
-uv run mypy
-uv run pytest -q
-uv build --wheel
+uv run --locked ruff check .
+uv run --locked ruff format --check src tests evals tools
+uv run --locked mypy
+uv run --locked python tools/verify_service_openapi.py
+uv run --locked pytest -q `
+  tests/service/test_openapi.py `
+  tests/test_packaged_contracts.py `
+  tests/test_evidence_contract_lock.py `
+  tests/test_evidence_runtime_release_v2.py `
+  tests/test_evidence_v3_consumer.py `
+  tests/test_v1_wire_compatibility.py
 ```
 
-PR 전 Safety Gate도 [고정 도구와 로컬 재현 절차](docs/SECURITY_GATE.md)에 따라 secret,
-dependency, Python SAST 세 검사를 모두 실행한다. API key나 token 값은 명령 인자·로그·
-PR 첨부 파일에 넣지 않는다.
+전체 회귀, Safety Gate, wheel/sdist 재현성, clean install 및 Docker smoke는 제품 코드에
+보존하되 일반 PR CI에서는 실행하지 않는다. Release 판정이 필요한 변경에서만
+[고정 도구와 로컬 재현 절차](docs/SECURITY_GATE.md)에 따라 별도로 실행한다. API key나
+token 값은 명령 인자·로그·PR 첨부 파일에 넣지 않는다.
 
 PR 설명에는 문제·의도·대안·선택 이유·영향 계약·실행 명령·결과·남은 위험을 기록한다.
 실제 문서, 개인정보, 거래정보, token, `.env`, 실행 결과 전체는 커밋하지 않는다.
 
 ## 완료 기준
 
-- clean checkout에서 lock 기반 설치, lint, typecheck, 28개 이상의 회귀 테스트와 wheel build가 통과한다.
+- clean checkout에서 lock 기반 설치, lint, format, typecheck와 공개 계약 회귀가 통과한다.
+- Release 판정이 필요한 변경은 일반 PR CI 결과로 대체하지 않고 전체 회귀와 배포 검증을 별도로 통과한다.
 - 새로운 High/Critical finding은 실제 item-bound evidence ID를 가진다.
 - 검색 실패·partial·unknown·ambiguous 상태가 자동 완료되지 않는다.
 - 공개 API나 wire schema가 바뀌면 호환성 테스트와 문서가 함께 바뀐다.

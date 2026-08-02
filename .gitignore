@@ -8,6 +8,9 @@ __pycache__/
 .coverage
 coverage.xml
 htmlcov/
+*.junit.xml
+ci-evidence/
+.task*-test-evidence/
 
 # Environments and build products
 .venv/
@@ -17,6 +20,7 @@ dist/
 customs_ai_agent-[0-9]*/
 *.whl
 security/.gitleaks-report-*.json
+src/customs_ai_agent/build-manifest.json
 
 # Runtime output and local configuration
 outputs/

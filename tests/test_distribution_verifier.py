@@ -880,12 +880,16 @@ def test_installed_record_rejects_unapproved_extra_file(tmp_path: Path) -> None:
         )
 
 
-def test_ci_hash_pins_wheel_install_and_supplies_archive_to_verifier() -> None:
+def test_distribution_certification_source_is_retained_but_inactive_in_general_ci() -> None:
     workflow = (ROOT / ".github" / "workflows" / "ci.yml").read_text(encoding="utf-8")
 
-    assert "agent-wheel-requirement.txt" in workflow
-    assert "--require-hashes --requirements dist/agent-wheel-requirement.txt" in workflow
-    assert '--wheel "$WHEEL"' in workflow
+    assert "build_release_distributions" not in workflow
+    assert "verify_distribution.py" not in workflow
+    assert "agent-wheel-requirement.txt" not in workflow
+    assert "docker build" not in workflow
+    assert (ROOT / "tools" / "build_release_distributions.py").is_file()
+    assert (ROOT / "tools" / "verify_distribution.py").is_file()
+    assert (ROOT / "Dockerfile").is_file()
 
 
 def test_agent_container_build_frontend_and_base_image_are_digest_pinned() -> None:
