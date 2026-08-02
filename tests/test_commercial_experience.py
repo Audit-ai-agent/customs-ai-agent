@@ -39,6 +39,7 @@ from customs_ai_agent.meaning_catalog import (
     user_action_text,
 )
 from customs_ai_agent.adapters.llm import (
+    LLMOutputValidationError,
     ModelCallMetadata,
     StructuredAgenticResult,
     anthropic_output_schema_sha256,
@@ -50,6 +51,7 @@ from customs_ai_agent.schemas.experience import (
     ConversationTurnV2,
     GroundedPresentationV1,
     ReviewExperienceEnvelopeV1,
+    ReviewRevisionExperienceResultV1,
     ReviewStageEventV1,
     assistant_answer_verified_content_sha256,
     case_conversation_request_sha256,
@@ -102,6 +104,7 @@ CONTRACT_MODELS = {
     "assistant-answer-v2.schema.json": AssistantAnswerV2,
     "case-conversation-request-v2.schema.json": CaseConversationRequestV2,
     "review-experience-envelope-v1.schema.json": ReviewExperienceEnvelopeV1,
+    "review-revision-experience-result-v1.schema.json": ReviewRevisionExperienceResultV1,
     "review-stage-event-v1.schema.json": ReviewStageEventV1,
 }
 BASELINE_REVIEW_RESULT_V3_FILE_SHA256 = (
@@ -310,6 +313,42 @@ def test_deterministic_presentation_has_all_sections_and_is_fact_bound() -> None
     )
     assert envelope.envelope_sha256 == canonical_json_sha256(
         envelope.model_dump(mode="json", exclude={"envelope_sha256"}, warnings=False)
+    )
+
+
+def test_revision_experience_runtime_wraps_child_with_same_pipeline(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    from customs_ai_agent.runtime import AgentRuntime
+
+    child_result = _v3_result()[2]
+    capability = _capability()
+    runtime = object.__new__(AgentRuntime)
+    runtime._closed = False
+    runtime._secret_markers = ()
+    runtime._analyzer = None
+    monkeypatch.setattr(
+        AgentRuntime,
+        "assert_uat_capability_current",
+        lambda _self, **_kwargs: capability,
+    )
+    monkeypatch.setattr(
+        AgentRuntime,
+        "revision_v3_json",
+        lambda _self, _payload: SimpleNamespace(
+            parent_result_sha256="b" * 64,
+            applied_decision_ids=["decision-approved-1"],
+            child_result=child_result,
+        ),
+    )
+
+    revision = runtime.revision_experience_v3_json(b"{}")
+
+    assert revision.parent_result_sha256 == "b" * 64
+    assert revision.applied_decision_ids == ["decision-approved-1"]
+    assert revision.experience_envelope.canonical_result.result_sha256 == child_result.result_sha256
+    assert revision.experience_envelope.user_presentation.generation_audit.mode == (
+        "deterministic_fallback"
     )
 
 
@@ -974,19 +1013,12 @@ def test_presentation_lexical_gate_defers_atom_free_contradiction_to_entailment_
     first = options[0]
     call = StructuredAgenticResult(
         value={
-            "statements": [
-                {
-                    "section_code": option["section_code"],
-                    "role": option["role"],
-                    "text": (
-                        "담당자 판단을 기다리지 않아도 바로 후속 절차를 진행할 수 있습니다."
-                        if option is first
-                        else " ".join(
-                            claim["canonical_text"] for claim in option["canonical_claims"]
-                        )
-                    ),
-                    "source_claim_ids": option["source_claim_ids"],
-                }
+            "prose_by_claim_group": [
+                (
+                    "담당자 판단을 기다리지 않아도 바로 후속 절차를 진행할 수 있습니다."
+                    if option is first
+                    else " ".join(claim["canonical_text"] for claim in option["canonical_claims"])
+                )
                 for option in options
             ]
         },
@@ -1050,17 +1082,7 @@ def test_presentation_accepts_natural_non_byte_equivalent_grounded_paraphrase() 
         for option in options
     ]
     call = StructuredAgenticResult(
-        value={
-            "statements": [
-                {
-                    "section_code": option["section_code"],
-                    "role": option["role"],
-                    "text": text,
-                    "source_claim_ids": option["source_claim_ids"],
-                }
-                for option, text in zip(options, texts, strict=True)
-            ]
-        },
+        value={"prose_by_claim_group": texts},
         model_id=result.runtime_release.model_id,
         prompt_sha256="1" * 64,
         output_schema_sha256="2" * 64,
@@ -1086,6 +1108,57 @@ def test_presentation_accepts_natural_non_byte_equivalent_grounded_paraphrase() 
         for section in sections
         for statement in section.statements
     )
+    options_by_claims = {tuple(option["source_claim_ids"]): option for option in options}
+    claim_index = {claim.claim_id: claim for claim in claims}
+    for section in sections:
+        for statement in section.statements:
+            option = options_by_claims[tuple(statement.source_claim_ids)]
+            assert section.section_code == option["section_code"]
+            assert statement.role == option["role"]
+            assert statement.citation_references == list(
+                {
+                    (citation.kind, citation.reference_id): citation
+                    for claim_id in statement.source_claim_ids
+                    for citation in claim_index[claim_id].citation_references
+                }.values()
+            )
+
+
+def test_presentation_failure_diagnostics_name_fixed_group_without_model_text() -> None:
+    result = _v3_result()[2]
+    claims = build_canonical_claim_catalog(result)
+    options = _presentation_statement_options(claims)
+    prose = [
+        "확인된 내용을 이해하기 쉽게 설명하면, "
+        + " ".join(claim["canonical_text"] for claim in option["canonical_claims"])
+        for option in options
+    ]
+    prose[0] = f"{prose[0][:-1]} 확인되지 않은 금액은 9999원입니다."
+    call = StructuredAgenticResult(
+        value={"prose_by_claim_group": prose},
+        model_id=result.runtime_release.model_id,
+        prompt_sha256="1" * 64,
+        output_schema_sha256="2" * 64,
+        semantic_output_schema_sha256="3" * 64,
+        request_id="request-presentation-diagnostic",
+        message_id="message-presentation-diagnostic",
+        input_tokens=10,
+        output_tokens=5,
+        latency_ms=1,
+    )
+
+    _sections, blockers = _candidate_presentation(
+        result,
+        claims,
+        call,
+        attempt_count=1,
+    )
+
+    assert "presentation_unsupported_factual_atom" in blockers
+    assert any(
+        code.startswith("presentation_group_00_conclusion_unsupported_") for code in blockers
+    )
+    assert "9999" not in json.dumps(blockers)
 
 
 class _GroundedPresentationAnalyzer:
@@ -1102,18 +1175,11 @@ class _GroundedPresentationAnalyzer:
             self.report_calls += 1
             groups = kwargs["untrusted_context"]["required_claim_groups"]
             value = {
-                "statements": [
-                    {
-                        "section_code": group["section_code"],
-                        "role": group["role"],
-                        "text": (
-                            "담당자가 결과를 이해하기 쉽도록 확인 내용을 설명하면, "
-                            + " ".join(
-                                claim["canonical_text"] for claim in group["canonical_claims"]
-                            )
-                        ),
-                        "source_claim_ids": group["source_claim_ids"],
-                    }
+                "prose_by_claim_group": [
+                    (
+                        "담당자가 결과를 이해하기 쉽도록 확인 내용을 설명하면, "
+                        + " ".join(claim["canonical_text"] for claim in group["canonical_claims"])
+                    )
                     for group in groups
                 ]
             }
@@ -1469,28 +1535,16 @@ class _VerifiedChatAnalyzer:
                 "guidance_topics": [],
             }
         elif task_id == "customs_case_answer_v2":
-            claim = next(
-                item
-                for item in kwargs["untrusted_context"]["allowed_claims"]
-                if item["section_code"] == "conclusion"
-            )
+            assignments = kwargs["untrusted_context"]["fixed_claim_assignments"]
+            claim = assignments["direct_answer"][0]
             value = {
                 "direct_answer": claim["canonical_text"],
-                "explanation": [],
-                "evidence_meaning": [],
-                "impact": [],
-                "next_steps": [],
-                "limitations": ["답변은 현재 심사 회차와 연결된 문서·법령 근거 범위에 한정됩니다."],
-                "claim_selections": {
-                    "direct_answer": [claim["claim_id"]],
-                    "explanation": [],
-                    "evidence_meaning": [],
-                    "impact": [],
-                    "next_steps": [],
-                },
-                "citation_references": claim["citation_references"],
-                "suggested_questions": [],
-                "used_context_message_ids": [],
+                "explanation": [item["canonical_text"] for item in assignments["explanation"]],
+                "evidence_meaning": [
+                    item["canonical_text"] for item in assignments["evidence_meaning"]
+                ],
+                "impact": [item["canonical_text"] for item in assignments["impact"]],
+                "next_steps": [item["canonical_text"] for item in assignments["next_steps"]],
             }
         elif task_id == "customs_case_answer_verifier":
             value = {"supported": True, "reason_codes": []}
@@ -1535,33 +1589,35 @@ class _NaturalChatAnalyzer:
             }
         elif task_id == "customs_case_answer_v2":
             self.answer_calls += 1
-            claim = next(
-                item
-                for item in kwargs["untrusted_context"]["allowed_claims"]
-                if item["section_code"] == "conclusion"
+            context = kwargs["untrusted_context"]
+            assignments = context["fixed_claim_assignments"]
+            claim = assignments["direct_answer"][0]
+            prefix = (
+                "질문하신 결론을 먼저 쉽게 설명하면, "
+                if context["answer_intent"] == "summary"
+                else "질문하신 항목에 바로 답하면, "
             )
-            direct = "질문하신 결론을 먼저 쉽게 설명하면, " + claim["canonical_text"]
+            direct = prefix + claim["canonical_text"]
             if self.forge_number:
                 direct = f"{direct[:-1]} 다만 확인되지 않은 금액은9999원입니다."
             value = {
                 "direct_answer": direct,
-                "explanation": [],
-                "evidence_meaning": [],
-                "impact": [],
-                "next_steps": [],
-                "limitations": [
-                    "이 설명은 현재 심사 회차에 연결된 문서와 법령 근거 안에서만 유효합니다."
+                "explanation": [
+                    "확인된 내용을 쉽게 풀어 설명하면, " + item["canonical_text"]
+                    for item in assignments["explanation"]
                 ],
-                "claim_selections": {
-                    "direct_answer": [claim["claim_id"]],
-                    "explanation": [],
-                    "evidence_meaning": [],
-                    "impact": [],
-                    "next_steps": [],
-                },
-                "citation_references": claim["citation_references"],
-                "suggested_questions": [],
-                "used_context_message_ids": [],
+                "evidence_meaning": [
+                    "근거의 의미를 쉽게 풀어 설명하면, " + item["canonical_text"]
+                    for item in assignments["evidence_meaning"]
+                ],
+                "impact": [
+                    "업무상 의미를 쉽게 풀어 설명하면, " + item["canonical_text"]
+                    for item in assignments["impact"]
+                ],
+                "next_steps": [
+                    "후속 조치를 쉽게 풀어 설명하면, " + item["canonical_text"]
+                    for item in assignments["next_steps"]
+                ],
             }
         elif task_id == "customs_case_answer_verifier":
             self.verifier_calls += 1
@@ -1583,6 +1639,60 @@ class _NaturalChatAnalyzer:
             output_tokens=5,
             latency_ms=1,
         )
+
+
+class _FailingAnswerAnalyzer:
+    def __init__(self, model_id: str) -> None:
+        self.model_id = model_id
+        self.answer_calls = 0
+
+    def run_bounded_agentic_task(self, *_args, **kwargs) -> StructuredAgenticResult:
+        task_id = kwargs["task_id"]
+        if task_id == "customs_case_answer_v2":
+            self.answer_calls += 1
+            raise LLMOutputValidationError(
+                "agentic_output_invalid",
+                "RAW MODEL TEXT 9999 MUST NEVER REACH THE RESPONSE",
+            )
+        if task_id != "customs_case_scope_classifier":  # pragma: no cover
+            raise AssertionError(f"unexpected task: {task_id}")
+        schema = kwargs["output_schema"]
+        return StructuredAgenticResult(
+            value={
+                "answer_scope": "case_grounded",
+                "reason_code": "semantic_intent_classified",
+                "guidance_topics": [],
+            },
+            model_id=self.model_id,
+            prompt_sha256=hashlib.sha256(kwargs["system_prompt"].encode("utf-8")).hexdigest(),
+            output_schema_sha256=anthropic_output_schema_sha256(schema),
+            semantic_output_schema_sha256=canonical_json_sha256(schema),
+            request_id="request-failing-answer-scope",
+            message_id="message-failing-answer-scope",
+            input_tokens=10,
+            output_tokens=5,
+            latency_ms=1,
+        )
+
+
+def _follow_up_turns() -> list[ConversationTurnV2]:
+    created_at = datetime(2026, 7, 14, tzinfo=timezone.utc)
+    return [
+        ConversationTurnV2(
+            message_id="turn-user-1",
+            role="user",
+            content="이 결과가 나온 이유를 설명해 주십시오.",
+            created_at=created_at,
+        ),
+        ConversationTurnV2(
+            message_id="turn-assistant-1",
+            parent_message_id="turn-user-1",
+            role="assistant",
+            content="확인된 원인을 설명했습니다.",
+            created_at=created_at,
+            answer_sha256="a" * 64,
+        ),
+    ]
 
 
 def test_chat_uses_natural_non_byte_equivalent_prose_after_atom_and_entailment_checks() -> None:
@@ -1630,6 +1740,59 @@ def test_chat_regenerates_once_then_falls_back_when_entailment_verifier_rejects(
     assert answer.generation_audit.attempt_count == 2
     assert answer.verification_audit.status == "fallback"
     assert "answer_entailment_failed" in answer.verification_audit.reason_codes
+
+
+def test_priority_follow_up_uses_same_action_claim_for_claude_and_safe_fallback() -> None:
+    request = _conversation(
+        "방금 설명한 이유 중에서 담당자가 가장 먼저 확인할 항목은 무엇입니까?",
+        turns=_follow_up_turns(),
+    )
+    fluent_analyzer = _NaturalChatAnalyzer(request.review_result.runtime_release.model_id)
+    fallback_analyzer = _FailingAnswerAnalyzer(request.review_result.runtime_release.model_id)
+
+    fluent = answer_case_conversation(request, analyzer=fluent_analyzer)  # type: ignore[arg-type]
+    fallback = answer_case_conversation(request, analyzer=fallback_analyzer)  # type: ignore[arg-type]
+
+    fluent_claim = answer_claim_bindings(fluent, request.review_result)["direct_answer"][0]
+    fallback_claim = answer_claim_bindings(fallback, request.review_result)["direct_answer"][0]
+    assert fluent.generation_audit.mode == "claude"
+    assert fallback.generation_audit.mode == "deterministic_fallback"
+    assert fluent_claim.claim_id == fallback_claim.claim_id
+    assert fluent_claim.role == fallback_claim.role == "action"
+    assert fallback.direct_answer == fallback_claim.canonical_text
+    assert fallback.next_steps == []
+    assert (
+        fluent.used_context_message_ids
+        == fallback.used_context_message_ids
+        == [
+            "turn-user-1",
+            "turn-assistant-1",
+        ]
+    )
+    assert fallback_analyzer.answer_calls == 2
+    assert "claude_answer_composer_failed_agentic_output_invalid" in (
+        fallback.verification_audit.reason_codes
+    )
+    assert "RAW MODEL TEXT" not in json.dumps(fallback.model_dump(mode="json"))
+
+
+def test_ambiguous_follow_up_is_reclassified_to_clarification() -> None:
+    request = _conversation("방금 말한 그것은요?", turns=_follow_up_turns())
+    analyzer = _FailingAnswerAnalyzer(request.review_result.runtime_release.model_id)
+
+    answer = answer_case_conversation(request, analyzer=analyzer)  # type: ignore[arg-type]
+
+    assert answer.answer_scope == "clarification_needed"
+    assert answer.status == "clarification_needed"
+    assert answer.claim_selections.direct_answer == []
+    assert answer.citations == []
+    assert answer.used_context_message_ids == ["turn-user-1", "turn-assistant-1"]
+    assert answer.generation_audit.scope_classification is not None
+    assert (
+        answer.generation_audit.scope_classification.reason_code
+        == "answer_intent_ambiguous_reclassified"
+    )
+    assert analyzer.answer_calls == 0
 
 
 def test_chat_live_evaluator_independently_verifies_request_and_verifier_context() -> None:

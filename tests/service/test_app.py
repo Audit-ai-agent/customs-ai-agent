@@ -178,12 +178,12 @@ def test_metadata_and_metrics_are_authenticated_and_safe(
         "contract": "evidence-runtime-release-provider-lock",
         "schema_version": "1.0",
         "provider_release": "evidence-api-v1.2.0",
-        "provider_revision": "14cde864425eee615a2e3f6799f6f2719448aab9",
+        "provider_revision": "aae07d01508dbe8eb299663f3cc1d9ee24f9d29d",
         "provider_build_sha256": (
-            "d7d64cf3df464cfc934ca0f347c1b1c461916fe12671eeeaf59c1445872486d3"
+            "83f410ffc47854b2648c81a06ed4d9ec3b15f3bda940175c556cc7c8dea41018"
         ),
         "provider_source_manifest_sha256": (
-            "dd8ceb68c2da83d1fdb82f3d00f4f1137a559fcb577efdf86b6f87e52d84db1c"
+            "224b794fe4312514f461d6ee269211e0ab0f152cdaa670079db5f82d6d42a2b1"
         ),
         "retrieval_schema_sha256": (
             "531b59ba4e86f78cef20a4fca052996efd8b88c48853ac12113ca76e69cdd69a"
@@ -195,7 +195,7 @@ def test_metadata_and_metrics_are_authenticated_and_safe(
     assert metadata_v2_payload["evidence_runtime_release"] == {"release_state": "unreleased"}
     assert metadata_v2_payload["evidence_runtime_release_v3"] == {"release_state": "unreleased"}
     assert metadata_v2_payload["schemas"]["service_openapi_sha256"] == (
-        "2d551ab78b0f79cdc11bb7ac0cffb5c86a4065d4490435b83c7d0d855018b45b"
+        "c7b4f174e80e1594c092bc9e29d23fed87ca254e5968177eccca6d0219625859"
     )
 
     metrics = client.get("/internal/agent/v1/metrics", headers=auth_headers)

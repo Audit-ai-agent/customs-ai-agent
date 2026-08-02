@@ -79,13 +79,13 @@ caller-visible finite daemon isolation과 최대 32개 transport slot 뒤에서 
 evaluation report가 아직 없으므로 generation/evaluation hash를 임의 생성하거나 기존 3/58
 snapshot을 released로 표시하지 않는다.
 
-2026-07-22에 동기화한 provider build pin은 다음과 같다.
+2026-08-03에 동기화한 provider build pin은 다음과 같다.
 
-- Data revision: `14cde864425eee615a2e3f6799f6f2719448aab9`
+- Data revision: `aae07d01508dbe8eb299663f3cc1d9ee24f9d29d`
 - provider release: `evidence-api-v1.2.0`
-- provider build SHA-256: `d7d64cf3df464cfc934ca0f347c1b1c461916fe12671eeeaf59c1445872486d3`
-- provider source manifest SHA-256: `dd8ceb68c2da83d1fdb82f3d00f4f1137a559fcb577efdf86b6f87e52d84db1c`
-- canonical provider lock SHA-256: `d87f1b86af4812f3de7a2de070f23453c354c0be1534725950f154befffb557f`
+- provider build SHA-256: `83f410ffc47854b2648c81a06ed4d9ec3b15f3bda940175c556cc7c8dea41018`
+- provider source manifest SHA-256: `224b794fe4312514f461d6ee269211e0ab0f152cdaa670079db5f82d6d42a2b1`
+- canonical provider lock SHA-256: `7427a38d0efb4075952274a85ef32ee65959fd4a638911d5d2819c737f52b64f`
 
 이 pin은 실행 이미지의 Provider shell을 정확히 식별하지만 sealed knowledge generation이나
 Evidence V3 정책 승인을 대신하지 않는다. Data build context의 requirement-policy와

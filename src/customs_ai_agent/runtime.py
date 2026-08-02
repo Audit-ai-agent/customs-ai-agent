@@ -95,6 +95,7 @@ from customs_ai_agent.schemas.experience import (
     AssistantAnswerV2,
     CaseConversationRequestV2,
     ReviewExperienceEnvelopeV1,
+    ReviewRevisionExperienceResultV1,
 )
 from customs_ai_agent.experience import answer_case_conversation, build_review_experience
 
@@ -2186,6 +2187,31 @@ class AgentRuntime:
             parent_result_sha256=revision.parent_result_sha256,
             child_result=child,
             applied_decision_ids=[item.decision_id for item in revision.decisions],
+        )
+        _assert_public_result_safe(
+            result.model_dump(mode="python", warnings=False),
+            sensitive_markers=self._secret_markers,
+        )
+        return result
+
+    def revision_experience_v3_json(
+        self,
+        payload: bytes | bytearray | memoryview,
+    ) -> ReviewRevisionExperienceResultV1:
+        """Run an approved child revision and compose its verified presentation."""
+
+        self._assert_open()
+        capability = self.assert_uat_capability_current()
+        revision = self.revision_v3_json(payload)
+        envelope = build_review_experience(
+            revision.child_result,
+            analyzer=self._analyzer,
+            capability=capability,
+        )
+        result = ReviewRevisionExperienceResultV1(
+            parent_result_sha256=revision.parent_result_sha256,
+            applied_decision_ids=revision.applied_decision_ids,
+            experience_envelope=envelope,
         )
         _assert_public_result_safe(
             result.model_dump(mode="python", warnings=False),

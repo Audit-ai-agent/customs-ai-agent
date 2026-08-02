@@ -16,6 +16,7 @@ from customs_ai_agent.schemas.experience import (
     AssistantAnswerV2,
     CaseConversationRequestV2,
     ReviewExperienceEnvelopeV1,
+    ReviewRevisionExperienceResultV1,
     ReviewStageEventV1,
 )
 
@@ -28,6 +29,7 @@ MODELS: dict[str, type[BaseModel]] = {
     "assistant-answer-v2.schema.json": AssistantAnswerV2,
     "case-conversation-request-v2.schema.json": CaseConversationRequestV2,
     "review-experience-envelope-v1.schema.json": ReviewExperienceEnvelopeV1,
+    "review-revision-experience-result-v1.schema.json": ReviewRevisionExperienceResultV1,
     "review-stage-event-v1.schema.json": ReviewStageEventV1,
 }
 

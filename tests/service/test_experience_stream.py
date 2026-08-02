@@ -77,6 +77,22 @@ class ExpiredCapabilityRuntime(FakeRuntime):
         )
 
 
+class RevisionExperienceRuntime(FakeRuntime):
+    def revision_experience_v3_json(self, payload: bytes) -> FakeResult:
+        return self.review_json(payload)
+
+
+def _revision_payload(valid_payload: dict[str, Any], *, child_run_id: str) -> dict[str, Any]:
+    documents = valid_payload["documents"]
+    return {
+        "parent_request": {"documents": documents},
+        "revised_request": {
+            "documents": documents,
+            "review_run_id": child_run_id,
+        },
+    }
+
+
 def test_all_enhanced_endpoints_reject_expired_capability_before_external_calls(
     service_settings,
     valid_payload,
@@ -111,6 +127,10 @@ def test_all_enhanced_endpoints_reject_expired_capability_before_external_calls(
             "/internal/agent/v3/answers/stream",
             {"conversation_id": "conversation-expired-1"},
         ),
+        (
+            "/internal/agent/v3/revisions",
+            _revision_payload(valid_payload, child_run_id="run-expired-revision"),
+        ),
     )
     with TestClient(app, raise_server_exceptions=False) as client:
         for path, payload in requests:
@@ -118,9 +138,42 @@ def test_all_enhanced_endpoints_reject_expired_capability_before_external_calls(
             assert response.status_code == 503
             assert response.json()["error"]["code"] == ("uat_capability_invalid_or_expired")
 
-    assert runtime.capability_checks == 4
+    assert runtime.capability_checks == 5
     assert readiness_calls == 0
     assert runtime.calls == 0
+
+
+def test_revision_experience_endpoint_dispatches_once_and_replays(
+    service_settings,
+    valid_payload,
+    auth_headers,
+) -> None:
+    runtime = RevisionExperienceRuntime()
+    settings = settings_with(service_settings, enhanced_agent_experience=True)
+    app = create_app(
+        settings,
+        runtime_factory=lambda _settings: runtime,
+        readiness_probe_factory=lambda _settings: lambda: object(),
+    )
+    payload = _revision_payload(valid_payload, child_run_id="run-revision-experience-1")
+
+    with TestClient(app, raise_server_exceptions=False) as client:
+        first = client.post(
+            "/internal/agent/v3/revisions",
+            headers=auth_headers,
+            json=payload,
+        )
+        replay = client.post(
+            "/internal/agent/v3/revisions",
+            headers=auth_headers,
+            json=payload,
+        )
+
+    assert first.status_code == replay.status_code == 200
+    assert first.headers["X-Idempotent-Replay"] == "false"
+    assert replay.headers["X-Idempotent-Replay"] == "true"
+    assert first.json() == replay.json()
+    assert runtime.calls == 1
 
 
 def test_review_stream_forwards_only_runtime_observed_stages_and_replays_them(

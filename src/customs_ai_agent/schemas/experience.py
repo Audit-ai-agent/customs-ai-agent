@@ -400,6 +400,21 @@ class ReviewExperienceEnvelopeV1(V3WireModel):
         return self
 
 
+class ReviewRevisionExperienceResultV1(V3WireModel):
+    """Approved child review plus its independently verified user presentation."""
+
+    schema_version: Literal["1.0"] = "1.0"
+    parent_result_sha256: str = Field(pattern=r"^[a-f0-9]{64}$")
+    applied_decision_ids: list[str] = Field(min_length=1, max_length=100)
+    experience_envelope: ReviewExperienceEnvelopeV1
+
+    @model_validator(mode="after")
+    def _decision_ids_are_unique(self) -> "ReviewRevisionExperienceResultV1":
+        if len(self.applied_decision_ids) != len(set(self.applied_decision_ids)):
+            raise ValueError("revision experience decision IDs must be unique")
+        return self
+
+
 class ConversationTurnV2(V3WireModel):
     message_id: str = Field(
         min_length=1,
@@ -646,6 +661,7 @@ __all__ = [
     "PresentationSectionCode",
     "PresentationStatementRole",
     "ReviewExperienceEnvelopeV1",
+    "ReviewRevisionExperienceResultV1",
     "ReviewStageCode",
     "ReviewStageEventV1",
     "UserActionEventV1",

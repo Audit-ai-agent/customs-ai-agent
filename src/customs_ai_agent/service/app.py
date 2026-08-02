@@ -46,6 +46,7 @@ from customs_ai_agent.schemas.experience import (
     AssistantAnswerV2,
     CaseConversationRequestV2,
     ReviewExperienceEnvelopeV1,
+    ReviewRevisionExperienceResultV1,
     ReviewStageEventV1,
 )
 from customs_ai_agent.schemas.v3 import canonical_json_sha256
@@ -101,6 +102,7 @@ class _UnavailableRuntime:
 
     review_v3_json = review_json
     revision_v3_json = review_json
+    revision_experience_v3_json = review_json
     answer_v3_json = review_json
     review_experience_json = review_json
     answer_v2_json = review_json
@@ -268,6 +270,9 @@ def create_app(
     review_result_v3_schema = get_schema("backend", "v3", "review-result")
     revision_request_schema = ReviewRevisionRequestV1.model_json_schema(mode="validation")
     revision_result_schema = ReviewRevisionResultV1.model_json_schema(mode="validation")
+    revision_experience_result_schema = ReviewRevisionExperienceResultV1.model_json_schema(
+        mode="validation"
+    )
     grounded_question_schema = GroundedQuestionV1.model_json_schema(mode="validation")
     grounded_answer_schema = GroundedAnswerV1.model_json_schema(mode="validation")
     experience_envelope_schema = ReviewExperienceEnvelopeV1.model_json_schema(mode="validation")
@@ -340,6 +345,7 @@ def create_app(
     experience_metadata["capabilities"] = [
         *experience_metadata["capabilities"],
         "grounded_commercial_presentation",
+        "grounded_revision_presentation",
         "multiturn_case_assistant_v2",
         "safe_ndjson_stage_events",
         "loopback_uat_bounded_active_tools",
@@ -650,6 +656,53 @@ def create_app(
             review_run_id=f"revision:{inspection.replay_id}",
             request_hash=inspection.canonical_sha256,
             runtime_method_name="revision_v3_json",
+        )
+        if outcome.result is None:
+            raise ServiceHttpError(
+                outcome.error_code or "internal_error",
+                outcome.status_code,
+                retryable=outcome.retryable,
+            )
+        return JSONResponse(
+            status_code=200,
+            headers={
+                **_NO_STORE_HEADERS,
+                "X-Idempotent-Replay": "true" if replayed else "false",
+            },
+            content=outcome.result,
+        )
+
+    @app.post(
+        "/internal/agent/v3/revisions",
+        summary="Execute an approved child review with verified user presentation",
+        openapi_extra={
+            "security": _BEARER_SECURITY,
+            "requestBody": {
+                "required": True,
+                "content": {"application/json": {"schema": revision_request_schema}},
+            },
+        },
+        responses={
+            200: {"content": {"application/json": {"schema": revision_experience_result_schema}}},
+            409: {"content": {"application/json": {"schema": ERROR_RESPONSE_SCHEMA}}},
+            422: {"content": {"application/json": {"schema": ERROR_RESPONSE_SCHEMA}}},
+            503: _PRE_EXECUTION_503_RESPONSE,
+        },
+    )
+    async def revision_experience_v3(request: Request) -> JSONResponse:
+        _authorize(request, active_settings)
+        payload = await admitted_body(request)
+        inspection = inspect_v3_auxiliary_request(
+            payload,
+            operation="revision",
+            settings=active_settings,
+        )
+        controller = await _require_enhanced_ready(request)
+        outcome, replayed = await controller.submit(
+            payload=payload,
+            review_run_id=f"revision-experience:{inspection.replay_id}",
+            request_hash=inspection.canonical_sha256,
+            runtime_method_name="revision_experience_v3_json",
         )
         if outcome.result is None:
             raise ServiceHttpError(
