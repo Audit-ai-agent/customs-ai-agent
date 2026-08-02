@@ -1577,6 +1577,7 @@ class _NaturalChatAnalyzer:
         self.reject_entailment = reject_entailment
         self.answer_calls = 0
         self.verifier_calls = 0
+        self.verifier_contexts: list[dict[str, object]] = []
 
     def run_bounded_agentic_task(self, *_args, **kwargs) -> StructuredAgenticResult:
         task_id = kwargs["task_id"]
@@ -1621,6 +1622,7 @@ class _NaturalChatAnalyzer:
             }
         elif task_id == "customs_case_answer_verifier":
             self.verifier_calls += 1
+            self.verifier_contexts.append(kwargs["untrusted_context"])
             value = {
                 "supported": not self.reject_entailment,
                 "reason_codes": ([] if not self.reject_entailment else ["semantic_contradiction"]),
@@ -1710,6 +1712,45 @@ def test_chat_uses_natural_non_byte_equivalent_prose_after_atom_and_entailment_c
     assert analyzer.verifier_calls == 1
 
 
+def test_human_review_reason_is_bound_to_release_guard_not_clean_issue_claim() -> None:
+    request = _conversation("이 심사 건이 사람 검토가 필요한 이유는 무엇입니까?")
+    analyzer = _NaturalChatAnalyzer(request.review_result.runtime_release.model_id)
+
+    answer = answer_case_conversation(request, analyzer=analyzer)  # type: ignore[arg-type]
+
+    bindings = answer_claim_bindings(answer, request.review_result)
+    direct_claim = bindings["direct_answer"][0]
+    assert answer.generation_audit.mode == "claude"
+    assert answer.verification_audit.status == "passed"
+    assert direct_claim.section_code == "conclusion"
+    assert direct_claim.role == "limitation"
+    assert "담당자가 최종 확인" in direct_claim.canonical_text
+    assert all(
+        claim.section_code != "issues_and_causes"
+        for area in bindings.values()
+        for claim in area
+    )
+    assert [claim.role for claim in bindings["impact"]] == ["impact"]
+    assert [claim.role for claim in bindings["next_steps"]] == ["action"]
+    assert analyzer.verifier_contexts[0]["answer_intent"] == "reason"
+    fixed_assignments = analyzer.verifier_contexts[0]["fixed_claim_assignments"]
+    assert isinstance(fixed_assignments, dict)
+    assert fixed_assignments["direct_answer"][0]["claim_id"] == direct_claim.claim_id
+
+
+def test_generic_reason_question_keeps_issue_cause_selection() -> None:
+    request = _conversation("현재 심사 결과의 원인을 설명해 주십시오.")
+    analyzer = _NaturalChatAnalyzer(request.review_result.runtime_release.model_id)
+
+    answer = answer_case_conversation(request, analyzer=analyzer)  # type: ignore[arg-type]
+
+    direct_claim = answer_claim_bindings(answer, request.review_result)["direct_answer"][0]
+    assert answer.generation_audit.mode == "claude"
+    assert answer.verification_audit.status == "passed"
+    assert direct_claim.section_code == "issues_and_causes"
+    assert direct_claim.role in {"reason", "observation"}
+
+
 def test_chat_rejects_new_number_before_verifier_and_falls_back_after_one_retry() -> None:
     request = _conversation("현재 심사 결과의 결론을 설명해 주십시오.")
     analyzer = _NaturalChatAnalyzer(
@@ -1756,9 +1797,17 @@ def test_priority_follow_up_uses_same_action_claim_for_claude_and_safe_fallback(
     fluent_claim = answer_claim_bindings(fluent, request.review_result)["direct_answer"][0]
     fallback_claim = answer_claim_bindings(fallback, request.review_result)["direct_answer"][0]
     assert fluent.generation_audit.mode == "claude"
+    assert fluent.verification_audit.status == "passed"
     assert fallback.generation_audit.mode == "deterministic_fallback"
     assert fluent_claim.claim_id == fallback_claim.claim_id
+    assert fluent_claim.section_code == fallback_claim.section_code == "next_actions"
     assert fluent_claim.role == fallback_claim.role == "action"
+    assert fluent.direct_answer.endswith(fluent_claim.canonical_text)
+    assert fluent.claim_selections.direct_answer == [fluent_claim.claim_id]
+    assert fluent.claim_selections.explanation == []
+    assert fluent.claim_selections.evidence_meaning == []
+    assert fluent.claim_selections.impact == []
+    assert fluent.claim_selections.next_steps == []
     assert fallback.direct_answer == fallback_claim.canonical_text
     assert fallback.next_steps == []
     assert (

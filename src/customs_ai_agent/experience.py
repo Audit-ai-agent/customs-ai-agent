@@ -1829,6 +1829,14 @@ _FOLLOW_UP_MARKERS = (
     "그게",
     "중에서",
 )
+_REVIEW_DISPOSITION_REASON_MARKERS = (
+    "사람 검토",
+    "담당자 검토",
+    "담당자 확인",
+    "최종 확인",
+    "인적 검토",
+    "human review",
+)
 
 
 def _contains_any(value: str, markers: Iterable[str]) -> bool:
@@ -1903,6 +1911,14 @@ def _answer_composition_plan(
                     used.add(claim.claim_id)
         return None
 
+    review_disposition_reason = (
+        intent == "reason"
+        and _contains_any(
+            _normalized_prose(request.question).casefold(),
+            _REVIEW_DISPOSITION_REASON_MARKERS,
+        )
+    )
+
     if intent == "summary":
         take("direct_answer", sections=("conclusion",), roles=("conclusion",), limit=1)
         take(
@@ -1910,6 +1926,37 @@ def _answer_composition_plan(
             sections=("issues_and_causes", "document_comparison", "process", "scope_and_limits"),
             roles=("reason", "observation", "limitation"),
             limit=4,
+        )
+    elif review_disposition_reason:
+        # A clean Case can still require a person because the Local UAT
+        # release guard keeps automatic completion disabled.  In that
+        # situation an "errors and causes" claim is true but does not answer
+        # why the disposition is human review.  Bind the answer to the
+        # provider-owned release limitation, then expose the clean conclusion,
+        # operational impact and next action in their proper answer areas.
+        take(
+            "direct_answer",
+            sections=("conclusion", "scope_and_limits"),
+            roles=("limitation",),
+            limit=1,
+        )
+        take(
+            "explanation",
+            sections=("conclusion", "process"),
+            roles=("conclusion", "observation"),
+            limit=3,
+        )
+        take(
+            "impact",
+            sections=("business_impact",),
+            roles=("impact",),
+            limit=1,
+        )
+        take(
+            "next_steps",
+            sections=("next_actions",),
+            roles=("action",),
+            limit=1,
         )
     elif intent == "reason":
         take(
@@ -2528,9 +2575,18 @@ def answer_case_conversation(
                     turn.model_dump(mode="json", warnings=False) for turn in request.recent_turns
                 ],
                 "answer_scope": scope,
+                "answer_intent": plan.intent,
                 "allowed_claims": [item.model_dump(mode="json", warnings=False) for item in claims],
+                "fixed_claim_assignments": {
+                    area: [
+                        claim.model_dump(mode="json", warnings=False)
+                        for claim in plan.claims_by_area[area]
+                    ]
+                    for area in _ANSWER_AREAS
+                },
                 "general_guidance": guidance,
                 "fixed_limitation_source": (answer_limitation_source(scope)),
+                "fixed_used_context_message_ids": list(plan.used_context_message_ids),
                 "candidate_answer": normalized_candidate,
             }
             try:

@@ -16,6 +16,8 @@
 - 이어서 이유, 근거의 의미, 업무상 영향, 다음 조치와 한계를 구분합니다.
 - answer_intent와 fixed_claim_assignments는 서버가 질문 의도에 맞게 고정한 작성 계획입니다.
   Claim을 다시 선택하거나 다른 구역으로 옮기지 않습니다.
+- fixed_claim_assignments의 답변 구역은 원본 보고서 section_code와 다른 사용자 답변용
+  구조입니다. 서버가 배정한 Claim을 해당 답변 구역에 그대로 설명하십시오.
 - direct_answer는 direct_answer에 고정된 Claim 하나에 직접 답하고, 배열형 구역은 고정된 Claim
   순서대로 Claim 하나당 설명 하나를 작성합니다. 고정 Claim이 없는 배열형 구역은 비웁니다.
 - 선택한 canonical_text를 글자 단위로 복사하지 말고, 사용자의 질문과 최근 대화 흐름에 직접
@@ -31,6 +33,8 @@
 - summary, reason, evidence, impact, next_action, priority_action, comparison 의도를 바꾸지 않습니다.
   특히 priority_action에서는 direct_answer가 고정된 첫 조치를 바로 말해야 하며 앞선 결론을
   반복해서 대신하지 않습니다.
+- reason 질문에서 direct_answer에 담당자 확인·자동처리 제한 Claim이 배정되었다면,
+  문서 오류가 없다는 결론과 별개로 그 제한이 사람 검토의 이유임을 먼저 설명합니다.
 - 법령 원문을 본문에 단순 나열하지 않습니다.
 - 정중한 한국어 “~습니다.”체를 사용합니다.
 - 모호한 Case 질문은 거절하지 말고 필요한 확인 질문을 제시합니다.
