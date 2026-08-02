@@ -150,7 +150,7 @@ _UAT_APPROVER_AUTHORITY_ID = (
     "backend:principal-sha256:6cc4551495f1ec8da505fdeaa4f34c17eeb8c234bcaeb6ca184f92a0cdd6318d"
 )
 _THREE_LAW_DIAGNOSTIC_HTTP_TIMEOUT_SECONDS = 195.0
-_THREE_LAW_SCENARIO_EVAL_HTTP_TIMEOUT_SECONDS = 285.0
+_THREE_LAW_SCENARIO_EVAL_HTTP_TIMEOUT_SECONDS = 300.0
 _THREE_LAW_SCENARIO_EVAL_READINESS_CACHE_SECONDS = 600.0
 _SERVICE_ENV_KEYS = frozenset(
     {
@@ -326,10 +326,9 @@ def _evidence_profile_metadata(mode: EvidenceMode) -> dict[str, Any]:
 
 
 def _evidence_timeout_seconds(mode: EvidenceMode) -> float:
-    # The actual-store provider performs fail-closed full-store attestation
-    # before and after retrieval under its own 180-second service deadline.
-    # Its HTTP consumer must have a strictly larger budget so a valid terminal
-    # response is not discarded at the same deadline boundary.
+    # The actual-store provider performs fail-closed store observation and the
+    # scenario profile also runs the required CPU BGE reranker.  Its consumer
+    # keeps a response margin without weakening ranking or falling back.
     if mode == "preserved-3law-v3-scenario-eval":
         return _THREE_LAW_SCENARIO_EVAL_HTTP_TIMEOUT_SECONDS
     if mode == "preserved-3law-v3-diagnostic":
