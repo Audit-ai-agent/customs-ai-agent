@@ -1,18 +1,18 @@
 # Evidence runtime v2 cross-repository fixture
 
 `provider-runtime-lock.json` is the byte-for-byte canonical handoff generated
-from `customs-data-platform@7df26860e3d31eef4545fae8851b6f16d17a331d`.
+from `customs-data-platform@89fe32ed43686fe7e1eb07bb8b8841c6ff393b05`.
 The lock format itself was introduced at `78e2392` by the canonical
 `tools.provider_build.create_runtime_provider_lock_document` helper.
 
 Artifact identity:
 
 - lock file SHA-256:
-  `71c0ff5db125267fbeca3ab448bdd9f830c8046e00d5e82898c2f4231bb98da5`
+  `1fcb0fbe554a5bafff908c6963b3b5f6ceb6b499dae1ef380e4e63ef8b1590f8`
 - provider revision:
-  `7df26860e3d31eef4545fae8851b6f16d17a331d`
+  `89fe32ed43686fe7e1eb07bb8b8841c6ff393b05`
 - provider source manifest SHA-256:
-  `3c085dba66bb3b546cc117124c224b36ccfa86b622123c74578d29fb86325c1c`
+  `fd4b7f6fd0d6b01917480ba8285ac0092525da41ddcc77ff91505cf82a513094`
 - retrieval/readiness schemas: byte-identical Agent/Data schema snapshots
 
 The fixture is committed so Agent clean-clone tests do not import a sibling
