@@ -401,6 +401,74 @@ def test_non_release_factory_executes_real_loopback_get_and_post() -> None:
         assert observed["headers"][name.casefold()] == expected
 
 
+def test_non_release_readiness_cache_skips_only_the_duplicate_get(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    identity = _identity()
+    request = _request()
+    retriever = LoopbackEvidenceV3ConformanceRetriever(
+        "http://127.0.0.1:18091",
+        conformance_identity=identity,
+        service_token="A" * 40,
+        acknowledge_non_release=True,
+        timeout_seconds=10,
+        readiness_identity_cache_ttl_seconds=600,
+    )
+    responses = [
+        _Response(_readiness(identity)),
+        _Response(
+            _response_payload(request, identity, with_requirement=True),
+            {**identity.binding_headers(), "X-Request-ID": request.request_id},
+        ),
+    ]
+    methods: list[str] = []
+
+    def fake_urlopen(http_request: Any, timeout: float) -> _Response:
+        assert timeout > 0
+        methods.append(http_request.get_method())
+        return responses.pop(0)
+
+    monkeypatch.setattr(retrieval_transport, "urlopen", fake_urlopen)
+
+    assert retriever.preflight(request.review_as_of) == identity
+    response = retriever.retrieve(request)
+
+    assert response.status == "ok"
+    assert methods == ["GET", "POST"]
+    assert retriever.successful_readiness_get_count == 1
+    assert retriever.successful_retrieval_post_count == 1
+
+
+def test_non_release_health_probe_does_not_seed_a_review_cache(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    identity = _identity()
+    request = _request()
+    retriever = LoopbackEvidenceV3ConformanceRetriever(
+        "http://127.0.0.1:18091",
+        conformance_identity=identity,
+        service_token="A" * 40,
+        acknowledge_non_release=True,
+        timeout_seconds=10,
+        readiness_identity_cache_ttl_seconds=600,
+    )
+    responses = [_Response(_readiness(identity)) for _ in range(3)]
+
+    def fake_urlopen(_request: Any, timeout: float) -> _Response:
+        assert timeout > 0
+        return responses.pop(0)
+
+    monkeypatch.setattr(retrieval_transport, "urlopen", fake_urlopen)
+
+    assert retriever.preflight() == identity
+    assert retriever.preflight(request.review_as_of) == identity
+    assert retriever.preflight(request.review_as_of) == identity
+    retriever.invalidate_readiness_identity_cache()
+    assert retriever.preflight(request.review_as_of) == identity
+
+    assert retriever.successful_readiness_get_count == 3
+
+
 @pytest.mark.parametrize(
     "base_url",
     [

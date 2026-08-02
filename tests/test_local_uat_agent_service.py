@@ -31,6 +31,7 @@ from tools.local_uat_agent_service.app import (
     LocalUatConfigurationError,
     LocalUatDiagnosticRuntime,
     _evidence_timeout_seconds,
+    _evidence_readiness_identity_cache_seconds,
     _readiness_policy,
     LocalUatManifest,
     _compose_local_uat_app,
@@ -552,6 +553,12 @@ def test_actual_store_profile_has_a_bounded_longer_http_budget() -> None:
     assert _readiness_policy("synthetic-v3") == (5.0, 5.0)
     assert _readiness_policy("preserved-3law-v3-diagnostic") == (60.0, 90.0)
     assert _readiness_policy("preserved-3law-v3-scenario-eval") == (60.0, 90.0)
+    assert _evidence_readiness_identity_cache_seconds("synthetic-v3") == 0.0
+    assert _evidence_readiness_identity_cache_seconds("preserved-3law-v3-diagnostic") == 0.0
+    assert (
+        _evidence_readiness_identity_cache_seconds("preserved-3law-v3-scenario-eval")
+        == 600.0
+    )
 
 
 @pytest.mark.parametrize(

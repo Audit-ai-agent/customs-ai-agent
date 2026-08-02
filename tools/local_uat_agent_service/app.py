@@ -41,7 +41,10 @@ from customs_ai_agent.schemas.v3 import (
     ReviewRunResultV3,
     review_result_v3_sha256,
 )
-from customs_ai_agent.schemas.experience import AgentUatCapabilityAttestationV1
+from customs_ai_agent.schemas.experience import (
+    AgentUatCapabilityAttestationV1,
+    ReviewRevisionExperienceResultV1,
+)
 from customs_ai_agent.uat_capability import UatCapabilityError, load_uat_capability
 from customs_ai_agent.service.app import create_app
 from customs_ai_agent.service.controller import ServiceRuntime
@@ -148,6 +151,7 @@ _UAT_APPROVER_AUTHORITY_ID = (
 )
 _THREE_LAW_DIAGNOSTIC_HTTP_TIMEOUT_SECONDS = 195.0
 _THREE_LAW_SCENARIO_EVAL_HTTP_TIMEOUT_SECONDS = 285.0
+_THREE_LAW_SCENARIO_EVAL_READINESS_CACHE_SECONDS = 600.0
 _SERVICE_ENV_KEYS = frozenset(
     {
         "CUSTOMS_AGENT_SERVICE_BEARER_TOKEN",
@@ -339,6 +343,21 @@ def _readiness_policy(mode: EvidenceMode) -> tuple[float, float]:
     # bounded TTL; otherwise a 30-second controller timeout leaves the
     # single-threaded probe running and every retry observes SERVICE_BUSY.
     return (60.0, 90.0) if mode in _ACTUAL_STORE_EVIDENCE_MODES else (5.0, 5.0)
+
+
+def _evidence_readiness_identity_cache_seconds(mode: EvidenceMode) -> float:
+    """Bridge one bounded UAT review without weakening POST identity binding.
+
+    The Agent service checks Data readiness immediately before admitting a
+    review.  Scenario evaluation then spends several minutes on four Claude
+    document analyses before retrieval.  Reusing that exact attestation for
+    one bounded review avoids a second expensive Store attestation; the POST
+    still has to echo all 17 identity headers before its body is accepted.
+    """
+
+    if mode == "preserved-3law-v3-scenario-eval":
+        return _THREE_LAW_SCENARIO_EVAL_READINESS_CACHE_SECONDS
+    return 0.0
 
 
 def _assert_evidence_policy_identity(
@@ -689,9 +708,11 @@ class LocalUatDiagnosticRuntime:
         )
 
     def review_v3_json(self, payload: bytes) -> ReviewRunResultV3:
+        self._retriever.invalidate_readiness_identity_cache()
         return _diagnostic_result(self._core.review_v3_json(payload))
 
     def revision_v3_json(self, payload: bytes) -> ReviewRevisionResultV1:
+        self._retriever.invalidate_readiness_identity_cache()
         result = self._core.revision_v3_json(payload)
         return ReviewRevisionResultV1(
             parent_result_sha256=result.parent_result_sha256,
@@ -712,12 +733,31 @@ class LocalUatDiagnosticRuntime:
         )
 
     def review_experience_json(self, payload: bytes) -> Any:
+        self._retriever.invalidate_readiness_identity_cache()
         capability = self.assert_uat_capability_current()
         result = _diagnostic_result(self._core.review_v3_json(payload))
         return build_review_experience(
             result,
             analyzer=self._core._analyzer,
             capability=capability,
+        )
+
+    def revision_experience_v3_json(
+        self,
+        payload: bytes,
+    ) -> ReviewRevisionExperienceResultV1:
+        self._retriever.invalidate_readiness_identity_cache()
+        capability = self.assert_uat_capability_current()
+        revision = self._core.revision_v3_json(payload)
+        child_result = _diagnostic_result(revision.child_result)
+        return ReviewRevisionExperienceResultV1(
+            parent_result_sha256=revision.parent_result_sha256,
+            applied_decision_ids=revision.applied_decision_ids,
+            experience_envelope=build_review_experience(
+                child_result,
+                analyzer=self._core._analyzer,
+                capability=capability,
+            ),
         )
 
     def answer_v2_json(self, payload: bytes) -> Any:
@@ -728,6 +768,7 @@ class LocalUatDiagnosticRuntime:
         payload: bytes,
         stage_callback: Callable[[dict[str, Any]], None],
     ) -> Any:
+        self._retriever.invalidate_readiness_identity_cache()
         return self._core.review_experience_stream_json(
             payload,
             stage_callback,
@@ -775,6 +816,9 @@ def build_local_uat_runtime(
             acknowledge_non_release=True,
             timeout_seconds=_evidence_timeout_seconds(manifest.evidence_mode),
             max_retries=0,
+            readiness_identity_cache_ttl_seconds=(
+                _evidence_readiness_identity_cache_seconds(manifest.evidence_mode)
+            ),
         )
     except Exception:
         analyzer.close()
