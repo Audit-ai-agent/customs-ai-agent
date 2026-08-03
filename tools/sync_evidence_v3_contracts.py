@@ -23,16 +23,16 @@ EXPECTED = {
     ),
 }
 EXPECTED_PROVIDER_RUNTIME_LOCK_SHA256 = (
-    "320216de8685493e529f389b4bd3a1e832bd3c5df05b0463c887b677aa25e821"
+    "1a05a40c6d6b4256d317fd67db6c90b12aaa7bda1b54ea5ddbd1ce4f4604ddae"
 )
 EXPECTED_PROVIDER_IDENTITY = {
     "contract": "evidence-runtime-release-provider-lock",
     "schema_version": "1.0",
     "provider_release": "evidence-api-v1.2.0",
-    "provider_revision": "568c241cd1b8f614f27b863ebec97a3d00ec8e4e",
-    "provider_build_sha256": ("27cf1cb621392460dbc95e84e68516dca9a0b9b1b19b65a518ea1645105bb593"),
+    "provider_revision": "036ef6cec5422c22228e865ea1689b2d319f0b65",
+    "provider_build_sha256": ("11d7f45637fe314ac70f0ef8d1ae08ab991527df9f7cd61de8e97c85a5790d5d"),
     "provider_source_manifest_sha256": (
-        "ab817a8f1876a8f0f983b763c79df3114a970d77066a03a95a21857d4eaf86b2"
+        "f11e46290dc6de240a27e6c610d1a8696877e09cfceed4269f326d8f0fe39e4a"
     ),
     "retrieval_schema_sha256": ("531b59ba4e86f78cef20a4fca052996efd8b88c48853ac12113ca76e69cdd69a"),
     "readiness_schema_sha256": ("0a0b50fef627ecbbad954af5878ccb3630ecc51f618132f8cfc674c324467a69"),

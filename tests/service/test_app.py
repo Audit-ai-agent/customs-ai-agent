@@ -178,12 +178,12 @@ def test_metadata_and_metrics_are_authenticated_and_safe(
         "contract": "evidence-runtime-release-provider-lock",
         "schema_version": "1.0",
         "provider_release": "evidence-api-v1.2.0",
-        "provider_revision": "568c241cd1b8f614f27b863ebec97a3d00ec8e4e",
+        "provider_revision": "036ef6cec5422c22228e865ea1689b2d319f0b65",
         "provider_build_sha256": (
-            "27cf1cb621392460dbc95e84e68516dca9a0b9b1b19b65a518ea1645105bb593"
+            "11d7f45637fe314ac70f0ef8d1ae08ab991527df9f7cd61de8e97c85a5790d5d"
         ),
         "provider_source_manifest_sha256": (
-            "ab817a8f1876a8f0f983b763c79df3114a970d77066a03a95a21857d4eaf86b2"
+            "f11e46290dc6de240a27e6c610d1a8696877e09cfceed4269f326d8f0fe39e4a"
         ),
         "retrieval_schema_sha256": (
             "531b59ba4e86f78cef20a4fca052996efd8b88c48853ac12113ca76e69cdd69a"
