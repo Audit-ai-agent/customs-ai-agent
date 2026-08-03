@@ -1829,12 +1829,16 @@ def test_priority_follow_up_uses_same_action_claim_for_claude_and_safe_fallback(
     assert fluent_claim.role == fallback_claim.role == "action"
     assert fluent.direct_answer.endswith(fluent_claim.canonical_text)
     assert fluent.claim_selections.direct_answer == [fluent_claim.claim_id]
-    assert fluent.claim_selections.explanation == []
+    assert len(fluent.claim_selections.explanation) == 1
     assert fluent.claim_selections.evidence_meaning == []
-    assert fluent.claim_selections.impact == []
-    assert fluent.claim_selections.next_steps == []
+    assert len(fluent.claim_selections.impact) == 1
+    assert fluent.claim_selections.next_steps == [fluent_claim.claim_id]
+    assert len(fluent.explanation) == 1
+    assert len(fluent.impact) == 1
+    assert len(fluent.next_steps) == 1
     assert fallback.direct_answer == fallback_claim.canonical_text
-    assert fallback.next_steps == []
+    assert fallback.claim_selections.next_steps == [fallback_claim.claim_id]
+    assert fallback.next_steps == [fallback_claim.canonical_text]
     assert (
         fluent.used_context_message_ids
         == fallback.used_context_message_ids
@@ -1851,10 +1855,7 @@ def test_priority_follow_up_uses_same_action_claim_for_claude_and_safe_fallback(
 
 
 def test_priority_follow_up_discards_unassigned_model_prose_before_verification() -> None:
-    request = _conversation(
-        "방금 설명한 이유 중에서 담당자가 가장 먼저 확인할 항목은 무엇입니까?",
-        turns=_follow_up_turns(),
-    )
+    request = _conversation("현재 심사 결과의 결론을 이해하기 쉽게 설명해 주십시오.")
     analyzer = _NaturalChatAnalyzer(
         request.review_result.runtime_release.model_id,
         add_unassigned_next_step=True,

@@ -2026,7 +2026,26 @@ def _answer_composition_plan(
             roles=("action",),
             limit=1,
         )
-        if intent == "next_action":
+        if intent == "priority_action":
+            # A priority follow-up must explain why the action comes first and
+            # still expose it in the UI's explicit next-step section.  Reusing
+            # the same provider-owned action claim across those two visible
+            # areas is intentional: Claude may rephrase it, but cannot invent
+            # another action or change the canonical outcome.
+            take(
+                "explanation",
+                sections=("conclusion", "scope_and_limits"),
+                roles=("limitation",),
+                limit=1,
+            )
+            take(
+                "impact",
+                sections=("business_impact",),
+                roles=("impact",),
+                limit=1,
+            )
+            by_area["next_steps"].extend(by_area["direct_answer"])
+        else:
             take(
                 "next_steps",
                 sections=("next_actions",),
