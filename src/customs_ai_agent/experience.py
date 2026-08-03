@@ -2371,6 +2371,20 @@ def answer_case_conversation(
             state="failed",
         )
         raise
+    if (
+        scope == "clarification_needed"
+        and request.recent_turns
+        and _answer_intent(request, "case_grounded") == "priority_action"
+    ):
+        # A question that explicitly asks for the first action in the prior
+        # answer has a bounded Case target even when the model classifies its
+        # pronoun as ambiguous.  Keep genuinely vague follow-ups unchanged.
+        scope = "case_grounded"
+        classification_audit = _reclassified_scope_audit(
+            classification_audit,
+            scope=scope,
+            reason_code="priority_action_follow_up_context_bound",
+        )
     claims, guidance = _answer_source_claims(request, scope, classification_audit)
     plan = _answer_composition_plan(request, scope, claims)
     if scope in {"case_grounded", "evidence_grounded"} and plan.intent == "clarification":

@@ -1573,12 +1573,14 @@ class _NaturalChatAnalyzer:
         reject_entailment: bool = False,
         add_unassigned_next_step: bool = False,
         add_extra_assigned_explanation: bool = False,
+        scope: str = "case_grounded",
     ) -> None:
         self.model_id = model_id
         self.forge_number = forge_number
         self.reject_entailment = reject_entailment
         self.add_unassigned_next_step = add_unassigned_next_step
         self.add_extra_assigned_explanation = add_extra_assigned_explanation
+        self.scope = scope
         self.answer_calls = 0
         self.verifier_calls = 0
         self.verifier_contexts: list[dict[str, object]] = []
@@ -1588,7 +1590,7 @@ class _NaturalChatAnalyzer:
         schema = kwargs["output_schema"]
         if task_id == "customs_case_scope_classifier":
             value = {
-                "answer_scope": "case_grounded",
+                "answer_scope": self.scope,
                 "reason_code": "semantic_intent_classified",
                 "guidance_topics": [],
             }
@@ -1849,6 +1851,29 @@ def test_priority_follow_up_discards_unassigned_model_prose_before_verification(
     assert analyzer.answer_calls == 1
     assert analyzer.verifier_calls == 1
     assert analyzer.verifier_contexts[0]["candidate_answer"]["next_steps"] == []
+
+
+def test_explicit_priority_follow_up_binds_context_when_scope_model_calls_it_ambiguous() -> None:
+    request = _conversation(
+        "방금 설명한 이유 중에서 담당자가 가장 먼저 확인할 항목은 무엇입니까?",
+        turns=_follow_up_turns(),
+    )
+    analyzer = _NaturalChatAnalyzer(
+        request.review_result.runtime_release.model_id,
+        scope="clarification_needed",
+    )
+
+    answer = answer_case_conversation(request, analyzer=analyzer)  # type: ignore[arg-type]
+
+    assert answer.answer_scope == "case_grounded"
+    assert answer.generation_audit.mode == "claude"
+    assert answer.verification_audit.status == "passed"
+    assert answer.generation_audit.scope_classification is not None
+    assert (
+        answer.generation_audit.scope_classification.reason_code
+        == "priority_action_follow_up_context_bound"
+    )
+    assert answer.used_context_message_ids == ["turn-user-1", "turn-assistant-1"]
 
 
 def test_assigned_answer_area_keeps_exact_prose_count_enforcement() -> None:
