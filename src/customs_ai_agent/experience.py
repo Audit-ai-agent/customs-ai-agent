@@ -160,6 +160,12 @@ _ANSWER_AREA_ROLES: dict[str, frozenset[PresentationStatementRole]] = {
     "impact": frozenset({"impact"}),
     "next_steps": frozenset({"action"}),
 }
+_ANSWER_AREA_REPAIR_PREFIX: dict[str, str] = {
+    "explanation": "확인된 내용을 근거와 함께 설명하면, ",
+    "evidence_meaning": "법령 근거의 의미를 설명하면, ",
+    "impact": "업무상 영향을 설명하면, ",
+    "next_steps": "담당자의 다음 조치를 설명하면, ",
+}
 
 
 @dataclass(frozen=True)
@@ -2113,6 +2119,7 @@ _FOLLOW_UP_MARKERS = (
     "그 근거",
     "그 법령",
     "그 항목",
+    "그중",
     "그것",
     "그게",
     "중에서",
@@ -2878,6 +2885,24 @@ def answer_case_conversation(
                     for area in ("explanation", "evidence_meaning", "impact", "next_steps")
                     if len(normalized_candidate[area]) != len(plan.claims_by_area[area])
                 ]
+                repairable_missing_prose = count_blockers and all(
+                    len(normalized_candidate[area]) < len(plan.claims_by_area[area])
+                    for area in ("explanation", "evidence_meaning", "impact", "next_steps")
+                    if len(normalized_candidate[area]) != len(plan.claims_by_area[area])
+                )
+                if repairable_missing_prose and attempt == 2:
+                    for area in ("explanation", "evidence_meaning", "impact", "next_steps"):
+                        if len(normalized_candidate[area]) == len(plan.claims_by_area[area]):
+                            continue
+                        normalized_candidate[area] = [
+                            _ANSWER_AREA_REPAIR_PREFIX[area] + claim.canonical_text
+                            for claim in plan.claims_by_area[area]
+                        ]
+                    count_blockers = [
+                        f"answer_{area}_prose_count_mismatch"
+                        for area in ("explanation", "evidence_meaning", "impact", "next_steps")
+                        if len(normalized_candidate[area]) != len(plan.claims_by_area[area])
+                    ]
                 if count_blockers:
                     blockers = [
                         *count_blockers,

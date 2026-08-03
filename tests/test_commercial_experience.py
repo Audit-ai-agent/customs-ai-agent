@@ -1917,6 +1917,7 @@ class _NaturalChatAnalyzer:
         reject_entailment: bool = False,
         add_unassigned_next_step: bool = False,
         add_extra_assigned_explanation: bool = False,
+        drop_assigned_explanation: bool = False,
         scope: str = "case_grounded",
     ) -> None:
         self.model_id = model_id
@@ -1924,6 +1925,7 @@ class _NaturalChatAnalyzer:
         self.reject_entailment = reject_entailment
         self.add_unassigned_next_step = add_unassigned_next_step
         self.add_extra_assigned_explanation = add_extra_assigned_explanation
+        self.drop_assigned_explanation = drop_assigned_explanation
         self.scope = scope
         self.answer_calls = 0
         self.verifier_calls = 0
@@ -1974,6 +1976,8 @@ class _NaturalChatAnalyzer:
                 value["next_steps"] = ["담당자는 현재 심사 결과를 먼저 확인해야 합니다."]
             if self.add_extra_assigned_explanation and assignments["explanation"]:
                 value["explanation"].append("서버가 배정하지 않은 별도의 설명을 추가했습니다.")
+            if self.drop_assigned_explanation and assignments["explanation"]:
+                value["explanation"] = []
         elif task_id == "customs_case_answer_verifier":
             self.verifier_calls += 1
             self.verifier_contexts.append(kwargs["untrusted_context"])
@@ -2064,6 +2068,26 @@ def test_chat_uses_natural_non_byte_equivalent_prose_after_atom_and_entailment_c
     assert answer.direct_answer.startswith("질문하신 결론을 먼저 쉽게 설명하면, ")
     assert analyzer.answer_calls == 1
     assert analyzer.verifier_calls == 1
+
+
+def test_chat_repairs_missing_assigned_prose_and_binds_geujung_follow_up() -> None:
+    request = _conversation(
+        "그중 가장 중요한 이유는 무엇입니까?",
+        turns=_follow_up_turns(),
+    )
+    analyzer = _NaturalChatAnalyzer(
+        request.review_result.runtime_release.model_id,
+        drop_assigned_explanation=True,
+    )
+
+    answer = answer_case_conversation(request, analyzer=analyzer)  # type: ignore[arg-type]
+
+    assert analyzer.answer_calls == 2
+    assert analyzer.verifier_calls == 1
+    assert answer.generation_audit.mode == "claude"
+    assert answer.verification_audit.status == "passed"
+    assert answer.explanation
+    assert answer.used_context_message_ids == ["turn-user-1", "turn-assistant-1"]
 
 
 def test_human_review_reason_is_bound_to_release_guard_not_clean_issue_claim() -> None:
