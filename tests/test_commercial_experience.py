@@ -263,6 +263,14 @@ def test_meaning_catalog_covers_current_dynamic_actions_and_never_leaks_raw_fall
     )
 
 
+def test_invoice_number_mismatch_has_specific_user_meaning() -> None:
+    meaning = ISSUE_MEANINGS["INVOICE_NO_MISMATCH"]
+
+    assert f"{meaning.title}." == "상업송장과 포장명세서의 송장 번호가 일치하지 않습니다."
+    assert "송장번호" in meaning.explanation
+    assert user_action_text("resolve_invoice_no_mismatch") == meaning.next_action
+
+
 def test_deterministic_presentation_has_all_sections_and_is_fact_bound() -> None:
     result = _v3_result()[2]
     envelope = build_review_experience(
@@ -1871,14 +1879,17 @@ def test_priority_follow_up_discards_unassigned_model_prose_before_verification(
     assert analyzer.verifier_contexts[0]["candidate_answer"]["next_steps"] == []
 
 
-def test_explicit_priority_follow_up_binds_context_when_scope_model_calls_it_ambiguous() -> None:
+@pytest.mark.parametrize("classified_scope", ["clarification_needed", "insufficient_evidence"])
+def test_explicit_priority_follow_up_binds_context_when_scope_model_misses_case_target(
+    classified_scope: str,
+) -> None:
     request = _conversation(
         "방금 설명한 이유 중에서 담당자가 가장 먼저 확인할 항목은 무엇입니까?",
         turns=_follow_up_turns(),
     )
     analyzer = _NaturalChatAnalyzer(
         request.review_result.runtime_release.model_id,
-        scope="clarification_needed",
+        scope=classified_scope,
     )
 
     answer = answer_case_conversation(request, analyzer=analyzer)  # type: ignore[arg-type]
@@ -1892,6 +1903,24 @@ def test_explicit_priority_follow_up_binds_context_when_scope_model_calls_it_amb
         == "priority_action_follow_up_context_bound"
     )
     assert answer.used_context_message_ids == ["turn-user-1", "turn-assistant-1"]
+
+
+def test_priority_wording_does_not_override_missing_legal_scope() -> None:
+    request = _conversation(
+        "방금 설명한 이유 중 법령 범위 밖에서 가장 먼저 확인할 요건은 무엇입니까?",
+        turns=_follow_up_turns(),
+    )
+    analyzer = _NaturalChatAnalyzer(
+        request.review_result.runtime_release.model_id,
+        scope="insufficient_evidence",
+    )
+
+    answer = answer_case_conversation(request, analyzer=analyzer)  # type: ignore[arg-type]
+
+    assert answer.answer_scope == "insufficient_evidence"
+    assert answer.status == "insufficient_evidence"
+    assert answer.generation_audit.mode == "deterministic_fallback"
+    assert answer.claim_selections.direct_answer == []
 
 
 def test_assigned_answer_area_keeps_exact_prose_count_enforcement() -> None:

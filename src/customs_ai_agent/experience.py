@@ -2416,13 +2416,22 @@ def answer_case_conversation(
         )
         raise
     if (
-        scope == "clarification_needed"
-        and request.recent_turns
+        scope in {"clarification_needed", "insufficient_evidence"}
+        and len(request.recent_turns) >= 2
+        and request.recent_turns[-2].role == "user"
+        and request.recent_turns[-1].role == "assistant"
+        and _intent_context_message_ids(request)
         and _answer_intent(request, "case_grounded") == "priority_action"
+        and not _contains_any(
+            _normalized_prose(request.question).casefold(),
+            _EVIDENCE_INTENT_MARKERS,
+        )
     ):
         # A question that explicitly asks for the first action in the prior
         # answer has a bounded Case target even when the model classifies its
-        # pronoun as ambiguous.  Keep genuinely vague follow-ups unchanged.
+        # pronoun as ambiguous or mistakes the requested operational action
+        # for a request for additional legal evidence.  Keep genuinely vague
+        # and explicitly legal-scope follow-ups unchanged.
         scope = "case_grounded"
         classification_audit = _reclassified_scope_audit(
             classification_audit,
