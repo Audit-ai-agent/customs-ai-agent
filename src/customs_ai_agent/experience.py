@@ -785,6 +785,30 @@ def _claim_sources(claims: Iterable[CanonicalClaimV1]) -> list[str]:
     return [claim.canonical_text for claim in claims]
 
 
+def _preserve_occurrence_meanings(
+    text: str,
+    claims: Iterable[CanonicalClaimV1],
+) -> str:
+    """Keep provider-owned Issue/Finding meanings explicit in fluent prose.
+
+    Claude may explain the surrounding context naturally, but a material
+    occurrence must not be reduced to a generic phrase such as "a value did
+    not match".  The exact, versioned Korean meaning remains server-owned and
+    is prefixed only when the model did not already retain it.
+    """
+
+    exact_meanings = [
+        claim.canonical_text
+        for claim in claims
+        if any(
+            citation.kind in {"issue", "finding"}
+            for citation in claim.citation_references
+        )
+    ]
+    missing = [meaning for meaning in exact_meanings if meaning not in text]
+    return " ".join([*missing, text]) if missing else text
+
+
 def _field_fact_claims(result: ReviewRunResultV3) -> list[CanonicalClaimV1]:
     """Expose bounded, user-readable document facts for grounded Case questions.
 
@@ -1209,6 +1233,7 @@ def _candidate_presentation(
         claim_ids = option["source_claim_ids"]
         typed_source = [claim_index[claim_id] for claim_id in claim_ids]
         normalized_text = " ".join(text.split())
+        normalized_text = _preserve_occurrence_meanings(normalized_text, typed_source)
         source_texts = _claim_sources(typed_source)
         prose_blockers = _grounded_prose_blockers(
             normalized_text,

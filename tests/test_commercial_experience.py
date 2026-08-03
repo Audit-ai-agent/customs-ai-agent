@@ -20,6 +20,7 @@ from customs_ai_agent.experience import (
     _classify_question_scope,
     _citation,
     _grounded_prose_blockers,
+    _preserve_occurrence_meanings,
     _presentation_statement_options,
     answer_claim_bindings,
     answer_case_conversation,
@@ -1122,6 +1123,22 @@ def test_presentation_accepts_natural_non_byte_equivalent_grounded_paraphrase() 
                     for citation in claim_index[claim_id].citation_references
                 }.values()
             )
+
+
+def test_presentation_keeps_exact_user_meaning_for_material_issue_in_fluent_prose() -> None:
+    issue_text = "상업송장과 포장명세서의 송장 번호가 일치하지 않습니다."
+    issue_claim = _claim(
+        "document_comparison",
+        "observation",
+        issue_text,
+        [_citation("issue", "issue-invoice-number")],
+    )
+    generic_model_text = "문서 사이에서 확인이 필요한 값이 발견되었습니다."
+
+    rendered = _preserve_occurrence_meanings(generic_model_text, [issue_claim])
+
+    assert rendered == f"{issue_text} {generic_model_text}"
+    assert _preserve_occurrence_meanings(rendered, [issue_claim]) == rendered
 
 
 def test_presentation_failure_diagnostics_name_fixed_group_without_model_text() -> None:
