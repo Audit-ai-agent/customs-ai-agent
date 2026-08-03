@@ -20,6 +20,8 @@ from customs_ai_agent.experience import (
     _classify_question_scope,
     _citation,
     _grounded_prose_blockers,
+    _issue_observation_text,
+    _is_exact_code_owned_presentation,
     _preserve_occurrence_meanings,
     _presentation_statement_options,
     answer_claim_bindings,
@@ -1090,6 +1092,21 @@ def test_presentation_lexical_gate_defers_atom_free_contradiction_to_entailment_
     assert sections[0].statements[0].text != claims[0].canonical_text
 
 
+@pytest.mark.parametrize(
+    "issue_code",
+    [
+        "QTY_MISMATCH_INVOICE_PACKING",
+        "INV_LINE_AMOUNT_MISMATCH",
+        "ORIGIN_MISMATCH",
+    ],
+)
+def test_issue_observation_copy_meets_presentation_section_floor(issue_code: str) -> None:
+    text = _issue_observation_text(ISSUE_MEANINGS[issue_code].title)
+
+    assert text.startswith("문서 대조 결과, ")
+    assert len(text) >= 28
+
+
 def test_presentation_options_chunk_claims_within_wire_limits() -> None:
     claims = [
         _claim(
@@ -1428,10 +1445,11 @@ def test_presentation_missing_required_document_strict_retry_passes_entailment()
     presentation = build_grounded_presentation(result, analyzer=analyzer)  # type: ignore[arg-type]
 
     assert analyzer.report_calls == 2
-    assert analyzer.verifier_calls == 2
+    assert analyzer.verifier_calls == 1
     assert presentation.generation_audit.mode == "claude"
     assert presentation.generation_audit.attempt_count == 2
     assert presentation.verification_audit.status == "passed"
+    assert presentation.verification_audit.entailment_verifier == "not_run"
     conclusion = presentation.sections[0].statements[0]
     assert "문서 정합성 검토에서는" in conclusion.text
     assert "이와 별도로 규정 검토에서는" in conclusion.text
@@ -1534,7 +1552,7 @@ def test_presentation_discards_unsafe_second_response_and_restores_canonical_gro
     )
 
 
-def test_presentation_regenerates_once_then_uses_detailed_fallback_on_entailment_failure() -> None:
+def test_presentation_regenerates_once_then_uses_exact_code_owned_projection() -> None:
     result = _v3_result()[2]
     analyzer = _GroundedPresentationAnalyzer(
         result.runtime_release.model_id,
@@ -1544,11 +1562,15 @@ def test_presentation_regenerates_once_then_uses_detailed_fallback_on_entailment
     presentation = build_grounded_presentation(result, analyzer=analyzer)  # type: ignore[arg-type]
 
     assert analyzer.report_calls == 2
-    assert analyzer.verifier_calls == 2
-    assert presentation.generation_audit.mode == "deterministic_fallback"
+    assert analyzer.verifier_calls == 1
+    assert presentation.generation_audit.mode == "claude"
     assert presentation.generation_audit.attempt_count == 2
-    assert presentation.verification_audit.status == "fallback"
-    assert "semantic_contradiction" in presentation.verification_audit.reason_codes
+    assert presentation.verification_audit.status == "passed"
+    assert presentation.verification_audit.entailment_verifier == "not_run"
+    assert _is_exact_code_owned_presentation(
+        build_canonical_claim_catalog(result),
+        presentation.sections,
+    )
 
 
 def test_chat_answer_catalog_exposes_human_readable_field_facts_with_exact_sources() -> None:

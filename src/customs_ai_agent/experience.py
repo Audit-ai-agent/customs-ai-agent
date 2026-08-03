@@ -574,6 +574,10 @@ def _claim(
     )
 
 
+def _issue_observation_text(title: str) -> str:
+    return f"문서 대조 결과, {title}."
+
+
 def _normalized_prose(value: str) -> str:
     return " ".join(unicodedata.normalize("NFKC", value).split())
 
@@ -999,7 +1003,7 @@ def build_canonical_claim_catalog(result: ReviewRunResultV3) -> list[CanonicalCl
                     _claim(
                         "document_comparison",
                         "observation",
-                        meaning.title + ".",
+                        _issue_observation_text(meaning.title),
                         [_citation("issue", reference)],
                     ),
                     _claim(
@@ -1404,6 +1408,31 @@ def _presentation_sections_from_group_prose(
     )
 
 
+def _is_exact_code_owned_presentation(
+    claims: list[CanonicalClaimV1],
+    sections: list[GroundedPresentationSectionV1],
+) -> bool:
+    """Return true only when every statement is the exact canonical projection."""
+
+    claim_index = {claim.claim_id: claim for claim in claims}
+    observed_claim_ids: list[str] = []
+    for section in sections:
+        for statement in section.statements:
+            if any(claim_id not in claim_index for claim_id in statement.source_claim_ids):
+                return False
+            expected = _normalized_prose(
+                " ".join(
+                    claim_index[claim_id].canonical_text for claim_id in statement.source_claim_ids
+                )
+            )
+            if _normalized_prose(statement.text) != expected:
+                return False
+            observed_claim_ids.extend(statement.source_claim_ids)
+    return len(observed_claim_ids) == len(set(observed_claim_ids)) and set(
+        observed_claim_ids
+    ) == set(claim_index)
+
+
 def _candidate_presentation(
     result: ReviewRunResultV3,
     claims: list[CanonicalClaimV1],
@@ -1637,12 +1666,19 @@ def build_grounded_presentation(
                 stage_callback,
                 "grounding_verification",
             )
+            verification: StructuredAgenticResult | None = None
+            verifier_context_sha256: str | None = None
             try:
-                verification, blockers, verifier_context_sha256 = _verify_presentation_with_claude(
-                    analyzer,
-                    claims,
-                    sections,
-                )
+                if not _is_exact_code_owned_presentation(claims, sections):
+                    verification, blockers, verifier_context_sha256 = (
+                        _verify_presentation_with_claude(
+                            analyzer,
+                            claims,
+                            sections,
+                        )
+                    )
+                else:
+                    blockers = []
                 _stage_finished(
                     stage_callback,
                     "grounding_verification",
@@ -1658,7 +1694,10 @@ def build_grounded_presentation(
                     state="failed",
                 )
                 raise
-            if verification.model_id != result.runtime_release.model_id:
+            if (
+                verification is not None
+                and verification.model_id != result.runtime_release.model_id
+            ):
                 blockers.append("entailment_model_identity_mismatch")
             if blockers:
                 accepted_prose_by_group_id.clear()
@@ -1683,10 +1722,10 @@ def build_grounded_presentation(
                 "verification_audit": ExperienceVerificationAuditV1(
                     status="passed",
                     deterministic_checks_passed=True,
-                    entailment_verifier="claude",
-                    verifier_model_id=verification.model_id,
-                    verifier_prompt_sha256=verification.prompt_sha256,
-                    verifier_schema_sha256=verification.output_schema_sha256,
+                    entailment_verifier=("claude" if verification is not None else "not_run"),
+                    verifier_model_id=(verification.model_id if verification is not None else None),
+                    verifier_prompt_sha256=experience_prompt_hashes()["entailment"],
+                    verifier_schema_sha256=experience_schema_hashes()["entailment"],
                     verifier_context_sha256=verifier_context_sha256,
                     verified_content_sha256=presentation_verified_content_sha256(
                         headline,
