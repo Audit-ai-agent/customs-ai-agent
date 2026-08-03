@@ -1267,11 +1267,14 @@ class _MissingGroupRepairAnalyzer(_GroundedPresentationAnalyzer):
         *,
         first_attempt_fault: str = "missing",
         repair_succeeds: bool = True,
+        unsafe_on_repair: bool = False,
     ) -> None:
         super().__init__(model_id)
         self.first_attempt_fault = first_attempt_fault
         self.repair_succeeds = repair_succeeds
+        self.unsafe_on_repair = unsafe_on_repair
         self.requested_group_ids: list[list[str]] = []
+        self.requested_groups: list[list[dict[str, object]]] = []
         self.generated_prose_by_group_id: dict[str, str] = {}
 
     def run_bounded_agentic_task(self, *_args, **kwargs) -> StructuredAgenticResult:
@@ -1281,6 +1284,7 @@ class _MissingGroupRepairAnalyzer(_GroundedPresentationAnalyzer):
         groups = kwargs["untrusted_context"]["required_claim_groups"]
         group_ids = [str(group["group_id"]) for group in groups]
         self.requested_group_ids.append(group_ids)
+        self.requested_groups.append(groups)
         selected = (
             groups[:-1]
             if self.report_calls == 1 and self.first_attempt_fault == "missing"
@@ -1291,14 +1295,19 @@ class _MissingGroupRepairAnalyzer(_GroundedPresentationAnalyzer):
         values: list[dict[str, str]] = []
         for group in selected:
             group_id = str(group["group_id"])
-            prose = "담당자가 결과를 이해하기 쉽도록 확인 내용을 설명하면, " + " ".join(
-                claim["canonical_text"] for claim in group["canonical_claims"]
+            prose = (
+                str(group.get("strict_repair_prose"))
+                if group.get("strict_repair_prose")
+                else "담당자가 결과를 이해하기 쉽도록 확인 내용을 설명하면, "
+                + " ".join(claim["canonical_text"] for claim in group["canonical_claims"])
             )
             if (
                 self.report_calls == 1
                 and self.first_attempt_fault == "unsafe"
                 and group is groups[-1]
             ):
+                prose = f"{prose} 확인되지 않은 금액은 9999원입니다."
+            if self.report_calls > 1 and self.unsafe_on_repair:
                 prose = f"{prose} 확인되지 않은 금액은 9999원입니다."
             self.generated_prose_by_group_id[group_id] = prose
             values.append({"group_id": group_id, "prose": prose})
@@ -1389,7 +1398,7 @@ def test_presentation_retries_only_the_rejected_group() -> None:
     )
 
 
-def test_presentation_uses_fallback_when_the_missing_group_repair_fails() -> None:
+def test_presentation_restores_canonical_group_when_second_response_is_missing() -> None:
     result = _v3_result()[2]
     analyzer = _MissingGroupRepairAnalyzer(
         result.runtime_release.model_id,
@@ -1399,10 +1408,37 @@ def test_presentation_uses_fallback_when_the_missing_group_repair_fails() -> Non
     presentation = build_grounded_presentation(result, analyzer=analyzer)  # type: ignore[arg-type]
 
     assert analyzer.report_calls == 2
-    assert analyzer.verifier_calls == 0
-    assert presentation.generation_audit.mode == "deterministic_fallback"
-    assert presentation.verification_audit.status == "fallback"
-    assert "presentation_group_count_mismatch" in presentation.verification_audit.reason_codes
+    assert analyzer.verifier_calls == 1
+    assert presentation.generation_audit.mode == "claude"
+    assert presentation.verification_audit.status == "passed"
+    assert "strict_repair_prose" in analyzer.requested_groups[1][0]
+    expected_repair = str(analyzer.requested_groups[1][0]["strict_repair_prose"])
+    assert any(
+        statement.text == expected_repair
+        for section in presentation.sections
+        for statement in section.statements
+    )
+
+
+def test_presentation_discards_unsafe_second_response_and_restores_canonical_group() -> None:
+    result = _v3_result()[2]
+    analyzer = _MissingGroupRepairAnalyzer(
+        result.runtime_release.model_id,
+        first_attempt_fault="unsafe",
+        unsafe_on_repair=True,
+    )
+
+    presentation = build_grounded_presentation(result, analyzer=analyzer)  # type: ignore[arg-type]
+
+    assert analyzer.report_calls == 2
+    assert analyzer.verifier_calls == 1
+    assert presentation.generation_audit.mode == "claude"
+    assert presentation.verification_audit.status == "passed"
+    assert all(
+        "9999" not in statement.text
+        for section in presentation.sections
+        for statement in section.statements
+    )
 
 
 def test_presentation_regenerates_once_then_uses_detailed_fallback_on_entailment_failure() -> None:

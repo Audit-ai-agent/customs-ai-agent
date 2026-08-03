@@ -4,7 +4,7 @@ import hashlib
 import re
 import time
 import unicodedata
-from collections.abc import Callable, Iterable
+from collections.abc import Callable, Iterable, Mapping
 from dataclasses import dataclass
 from typing import Any, Literal
 
@@ -802,6 +802,16 @@ def _claim_sources(claims: Iterable[CanonicalClaimV1]) -> list[str]:
     return [claim.canonical_text for claim in claims]
 
 
+def _strict_presentation_group_prose(option: Mapping[str, Any]) -> str:
+    """Return the code-owned repair text for one already-grounded claim group."""
+
+    return " ".join(
+        str(claim["canonical_text"])
+        for claim in option["canonical_claims"]
+        if isinstance(claim, Mapping)
+    )
+
+
 def _preserve_occurrence_meanings(
     text: str,
     claims: Iterable[CanonicalClaimV1],
@@ -1223,6 +1233,8 @@ def _validated_presentation_group_prose(
     claims: list[CanonicalClaimV1],
     options: list[dict[str, Any]],
     call: StructuredAgenticResult,
+    *,
+    strict_prose_by_group_id: Mapping[str, str] | None = None,
 ) -> tuple[dict[str, str], list[str]]:
     """Validate one bounded batch while retaining every independently safe group."""
 
@@ -1257,6 +1269,12 @@ def _validated_presentation_group_prose(
         typed_source = [claim_index[claim_id] for claim_id in claim_ids]
         normalized_text = " ".join(values[0].split())
         normalized_text = _preserve_occurrence_meanings(normalized_text, typed_source)
+        strict_prose = (
+            strict_prose_by_group_id.get(group_id) if strict_prose_by_group_id is not None else None
+        )
+        if strict_prose is not None and normalized_text != _normalized_prose(strict_prose):
+            blockers.append(f"presentation_group_{group_index:02d}_strict_repair_mismatch")
+            continue
         source_texts = _claim_sources(typed_source)
         prose_blockers = _grounded_prose_blockers(
             normalized_text,
@@ -1464,6 +1482,25 @@ def build_grounded_presentation(
             for option in options
             if str(option["group_id"]) not in accepted_prose_by_group_id
         ]
+        strict_prose_by_group_id = (
+            {
+                str(option["group_id"]): _strict_presentation_group_prose(option)
+                for option in pending_options
+            }
+            if attempt == 2
+            else {}
+        )
+        requested_options = [
+            {
+                **option,
+                **(
+                    {"strict_repair_prose": strict_prose_by_group_id[str(option["group_id"])]}
+                    if attempt == 2
+                    else {}
+                ),
+            }
+            for option in pending_options
+        ]
         generation_started = _stage_started(stage_callback, "report_composition")
         generation_completed = False
         try:
@@ -1471,7 +1508,7 @@ def build_grounded_presentation(
                 task_id=EXPERIENCE_REPORT_PROMPT_ID,
                 system_prompt=load_experience_report_system_prompt(),
                 untrusted_context={
-                    "required_claim_groups": pending_options,
+                    "required_claim_groups": requested_options,
                     "accepted_group_ids": [
                         option["group_id"]
                         for option in options
@@ -1510,6 +1547,7 @@ def build_grounded_presentation(
                 claims,
                 pending_options,
                 generation,
+                strict_prose_by_group_id=strict_prose_by_group_id,
             )
             accepted_prose_by_group_id.update(accepted)
             missing_group_ids = {
@@ -1519,12 +1557,24 @@ def build_grounded_presentation(
             }
             if blockers:
                 retry_blockers = blockers
-                if missing_group_ids:
+                if missing_group_ids and attempt == 1:
                     continue
-                # Surplus or otherwise malformed output is not user-visible, but
-                # a protocol violation cannot be certified as a Claude report.
-                accepted_prose_by_group_id.clear()
-                continue
+                if missing_group_ids and attempt == 2:
+                    # Never weaken the grounding gate for a second bad response.
+                    # Discard only unresolved model prose and restore those
+                    # groups from the server-owned canonical claims.
+                    for option in pending_options:
+                        group_id = str(option["group_id"])
+                        if group_id in missing_group_ids:
+                            accepted_prose_by_group_id[group_id] = strict_prose_by_group_id[
+                                group_id
+                            ]
+                else:
+                    # A response with every expected group plus malformed or
+                    # surplus content is a protocol violation, not a repairable
+                    # omission. It cannot be certified as a Claude report.
+                    accepted_prose_by_group_id.clear()
+                    continue
             sections, blockers = _presentation_sections_from_group_prose(
                 claims,
                 options,

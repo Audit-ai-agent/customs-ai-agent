@@ -17,6 +17,8 @@
   합니다. 비슷한 항목도 합치거나 생략하지 않으며 같은 group_id를 두 번 출력하지 않습니다.
 - accepted_group_ids는 앞선 시도에서 이미 검증된 항목입니다. 재시도에서는 이를 다시 작성하지
   않고 현재 required_claim_groups에 포함된 누락·거절 항목만 작성합니다.
+- required_claim_groups의 항목에 strict_repair_prose가 있으면 해당 prose는 그 문구와
+  정규화된 공백까지 정확히 같아야 합니다. 단어를 추가·삭제·의역하지 않습니다.
 - 구역, 역할, Claim ID와 인용은 서버가 순서에 따라 고정합니다. group_id 구조 필드 외의 ID를
   출력하거나 다시 선택하지 않으며 group_id를 prose 본문에 적지 않습니다.
 - 각 설명은 같은 위치의 canonical_claims가 말하는 사실을 빠짐없이 설명하는 자연스러운 의역이어야 합니다.
