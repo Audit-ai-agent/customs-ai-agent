@@ -2916,6 +2916,41 @@ def answer_case_conversation(
                 allowed_context_ids=allowed_context_ids,
                 scope=scope,
             )
+            if blockers and attempt == 2:
+                strict_answer = _fallback_answer(
+                    request,
+                    scope,
+                    guidance,
+                    plan,
+                    classification_audit,
+                    reasons=["strict_answer_projection"],
+                    attempt_count=attempt,
+                )
+                normalized_candidate = {
+                    "direct_answer": strict_answer.direct_answer,
+                    "explanation": strict_answer.explanation,
+                    "evidence_meaning": strict_answer.evidence_meaning,
+                    "impact": strict_answer.impact,
+                    "next_steps": strict_answer.next_steps,
+                    "limitations": strict_answer.limitations,
+                    "claim_selections": strict_answer.claim_selections.model_dump(
+                        mode="json",
+                        warnings=False,
+                    ),
+                    "citation_references": [
+                        citation.model_dump(mode="json", warnings=False)
+                        for citation in strict_answer.citations
+                    ],
+                    "suggested_questions": _SAFE_SUGGESTED_QUESTIONS,
+                    "used_context_message_ids": strict_answer.used_context_message_ids,
+                }
+                blockers = _answer_values_safe(
+                    normalized_candidate,
+                    claims=claims,
+                    guidance=guidance,
+                    allowed_context_ids=allowed_context_ids,
+                    scope=scope,
+                )
             if blockers:
                 blockers = sorted(
                     {

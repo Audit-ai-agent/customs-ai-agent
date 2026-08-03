@@ -1918,6 +1918,7 @@ class _NaturalChatAnalyzer:
         add_unassigned_next_step: bool = False,
         add_extra_assigned_explanation: bool = False,
         drop_assigned_explanation: bool = False,
+        invalid_assigned_explanation_style: bool = False,
         scope: str = "case_grounded",
     ) -> None:
         self.model_id = model_id
@@ -1926,6 +1927,7 @@ class _NaturalChatAnalyzer:
         self.add_unassigned_next_step = add_unassigned_next_step
         self.add_extra_assigned_explanation = add_extra_assigned_explanation
         self.drop_assigned_explanation = drop_assigned_explanation
+        self.invalid_assigned_explanation_style = invalid_assigned_explanation_style
         self.scope = scope
         self.answer_calls = 0
         self.verifier_calls = 0
@@ -1978,6 +1980,8 @@ class _NaturalChatAnalyzer:
                 value["explanation"].append("서버가 배정하지 않은 별도의 설명을 추가했습니다.")
             if self.drop_assigned_explanation and assignments["explanation"]:
                 value["explanation"] = []
+            if self.invalid_assigned_explanation_style and assignments["explanation"]:
+                value["explanation"][0] = "확인된 설명이지만 종결 형식이 올바르지 않음"
         elif task_id == "customs_case_answer_verifier":
             self.verifier_calls += 1
             self.verifier_contexts.append(kwargs["untrusted_context"])
@@ -2087,6 +2091,27 @@ def test_chat_repairs_missing_assigned_prose_and_binds_geujung_follow_up() -> No
     assert answer.generation_audit.mode == "claude"
     assert answer.verification_audit.status == "passed"
     assert answer.explanation
+    assert answer.used_context_message_ids == ["turn-user-1", "turn-assistant-1"]
+
+
+def test_chat_repairs_invalid_assigned_prose_with_verified_canonical_projection() -> None:
+    request = _conversation(
+        "그중 가장 중요한 이유는 무엇입니까?",
+        turns=_follow_up_turns(),
+    )
+    analyzer = _NaturalChatAnalyzer(
+        request.review_result.runtime_release.model_id,
+        invalid_assigned_explanation_style=True,
+    )
+
+    answer = answer_case_conversation(request, analyzer=analyzer)  # type: ignore[arg-type]
+
+    assert analyzer.answer_calls == 2
+    assert analyzer.verifier_calls == 1
+    assert answer.generation_audit.mode == "claude"
+    assert answer.verification_audit.status == "passed"
+    assert answer.explanation
+    assert all(item.endswith("니다.") for item in answer.explanation)
     assert answer.used_context_message_ids == ["turn-user-1", "turn-assistant-1"]
 
 
