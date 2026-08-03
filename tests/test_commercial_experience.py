@@ -108,6 +108,18 @@ CONTRACT_MODELS = {
     "review-revision-experience-result-v1.schema.json": ReviewRevisionExperienceResultV1,
     "review-stage-event-v1.schema.json": ReviewStageEventV1,
 }
+
+
+def _presentation_outputs(
+    options: list[dict[str, object]],
+    texts: list[str],
+) -> list[dict[str, str]]:
+    return [
+        {"group_id": str(option["group_id"]), "prose": text}
+        for option, text in zip(options, texts, strict=True)
+    ]
+
+
 BASELINE_REVIEW_RESULT_V3_FILE_SHA256 = (
     "72e70f901ef0bc7402159f4a1d1e25043effa02213f450ac017b611aaa37f912"
 )
@@ -1022,14 +1034,19 @@ def test_presentation_lexical_gate_defers_atom_free_contradiction_to_entailment_
     first = options[0]
     call = StructuredAgenticResult(
         value={
-            "prose_by_claim_group": [
-                (
-                    "담당자 판단을 기다리지 않아도 바로 후속 절차를 진행할 수 있습니다."
-                    if option is first
-                    else " ".join(claim["canonical_text"] for claim in option["canonical_claims"])
-                )
-                for option in options
-            ]
+            "prose_by_claim_group": _presentation_outputs(
+                options,
+                [
+                    (
+                        "담당자 판단을 기다리지 않아도 바로 후속 절차를 진행할 수 있습니다."
+                        if option is first
+                        else " ".join(
+                            claim["canonical_text"] for claim in option["canonical_claims"]
+                        )
+                    )
+                    for option in options
+                ],
+            )
         },
         model_id=result.runtime_release.model_id,
         prompt_sha256="1" * 64,
@@ -1091,7 +1108,7 @@ def test_presentation_accepts_natural_non_byte_equivalent_grounded_paraphrase() 
         for option in options
     ]
     call = StructuredAgenticResult(
-        value={"prose_by_claim_group": texts},
+        value={"prose_by_claim_group": _presentation_outputs(options, texts)},
         model_id=result.runtime_release.model_id,
         prompt_sha256="1" * 64,
         output_schema_sha256="2" * 64,
@@ -1160,7 +1177,7 @@ def test_presentation_failure_diagnostics_name_fixed_group_without_model_text() 
     ]
     prose[0] = f"{prose[0][:-1]} 확인되지 않은 금액은 9999원입니다."
     call = StructuredAgenticResult(
-        value={"prose_by_claim_group": prose},
+        value={"prose_by_claim_group": _presentation_outputs(options, prose)},
         model_id=result.runtime_release.model_id,
         prompt_sha256="1" * 64,
         output_schema_sha256="2" * 64,
@@ -1201,10 +1218,15 @@ class _GroundedPresentationAnalyzer:
             groups = kwargs["untrusted_context"]["required_claim_groups"]
             value = {
                 "prose_by_claim_group": [
-                    (
-                        "담당자가 결과를 이해하기 쉽도록 확인 내용을 설명하면, "
-                        + " ".join(claim["canonical_text"] for claim in group["canonical_claims"])
-                    )
+                    {
+                        "group_id": group["group_id"],
+                        "prose": (
+                            "담당자가 결과를 이해하기 쉽도록 확인 내용을 설명하면, "
+                            + " ".join(
+                                claim["canonical_text"] for claim in group["canonical_claims"]
+                            )
+                        ),
+                    }
                     for group in groups
                 ]
             }
@@ -1238,6 +1260,63 @@ class _GroundedPresentationAnalyzer:
         )
 
 
+class _MissingGroupRepairAnalyzer(_GroundedPresentationAnalyzer):
+    def __init__(
+        self,
+        model_id: str,
+        *,
+        first_attempt_fault: str = "missing",
+        repair_succeeds: bool = True,
+    ) -> None:
+        super().__init__(model_id)
+        self.first_attempt_fault = first_attempt_fault
+        self.repair_succeeds = repair_succeeds
+        self.requested_group_ids: list[list[str]] = []
+        self.generated_prose_by_group_id: dict[str, str] = {}
+
+    def run_bounded_agentic_task(self, *_args, **kwargs) -> StructuredAgenticResult:
+        if kwargs["task_id"] != "customs_experience_report":
+            return super().run_bounded_agentic_task(*_args, **kwargs)
+        self.report_calls += 1
+        groups = kwargs["untrusted_context"]["required_claim_groups"]
+        group_ids = [str(group["group_id"]) for group in groups]
+        self.requested_group_ids.append(group_ids)
+        selected = (
+            groups[:-1]
+            if self.report_calls == 1 and self.first_attempt_fault == "missing"
+            else groups
+        )
+        if self.report_calls > 1 and not self.repair_succeeds:
+            selected = []
+        values: list[dict[str, str]] = []
+        for group in selected:
+            group_id = str(group["group_id"])
+            prose = "담당자가 결과를 이해하기 쉽도록 확인 내용을 설명하면, " + " ".join(
+                claim["canonical_text"] for claim in group["canonical_claims"]
+            )
+            if (
+                self.report_calls == 1
+                and self.first_attempt_fault == "unsafe"
+                and group is groups[-1]
+            ):
+                prose = f"{prose} 확인되지 않은 금액은 9999원입니다."
+            self.generated_prose_by_group_id[group_id] = prose
+            values.append({"group_id": group_id, "prose": prose})
+        schema = kwargs["output_schema"]
+        return StructuredAgenticResult(
+            value={"prose_by_claim_group": values},
+            model_id=self.model_id,
+            prompt_sha256=hashlib.sha256(kwargs["system_prompt"].encode("utf-8")).hexdigest(),
+            output_schema_sha256=anthropic_output_schema_sha256(schema),
+            semantic_output_schema_sha256=canonical_json_sha256(schema),
+            request_id=f"request-customs-experience-report-{self.report_calls}",
+            message_id=f"message-customs-experience-report-{self.report_calls}",
+            input_tokens=10,
+            output_tokens=5,
+            latency_ms=1,
+        )
+
+
 def test_presentation_uses_fluent_claude_prose_only_after_independent_entailment() -> None:
     result = _v3_result()[2]
     analyzer = _GroundedPresentationAnalyzer(result.runtime_release.model_id)
@@ -1254,6 +1333,76 @@ def test_presentation_uses_fluent_claude_prose_only_after_independent_entailment
         for section in presentation.sections
         for statement in section.statements
     )
+
+
+def test_presentation_preserves_valid_groups_and_repairs_only_the_missing_group() -> None:
+    result = _v3_result()[2]
+    claims = build_canonical_claim_catalog(result)
+    options = _presentation_statement_options(claims)
+    analyzer = _MissingGroupRepairAnalyzer(result.runtime_release.model_id)
+
+    presentation = build_grounded_presentation(result, analyzer=analyzer)  # type: ignore[arg-type]
+
+    assert presentation.generation_audit.mode == "claude"
+    assert presentation.generation_audit.attempt_count == 2
+    assert presentation.verification_audit.status == "passed"
+    assert analyzer.report_calls == 2
+    assert analyzer.verifier_calls == 1
+    assert analyzer.requested_group_ids[0] == [str(option["group_id"]) for option in options]
+    assert analyzer.requested_group_ids[1] == [str(options[-1]["group_id"])]
+    visible_claim_ids = [
+        claim_id
+        for section in presentation.sections
+        for statement in section.statements
+        for claim_id in statement.source_claim_ids
+    ]
+    assert Counter(visible_claim_ids) == Counter(claim.claim_id for claim in claims)
+    visible_prose = {
+        tuple(statement.source_claim_ids): statement.text
+        for section in presentation.sections
+        for statement in section.statements
+    }
+    for option in options:
+        assert (
+            visible_prose[tuple(option["source_claim_ids"])]
+            == (analyzer.generated_prose_by_group_id[str(option["group_id"])])
+        )
+
+
+def test_presentation_retries_only_the_rejected_group() -> None:
+    result = _v3_result()[2]
+    options = _presentation_statement_options(build_canonical_claim_catalog(result))
+    analyzer = _MissingGroupRepairAnalyzer(
+        result.runtime_release.model_id,
+        first_attempt_fault="unsafe",
+    )
+
+    presentation = build_grounded_presentation(result, analyzer=analyzer)  # type: ignore[arg-type]
+
+    assert presentation.generation_audit.mode == "claude"
+    assert presentation.verification_audit.status == "passed"
+    assert analyzer.requested_group_ids[1] == [str(options[-1]["group_id"])]
+    assert all(
+        "9999" not in statement.text
+        for section in presentation.sections
+        for statement in section.statements
+    )
+
+
+def test_presentation_uses_fallback_when_the_missing_group_repair_fails() -> None:
+    result = _v3_result()[2]
+    analyzer = _MissingGroupRepairAnalyzer(
+        result.runtime_release.model_id,
+        repair_succeeds=False,
+    )
+
+    presentation = build_grounded_presentation(result, analyzer=analyzer)  # type: ignore[arg-type]
+
+    assert analyzer.report_calls == 2
+    assert analyzer.verifier_calls == 0
+    assert presentation.generation_audit.mode == "deterministic_fallback"
+    assert presentation.verification_audit.status == "fallback"
+    assert "presentation_group_count_mismatch" in presentation.verification_audit.reason_codes
 
 
 def test_presentation_regenerates_once_then_uses_detailed_fallback_on_entailment_failure() -> None:

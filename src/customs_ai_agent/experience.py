@@ -364,9 +364,20 @@ _PRESENTATION_OUTPUT_SCHEMA: dict[str, Any] = {
     "properties": {
         "prose_by_claim_group": {
             "type": "array",
-            "minItems": 8,
+            "minItems": 1,
             "maxItems": 100,
-            "items": {"type": "string", "minLength": 1, "maxLength": 4000},
+            "items": {
+                "type": "object",
+                "additionalProperties": False,
+                "required": ["group_id", "prose"],
+                "properties": {
+                    "group_id": {
+                        "type": "string",
+                        "pattern": r"^presentation_group_[a-f0-9]{64}$",
+                    },
+                    "prose": {"type": "string", "minLength": 1, "maxLength": 4000},
+                },
+            },
         }
     },
 }
@@ -757,11 +768,17 @@ def _presentation_statement_options(
         if current:
             chunks.append(current)
         for chunk in chunks:
+            group_payload = {
+                "section_code": section,
+                "role": role,
+                "source_claim_ids": [claim.claim_id for claim in chunk],
+            }
             options.append(
                 {
+                    "group_id": stable_object_id("presentation_group", group_payload),
                     "section_code": section,
                     "role": role,
-                    "source_claim_ids": [claim.claim_id for claim in chunk],
+                    "source_claim_ids": group_payload["source_claim_ids"],
                     "canonical_claims": [
                         {
                             "claim_id": claim.claim_id,
@@ -800,10 +817,7 @@ def _preserve_occurrence_meanings(
     exact_meanings = [
         claim.canonical_text
         for claim in claims
-        if any(
-            citation.kind in {"issue", "finding"}
-            for citation in claim.citation_references
-        )
+        if any(citation.kind in {"issue", "finding"} for citation in claim.citation_references)
     ]
     missing = [meaning for meaning in exact_meanings if meaning not in text]
     return " ".join([*missing, text]) if missing else text
@@ -1205,34 +1219,43 @@ def _fallback_presentation(
     return GroundedPresentationV1.model_validate(payload)
 
 
-def _candidate_presentation(
-    result: ReviewRunResultV3,
+def _validated_presentation_group_prose(
     claims: list[CanonicalClaimV1],
+    options: list[dict[str, Any]],
     call: StructuredAgenticResult,
-    *,
-    attempt_count: int,
-) -> tuple[list[GroundedPresentationSectionV1], list[str]]:
+) -> tuple[dict[str, str], list[str]]:
+    """Validate one bounded batch while retaining every independently safe group."""
+
     claim_index = {claim.claim_id: claim for claim in claims}
-    options = _presentation_statement_options(claims)
     raw_prose = call.value.get("prose_by_claim_group")
-    if not isinstance(raw_prose, list) or any(not isinstance(item, str) for item in raw_prose):
-        return [], ["presentation_group_prose_invalid"]
-    if len(raw_prose) != len(options):
-        return [], [
-            "presentation_group_count_mismatch",
-            f"presentation_expected_groups_{len(options):02d}",
-            f"presentation_observed_groups_{len(raw_prose):02d}",
-        ]
-    statements_by_section: dict[PresentationSectionCode, list[GroundedPresentationStatementV1]] = {
-        section: [] for section in _SECTION_ORDER
-    }
-    used_claims: set[str] = set()
+    if not isinstance(raw_prose, list) or any(not isinstance(item, dict) for item in raw_prose):
+        return {}, ["presentation_group_prose_invalid"]
+    expected_ids = {str(option["group_id"]) for option in options}
+    outputs_by_id: dict[str, list[str]] = {}
     blockers: list[str] = []
-    for group_index, (option, text) in enumerate(zip(options, raw_prose, strict=True)):
-        section: PresentationSectionCode = option["section_code"]
+    for item in raw_prose:
+        group_id = item.get("group_id")
+        prose = item.get("prose")
+        if not isinstance(group_id, str) or not isinstance(prose, str):
+            blockers.append("presentation_group_prose_invalid")
+            continue
+        if group_id not in expected_ids:
+            blockers.append("presentation_unknown_group")
+            continue
+        outputs_by_id.setdefault(group_id, []).append(prose)
+    accepted: dict[str, str] = {}
+    for group_index, option in enumerate(options):
+        group_id = str(option["group_id"])
+        values = outputs_by_id.get(group_id, [])
+        if not values:
+            blockers.append(f"presentation_group_{group_index:02d}_missing")
+            continue
+        if len(values) != 1:
+            blockers.append(f"presentation_group_{group_index:02d}_duplicated")
+            continue
         claim_ids = option["source_claim_ids"]
         typed_source = [claim_index[claim_id] for claim_id in claim_ids]
-        normalized_text = " ".join(text.split())
+        normalized_text = " ".join(values[0].split())
         normalized_text = _preserve_occurrence_meanings(normalized_text, typed_source)
         source_texts = _claim_sources(typed_source)
         prose_blockers = _grounded_prose_blockers(
@@ -1246,12 +1269,42 @@ def _candidate_presentation(
             blockers.extend(
                 _presentation_group_diagnostics(
                     group_index=group_index,
-                    section_code=section,
+                    section_code=option["section_code"],
                     text=normalized_text,
                     source_texts=source_texts,
                     blockers=prose_blockers,
                 )
             )
+            continue
+        accepted[group_id] = normalized_text
+    if len(accepted) != len(options):
+        blockers.extend(
+            [
+                "presentation_group_count_mismatch",
+                f"presentation_expected_groups_{len(options):02d}",
+                f"presentation_observed_groups_{len(accepted):02d}",
+            ]
+        )
+    return accepted, sorted(set(blockers))
+
+
+def _presentation_sections_from_group_prose(
+    claims: list[CanonicalClaimV1],
+    options: list[dict[str, Any]],
+    prose_by_group_id: dict[str, str],
+) -> tuple[list[GroundedPresentationSectionV1], list[str]]:
+    claim_index = {claim.claim_id: claim for claim in claims}
+    statements_by_section: dict[PresentationSectionCode, list[GroundedPresentationStatementV1]] = {
+        section: [] for section in _SECTION_ORDER
+    }
+    used_claims: set[str] = set()
+    blockers: list[str] = []
+    for option in options:
+        section: PresentationSectionCode = option["section_code"]
+        claim_ids = option["source_claim_ids"]
+        typed_source = [claim_index[claim_id] for claim_id in claim_ids]
+        normalized_text = prose_by_group_id.get(str(option["group_id"]))
+        if normalized_text is None:
             continue
         used_claims.update(claim_ids)
         statements_by_section[section].append(_statement(typed_source, normalized_text))
@@ -1289,6 +1342,21 @@ def _candidate_presentation(
         ],
         blockers,
     )
+
+
+def _candidate_presentation(
+    result: ReviewRunResultV3,
+    claims: list[CanonicalClaimV1],
+    call: StructuredAgenticResult,
+    *,
+    attempt_count: int,
+) -> tuple[list[GroundedPresentationSectionV1], list[str]]:
+    del result, attempt_count
+    options = _presentation_statement_options(claims)
+    accepted, blockers = _validated_presentation_group_prose(claims, options, call)
+    if blockers:
+        return [], blockers
+    return _presentation_sections_from_group_prose(claims, options, accepted)
 
 
 def _verify_presentation_with_claude(
@@ -1387,8 +1455,15 @@ def build_grounded_presentation(
                 state="failed",
             )
             raise
+    options = _presentation_statement_options(claims)
+    accepted_prose_by_group_id: dict[str, str] = {}
     retry_blockers: list[str] = []
     for attempt in range(1, 3):
+        pending_options = [
+            option
+            for option in options
+            if str(option["group_id"]) not in accepted_prose_by_group_id
+        ]
         generation_started = _stage_started(stage_callback, "report_composition")
         generation_completed = False
         try:
@@ -1396,7 +1471,14 @@ def build_grounded_presentation(
                 task_id=EXPERIENCE_REPORT_PROMPT_ID,
                 system_prompt=load_experience_report_system_prompt(),
                 untrusted_context={
-                    "required_claim_groups": _presentation_statement_options(claims),
+                    "required_claim_groups": pending_options,
+                    "accepted_group_ids": [
+                        option["group_id"]
+                        for option in options
+                        if str(option["group_id"]) in accepted_prose_by_group_id
+                    ],
+                    "total_required_claim_group_count": len(options),
+                    "current_required_claim_group_count": len(pending_options),
                     "fixed_headline": _headline(result),
                     "fixed_section_order": list(_SECTION_ORDER),
                     "quality_requirements": {
@@ -1424,13 +1506,32 @@ def build_grounded_presentation(
             generation_completed = True
             if generation.model_id != result.runtime_release.model_id:
                 raise ValueError("presentation_model_identity_mismatch")
-            sections, blockers = _candidate_presentation(
-                result,
+            accepted, blockers = _validated_presentation_group_prose(
                 claims,
+                pending_options,
                 generation,
-                attempt_count=attempt,
+            )
+            accepted_prose_by_group_id.update(accepted)
+            missing_group_ids = {
+                str(option["group_id"])
+                for option in options
+                if str(option["group_id"]) not in accepted_prose_by_group_id
+            }
+            if blockers:
+                retry_blockers = blockers
+                if missing_group_ids:
+                    continue
+                # Surplus or otherwise malformed output is not user-visible, but
+                # a protocol violation cannot be certified as a Claude report.
+                accepted_prose_by_group_id.clear()
+                continue
+            sections, blockers = _presentation_sections_from_group_prose(
+                claims,
+                options,
+                accepted_prose_by_group_id,
             )
             if blockers:
+                accepted_prose_by_group_id.clear()
                 retry_blockers = blockers
                 continue
             verification_started = _stage_started(
@@ -1461,6 +1562,7 @@ def build_grounded_presentation(
             if verification.model_id != result.runtime_release.model_id:
                 blockers.append("entailment_model_identity_mismatch")
             if blockers:
+                accepted_prose_by_group_id.clear()
                 retry_blockers = blockers
                 continue
             headline = _headline(result)
@@ -1517,6 +1619,7 @@ def build_grounded_presentation(
                     exc,
                 )
             ]
+            accepted_prose_by_group_id.clear()
     composition_started = _stage_started(stage_callback, "report_composition")
     verification_started = None
     try:

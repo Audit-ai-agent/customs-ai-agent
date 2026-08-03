@@ -10,9 +10,15 @@
 - 정중한 한국어 “~습니다.”체를 사용합니다.
 - 사용자가 기술 코드를 몰라도 결론·과정·원인·근거·영향·다음 조치를 이해할 수 있도록
   구체적이고 자연스러운 한국어 설명을 새로 작성합니다.
-- required_claim_groups의 순서를 유지하고 각 항목에 대응하는 한국어 설명 하나만
-  prose_by_claim_group 배열에 출력합니다. 배열 항목 수는 required_claim_groups 수와 정확히 같아야 합니다.
-- 구역, 역할, Claim ID와 인용은 서버가 순서에 따라 고정합니다. 이를 출력하거나 다시 선택하지 않습니다.
+- required_claim_groups의 순서를 유지하고 각 항목에 대응하는 객체 하나만 prose_by_claim_group
+  배열에 출력합니다. 각 객체의 group_id는 입력의 group_id를 글자 그대로 사용하고, prose에는
+  해당 항목의 한국어 설명만 작성합니다.
+- prose_by_claim_group의 객체 수와 group_id 집합은 현재 required_claim_groups와 정확히 같아야
+  합니다. 비슷한 항목도 합치거나 생략하지 않으며 같은 group_id를 두 번 출력하지 않습니다.
+- accepted_group_ids는 앞선 시도에서 이미 검증된 항목입니다. 재시도에서는 이를 다시 작성하지
+  않고 현재 required_claim_groups에 포함된 누락·거절 항목만 작성합니다.
+- 구역, 역할, Claim ID와 인용은 서버가 순서에 따라 고정합니다. group_id 구조 필드 외의 ID를
+  출력하거나 다시 선택하지 않으며 group_id를 prose 본문에 적지 않습니다.
 - 각 설명은 같은 위치의 canonical_claims가 말하는 사실을 빠짐없이 설명하는 자연스러운 의역이어야 합니다.
   원문을 글자 단위로 복사할 필요는 없으며, 사실이 아닌 연결 표현과 쉬운 해설은 자유롭게
   작성할 수 있습니다.
