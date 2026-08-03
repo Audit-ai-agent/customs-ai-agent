@@ -1571,10 +1571,14 @@ class _NaturalChatAnalyzer:
         *,
         forge_number: bool = False,
         reject_entailment: bool = False,
+        add_unassigned_next_step: bool = False,
+        add_extra_assigned_explanation: bool = False,
     ) -> None:
         self.model_id = model_id
         self.forge_number = forge_number
         self.reject_entailment = reject_entailment
+        self.add_unassigned_next_step = add_unassigned_next_step
+        self.add_extra_assigned_explanation = add_extra_assigned_explanation
         self.answer_calls = 0
         self.verifier_calls = 0
         self.verifier_contexts: list[dict[str, object]] = []
@@ -1620,6 +1624,10 @@ class _NaturalChatAnalyzer:
                     for item in assignments["next_steps"]
                 ],
             }
+            if self.add_unassigned_next_step and not assignments["next_steps"]:
+                value["next_steps"] = ["담당자는 현재 심사 결과를 먼저 확인해야 합니다."]
+            if self.add_extra_assigned_explanation and assignments["explanation"]:
+                value["explanation"].append("서버가 배정하지 않은 별도의 설명을 추가했습니다.")
         elif task_id == "customs_case_answer_verifier":
             self.verifier_calls += 1
             self.verifier_contexts.append(kwargs["untrusted_context"])
@@ -1726,9 +1734,7 @@ def test_human_review_reason_is_bound_to_release_guard_not_clean_issue_claim() -
     assert direct_claim.role == "limitation"
     assert "담당자가 최종 확인" in direct_claim.canonical_text
     assert all(
-        claim.section_code != "issues_and_causes"
-        for area in bindings.values()
-        for claim in area
+        claim.section_code != "issues_and_causes" for area in bindings.values() for claim in area
     )
     assert [claim.role for claim in bindings["impact"]] == ["impact"]
     assert [claim.role for claim in bindings["next_steps"]] == ["action"]
@@ -1823,6 +1829,41 @@ def test_priority_follow_up_uses_same_action_claim_for_claude_and_safe_fallback(
         fallback.verification_audit.reason_codes
     )
     assert "RAW MODEL TEXT" not in json.dumps(fallback.model_dump(mode="json"))
+
+
+def test_priority_follow_up_discards_unassigned_model_prose_before_verification() -> None:
+    request = _conversation(
+        "방금 설명한 이유 중에서 담당자가 가장 먼저 확인할 항목은 무엇입니까?",
+        turns=_follow_up_turns(),
+    )
+    analyzer = _NaturalChatAnalyzer(
+        request.review_result.runtime_release.model_id,
+        add_unassigned_next_step=True,
+    )
+
+    answer = answer_case_conversation(request, analyzer=analyzer)  # type: ignore[arg-type]
+
+    assert answer.generation_audit.mode == "claude"
+    assert answer.verification_audit.status == "passed"
+    assert answer.next_steps == []
+    assert analyzer.answer_calls == 1
+    assert analyzer.verifier_calls == 1
+    assert analyzer.verifier_contexts[0]["candidate_answer"]["next_steps"] == []
+
+
+def test_assigned_answer_area_keeps_exact_prose_count_enforcement() -> None:
+    request = _conversation("현재 심사 결과의 결론을 이해하기 쉽게 설명해 주십시오.")
+    analyzer = _NaturalChatAnalyzer(
+        request.review_result.runtime_release.model_id,
+        add_extra_assigned_explanation=True,
+    )
+
+    answer = answer_case_conversation(request, analyzer=analyzer)  # type: ignore[arg-type]
+
+    assert analyzer.answer_calls == 2
+    assert analyzer.verifier_calls == 0
+    assert answer.generation_audit.mode == "deterministic_fallback"
+    assert "answer_explanation_prose_count_mismatch" in answer.verification_audit.reason_codes
 
 
 def test_ambiguous_follow_up_is_reclassified_to_clarification() -> None:

@@ -1911,12 +1911,9 @@ def _answer_composition_plan(
                     used.add(claim.claim_id)
         return None
 
-    review_disposition_reason = (
-        intent == "reason"
-        and _contains_any(
-            _normalized_prose(request.question).casefold(),
-            _REVIEW_DISPOSITION_REASON_MARKERS,
-        )
+    review_disposition_reason = intent == "reason" and _contains_any(
+        _normalized_prose(request.question).casefold(),
+        _REVIEW_DISPOSITION_REASON_MARKERS,
     )
 
     if intent == "summary":
@@ -2539,6 +2536,13 @@ def answer_case_conversation(
                 "used_context_message_ids": list(plan.used_context_message_ids),
             }
             if scope in {"case_grounded", "evidence_grounded"}:
+                # The server owns the answer composition plan.  Model prose in
+                # an unassigned area is never user-visible and must not make an
+                # otherwise grounded direct answer fail.  Assigned areas remain
+                # strict: missing or surplus prose still triggers regeneration.
+                for area in ("explanation", "evidence_meaning", "impact", "next_steps"):
+                    if not plan.claims_by_area[area]:
+                        normalized_candidate[area] = []
                 count_blockers = [
                     f"answer_{area}_prose_count_mismatch"
                     for area in ("explanation", "evidence_meaning", "impact", "next_steps")
