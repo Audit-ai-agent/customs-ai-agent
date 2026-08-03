@@ -88,7 +88,8 @@ from evals.run_uat_adaptive_live import (
     _write_private_summary_to_stdout,
     main as adaptive_live_main,
 )
-from tests.test_v3_bounded_agent import _v3_result
+from tests.test_retrieval_integration import RequirementRetriever
+from tests.test_v3_bounded_agent import _request, _v3_result
 
 
 ROOT = Path(__file__).resolve().parents[1]
@@ -167,6 +168,23 @@ def _conversation(question: str, *, turns: list[ConversationTurnV2] | None = Non
         conversation_context_sha256=conversation_context_sha256(recent_turns),
         recent_turns=recent_turns,
         review_result=result,
+    )
+
+
+def _missing_required_document_result():
+    request = _request(review_run_id="missing-required-document-presentation")
+    result_v2 = run_review_result_v2(
+        ReviewRunRequestV2(
+            scenario_id="happy_path",
+            review_run_id=request.review_run_id,
+            review_as_of=request.review_as_of,
+        ),
+        retriever=RequirementRetriever(),
+    )
+    return to_review_run_result_v3(
+        result_v2,
+        request,
+        evidence_runtime_v3_sha256="e" * 64,
     )
 
 
@@ -1232,6 +1250,11 @@ class _GroundedPresentationAnalyzer:
             }
         elif task_id == "customs_experience_entailment":
             self.verifier_calls += 1
+            assert all(
+                statement["source_claim_ids"]
+                == [claim["claim_id"] for claim in statement["canonical_claims"]]
+                for statement in kwargs["untrusted_context"]["candidate_statements"]
+            )
             value = {
                 "verdicts": [
                     {
@@ -1326,6 +1349,16 @@ class _MissingGroupRepairAnalyzer(_GroundedPresentationAnalyzer):
         )
 
 
+class _RejectFirstEntailmentAnalyzer(_MissingGroupRepairAnalyzer):
+    def __init__(self, model_id: str) -> None:
+        super().__init__(model_id, first_attempt_fault="none")
+
+    def run_bounded_agentic_task(self, *_args, **kwargs) -> StructuredAgenticResult:
+        if kwargs["task_id"] == "customs_experience_entailment":
+            self.reject_entailment = self.verifier_calls == 0
+        return super().run_bounded_agentic_task(*_args, **kwargs)
+
+
 def test_presentation_uses_fluent_claude_prose_only_after_independent_entailment() -> None:
     result = _v3_result()[2]
     analyzer = _GroundedPresentationAnalyzer(result.runtime_release.model_id)
@@ -1342,6 +1375,66 @@ def test_presentation_uses_fluent_claude_prose_only_after_independent_entailment
         for section in presentation.sections
         for statement in section.statements
     )
+
+
+def test_presentation_missing_required_document_conclusion_separates_results() -> None:
+    result = _missing_required_document_result().model_copy(update={"execution_status": "partial"})
+
+    claims = build_canonical_claim_catalog(result)
+    conclusion = next(
+        claim
+        for claim in claims
+        if claim.section_code == "conclusion" and claim.role == "conclusion"
+    )
+
+    assert result.validation_issues == []
+    assert [finding.finding_code for finding in result.regulatory_findings] == [
+        "REQUIRED_CERT_MISSING"
+    ]
+    assert conclusion.canonical_text == (
+        "문서 정합성 검토에서는 제출 문서 사이의 값 불일치가 발견되지 않았습니다. "
+        "이와 별도로 규정 검토에서는 담당자가 확인하고 보완해야 할 사항이 발견되었습니다."
+    )
+    assert {citation.kind for citation in conclusion.citation_references} == {
+        "outcome",
+        "finding",
+    }
+
+
+def test_presentation_incomplete_review_does_not_claim_document_consistency() -> None:
+    result = _missing_required_document_result()
+    failed_document = result.document_results[0].model_copy(update={"extraction_status": "failed"})
+    result = result.model_copy(
+        update={"document_results": [failed_document, *result.document_results[1:]]}
+    )
+
+    claims = build_canonical_claim_catalog(result)
+    visible_text = " ".join(claim.canonical_text for claim in claims)
+
+    assert (
+        "문서 정합성 검토에서는 제출 문서 사이의 값 불일치가 발견되지 않았습니다"
+        not in visible_text
+    )
+    assert (
+        "문서 분석이 완전히 끝나지 않아 문서 사이의 값 일치 여부를 확정하지 않았습니다."
+        in visible_text
+    )
+
+
+def test_presentation_missing_required_document_strict_retry_passes_entailment() -> None:
+    result = _missing_required_document_result()
+    analyzer = _RejectFirstEntailmentAnalyzer(result.runtime_release.model_id)
+
+    presentation = build_grounded_presentation(result, analyzer=analyzer)  # type: ignore[arg-type]
+
+    assert analyzer.report_calls == 2
+    assert analyzer.verifier_calls == 2
+    assert presentation.generation_audit.mode == "claude"
+    assert presentation.generation_audit.attempt_count == 2
+    assert presentation.verification_audit.status == "passed"
+    conclusion = presentation.sections[0].statements[0]
+    assert "문서 정합성 검토에서는" in conclusion.text
+    assert "이와 별도로 규정 검토에서는" in conclusion.text
 
 
 def test_presentation_preserves_valid_groups_and_repairs_only_the_missing_group() -> None:

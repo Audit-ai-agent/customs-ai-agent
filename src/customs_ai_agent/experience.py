@@ -913,19 +913,44 @@ def build_canonical_claim_catalog(result: ReviewRunResultV3) -> list[CanonicalCl
         raise ValueError("canonical occurrence reference is absent from the FactLedger")
     outcome_entry = next(entry for entry in result.fact_ledger.entries if entry.kind == "outcome")
     outcome = _citation("outcome", outcome_entry.reference_id)
+    finding_citations = [
+        _citation("finding", reference_id)
+        for reference_id in current_semantics.finding_reference_ids
+    ]
+    document_consistency_complete = (
+        not result.model_errors
+        and not result.model_conflicts
+        and bool(result.document_results)
+        and all(item.extraction_status == "completed" for item in result.document_results)
+    )
     claims: list[CanonicalClaimV1] = []
+    conclusion_citations = [outcome]
     if result.assessment == "no_issue_detected":
         conclusion = (
             "제출된 문서와 현재 조회된 법령 근거 범위에서는 별도의 불일치나 규정상 누락을 "
             "확인하지 못했습니다."
         )
     elif result.assessment == "issues_detected":
-        conclusion = "문서 또는 규정 검토에서 담당자가 확인하고 보완해야 할 사항이 발견되었습니다."
+        if (
+            document_consistency_complete
+            and not result.validation_issues
+            and result.regulatory_findings
+        ):
+            conclusion = (
+                "문서 정합성 검토에서는 제출 문서 사이의 값 불일치가 발견되지 "
+                "않았습니다. 이와 별도로 규정 검토에서는 담당자가 확인하고 보완해야 할 "
+                "사항이 발견되었습니다."
+            )
+            conclusion_citations.extend(finding_citations)
+        else:
+            conclusion = (
+                "문서 또는 규정 검토에서 담당자가 확인하고 보완해야 할 사항이 발견되었습니다."
+            )
     else:
         conclusion = (
             "현재 자료와 근거만으로 심사 결과를 확정하기 어려워 담당자의 추가 확인이 필요합니다."
         )
-    claims.append(_claim("conclusion", "conclusion", conclusion, [outcome]))
+    claims.append(_claim("conclusion", "conclusion", conclusion, conclusion_citations))
     claims.append(
         _claim(
             "conclusion",
@@ -991,7 +1016,7 @@ def build_canonical_claim_catalog(result: ReviewRunResultV3) -> list[CanonicalCl
                     ),
                 ]
             )
-    else:
+    elif document_consistency_complete:
         claims.append(
             _claim(
                 "document_comparison",
@@ -1005,6 +1030,23 @@ def build_canonical_claim_catalog(result: ReviewRunResultV3) -> list[CanonicalCl
                 "issues_and_causes",
                 "observation",
                 "문서 교차검증에서 별도로 설명할 오류 원인은 확인되지 않았습니다.",
+                [outcome],
+            )
+        )
+    else:
+        claims.append(
+            _claim(
+                "document_comparison",
+                "limitation",
+                "문서 분석이 완전히 끝나지 않아 문서 사이의 값 일치 여부를 확정하지 않았습니다.",
+                [outcome],
+            )
+        )
+        claims.append(
+            _claim(
+                "issues_and_causes",
+                "limitation",
+                "완료되지 않은 문서 분석이 있어 교차검증 결과와 오류 원인을 추가로 확인해야 합니다.",
                 [outcome],
             )
         )
@@ -1383,10 +1425,17 @@ def _verify_presentation_with_claude(
     sections: list[GroundedPresentationSectionV1],
 ) -> tuple[StructuredAgenticResult, list[str], str]:
     statements = [statement for section in sections for statement in section.statements]
+    claim_index = {claim.claim_id: claim for claim in claims}
     verifier_context = {
-        "canonical_claims": [claim.model_dump(mode="json", warnings=False) for claim in claims],
         "candidate_statements": [
-            statement.model_dump(mode="json", warnings=False) for statement in statements
+            {
+                **statement.model_dump(mode="json", warnings=False),
+                "canonical_claims": [
+                    claim_index[claim_id].model_dump(mode="json", warnings=False)
+                    for claim_id in statement.source_claim_ids
+                ],
+            }
+            for statement in statements
         ],
     }
     call = analyzer.run_bounded_agentic_task(
