@@ -1,11 +1,14 @@
 from __future__ import annotations
 
+from concurrent.futures import ThreadPoolExecutor
+from dataclasses import dataclass
 import time
 from typing import Any
 
 from customs_ai_agent.adapters.llm import (
     CropReadBudget,
     DEFAULT_CLAUDE_MODEL,
+    DocumentAnalysis,
     DocumentAnalyzer,
     LLMError,
     analysis_to_extracted_document,
@@ -32,6 +35,78 @@ PROVIDER_WIDE_FAILURE_CODES = frozenset(
         "unsafe_anthropic_transport_override",
     }
 )
+
+_TEXT_ANALYSIS_CONCURRENCY = 2
+
+
+@dataclass(frozen=True)
+class _TextAnalysisAttempt:
+    analysis: DocumentAnalysis | None
+    error: LLMError | None
+    latency_ms: int
+    not_attempted_after_failure: bool = False
+
+
+def _analyze_text_document(
+    analyzer: DocumentAnalyzer,
+    document: dict[str, Any],
+) -> _TextAnalysisAttempt:
+    started = time.perf_counter()
+    try:
+        return _TextAnalysisAttempt(
+            analysis=analyzer.analyze(dict(document)),
+            error=None,
+            latency_ms=round((time.perf_counter() - started) * 1000),
+        )
+    except LLMError as exc:
+        return _TextAnalysisAttempt(
+            analysis=None,
+            error=exc,
+            latency_ms=round((time.perf_counter() - started) * 1000),
+        )
+
+
+def _analyze_text_documents_in_waves(
+    analyzer: DocumentAnalyzer,
+    documents: list[dict[str, Any]],
+) -> dict[str, _TextAnalysisAttempt]:
+    """Analyze text documents in bounded waves while preserving input order.
+
+    A provider-wide failure stops only later waves. Calls already admitted to
+    the same two-document wave are allowed to finish, and their observations
+    are retained in the original document order.
+    """
+
+    attempts: dict[str, _TextAnalysisAttempt] = {}
+    circuit_failure: LLMError | None = None
+    with ThreadPoolExecutor(
+        max_workers=_TEXT_ANALYSIS_CONCURRENCY,
+        thread_name_prefix="customs-text-analysis",
+    ) as executor:
+        for start in range(0, len(documents), _TEXT_ANALYSIS_CONCURRENCY):
+            wave = documents[start : start + _TEXT_ANALYSIS_CONCURRENCY]
+            if circuit_failure is not None:
+                for document in wave:
+                    attempts[document["document_id"]] = _TextAnalysisAttempt(
+                        analysis=None,
+                        error=circuit_failure,
+                        latency_ms=0,
+                        not_attempted_after_failure=True,
+                    )
+                continue
+            futures = [
+                executor.submit(_analyze_text_document, analyzer, document) for document in wave
+            ]
+            for document, future in zip(wave, futures, strict=True):
+                attempt = future.result()
+                attempts[document["document_id"]] = attempt
+                if (
+                    circuit_failure is None
+                    and attempt.error is not None
+                    and attempt.error.code in PROVIDER_WIDE_FAILURE_CODES
+                ):
+                    circuit_failure = attempt.error
+    return attempts
 
 
 def _classify(text: str, filename: str) -> tuple[str, float]:
@@ -93,8 +168,17 @@ def _classify_documents(
     llm_mode = state.get("llm_mode") == "llm"
     circuit_failure: LLMError | None = None
     crop_budget = CropReadBudget()
+    documents = list(state.get("documents") or [])
+    text_attempts: dict[str, _TextAnalysisAttempt] | None = None
+    if (
+        llm_mode
+        and analyzer is not None
+        and documents
+        and all(not document.get("image_pages") for document in documents)
+    ):
+        text_attempts = _analyze_text_documents_in_waves(analyzer, documents)
 
-    for doc in state.get("documents") or []:
+    for doc in documents:
         provider = "rules"
         prompt_id, prompt_version, input_modality = document_prompt_identity(doc)
         declared_type = doc.get("declared_type")
@@ -105,7 +189,18 @@ def _classify_documents(
                 raise RuntimeError("llm mode requires an injected document analyzer")
             provider = "anthropic"
             started = time.perf_counter()
-            if circuit_failure is not None:
+            prefetched_attempt = (
+                text_attempts.get(doc["document_id"]) if text_attempts is not None else None
+            )
+            skipped_after_failure = (
+                prefetched_attempt is not None and prefetched_attempt.not_attempted_after_failure
+            )
+            if (text_attempts is None and circuit_failure is not None) or skipped_after_failure:
+                active_failure = (
+                    prefetched_attempt.error if prefetched_attempt is not None else circuit_failure
+                )
+                if active_failure is None:
+                    raise RuntimeError("provider circuit failure identity is missing")
                 doc_type = "unknown"
                 confidence = 0.0
                 requires_human_review = True
@@ -113,7 +208,7 @@ def _classify_documents(
                     {
                         "document_id": doc["document_id"],
                         "code": "provider_not_attempted_after_failure",
-                        "retryable": circuit_failure.retryable,
+                        "retryable": active_failure.retryable,
                         "provider": "anthropic",
                         "model_id": getattr(analyzer, "model_id", DEFAULT_CLAUDE_MODEL),
                         "prompt_id": prompt_id,
@@ -132,8 +227,17 @@ def _classify_documents(
                 if analysis_document.get("image_pages"):
                     analysis_document["_runtime_crop_budget"] = crop_budget
                 try:
+                    analysis: DocumentAnalysis
                     try:
-                        analysis = analyzer.analyze(analysis_document)
+                        if prefetched_attempt is None:
+                            analysis = analyzer.analyze(analysis_document)
+                        elif prefetched_attempt.error is not None:
+                            raise prefetched_attempt.error
+                        else:
+                            prefetched_analysis = prefetched_attempt.analysis
+                            if prefetched_analysis is None:
+                                raise RuntimeError("text analysis result is missing")
+                            analysis = prefetched_analysis
                     except LLMError as exc:
                         doc_type = "unknown"
                         confidence = 0.0
@@ -147,7 +251,11 @@ def _classify_documents(
                                 "model_id": getattr(analyzer, "model_id", DEFAULT_CLAUDE_MODEL),
                                 "prompt_id": prompt_id,
                                 "prompt_version": prompt_version,
-                                "latency_ms": round((time.perf_counter() - started) * 1000),
+                                "latency_ms": (
+                                    prefetched_attempt.latency_ms
+                                    if prefetched_attempt is not None
+                                    else round((time.perf_counter() - started) * 1000)
+                                ),
                                 "provider_request_id": exc.provider_request_id,
                                 "provider_status_code": exc.provider_status_code,
                                 "input_modality": input_modality,

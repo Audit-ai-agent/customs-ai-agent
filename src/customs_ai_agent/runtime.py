@@ -39,10 +39,12 @@ from customs_ai_agent.contracts.evidence_runtime_release import (
 )
 from customs_ai_agent.ocr_release import ReleaseLockedOcrProvider
 from customs_ai_agent.runner import (
+    build_reused_extraction_state,
     CorrectionApplicationError,
     WorkflowStageObserver,
     WorkflowStageState,
     rerun_review,
+    rerun_review_to_retrieval,
     run_review_result_v2,
     run_review_v2,
     to_review_run_result_v2,
@@ -87,6 +89,7 @@ from customs_ai_agent.schemas.v3 import (
     ReviewRevisionResultV1,
     ReviewRunResultV3,
     ServiceReviewRunRequestV3,
+    canonical_json_sha256,
     review_result_v3_sha256,
     stable_object_id,
 )
@@ -154,6 +157,10 @@ _FORBIDDEN_RESULT_KEY_TOKENS = frozenset(_key_safety_token(key) for key in _FORB
 
 class _DuplicateJsonKeyError(ValueError):
     pass
+
+
+class _ParentExtractionReuseMismatch(ValueError):
+    """The immutable parent extraction cannot be reused by this runtime."""
 
 
 def _reject_duplicate_json_keys(pairs: list[tuple[str, Any]]) -> dict[str, Any]:
@@ -2171,18 +2178,26 @@ class AgentRuntime:
             if any(decision.decision == "reject_review" for decision in revision.decisions)
             else ()
         )
-        if corrections:
-            child = self._review_v3_with_corrections(
-                revision.revised_request,
+        try:
+            child = self._review_v3_reusing_parent_extraction(
+                revision,
                 corrections,
                 forced_human_review_reasons=forced_reasons,
             )
+        except _ParentExtractionReuseMismatch:
+            if corrections:
+                child = self._review_v3_with_corrections(
+                    revision.revised_request,
+                    corrections,
+                    forced_human_review_reasons=forced_reasons,
+                )
+            else:
+                child = self.review_v3(
+                    revision.revised_request,
+                    _forced_human_review_reasons=forced_reasons,
+                )
+        if corrections:
             _assert_public_corrections_applied(child, corrections)
-        else:
-            child = self.review_v3(
-                revision.revised_request,
-                _forced_human_review_reasons=forced_reasons,
-            )
         result = ReviewRevisionResultV1(
             parent_result_sha256=revision.parent_result_sha256,
             child_result=child,
@@ -2193,6 +2208,158 @@ class AgentRuntime:
             sensitive_markers=self._secret_markers,
         )
         return result
+
+    def _revision_reuse_key(
+        self,
+        revision: ReviewRevisionRequestV1,
+        *,
+        retriever: ProductionHttpRegulationRetrieverV3,
+    ) -> str:
+        parent = revision.parent_result
+        current_release = runtime_release_identity(
+            model_id=self._analyzer.model_id,
+            evidence_snapshot_id=parent.knowledge_snapshot_id,
+            evidence_runtime_v3_sha256=retriever.expected_identity.runtime_release_v3_sha256,
+            assertion_trust_store=self._runtime_assertion_trust_store(),
+        )
+        extraction_identity_fields = (
+            "agent_code_snapshot_sha256",
+            "model_id",
+            "model_revision",
+            "extraction_prompt_sha256",
+            "extraction_schema_sha256",
+        )
+        if any(
+            getattr(parent.runtime_release, name) != getattr(current_release, name)
+            for name in extraction_identity_fields
+        ):
+            raise _ParentExtractionReuseMismatch("parent extraction runtime identity changed")
+        expected_document_ids = [
+            document.document_id for document in revision.parent_request.documents
+        ]
+        model_call_document_ids = [call.document_id for call in parent.model_calls]
+        if (
+            model_call_document_ids != expected_document_ids
+            or len(model_call_document_ids) != len(set(model_call_document_ids))
+            or any(
+                call.input_modality != "text"
+                or call.model_id != current_release.model_id
+                or call.prompt_sha256 != current_release.extraction_prompt_sha256
+                or call.output_schema_sha256 != current_release.extraction_schema_sha256
+                for call in parent.model_calls
+            )
+        ):
+            raise _ParentExtractionReuseMismatch("parent model-call identity is incomplete")
+        if parent.model_errors or parent.model_conflicts:
+            raise _ParentExtractionReuseMismatch("parent extraction is not release-clean")
+        parent_documents = {item.document_id: item for item in parent.document_results}
+        if set(parent_documents) != set(expected_document_ids):
+            raise _ParentExtractionReuseMismatch("parent document result set changed")
+        document_bindings = [
+            {
+                "document_id": document.document_id,
+                "input_sha256": canonical_json_sha256(document),
+                "extraction_sha256": canonical_json_sha256(parent_documents[document.document_id]),
+            }
+            for document in revision.parent_request.documents
+        ]
+        return canonical_json_sha256(
+            {
+                "schema_version": "parent-extraction-reuse/v1",
+                "parent_result_sha256": revision.parent_result_sha256,
+                "parent_input_manifest_sha256": revision.parent_input_manifest_sha256,
+                "extraction_identity": {
+                    name: getattr(current_release, name) for name in extraction_identity_fields
+                },
+                "documents": document_bindings,
+            }
+        )
+
+    def _review_v3_reusing_parent_extraction(
+        self,
+        revision: ReviewRevisionRequestV1,
+        corrections: list[Any],
+        *,
+        forced_human_review_reasons: tuple[str, ...] = (),
+    ) -> ReviewRunResultV3:
+        request = revision.revised_request
+        if _has_visual_documents(request):
+            raise _ParentExtractionReuseMismatch("visual extraction cannot be reused")
+        if not hasattr(self, "_analyzer") or not hasattr(self, "_config"):
+            # Direct compatibility tests may construct a minimal runtime and
+            # replace only the established full-analysis seam.
+            raise _ParentExtractionReuseMismatch("runtime extraction identity is unavailable")
+        retriever = self._get_retriever_v3()
+        aggregate_reuse_key_sha256 = self._revision_reuse_key(
+            revision,
+            retriever=retriever,
+        )
+        service_request = _project_service_request_v3_to_v2(request)
+        workflow_request = ReviewRunRequestV2.model_validate(
+            service_request.model_dump(mode="python", warnings=False)
+        )
+        try:
+            state = build_reused_extraction_state(
+                workflow_request,
+                revision.parent_result,
+                parent_result_sha256=revision.parent_result_sha256,
+                aggregate_reuse_key_sha256=aggregate_reuse_key_sha256,
+            )
+        except ValueError:
+            raise _ParentExtractionReuseMismatch(
+                "parent extraction source grounding changed"
+            ) from None
+        try:
+            retriever.preflight(service_request.review_as_of)
+            state = rerun_review_to_retrieval(state, corrections, retriever)
+            retrieval_request = state.get("retrieval_request") or {}
+            request_id = retrieval_request.get("request_id")
+            policies = retriever.policy_bindings(request_id) if isinstance(request_id, str) else {}
+            verified_by_item, supporting_rejections = verified_requirement_codes_by_item(
+                request.supporting_documents,
+                case_id=request.case_id,
+                review_as_of=request.review_as_of,
+                assertion_cutoff_at=request.assertion_cutoff_at,
+                retrieval_results=list(state.get("retrieval_results") or []),
+                policy_bindings=policies,
+                assertion_verifier=self._assertion_verifier,
+            )
+            supporting_rejections = sorted({*supporting_rejections, *forced_human_review_reasons})
+            state["verified_requirement_documents_by_item"] = verified_by_item
+            state["presented_requirement_documents_by_item"] = presented_requirement_codes_by_item(
+                request.supporting_documents,
+                retrieval_results=list(state.get("retrieval_results") or []),
+            )
+            for node in (compliance_review, generate_xai_report, route_to_human_or_complete):
+                state.update(node(state))
+            v2_result = to_review_run_result_v2(state)
+            _assert_result_correlated(service_request, v2_result)
+            _assert_public_result_safe(
+                v2_result.model_dump(mode="python"),
+                sensitive_markers=self._secret_markers,
+            )
+        except AgentRuntimeError:
+            raise
+        except CorrectionApplicationError:
+            raise RuntimeConflictError(
+                "correction_application_failed",
+                "An approved correction could not be applied exactly to the child review.",
+            ) from None
+        except (LLMError, OcrLayoutProviderError, RetrievalError, ValidationError, ValueError):
+            raise RuntimeExecutionError(
+                "review_execution_failed",
+                "The V3 Agent child review failed without exposing private execution details.",
+            ) from None
+        return to_review_run_result_v3(
+            v2_result,
+            request,
+            analyzer=self._analyzer,
+            evidence_runtime_v3_sha256=(retriever.expected_identity.runtime_release_v3_sha256),
+            assertion_trust_store=self._runtime_assertion_trust_store(),
+            supporting_document_rejections=supporting_rejections,
+            active_executor=None,
+            uat_capability=getattr(self, "_uat_capability", None),
+        )
 
     def revision_experience_v3_json(
         self,

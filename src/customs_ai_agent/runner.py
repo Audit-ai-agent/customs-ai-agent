@@ -556,6 +556,143 @@ def run_review_result_v2(
     )
 
 
+def _reused_text_field(field: ReviewFieldV2, document_text: str) -> dict[str, Any]:
+    source = field.source
+    if (
+        source.source_modality != "text"
+        or source.page != 1
+        or source.bbox is not None
+        or source.text_start is None
+        or source.text_end is None
+        or source.text_start < 0
+        or source.text_end > len(document_text)
+    ):
+        raise ValueError("parent field source is not a reusable text span")
+    raw_text = document_text[source.text_start : source.text_end]
+    if not raw_text:
+        raise ValueError("parent field source span is empty")
+    values = field.value if isinstance(field.value, list) else [field.value]
+    if any(value is not None and str(value) not in raw_text for value in values):
+        raise ValueError("parent field value is not grounded in its source span")
+    return {
+        "name": field.name,
+        "value": copy.deepcopy(field.value),
+        "confidence": field.confidence,
+        "confidence_basis": field.confidence_basis,
+        "evidence": {
+            "document_id": source.document_id,
+            "page": source.page,
+            "bbox": None,
+            "raw_text": raw_text,
+            "text_start": source.text_start,
+            "text_end": source.text_end,
+            "confidence": field.confidence,
+            "source_modality": "text",
+            "image_sha256": None,
+            "image_width_px": None,
+            "image_height_px": None,
+            "coordinate_space": None,
+            "ocr_ledger_id": None,
+            "ocr_span_ids": [],
+        },
+    }
+
+
+def build_reused_extraction_state(
+    request: ReviewRunRequestV2,
+    parent_result: ReviewRunResultV2,
+    *,
+    parent_result_sha256: str,
+    aggregate_reuse_key_sha256: str,
+) -> dict[str, Any]:
+    """Rebuild a child execution state from a hash-bound public extraction.
+
+    This function performs no model or Evidence I/O. Callers must first bind
+    the parent result/request and current extraction runtime identity.
+    """
+
+    if any(document.input_modality != "text" for document in parent_result.document_results):
+        raise ValueError("only text extraction can be reused")
+    if parent_result.model_errors or parent_result.model_conflicts:
+        raise ValueError("failed or conflicting parent extraction cannot be reused")
+    documents = request.documents
+    if not documents:
+        raise ValueError("reused extraction requires primary documents")
+    request_documents = {document.document_id: document for document in documents}
+    parent_documents = {
+        document.document_id: document for document in parent_result.document_results
+    }
+    if set(request_documents) != set(parent_documents):
+        raise ValueError("parent and child document sets differ")
+
+    state = _build_initial_state(request)
+    classified: dict[str, dict[str, Any]] = {}
+    extracted: dict[str, dict[str, Any]] = {}
+    for document in documents:
+        parent = parent_documents[document.document_id]
+        if parent.extraction_status != "completed" or parent.document_type == "unknown":
+            raise ValueError("incomplete parent extraction cannot be reused")
+        if parent.extraction_provider != "anthropic":
+            raise ValueError("only Anthropic extraction can be reused")
+        content_text = str(document.content_text or "")
+        fields = {field.name: _reused_text_field(field, content_text) for field in parent.fields}
+        line_items = [
+            {
+                "item_id": item.item_id,
+                **{field.name: _reused_text_field(field, content_text) for field in item.fields},
+            }
+            for item in parent.line_items
+        ]
+        classified[document.document_id] = {
+            "document_id": document.document_id,
+            "filename": document.filename,
+            "document_type": parent.document_type,
+            "confidence": parent.extraction_confidence,
+            "provider": parent.extraction_provider,
+            "input_modality": "text",
+        }
+        extracted[document.document_id] = {
+            "document_id": document.document_id,
+            "filename": document.filename,
+            "document_type": parent.document_type,
+            "fields": fields,
+            "line_items": line_items,
+            "extraction_status": parent.extraction_status,
+            "extraction_confidence": parent.extraction_confidence,
+            "extraction_provider": parent.extraction_provider,
+            "input_modality": "text",
+            "model_id": parent.model_id,
+            "prompt_version": parent.prompt_version,
+        }
+    state.update(
+        {
+            "document_ids": [document.document_id for document in documents],
+            "classified_documents": classified,
+            "extracted_documents": extracted,
+            "model_calls": [
+                item.model_dump(mode="json", warnings=False) for item in parent_result.model_calls
+            ],
+            "model_errors": [],
+            "model_conflicts": [],
+            "current_stage": "extract_documents",
+        }
+    )
+    state["audit_trail"] = audit(
+        state,
+        "extract_documents",
+        "parent_extraction_reused",
+        "Reused the hash-bound parent text extraction for deterministic child review.",
+        {
+            "parent_result_sha256": parent_result_sha256,
+            "aggregate_reuse_key_sha256": aggregate_reuse_key_sha256,
+            "reused_document_count": len(extracted),
+            "inherited_model_call_count": len(parent_result.model_calls),
+            "actual_document_model_call_count": 0,
+        },
+    )
+    return state
+
+
 class CorrectionApplicationError(ValueError):
     """A safe, fail-closed error raised when an approved correction cannot apply."""
 
@@ -800,10 +937,12 @@ def _merge(state: dict[str, Any], update: dict[str, Any]) -> dict[str, Any]:
     return state
 
 
-def rerun_review(
+def _rerun_review(
     state: dict[str, Any],
     corrections: list[UserCorrection | dict[str, Any]],
-    retriever: RegulationRetriever | None = None,
+    *,
+    retriever: RegulationRetriever | None,
+    finalize: bool,
 ) -> dict[str, Any]:
     if retriever is not None:
         active_retriever = retriever
@@ -828,9 +967,6 @@ def rerun_review(
         normalize_documents,
         pair_documents,
         validate_cross_documents,
-        compliance_review,
-        generate_xai_report,
-        route_to_human_or_complete,
     ]:
         next_state = _merge(next_state, node(next_state))
         if node is validate_cross_documents:
@@ -838,16 +974,49 @@ def rerun_review(
                 next_state,
                 retrieve_regulations(next_state, active_retriever),
             )
+    if finalize:
+        for node in [compliance_review, generate_xai_report, route_to_human_or_complete]:
+            next_state = _merge(next_state, node(next_state))
     for correction in parsed:
         _verify_correction_persisted(next_state, correction)
     next_state["audit_trail"] = audit(
         next_state,
         "rerun_review",
         "corrections_applied",
-        "Applied user corrections and completed all deterministic child review stages.",
-        {"correction_count": len(parsed)},
+        (
+            "Applied user corrections and completed all deterministic child review stages."
+            if finalize
+            else "Applied user corrections and reran deterministic stages through Evidence."
+        ),
+        {"correction_count": len(parsed), "finalized": finalize},
     )
     return next_state
+
+
+def rerun_review_to_retrieval(
+    state: dict[str, Any],
+    corrections: list[UserCorrection | dict[str, Any]],
+    retriever: RegulationRetriever,
+) -> dict[str, Any]:
+    return _rerun_review(
+        state,
+        corrections,
+        retriever=retriever,
+        finalize=False,
+    )
+
+
+def rerun_review(
+    state: dict[str, Any],
+    corrections: list[UserCorrection | dict[str, Any]],
+    retriever: RegulationRetriever | None = None,
+) -> dict[str, Any]:
+    return _rerun_review(
+        state,
+        corrections,
+        retriever=retriever,
+        finalize=True,
+    )
 
 
 def answer_question(report_or_state: dict[str, Any], question: str) -> ChatAnswer:
