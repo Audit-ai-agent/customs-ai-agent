@@ -1700,9 +1700,31 @@ def build_grounded_presentation(
             ):
                 blockers.append("entailment_model_identity_mismatch")
             if blockers:
-                accepted_prose_by_group_id.clear()
-                retry_blockers = blockers
-                continue
+                if attempt == 2:
+                    exact_prose_by_group_id = {
+                        str(option["group_id"]): _strict_presentation_group_prose(option)
+                        for option in options
+                    }
+                    exact_sections, exact_blockers = _presentation_sections_from_group_prose(
+                        claims,
+                        options,
+                        exact_prose_by_group_id,
+                    )
+                    if not exact_blockers and _is_exact_code_owned_presentation(
+                        claims,
+                        exact_sections,
+                    ):
+                        # The verifier rejected a mixed model/canonical repair. The
+                        # final user text can still be certified without another
+                        # model call by projecting every server-owned Claim exactly.
+                        sections = exact_sections
+                        blockers = []
+                        verification = None
+                        verifier_context_sha256 = None
+                if blockers:
+                    accepted_prose_by_group_id.clear()
+                    retry_blockers = blockers
+                    continue
             headline = _headline(result)
             payload = {
                 "schema_version": "1.0",

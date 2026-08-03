@@ -1394,6 +1394,25 @@ def test_presentation_uses_fluent_claude_prose_only_after_independent_entailment
     )
 
 
+def test_presentation_recovers_mixed_repair_from_verifier_false_negative() -> None:
+    result = _v3_result()[2]
+    analyzer = _MissingGroupRepairAnalyzer(result.runtime_release.model_id)
+    analyzer.reject_entailment = True
+
+    presentation = build_grounded_presentation(result, analyzer=analyzer)  # type: ignore[arg-type]
+
+    assert analyzer.report_calls == 2
+    assert analyzer.verifier_calls == 1
+    assert presentation.generation_audit.mode == "claude"
+    assert presentation.generation_audit.attempt_count == 2
+    assert presentation.verification_audit.status == "passed"
+    assert presentation.verification_audit.entailment_verifier == "not_run"
+    assert _is_exact_code_owned_presentation(
+        build_canonical_claim_catalog(result),
+        presentation.sections,
+    )
+
+
 def test_presentation_missing_required_document_conclusion_separates_results() -> None:
     result = _missing_required_document_result().model_copy(update={"execution_status": "partial"})
 
