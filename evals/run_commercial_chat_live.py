@@ -13,6 +13,7 @@ from urllib.parse import urlsplit
 import httpx
 
 from customs_ai_agent.experience import (
+    _answer_composition_plan,
     answer_limitation_source,
     answer_claim_bindings,
     build_answer_claim_catalog,
@@ -267,17 +268,33 @@ def _evaluate_answer(
             claims = []
         elif answer.answer_scope != "case_grounded":
             claims = []
+        plan = _answer_composition_plan(request, answer.answer_scope, claims)
         verifier_context = {
             "question": request.question,
             "recent_turns": [
                 turn.model_dump(mode="json", warnings=False) for turn in request.recent_turns
             ],
             "answer_scope": answer.answer_scope,
+            "answer_intent": plan.intent,
             "allowed_claims": [
                 item.model_dump(mode="json", warnings=False) for item in claims[:100]
             ],
+            "fixed_claim_assignments": {
+                area: [
+                    claim.model_dump(mode="json", warnings=False)
+                    for claim in plan.claims_by_area[area]
+                ]
+                for area in (
+                    "direct_answer",
+                    "explanation",
+                    "evidence_meaning",
+                    "impact",
+                    "next_steps",
+                )
+            },
             "general_guidance": guidance,
             "fixed_limitation_source": answer_limitation_source(answer.answer_scope),
+            "fixed_used_context_message_ids": list(plan.used_context_message_ids),
             "candidate_answer": {
                 "direct_answer": answer.direct_answer,
                 "explanation": answer.explanation,
