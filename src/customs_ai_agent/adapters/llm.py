@@ -1627,6 +1627,11 @@ class ClaudeDocumentAnalyzer:
             "customs_review_coordinator",
             "customs_narrative_report",
             "customs_case_answer",
+            "customs_experience_report",
+            "customs_experience_entailment",
+            "customs_case_answer_v2",
+            "customs_case_answer_verifier",
+            "customs_case_scope_classifier",
         }:
             raise LLMConfigurationError(
                 "agentic_task_not_allowed",

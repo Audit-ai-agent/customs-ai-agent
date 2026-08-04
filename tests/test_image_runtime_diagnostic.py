@@ -24,6 +24,16 @@ from customs_ai_agent.schemas.llm import (
 )
 from customs_ai_agent.schemas.models import ReviewRunResultV2
 from evals import run_image_runtime_diagnostic as diagnostic
+from tools.dataset_provenance import DatasetProvenanceError
+
+
+@pytest.fixture(autouse=True)
+def _verified_dataset_provenance(monkeypatch: pytest.MonkeyPatch) -> None:
+    monkeypatch.setattr(
+        diagnostic,
+        "verify_dataset_provenance",
+        lambda *_args, **_kwargs: None,
+    )
 
 
 def _sha256(path: Path) -> str:
@@ -34,7 +44,7 @@ def _canonical_fixture(
     monkeypatch: pytest.MonkeyPatch,
     tmp_path: Path,
 ) -> tuple[Path, tuple[diagnostic.FixedDocument, ...]]:
-    root = tmp_path / "_artifacts" / "datasets" / "trade_documents_images" / "source-v1" / "raw"
+    root = tmp_path / "_local" / "data" / "trade_documents_images" / "source-v1" / "raw"
     specifications = (
         ("ci:test", "commercial_invoice", "invoice", "commercial_invoice/CI_test.jpg", "red"),
         ("pl:test", "packing_list", "packing_list", "packing_list/PL_test.jpg", "green"),
@@ -431,7 +441,7 @@ def test_missing_canonical_tree_never_falls_back_to_root_reference(
     monkeypatch.setattr(
         diagnostic,
         "CANONICAL_DATASET_ROOT",
-        tmp_path / "_artifacts" / "datasets" / "missing" / "raw",
+        tmp_path / "_local" / "data" / "missing" / "raw",
     )
     monkeypatch.setattr(
         diagnostic,
@@ -449,6 +459,37 @@ def test_missing_canonical_tree_never_falls_back_to_root_reference(
     assert exit_code == 1
     assert report["status"] == "BLOCKED_EVALUATION_ASSET"
     assert report["error_codes"] == ["canonical_dataset_or_gold_missing"]
+
+
+def test_relocation_contract_failure_stops_before_network_or_provider(
+    monkeypatch: pytest.MonkeyPatch,
+    tmp_path: Path,
+) -> None:
+    _canonical_fixture(monkeypatch, tmp_path)
+
+    def reject_relocation(*_args: Any, **_kwargs: Any) -> None:
+        raise DatasetProvenanceError(
+            "dataset_relocation_manifest_binding_mismatch",
+            "test relocation mismatch",
+        )
+
+    monkeypatch.setattr(diagnostic, "verify_dataset_provenance", reject_relocation)
+    monkeypatch.setattr(
+        diagnostic,
+        "fetch_supported_review_as_of",
+        lambda *_args, **_kwargs: pytest.fail("network must not run"),
+    )
+    monkeypatch.setattr(
+        diagnostic,
+        "build_ocr_layout_provider",
+        lambda *_args, **_kwargs: pytest.fail("provider must not run"),
+    )
+
+    exit_code, report = _evaluate(env_file=_env_file(tmp_path))
+
+    assert exit_code == 1
+    assert report["status"] == "BLOCKED_EVALUATION_ASSET"
+    assert report["error_codes"] == ["dataset_relocation_manifest_binding_mismatch"]
 
 
 def test_explicitly_invalidated_gold_never_reaches_provider_or_network(

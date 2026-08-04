@@ -806,8 +806,8 @@ hash를 모두 통과해야 한다. 기존 권리 미확인 raw에서 일부 행
 
 ### 17.3 게시 금지
 
-- 원본 `trade_documents_images`
-- 원본 `가상데이터(CI_PL_BL)`
+- `_local/data` canonical 이전을 완료한 `trade_documents_images` raw
+- `_local/data` canonical 이전을 완료한 `가상데이터(CI_PL_BL)` raw
 - private artifact 전체
 - 개인 엔지니어링 기록
 - 로컬 절대경로
@@ -816,6 +816,11 @@ hash를 모두 통과해야 한다. 기존 권리 미확인 raw에서 일부 행
 
 raw가 GitHub에 없더라도 schema·generator·검증 명령과 공개 descriptor만으로 팀원이 데이터
 계약과 생성 방식을 검토할 수 있어야 한다.
+
+raw의 유일한 로컬 권한 경로는 `_local/data/<dataset-id>/source-v1`이다. 실행 전에
+Agent-owned relocation binding, workspace relocation manifest, DatasetProvenanceV2, inventory·checksum,
+폐기된 root와 `_artifacts/datasets` 경로의 부재를 모두 검증한다. 중복 원본이 다시
+생기면 편의상 fallback하지 않고 fail-closed한다.
 
 ---
 

@@ -12,7 +12,7 @@ from tools.verify_service_openapi import (
 
 def test_service_openapi_matches_frozen_lock() -> None:
     assert (
-        verify_openapi_lock() == "e0ac396417ddc37a20fce7ed9ba612db3db5d259a3a3393faadfb1ad95f6c64e"
+        verify_openapi_lock() == "c7b4f174e80e1594c092bc9e29d23fed87ca254e5968177eccca6d0219625859"
     )
 
 
@@ -53,3 +53,24 @@ def test_openapi_declares_bearer_auth_and_exact_v2_result_schema() -> None:
             "type": "string",
             "enum": ["not-started"],
         }
+
+
+def test_openapi_adds_revision_experience_without_changing_v2_revision_wire() -> None:
+    schema, _encoded = canonical_openapi()
+    legacy = schema["paths"]["/internal/agent/v2/revisions"]["post"]
+    enhanced = schema["paths"]["/internal/agent/v3/revisions"]["post"]
+
+    assert enhanced["requestBody"] == legacy["requestBody"]
+    response_schema = enhanced["responses"]["200"]["content"]["application/json"]["schema"]
+    assert response_schema["additionalProperties"] is False
+    assert set(response_schema["properties"]) == {
+        "schema_version",
+        "parent_result_sha256",
+        "applied_decision_ids",
+        "experience_envelope",
+    }
+    assert set(response_schema["required"]) == {
+        "parent_result_sha256",
+        "applied_decision_ids",
+        "experience_envelope",
+    }

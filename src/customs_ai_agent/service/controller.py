@@ -1,12 +1,13 @@
 from __future__ import annotations
 
 import asyncio
+import copy
 import json
 import logging
 import time
 from collections import OrderedDict
 from concurrent.futures import ThreadPoolExecutor
-from dataclasses import dataclass
+from dataclasses import dataclass, field
 from typing import Any, Callable, Protocol
 
 from customs_ai_agent.runtime import (
@@ -28,7 +29,27 @@ class ServiceRuntime(Protocol):
 
     def revision_v3_json(self, payload: bytes) -> Any: ...
 
+    def revision_experience_v3_json(self, payload: bytes) -> Any: ...
+
     def answer_v3_json(self, payload: bytes) -> Any: ...
+
+    def review_experience_json(self, payload: bytes) -> Any: ...
+
+    def answer_v2_json(self, payload: bytes) -> Any: ...
+
+    def review_experience_stream_json(
+        self,
+        payload: bytes,
+        stage_callback: Callable[[dict[str, Any]], None],
+    ) -> Any: ...
+
+    def answer_v2_stream_json(
+        self,
+        payload: bytes,
+        stage_callback: Callable[[dict[str, Any]], None],
+    ) -> Any: ...
+
+    def assert_uat_capability_current(self, *, require_active: bool = False) -> Any: ...
 
     def close(self) -> None: ...
 
@@ -49,6 +70,8 @@ class _ReplayEntry:
     task: asyncio.Task[ServiceOutcome]
     completed_at: float | None = None
     result_bytes: int = 0
+    stage_events: list[dict[str, Any]] = field(default_factory=list)
+    stage_callbacks: set[Callable[[dict[str, Any]], None]] = field(default_factory=set)
 
 
 class AgentServiceController:
@@ -88,6 +111,17 @@ class AgentServiceController:
     @property
     def closing(self) -> bool:
         return self._closing
+
+    def assert_uat_capability_current(self, *, require_active: bool = False) -> None:
+        """Fail before readiness I/O when enhanced UAT authority is stale."""
+
+        checker = getattr(self.runtime, "assert_uat_capability_current", None)
+        if not callable(checker):
+            raise RuntimeConfigurationError(
+                "uat_capability_unavailable",
+                "The runtime does not expose a local-UAT capability boundary.",
+            )
+        checker(require_active=require_active)
 
     def _update_replay_metrics(self) -> None:
         self.metrics.set_replay_cache(
@@ -148,6 +182,7 @@ class AgentServiceController:
         review_run_id: str,
         request_hash: str,
         runtime_method_name: str = "review_json",
+        stage_callback: Callable[[dict[str, Any]], None] | None = None,
     ) -> tuple[ServiceOutcome, bool]:
         self.metrics.increment("review_requests_total")
         async with self._state_lock:
@@ -165,6 +200,10 @@ class AgentServiceController:
                 self._replays.move_to_end(review_run_id)
                 self.metrics.increment("review_replayed_total")
                 task = entry.task
+                if stage_callback is not None:
+                    for event in entry.stage_events:
+                        stage_callback(event)
+                    entry.stage_callbacks.add(stage_callback)
             else:
                 if not self._make_replay_room():
                     self.metrics.increment("review_rejected_total")
@@ -174,8 +213,34 @@ class AgentServiceController:
                         retryable=True,
                         retry_after_seconds=max(1, round(self.settings.queue_wait_seconds)),
                     )
-                task = asyncio.create_task(self._run_once(payload, runtime_method_name))
+                entry_holder: dict[str, _ReplayEntry] = {}
+                loop = asyncio.get_running_loop()
+
+                def record_stage_event(event: dict[str, Any]) -> None:
+                    # Runtime callbacks execute in a worker thread. Move all
+                    # journal/subscriber mutation back onto the owning loop.
+                    def record() -> None:
+                        target = entry_holder.get("entry")
+                        if target is None or len(target.stage_events) >= 64:
+                            return
+                        safe_event = copy.deepcopy(event)
+                        target.stage_events.append(safe_event)
+                        for callback in tuple(target.stage_callbacks):
+                            callback(copy.deepcopy(safe_event))
+
+                    loop.call_soon_threadsafe(record)
+
+                task = asyncio.create_task(
+                    self._run_once(
+                        payload,
+                        runtime_method_name,
+                        stage_callback=(record_stage_event if stage_callback is not None else None),
+                    )
+                )
                 entry = _ReplayEntry(request_hash=request_hash, task=task)
+                entry_holder["entry"] = entry
+                if stage_callback is not None:
+                    entry.stage_callbacks.add(stage_callback)
                 self._replays[review_run_id] = entry
                 self._update_replay_metrics()
 
@@ -197,7 +262,12 @@ class AgentServiceController:
                     self._update_replay_metrics()
 
                 task.add_done_callback(mark_completed)
-        return await asyncio.shield(task), replayed
+        try:
+            return await asyncio.shield(task), replayed
+        finally:
+            if stage_callback is not None:
+                async with self._state_lock:
+                    entry.stage_callbacks.discard(stage_callback)
 
     def _track_background(self, task: asyncio.Task[None]) -> None:
         self._background.add(task)
@@ -228,6 +298,7 @@ class AgentServiceController:
         self,
         payload: bytes,
         runtime_method_name: str = "review_json",
+        stage_callback: Callable[[dict[str, Any]], None] | None = None,
     ) -> ServiceOutcome:
         try:
             await asyncio.wait_for(
@@ -266,7 +337,15 @@ class AgentServiceController:
             self._semaphore.release()
             self.metrics.increment("review_failed_total")
             return ServiceOutcome(status_code=503, error_code="capability_unavailable")
-        worker = loop.run_in_executor(self._executor, runtime_method, payload)
+        if stage_callback is None:
+            worker = loop.run_in_executor(self._executor, runtime_method, payload)
+        else:
+            worker = loop.run_in_executor(
+                self._executor,
+                runtime_method,
+                payload,
+                stage_callback,
+            )
         try:
             result = await asyncio.wait_for(
                 asyncio.shield(worker),

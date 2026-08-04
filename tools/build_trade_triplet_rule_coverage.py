@@ -23,6 +23,7 @@ from tools.build_trade_triplet_eval_assets import (
     BUSINESS_FIELD_OPERATOR_IDS,
     inject_controlled_defects,
 )
+from tools.dataset_provenance import DatasetProvenanceError, verify_dataset_provenance
 
 
 DATASET_ID = "trade_document_triplets"
@@ -522,12 +523,19 @@ def _parse_args() -> argparse.Namespace:
 def main() -> int:
     args = _parse_args()
     try:
+        verify_dataset_provenance(
+            args.dataset_lock,
+            expected_dataset_root=args.dataset_root,
+        )
         report = build_rule_coverage_bundle(
             args.dataset_root,
             args.output_root,
             descriptor_path=args.descriptor,
             dataset_lock_path=args.dataset_lock,
         )
+    except DatasetProvenanceError as exc:
+        print(json.dumps({"status": "FAIL", "error": exc.code}, sort_keys=True))
+        return 1
     except RuleCoverageBuildError as exc:
         print(json.dumps({"status": "FAIL", "error": str(exc)}, sort_keys=True))
         return 1

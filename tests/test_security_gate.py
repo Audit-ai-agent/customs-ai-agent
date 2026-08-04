@@ -25,7 +25,7 @@ SPEC.loader.exec_module(security_gate)
 
 
 class SecurityGateTests(unittest.TestCase):
-    def test_toolchain_lock_matches_uv_lock_and_ci_pins(self) -> None:
+    def test_toolchain_lock_matches_uv_lock_and_security_gate_is_release_only(self) -> None:
         toolchain = tomllib.loads(
             (ROOT / "security" / "toolchain.lock.toml").read_text(encoding="utf-8")
         )
@@ -35,12 +35,12 @@ class SecurityGateTests(unittest.TestCase):
         }
         self.assertEqual(ruff_versions, {toolchain["ruff_sast"]["version"]})
         workflow = (ROOT / ".github" / "workflows" / "ci.yml").read_text(encoding="utf-8")
-        self.assertIn(toolchain["gitleaks"]["linux_x64_url"], workflow)
-        self.assertIn(toolchain["gitleaks"]["linux_x64_sha256"], workflow)
-        self.assertIn(f"pip-audit=={toolchain['pip_audit']['version']}", workflow)
-        self.assertIn("uv run --isolated --no-project", workflow)
-        self.assertIn("python -I -X utf8", workflow)
-        self.assertIn("fetch-depth: 0", workflow)
+        self.assertNotIn(toolchain["gitleaks"]["linux_x64_url"], workflow)
+        self.assertNotIn(toolchain["gitleaks"]["linux_x64_sha256"], workflow)
+        self.assertNotIn(f"pip-audit=={toolchain['pip_audit']['version']}", workflow)
+        self.assertNotIn("run_security_gate.py", workflow)
+        self.assertTrue((ROOT / "tools" / "run_security_gate.py").is_file())
+        self.assertTrue((ROOT / "security" / "toolchain.lock.toml").is_file())
         self.assertNotIn("security-events: write", workflow)
         self.assertNotIn("id-token: write", workflow)
         self.assertNotIn("sarif", workflow.casefold())

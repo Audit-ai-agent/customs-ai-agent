@@ -68,6 +68,7 @@ from evals.run_ocr_benchmark import (
     installed_agent_wheel_sha256,
     load_benchmark,
 )
+from tools.dataset_provenance import DatasetProvenanceError, verify_dataset_provenance
 
 
 DEFAULT_GOLD_PATH = (
@@ -95,7 +96,7 @@ DEFAULT_LOCK_PATH = (
 EXPECTED_INVALIDATED_ANNOTATION_SHA256 = (
     "ac86a6e248492db92e5bfa635dfbdff3b74adf8cb454bf0da7faabc77cfa33dd"
 )
-EXPECTED_DATASET_LOCK_SHA256 = "2177c598d1b0111cbf7dbf0a7a25c46041a523b6b3923b9ecee71d3c64141edc"
+EXPECTED_DATASET_LOCK_SHA256 = "d5c6250a7c31ce053e958c9235404f9cd7f13a7aaef0d9b14a65db1af846b971"
 EXPECTED_SELECTION_SHA256 = "8959d3e91affb1c51fbb320cf90cea7349d069cd12b58858d27ea13fb92ba961"
 EXPECTED_ADJUDICATED_GOLD_SCHEMA_SHA256 = (
     "6d6695c72cda5302b762d338fc97792b5dca48e4eb75fe55a1798362e86f9066"
@@ -531,6 +532,13 @@ def _preflight(
         )
     if run_workflow:
         failures.append("workflow_scoring_requires_separate_outcome_gold")
+    try:
+        verify_dataset_provenance(
+            lock_path,
+            expected_raw_root=dataset_root,
+        )
+    except DatasetProvenanceError as exc:
+        failures.append(exc.code)
     if not dataset_root.is_dir():
         failures.append("dataset_root_missing")
     else:

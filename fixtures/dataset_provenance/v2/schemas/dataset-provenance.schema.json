@@ -1,0 +1,131 @@
+{
+  "$schema": "https://json-schema.org/draft/2020-12/schema",
+  "$id": "urn:customs:dataset-provenance:v2",
+  "type": "object",
+  "additionalProperties": false,
+  "required": [
+    "schema_version",
+    "provenance_revision",
+    "dataset",
+    "classification",
+    "canonical_storage",
+    "origin",
+    "integrity",
+    "truth_and_rights",
+    "migration"
+  ],
+  "properties": {
+    "schema_version": {"const": "customs-dataset-provenance/v2"},
+    "provenance_revision": {"const": 2},
+    "dataset": {
+      "type": "object",
+      "additionalProperties": false,
+      "required": ["id", "version"],
+      "properties": {
+        "id": {"enum": ["trade_document_triplets", "trade_documents_images"]},
+        "version": {"const": "source-v1"}
+      }
+    },
+    "classification": {"type": "string", "minLength": 1},
+    "canonical_storage": {
+      "type": "object",
+      "additionalProperties": false,
+      "required": [
+        "workspace_relative_path",
+        "raw_workspace_relative_path",
+        "tracked_in_git",
+        "immutable_raw",
+        "runner_access_policy"
+      ],
+      "properties": {
+        "workspace_relative_path": {"type": "string", "pattern": "^_local/data/"},
+        "raw_workspace_relative_path": {"type": "string", "pattern": "^_local/data/.+/raw$"},
+        "tracked_in_git": {"const": false},
+        "immutable_raw": {"const": true},
+        "runner_access_policy": {"const": "canonical_only_after_relocation_verification"}
+      }
+    },
+    "origin": {
+      "type": "object",
+      "additionalProperties": false,
+      "required": ["description", "generator", "legacy_source_reference", "legacy_canonical_registration"],
+      "properties": {
+        "description": {"type": "string", "minLength": 1},
+        "generator": {
+          "type": "object",
+          "additionalProperties": false,
+          "required": ["name", "version", "seed"],
+          "properties": {
+            "name": {"type": "string", "minLength": 1},
+            "version": {"type": "string", "minLength": 1},
+            "seed": {"type": "string", "minLength": 1}
+          }
+        },
+        "legacy_source_reference": {"$ref": "#/$defs/retiredPath"},
+        "legacy_canonical_registration": {
+          "allOf": [
+            {"$ref": "#/$defs/retiredPath"},
+            {
+              "type": "object",
+              "required": ["provenance_v1_sha256"],
+              "properties": {
+                "provenance_v1_sha256": {"$ref": "#/$defs/sha256"}
+              }
+            }
+          ]
+        }
+      }
+    },
+    "integrity": {
+      "type": "object",
+      "additionalProperties": false,
+      "required": ["raw_file_count", "raw_bytes", "raw_checksums_workspace_relative_path", "raw_checksums_sha256", "inventory_workspace_relative_path", "inventory_sha256"],
+      "properties": {
+        "raw_file_count": {"type": "integer", "minimum": 1},
+        "raw_bytes": {"type": "integer", "minimum": 1},
+        "raw_checksums_workspace_relative_path": {"type": "string", "pattern": "^_local/data/"},
+        "raw_checksums_sha256": {"$ref": "#/$defs/sha256"},
+        "inventory_workspace_relative_path": {"type": "string", "pattern": "^_local/data/"},
+        "inventory_sha256": {"$ref": "#/$defs/sha256"},
+        "supplemental_readme_sha256": {"$ref": "#/$defs/sha256"}
+      }
+    },
+    "truth_and_rights": {
+      "type": "object",
+      "additionalProperties": false,
+      "required": ["ground_truth_status", "generation_provenance_status", "public_redistribution_rights", "raw_allowed_in_git_or_public_portfolio"],
+      "properties": {
+        "ground_truth_status": {"type": "string", "minLength": 1},
+        "generation_provenance_status": {"const": "unknown"},
+        "public_redistribution_rights": {"const": "not_confirmed"},
+        "raw_allowed_in_git_or_public_portfolio": {"const": false}
+      }
+    },
+    "migration": {
+      "type": "object",
+      "additionalProperties": false,
+      "required": ["migration_id", "contract_issued_at", "relocation_manifest_workspace_relative_path", "completion_policy"],
+      "properties": {
+        "migration_id": {"const": "TASK-0028-dataset-canonical-relocation"},
+        "contract_issued_at": {"type": "string", "format": "date-time"},
+        "relocation_manifest_workspace_relative_path": {"const": "_local/data/dataset-relocation-manifest.v1.json"},
+        "completion_policy": {"const": "manifest_verified_and_both_legacy_paths_absent"}
+      }
+    }
+  },
+  "$defs": {
+    "sha256": {"type": "string", "pattern": "^[0-9a-f]{64}$"},
+    "retiredPath": {
+      "type": "object",
+      "additionalProperties": false,
+      "required": ["workspace_relative_path", "status", "preserved", "runner_eligible"],
+      "properties": {
+        "workspace_relative_path": {"type": "string", "minLength": 1},
+        "status": {"const": "retired"},
+        "preserved": {"const": false},
+        "runner_eligible": {"const": false},
+        "provenance_v1_sha256": {"$ref": "#/$defs/sha256"}
+      }
+    }
+  }
+}

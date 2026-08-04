@@ -137,6 +137,78 @@ def test_readiness_timeout_can_cover_a_bounded_slow_dependency() -> None:
         ServiceSettings.from_environment(source)
 
 
+@pytest.mark.parametrize(
+    ("enhanced", "adaptive"),
+    [
+        (True, False),
+        (False, True),
+        (True, True),
+    ],
+)
+@pytest.mark.parametrize(
+    "host",
+    [
+        "0.0.0.0",
+        "localhost",
+        "::1",
+        "127.0.0.2",
+    ],
+)
+def test_local_uat_enhanced_features_require_literal_ipv4_loopback_bind(
+    enhanced: bool,
+    adaptive: bool,
+    host: str,
+) -> None:
+    source = {
+        "CUSTOMS_AGENT_SERVICE_BEARER_TOKEN": TEST_TOKEN,
+        "EVIDENCE_SERVICE_BASE_URL": "http://127.0.0.1:8010",
+        "CUSTOMS_AGENT_HOST": host,
+        "CUSTOMS_ENHANCED_AGENT_EXPERIENCE": str(enhanced),
+        "CUSTOMS_UAT_ADAPTIVE_ACTIVE": str(adaptive),
+    }
+
+    with pytest.raises(
+        ServiceConfigurationError,
+        match="local_uat_enhanced_bind_host_not_loopback",
+    ):
+        ServiceSettings.from_environment(source)
+
+
+def test_literal_ipv4_loopback_accepts_local_uat_enhanced_features() -> None:
+    source = {
+        "CUSTOMS_AGENT_SERVICE_BEARER_TOKEN": TEST_TOKEN,
+        "EVIDENCE_SERVICE_BASE_URL": "http://127.0.0.1:8010",
+        "CUSTOMS_AGENT_HOST": "127.0.0.1",
+        "CUSTOMS_ENHANCED_AGENT_EXPERIENCE": "true",
+        "CUSTOMS_UAT_ADAPTIVE_ACTIVE": "true",
+    }
+
+    settings = ServiceSettings.from_environment(source)
+
+    assert settings.host == "127.0.0.1"
+    assert settings.enhanced_agent_experience is True
+    assert settings.uat_adaptive_active is True
+
+
+@pytest.mark.parametrize("host", ["0.0.0.0", "localhost", "::1"])
+def test_non_loopback_bind_remains_compatible_when_uat_features_are_disabled(
+    host: str,
+) -> None:
+    source = {
+        "CUSTOMS_AGENT_SERVICE_BEARER_TOKEN": TEST_TOKEN,
+        "EVIDENCE_SERVICE_BASE_URL": "http://127.0.0.1:8010",
+        "CUSTOMS_AGENT_HOST": host,
+        "CUSTOMS_ENHANCED_AGENT_EXPERIENCE": "false",
+        "CUSTOMS_UAT_ADAPTIVE_ACTIVE": "false",
+    }
+
+    settings = ServiceSettings.from_environment(source)
+
+    assert settings.host == host
+    assert settings.enhanced_agent_experience is False
+    assert settings.uat_adaptive_active is False
+
+
 def test_metadata_rejects_build_sha_not_bound_to_packaged_manifest(
     monkeypatch: pytest.MonkeyPatch,
 ) -> None:

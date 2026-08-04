@@ -112,7 +112,7 @@ container/seccomp, memory/CPU quota 같은 강제 격리는 운영 전 별도 �
 
 ## Network와 secret
 
-- local secret의 단일 기준은 저장소 밖 `project/_secrets/.env`다. repo/worktree별 `.env` 복제를
+- local secret의 단일 기준은 저장소 밖 `project/_local/secrets/.env`다. repo/worktree별 `.env` 복제를
   금지한다.
 - env file은 `--env-file`로만 지정하고 Claude/Evidence allowlist만 읽는다. process 환경을
   변경하지 않는다.
@@ -149,9 +149,10 @@ body, subprocess stderr는 민감한 로컬 artifact로 취급하고 공개 결�
 
 ## 운영 전 필수 검증
 
-저장소 CI의 secret scan, Python dependency vulnerability audit, Python SAST 기준과 동일한 로컬
-재현 명령은 [AI Agent Safety Gate](docs/SECURITY_GATE.md)를 따른다. 세 Gate 중 하나라도 도구
-실행·외부 advisory 조회·보고서 검증에 실패하면 PASS가 아니다.
+일반 PR CI는 공개 계약 중심의 빠른 검증만 수행한다. Release 판정 시 실행하는 secret scan,
+Python dependency vulnerability audit, Python SAST의 로컬 재현 명령은
+[AI Agent Safety Gate](docs/SECURITY_GATE.md)를 따른다. 세 Gate 중 하나라도 도구 실행·외부
+advisory 조회·보고서 검증에 실패하면 Release PASS가 아니다.
 
 - 실제 문서 전송 권리와 최소 수집 원칙
 - Anthropic 조직의 retention/ZDR 조건

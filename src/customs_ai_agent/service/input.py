@@ -339,6 +339,22 @@ def inspect_v3_auxiliary_request(
         replay_id = revised.get("review_run_id")
     elif operation == "answer":
         replay_id = decoded.get("question_id")
+    elif operation == "answer_v2":
+        conversation_id = decoded.get("conversation_id")
+        if not isinstance(conversation_id, str) or _RUN_ID.fullmatch(conversation_id) is None:
+            raise ServiceHttpError("request_invalid", 422)
+        replay_id = (
+            "conversation:"
+            + hashlib.sha256(
+                json.dumps(
+                    decoded,
+                    ensure_ascii=False,
+                    allow_nan=False,
+                    separators=(",", ":"),
+                    sort_keys=True,
+                ).encode("utf-8")
+            ).hexdigest()
+        )
     else:
         raise ValueError("unsupported V3 auxiliary operation")
     if not isinstance(replay_id, str) or _RUN_ID.fullmatch(replay_id) is None:

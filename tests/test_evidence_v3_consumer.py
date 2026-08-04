@@ -230,12 +230,12 @@ def test_packaged_v3_contract_hashes_are_provider_frozen_and_release_is_unreleas
         "contract": "evidence-runtime-release-provider-lock",
         "schema_version": "1.0",
         "provider_release": "evidence-api-v1.2.0",
-        "provider_revision": "14cde864425eee615a2e3f6799f6f2719448aab9",
+        "provider_revision": "b13e8bf7238a61eb185efcf2e9cd768ad5a908e2",
         "provider_build_sha256": (
-            "d7d64cf3df464cfc934ca0f347c1b1c461916fe12671eeeaf59c1445872486d3"
+            "1591ebafb01aadc8d9c5e7fc91950e3bf5c7d44f88a7ff9e4065b7d57e2ed1b7"
         ),
         "provider_source_manifest_sha256": (
-            "dd8ceb68c2da83d1fdb82f3d00f4f1137a559fcb577efdf86b6f87e52d84db1c"
+            "ddf271e0e0f8b3628917146d6f1a83bedb8e17d9dc98de30f50e12e0c8b1d8e0"
         ),
         "retrieval_schema_sha256": (
             "531b59ba4e86f78cef20a4fca052996efd8b88c48853ac12113ca76e69cdd69a"
@@ -399,6 +399,74 @@ def test_non_release_factory_executes_real_loopback_get_and_post() -> None:
     assert sent_body["request_id"] == request.request_id
     for name, expected in identity.binding_headers().items():
         assert observed["headers"][name.casefold()] == expected
+
+
+def test_non_release_readiness_cache_skips_only_the_duplicate_get(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    identity = _identity()
+    request = _request()
+    retriever = LoopbackEvidenceV3ConformanceRetriever(
+        "http://127.0.0.1:18091",
+        conformance_identity=identity,
+        service_token="A" * 40,
+        acknowledge_non_release=True,
+        timeout_seconds=10,
+        readiness_identity_cache_ttl_seconds=600,
+    )
+    responses = [
+        _Response(_readiness(identity)),
+        _Response(
+            _response_payload(request, identity, with_requirement=True),
+            {**identity.binding_headers(), "X-Request-ID": request.request_id},
+        ),
+    ]
+    methods: list[str] = []
+
+    def fake_urlopen(http_request: Any, timeout: float) -> _Response:
+        assert timeout > 0
+        methods.append(http_request.get_method())
+        return responses.pop(0)
+
+    monkeypatch.setattr(retrieval_transport, "urlopen", fake_urlopen)
+
+    assert retriever.preflight(request.review_as_of) == identity
+    response = retriever.retrieve(request)
+
+    assert response.status == "ok"
+    assert methods == ["GET", "POST"]
+    assert retriever.successful_readiness_get_count == 1
+    assert retriever.successful_retrieval_post_count == 1
+
+
+def test_non_release_health_probe_does_not_seed_a_review_cache(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    identity = _identity()
+    request = _request()
+    retriever = LoopbackEvidenceV3ConformanceRetriever(
+        "http://127.0.0.1:18091",
+        conformance_identity=identity,
+        service_token="A" * 40,
+        acknowledge_non_release=True,
+        timeout_seconds=10,
+        readiness_identity_cache_ttl_seconds=600,
+    )
+    responses = [_Response(_readiness(identity)) for _ in range(3)]
+
+    def fake_urlopen(_request: Any, timeout: float) -> _Response:
+        assert timeout > 0
+        return responses.pop(0)
+
+    monkeypatch.setattr(retrieval_transport, "urlopen", fake_urlopen)
+
+    assert retriever.preflight() == identity
+    assert retriever.preflight(request.review_as_of) == identity
+    assert retriever.preflight(request.review_as_of) == identity
+    retriever.invalidate_readiness_identity_cache()
+    assert retriever.preflight(request.review_as_of) == identity
+
+    assert retriever.successful_readiness_get_count == 3
 
 
 @pytest.mark.parametrize(

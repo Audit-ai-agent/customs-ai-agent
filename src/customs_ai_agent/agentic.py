@@ -3,6 +3,7 @@ from __future__ import annotations
 import json
 import hashlib
 import re
+import time
 from dataclasses import dataclass
 from datetime import date, datetime
 from importlib.metadata import PackageNotFoundError, version
@@ -60,6 +61,7 @@ from customs_ai_agent.schemas.v3 import (
     review_result_v3_sha256,
     stable_object_id,
 )
+from customs_ai_agent.schemas.experience import AgentUatCapabilityAttestationV1
 from customs_ai_agent.assertion_trust import AssertionTrustStoreV1, load_assertion_trust_store
 from customs_ai_agent.v3_semantics import (
     ACTIVE_FAILURE_REASON_CODES,
@@ -78,6 +80,15 @@ AGENT_POLICY_ID = "bounded-adaptive-customs-review/v1"
 TOOL_REGISTRY_ID = "customs-agent-tools/text-v1"
 MAX_AGENT_CYCLES = 2
 MAX_TOOL_CALLS = 6
+PRODUCTION_ALLOWED_TOOLS = frozenset(
+    {
+        "document.reread_span/v1",
+        "evidence.retrieve/v3",
+        "human.request/v1",
+        "explanation.compose/v1",
+        "case.answer/v1",
+    }
+)
 
 
 class BoundedToolPolicyError(RuntimeError):
@@ -156,6 +167,7 @@ class ActiveBoundedRuntimeExecutor(Protocol):
         *,
         plan: ReviewPlanProposalV1,
         fact_ledger: FactLedgerV1,
+        uat_capability: AgentUatCapabilityAttestationV1 | None = None,
     ) -> ActiveBoundedRuntimeOutcome: ...
 
 
@@ -684,6 +696,13 @@ def compile_shadow_plan(
         input_references = sorted(set(requested_references))
         if not set(input_references).issubset(gap.source_reference_ids):
             continue
+        # The span reread contract is deliberately singular: one action is
+        # bound to one canonical field-source reference. A broad list would
+        # silently turn a span check into document-set reanalysis.
+        if tool_name == "document.reread_span/v1":
+            if not input_references:
+                continue
+            input_references = input_references[:1]
         reason_code = str(suggestion.get("reason_code") or gap.reason_code)[:128]
         canonical = {
             "tool_name": tool_name,
@@ -776,6 +795,155 @@ def compile_shadow_plan(
         input_tokens=(model_call.input_tokens if model_call is not None else 0),
         output_tokens=(model_call.output_tokens if model_call is not None else 0),
         latency_ms=(model_call.latency_ms if model_call is not None else 0),
+    )
+
+
+def _compile_uat_bounded_retry_plan(
+    plan: ReviewPlanProposalV1,
+    gaps: list[ReviewGapV1],
+) -> ReviewPlanProposalV1:
+    """Add the second Evidence cycle only to the expiring local-UAT plan.
+
+    Production keeps its frozen one-action-per-Gap plan. The UAT capability
+    explicitly authorizes two cycles, so code guarantees the two recoverable
+    tools are present and reserves one conditional same-Provider Evidence
+    retry. ReviewResultV3 is frozen, so its plan retains the v1 explanation
+    action. The separately attested v2 user renderer is recorded only in the
+    additive Experience envelope. The resulting plan remains at most six
+    actions and retains the exact Claude coordinator identity.
+    """
+
+    if not gaps:
+        return plan
+    ordered_gaps = sorted(gaps, key=lambda item: item.gap_id)
+    evidence_gap = next(
+        (gap for gap in ordered_gaps if gap.gap_type == "evidence_incomplete"),
+        None,
+    )
+    field_gaps = [gap for gap in ordered_gaps if gap.gap_type == "field_uncertainty"]
+    selected: list[PlannedToolActionV1] = []
+    selected_action_ids: set[str] = set()
+    reread_reference_ids: set[str] = set()
+
+    def action_for_gap(gap: ReviewGapV1) -> PlannedToolActionV1:
+        expected_tool = _tool_for_gap(gap)
+        existing = next(
+            (
+                action
+                for action in plan.actions
+                if action.gap_id == gap.gap_id and action.tool_name == expected_tool
+            ),
+            None,
+        )
+        if existing is not None and expected_tool != "document.reread_span/v1":
+            return existing
+        input_reference_ids = (
+            sorted(set(existing.input_reference_ids))[:1]
+            if existing is not None
+            else sorted(set(gap.source_reference_ids))[:1]
+        )
+        if expected_tool != "document.reread_span/v1":
+            input_reference_ids = (
+                existing.input_reference_ids if existing is not None else gap.source_reference_ids
+            )
+        payload = {
+            "tool_name": expected_tool,
+            "gap_id": gap.gap_id,
+            "reason_code": gap.reason_code,
+            "input_reference_ids": input_reference_ids,
+        }
+        return PlannedToolActionV1(
+            action_id=stable_object_id("action", payload),
+            tool_name=expected_tool,  # type: ignore[arg-type]
+            gap_id=gap.gap_id,
+            reason_code=gap.reason_code,
+            input_reference_ids=input_reference_ids,
+        )
+
+    def add_action(action: PlannedToolActionV1, *, action_limit: int) -> bool:
+        if len(selected) >= action_limit or action.action_id in selected_action_ids:
+            return False
+        if action.tool_name == "document.reread_span/v1":
+            if reread_reference_ids.intersection(action.input_reference_ids):
+                return False
+            reread_reference_ids.update(action.input_reference_ids)
+        selected.append(action)
+        selected_action_ids.add(action.action_id)
+        return True
+
+    # Reserve one terminal explanation slot and, when Evidence is incomplete,
+    # one conditional same-Provider retry slot. The first Evidence action is
+    # deliberately first so its attempt is always cycle 0.
+    primary_action_limit = MAX_TOOL_CALLS - 1 - int(evidence_gap is not None)
+    if evidence_gap is not None:
+        add_action(action_for_gap(evidence_gap), action_limit=primary_action_limit)
+    for gap in field_gaps:
+        add_action(action_for_gap(gap), action_limit=primary_action_limit)
+    for action in plan.actions:
+        if action.tool_name == "explanation.compose/v1":
+            continue
+        # The expiring UAT policy permits two attempts for one deterministically
+        # selected Evidence Gap, not one attempt for every Evidence Gap.
+        if (
+            evidence_gap is not None
+            and action.tool_name == "evidence.retrieve/v3"
+            and action.gap_id != evidence_gap.gap_id
+        ):
+            continue
+        if not add_action(action, action_limit=primary_action_limit):
+            if len(selected) < primary_action_limit:
+                continue
+            break
+    if evidence_gap is not None:
+        evidence_primary = next(
+            action
+            for action in selected
+            if action.gap_id == evidence_gap.gap_id and action.tool_name == "evidence.retrieve/v3"
+        )
+        retry_payload = {
+            "tool_name": "evidence.retrieve/v3",
+            "gap_id": evidence_gap.gap_id,
+            "reason_code": "evidence_retry_cycle_2_if_unresolved",
+            "input_reference_ids": evidence_primary.input_reference_ids,
+        }
+        selected.append(
+            PlannedToolActionV1(
+                action_id=stable_object_id("action", retry_payload),
+                tool_name="evidence.retrieve/v3",
+                gap_id=evidence_gap.gap_id,
+                reason_code="evidence_retry_cycle_2_if_unresolved",
+                input_reference_ids=evidence_primary.input_reference_ids,
+            )
+        )
+    explanation_gap = evidence_gap or ordered_gaps[0]
+    explanation_payload = {
+        "tool_name": "explanation.compose/v1",
+        "gap_id": explanation_gap.gap_id,
+        "reason_code": "compose_canonical_v3_explanation",
+        "input_reference_ids": explanation_gap.source_reference_ids,
+    }
+    selected.append(
+        PlannedToolActionV1(
+            action_id=stable_object_id("action", explanation_payload),
+            tool_name="explanation.compose/v1",
+            gap_id=explanation_gap.gap_id,
+            reason_code="compose_canonical_v3_explanation",
+            input_reference_ids=explanation_gap.source_reference_ids,
+        )
+    )
+    if len(selected) > MAX_TOOL_CALLS:
+        raise BoundedToolPolicyError("UAT plan compiler exceeded the Tool-call limit")
+    payload = {
+        **plan.model_dump(
+            mode="json",
+            exclude={"plan_id", "actions"},
+            warnings=False,
+        ),
+        "actions": [item.model_dump(mode="json", warnings=False) for item in selected],
+    }
+    return ReviewPlanProposalV1(
+        plan_id=stable_object_id("plan", payload),
+        **payload,
     )
 
 
@@ -1012,6 +1180,8 @@ def activate_bounded_plan(
     plan: ReviewPlanProposalV1,
     *,
     policy_id: str,
+    uat_capability: AgentUatCapabilityAttestationV1 | None = None,
+    runtime_release: RuntimeReleaseIdentityV1 | None = None,
 ) -> ReviewPlanProposalV1:
     """Convert a reviewed shadow plan only under the signed packaged release.
 
@@ -1024,7 +1194,7 @@ def activate_bounded_plan(
         build_authorized = profile.agent_code_snapshot_sha256 == package_code_snapshot_sha256()
     except Exception:
         build_authorized = False
-    if (
+    production_authorized = (
         policy_id != AGENT_POLICY_ID
         or profile.policy_id != AGENT_POLICY_ID
         or profile.tool_registry_id != TOOL_REGISTRY_ID
@@ -1032,8 +1202,34 @@ def activate_bounded_plan(
         or profile.kill_switch_active
         or not profile.bounded_adaptive_active_enabled
         or not build_authorized
-    ):
+    ) is False
+    uat_authorized = False
+    uat_allowed_tools: frozenset[str] = frozenset()
+    if uat_capability is not None and runtime_release is not None:
+        from customs_ai_agent.uat_capability import (
+            UAT_CANONICAL_REVIEW_TOOLS,
+            assert_runtime_uat_capability,
+        )
+
+        uat_authorized = assert_runtime_uat_capability(
+            uat_capability,
+            agent_code_snapshot_sha256=runtime_release.agent_code_snapshot_sha256,
+            model_id=runtime_release.model_id,
+            evidence_runtime_v3_sha256=runtime_release.evidence_runtime_v3_sha256,
+        )
+        if uat_authorized:
+            uat_allowed_tools = frozenset(UAT_CANONICAL_REVIEW_TOOLS)
+    if not production_authorized and not uat_authorized:
         raise BoundedToolPolicyError("active bounded execution is not release-authorized")
+    allowed_tools = (
+        PRODUCTION_ALLOWED_TOOLS.intersection(uat_allowed_tools)
+        if production_authorized and uat_authorized
+        else (PRODUCTION_ALLOWED_TOOLS if production_authorized else uat_allowed_tools)
+    )
+    if any(action.tool_name not in allowed_tools for action in plan.actions):
+        raise BoundedToolPolicyError(
+            "shadow plan contains a Tool outside the authorized runtime registry"
+        )
     payload = {
         **plan.model_dump(mode="json", exclude={"plan_id", "mode"}),
         "mode": "active",
@@ -1050,6 +1246,8 @@ def execute_active_bounded_plan(
     broker: BoundedToolBroker,
     reevaluate: DeterministicStageReevaluator,
     policy_id: str,
+    uat_capability: AgentUatCapabilityAttestationV1 | None = None,
+    runtime_release: RuntimeReleaseIdentityV1 | None = None,
 ) -> tuple[list[ActionTraceV1], list[ToolObservationV1], list[str]]:
     """Execute allowlisted observations and deterministic affected-stage reruns.
 
@@ -1068,7 +1266,7 @@ def execute_active_bounded_plan(
         build_authorized = profile.agent_code_snapshot_sha256 == package_code_snapshot_sha256()
     except Exception:
         build_authorized = False
-    if (
+    production_authorized = (
         policy_id != AGENT_POLICY_ID
         or profile.policy_id != AGENT_POLICY_ID
         or profile.tool_registry_id != TOOL_REGISTRY_ID
@@ -1076,8 +1274,34 @@ def execute_active_bounded_plan(
         or profile.kill_switch_active
         or not profile.bounded_adaptive_active_enabled
         or not build_authorized
-    ):
+    ) is False
+    uat_authorized = False
+    uat_allowed_tools: frozenset[str] = frozenset()
+    if uat_capability is not None and runtime_release is not None:
+        from customs_ai_agent.uat_capability import (
+            UAT_CANONICAL_REVIEW_TOOLS,
+            assert_runtime_uat_capability,
+        )
+
+        uat_authorized = assert_runtime_uat_capability(
+            uat_capability,
+            agent_code_snapshot_sha256=runtime_release.agent_code_snapshot_sha256,
+            model_id=runtime_release.model_id,
+            evidence_runtime_v3_sha256=runtime_release.evidence_runtime_v3_sha256,
+        )
+        if uat_authorized:
+            uat_allowed_tools = frozenset(UAT_CANONICAL_REVIEW_TOOLS)
+    if not production_authorized and not uat_authorized:
         raise BoundedToolPolicyError("active bounded execution is not release-authorized")
+    allowed_tools = (
+        PRODUCTION_ALLOWED_TOOLS.intersection(uat_allowed_tools)
+        if production_authorized and uat_authorized
+        else (PRODUCTION_ALLOWED_TOOLS if production_authorized else uat_allowed_tools)
+    )
+    if any(action.tool_name not in allowed_tools for action in plan.actions):
+        raise BoundedToolPolicyError(
+            "active plan contains a Tool outside the authorized runtime registry"
+        )
 
     traces: list[ActionTraceV1] = []
     observations: list[ToolObservationV1] = []
@@ -1090,14 +1314,23 @@ def execute_active_bounded_plan(
     for action in plan.actions:
         if calls >= min(plan.tool_call_limit, MAX_TOOL_CALLS):
             break
-        cycle = calls // per_cycle
+        conditional_evidence_retry = (
+            action.tool_name == "evidence.retrieve/v3"
+            and action.reason_code == "evidence_retry_cycle_2_if_unresolved"
+        )
+        cycle = 1 if conditional_evidence_retry else calls // per_cycle
         if cycle >= min(plan.cycle_limit, MAX_AGENT_CYCLES):
             break
         calls += 1
+        action_started_ns = time.perf_counter_ns()
         status: Literal["succeeded", "failed", "deferred"]
         reason_code: str
         output_references: list[str]
-        if action.tool_name == "human.request/v1":
+        if conditional_evidence_retry and action.gap_id in resolved_gap_ids:
+            status = "deferred"
+            reason_code = "gap_already_resolved"
+            output_references = [action.gap_id]
+        elif action.tool_name == "human.request/v1":
             status = "succeeded"
             reason_code = "human_review_request_recorded"
             output_references = [action.gap_id]
@@ -1173,7 +1406,10 @@ def execute_active_bounded_plan(
             input_reference_ids=action.input_reference_ids,
             output_reference_ids=output_references,
             status=status,
-            duration_ms=0,
+            duration_ms=min(
+                300_000,
+                max(1, (time.perf_counter_ns() - action_started_ns + 999_999) // 1_000_000),
+            ),
             provider="deterministic_policy",
         )
         traces.append(trace)
@@ -1359,14 +1595,35 @@ def _runtime_release(
     *,
     evidence_runtime_v3_sha256: str | None,
     assertion_trust_store: AssertionTrustStoreV1 | None = None,
+    uat_capability: AgentUatCapabilityAttestationV1 | None = None,
 ) -> RuntimeReleaseIdentityV1:
     observed_model = result.model_calls[0].model_id if result.model_calls else DEFAULT_CLAUDE_MODEL
-    return runtime_release_identity(
+    release = runtime_release_identity(
         model_id=observed_model,
         evidence_snapshot_id=result.knowledge_snapshot_id,
         evidence_runtime_v3_sha256=evidence_runtime_v3_sha256,
         assertion_trust_store=assertion_trust_store,
     )
+    if uat_capability is None:
+        return release
+
+    # A source checkout has no packaged wheel manifest, so its otherwise exact
+    # runtime identity cannot name a Git commit.  Local UAT already loads a
+    # file-hash-bound, time-limited capability against the harness manifest.
+    # Revalidate every immutable runtime binding here before using that trusted
+    # commit in the canonical result consumed by Backend.
+    from customs_ai_agent.uat_capability import assert_runtime_uat_capability
+
+    if not assert_runtime_uat_capability(
+        uat_capability,
+        agent_code_snapshot_sha256=release.agent_code_snapshot_sha256,
+        model_id=release.model_id,
+        evidence_runtime_v3_sha256=release.evidence_runtime_v3_sha256,
+        expected_agent_commit=uat_capability.agent_commit,
+        require_active=False,
+    ):
+        raise ValueError("uat capability does not bind the canonical runtime release")
+    return release.model_copy(update={"agent_git_sha": uat_capability.agent_commit})
 
 
 def _detect_text_language(text: str | None) -> str:
@@ -1663,6 +1920,7 @@ def to_review_run_result_v3(
     assertion_trust_store: AssertionTrustStoreV1 | None = None,
     supporting_document_rejections: list[str] | None = None,
     active_executor: ActiveBoundedRuntimeExecutor | None = None,
+    uat_capability: AgentUatCapabilityAttestationV1 | None = None,
 ) -> ReviewRunResultV3:
     """Add release-gated adaptive inspection without granting Claude policy authority."""
 
@@ -1680,6 +1938,7 @@ def to_review_run_result_v3(
             current,
             evidence_runtime_v3_sha256=evidence_runtime_v3_sha256,
             assertion_trust_store=assertion_trust_store,
+            uat_capability=uat_capability,
         )
         current_eligibility = _completion_eligibility(
             current,
@@ -1746,7 +2005,18 @@ def to_review_run_result_v3(
         runtime_release,
         supporting_rejections=rejection_codes,
     )
+    if uat_capability is not None:
+        from customs_ai_agent.uat_capability import assert_runtime_uat_capability
+
+        adaptive_authorized = assert_runtime_uat_capability(
+            uat_capability,
+            agent_code_snapshot_sha256=runtime_release.agent_code_snapshot_sha256,
+            model_id=runtime_release.model_id,
+            evidence_runtime_v3_sha256=runtime_release.evidence_runtime_v3_sha256,
+        )
     coordinator_blockers = observed_coordinator_blockers if adaptive_authorized else []
+    if uat_capability is not None and adaptive_authorized and not coordinator_blockers:
+        plan = _compile_uat_bounded_retry_plan(plan, gaps)
     eligibility = _with_release_identity_blockers(eligibility, coordinator_blockers)
     gaps.extend(
         _gap("release_gate", reason_code, (facts.outcome_reference,))
@@ -1759,7 +2029,12 @@ def to_review_run_result_v3(
     active_failure_codes: list[str] = []
     if active_executor is not None and adaptive_authorized and not coordinator_blockers:
         try:
-            active_plan = activate_bounded_plan(plan, policy_id=AGENT_POLICY_ID)
+            active_plan = activate_bounded_plan(
+                plan,
+                policy_id=AGENT_POLICY_ID,
+                uat_capability=uat_capability,
+                runtime_release=runtime_release,
+            )
         except BoundedToolPolicyError:
             # The normal current state: an unreleased profile and kill switch
             # retain the fully audited shadow plan without executing a Tool.
@@ -1767,10 +2042,17 @@ def to_review_run_result_v3(
         else:
             plan = active_plan
             try:
-                active_outcome = active_executor.execute(
-                    plan=active_plan,
-                    fact_ledger=facts.ledger,
-                )
+                if uat_capability is None:
+                    active_outcome = active_executor.execute(
+                        plan=active_plan,
+                        fact_ledger=facts.ledger,
+                    )
+                else:
+                    active_outcome = active_executor.execute(
+                        plan=active_plan,
+                        fact_ledger=facts.ledger,
+                        uat_capability=uat_capability,
+                    )
             except (BoundedToolPolicyError, LLMError, ValueError):
                 active_failure_codes.append("active_bounded_execution_failed")
             except Exception:
@@ -1880,7 +2162,11 @@ def to_review_run_result_v3(
     if action_trace is None or observations is None:
         action_trace, observations = execute_bounded_plan(plan, narrative, narrative_call)
     open_gaps = any(gap.status != "resolved" for gap in gaps)
-    action_failed = any(item.status != "succeeded" for item in observations)
+    action_failed = any(
+        item.status == "failed"
+        or (item.status == "deferred" and item.reason_code != "gap_already_resolved")
+        for item in observations
+    )
     if result.status == "blocked":
         execution_status = "failed"
         disposition = "blocked"

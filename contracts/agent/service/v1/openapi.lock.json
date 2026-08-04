@@ -1,6 +1,6 @@
 {
-  "canonical_json_bytes": 262009,
-  "canonical_sha256": "e0ac396417ddc37a20fce7ed9ba612db3db5d259a3a3393faadfb1ad95f6c64e",
+  "canonical_json_bytes": 564617,
+  "canonical_sha256": "c7b4f174e80e1594c092bc9e29d23fed87ca254e5968177eccca6d0219625859",
   "generator": {
     "fastapi": "0.139.2",
     "openapi": "3.1.0",
@@ -32,6 +32,24 @@
       "post"
     ],
     "/internal/agent/v2/revisions": [
+      "post"
+    ],
+    "/internal/agent/v3/answers": [
+      "post"
+    ],
+    "/internal/agent/v3/answers/stream": [
+      "post"
+    ],
+    "/internal/agent/v3/metadata": [
+      "get"
+    ],
+    "/internal/agent/v3/reviews": [
+      "post"
+    ],
+    "/internal/agent/v3/reviews/stream": [
+      "post"
+    ],
+    "/internal/agent/v3/revisions": [
       "post"
     ]
   },

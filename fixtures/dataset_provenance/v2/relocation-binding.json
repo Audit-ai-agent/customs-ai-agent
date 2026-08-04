@@ -1,0 +1,45 @@
+{
+  "schema_version": "customs-dataset-relocation-binding/v1",
+  "migration_id": "TASK-0028-dataset-canonical-relocation",
+  "workspace_layout_version": "local-data/v1",
+  "contract_issued_at": "2026-08-01T07:58:13+09:00",
+  "manifest_workspace_relative_path": "_local/data/dataset-relocation-manifest.v1.json",
+  "datasets": [
+    {
+      "dataset_id": "trade_document_triplets",
+      "dataset_version": "source-v1",
+      "canonical_dataset_workspace_relative_path": "_local/data/trade_document_triplets/source-v1",
+      "canonical_raw_workspace_relative_path": "_local/data/trade_document_triplets/source-v1/raw",
+      "provenance_workspace_relative_path": "_local/data/trade_document_triplets/source-v1/provenance.json",
+      "provenance_sha256": "0c4005d61b5e6d183ab08dabca820e132fd088c357d5d5d2843ab73df7160792",
+      "legacy_source_workspace_relative_path": "가상데이터(CI_PL_BL)",
+      "legacy_canonical_workspace_relative_path": "_artifacts/datasets/trade_document_triplets/source-v1",
+      "raw_integrity": {
+        "raw_file_count": 3,
+        "raw_bytes": 347619,
+        "raw_checksums_workspace_relative_path": "_local/data/trade_document_triplets/source-v1/checksums.sha256",
+        "raw_checksums_sha256": "b5fc050316847c211f3a931a957eb55bbfeb8d18e09818e453a420554e722179",
+        "inventory_workspace_relative_path": "_local/data/trade_document_triplets/source-v1/inventory.json",
+        "inventory_sha256": "85f007a7d4484042a1c1064d22e9c2d15400a53fe4c773c919b3bd0e13f6f536"
+      }
+    },
+    {
+      "dataset_id": "trade_documents_images",
+      "dataset_version": "source-v1",
+      "canonical_dataset_workspace_relative_path": "_local/data/trade_documents_images/source-v1",
+      "canonical_raw_workspace_relative_path": "_local/data/trade_documents_images/source-v1/raw",
+      "provenance_workspace_relative_path": "_local/data/trade_documents_images/source-v1/provenance.json",
+      "provenance_sha256": "2ce2ad53da8a1ea867e9494c85b1df0c04fdc7d3396ac7d596b1d678421f5744",
+      "legacy_source_workspace_relative_path": "trade_documents_images",
+      "legacy_canonical_workspace_relative_path": "_artifacts/datasets/trade_documents_images/source-v1",
+      "raw_integrity": {
+        "raw_file_count": 3002,
+        "raw_bytes": 260248817,
+        "raw_checksums_workspace_relative_path": "_local/data/trade_documents_images/source-v1/checksums.sha256",
+        "raw_checksums_sha256": "f720c8a58dfc2563c4425539fb51230eac9f036385fa3df21fae415a4be8ce1a",
+        "inventory_workspace_relative_path": "_local/data/trade_documents_images/source-v1/dataset-inventory.json",
+        "inventory_sha256": "fff84fc91c8dd545ee6f14bdf77c00974e12b297e69b54c9ea05c3221453e947"
+      }
+    }
+  ]
+}

@@ -1,0 +1,234 @@
+from __future__ import annotations
+
+import json
+import time
+from typing import Any, Callable
+
+from fastapi.testclient import TestClient
+
+from customs_ai_agent.runtime import RuntimeConfigurationError
+from customs_ai_agent.service.app import create_app
+from tests.service.conftest import FakeResult, FakeRuntime, settings_with
+
+
+class ObservedRuntime(FakeRuntime):
+    def review_experience_stream_json(
+        self,
+        payload: bytes,
+        callback: Callable[[dict[str, Any]], None],
+    ) -> FakeResult:
+        self.calls += 1
+        self.payloads.append(payload)
+        callback(
+            {
+                "stage_code": "request_validation",
+                "state": "started",
+                "duration_ms": None,
+                "safe_counts": {},
+            }
+        )
+        callback(
+            {
+                "stage_code": "request_validation",
+                "state": "completed",
+                "duration_ms": 1,
+                "safe_counts": {},
+            }
+        )
+        callback(
+            {
+                "stage_code": "document_analysis",
+                "state": "started",
+                "duration_ms": None,
+                "safe_counts": {},
+            }
+        )
+        time.sleep(0.01)
+        callback(
+            {
+                "stage_code": "document_analysis",
+                "state": "completed",
+                "duration_ms": 10,
+                "safe_counts": {"documents": 1},
+            }
+        )
+        callback(
+            {
+                "stage_code": "completed",
+                "state": "completed",
+                "duration_ms": None,
+                "safe_counts": {"documents": 1},
+            }
+        )
+        return FakeResult("run-service-1")
+
+
+class ExpiredCapabilityRuntime(FakeRuntime):
+    def __init__(self) -> None:
+        super().__init__()
+        self.capability_checks = 0
+
+    def assert_uat_capability_current(self, *, require_active: bool = False) -> None:
+        assert require_active is False
+        self.capability_checks += 1
+        raise RuntimeConfigurationError(
+            "uat_capability_invalid_or_expired",
+            "expired test capability",
+        )
+
+
+class RevisionExperienceRuntime(FakeRuntime):
+    def revision_experience_v3_json(self, payload: bytes) -> FakeResult:
+        return self.review_json(payload)
+
+
+def _revision_payload(valid_payload: dict[str, Any], *, child_run_id: str) -> dict[str, Any]:
+    documents = valid_payload["documents"]
+    return {
+        "parent_request": {"documents": documents},
+        "revised_request": {
+            "documents": documents,
+            "review_run_id": child_run_id,
+        },
+    }
+
+
+def test_all_enhanced_endpoints_reject_expired_capability_before_external_calls(
+    service_settings,
+    valid_payload,
+    auth_headers,
+) -> None:
+    runtime = ExpiredCapabilityRuntime()
+    readiness_calls = 0
+
+    def probe() -> object:
+        nonlocal readiness_calls
+        readiness_calls += 1
+        return object()
+
+    settings = settings_with(
+        service_settings,
+        enhanced_agent_experience=True,
+        uat_adaptive_active=True,
+    )
+    app = create_app(
+        settings,
+        runtime_factory=lambda _settings: runtime,
+        readiness_probe_factory=lambda _settings: probe,
+    )
+    requests = (
+        ("/internal/agent/v3/reviews", valid_payload),
+        ("/internal/agent/v3/reviews/stream", valid_payload),
+        (
+            "/internal/agent/v3/answers",
+            {"conversation_id": "conversation-expired-1"},
+        ),
+        (
+            "/internal/agent/v3/answers/stream",
+            {"conversation_id": "conversation-expired-1"},
+        ),
+        (
+            "/internal/agent/v3/revisions",
+            _revision_payload(valid_payload, child_run_id="run-expired-revision"),
+        ),
+    )
+    with TestClient(app, raise_server_exceptions=False) as client:
+        for path, payload in requests:
+            response = client.post(path, headers=auth_headers, json=payload)
+            assert response.status_code == 503
+            assert response.json()["error"]["code"] == ("uat_capability_invalid_or_expired")
+
+    assert runtime.capability_checks == 5
+    assert readiness_calls == 0
+    assert runtime.calls == 0
+
+
+def test_revision_experience_endpoint_dispatches_once_and_replays(
+    service_settings,
+    valid_payload,
+    auth_headers,
+) -> None:
+    runtime = RevisionExperienceRuntime()
+    settings = settings_with(service_settings, enhanced_agent_experience=True)
+    app = create_app(
+        settings,
+        runtime_factory=lambda _settings: runtime,
+        readiness_probe_factory=lambda _settings: lambda: object(),
+    )
+    payload = _revision_payload(valid_payload, child_run_id="run-revision-experience-1")
+
+    with TestClient(app, raise_server_exceptions=False) as client:
+        first = client.post(
+            "/internal/agent/v3/revisions",
+            headers=auth_headers,
+            json=payload,
+        )
+        replay = client.post(
+            "/internal/agent/v3/revisions",
+            headers=auth_headers,
+            json=payload,
+        )
+
+    assert first.status_code == replay.status_code == 200
+    assert first.headers["X-Idempotent-Replay"] == "false"
+    assert replay.headers["X-Idempotent-Replay"] == "true"
+    assert first.json() == replay.json()
+    assert runtime.calls == 1
+
+
+def test_review_stream_forwards_only_runtime_observed_stages_and_replays_them(
+    service_settings,
+    valid_payload,
+    auth_headers,
+) -> None:
+    runtime = ObservedRuntime()
+    settings = settings_with(
+        service_settings,
+        enhanced_agent_experience=True,
+    )
+    app = create_app(
+        settings,
+        runtime_factory=lambda _settings: runtime,
+        readiness_probe_factory=lambda _settings: lambda: object(),
+    )
+    with TestClient(app, raise_server_exceptions=False) as client:
+        responses = []
+        for _attempt in range(2):
+            with client.stream(
+                "POST",
+                "/internal/agent/v3/reviews/stream",
+                headers=auth_headers,
+                json=valid_payload,
+            ) as response:
+                assert response.status_code == 200
+                assert response.headers["content-type"].startswith("application/x-ndjson")
+                responses.append([json.loads(line) for line in response.iter_lines()])
+
+    assert runtime.calls == 1
+    for lines in responses:
+        stage_lines = [line for line in lines if line["type"] == "stage_event"]
+        assert [line["event"]["stage_code"] for line in stage_lines] == [
+            "request_validation",
+            "request_validation",
+            "document_analysis",
+            "document_analysis",
+            "completed",
+        ]
+        assert [line["event"]["sequence"] for line in stage_lines] == list(range(len(stage_lines)))
+        assert lines[-1]["type"] == "result"
+        assert not any(
+            line["event"]["duration_ms"] == 0
+            for line in stage_lines
+            if line["event"]["state"] == "completed"
+        )
+        active: set[str] = set()
+        for line in stage_lines:
+            event = line["event"]
+            if event["stage_code"] == "completed":
+                continue
+            if event["state"] == "started":
+                active.add(event["stage_code"])
+                continue
+            assert event["stage_code"] in active
+            active.remove(event["stage_code"])
+        assert not active

@@ -1,3 +1,6 @@
+import threading
+import time
+
 import pytest
 
 from customs_ai_agent.adapters.llm import (
@@ -219,6 +222,60 @@ def test_llm_workflow_calls_analyzer_once_per_document_and_preserves_policy():
     reasons = state["report_json"]["summary"]["outcome_reasons"]
     assert "llm_extraction_uncalibrated" in reasons
     assert "extraction_confidence_below_threshold" in reasons
+
+
+def test_text_analysis_uses_two_call_waves_and_preserves_result_order():
+    class ConcurrentAnalyzer(StaticAnalyzer):
+        def __init__(self):
+            super().__init__()
+            self._lock = threading.Lock()
+            self.active = 0
+            self.max_active = 0
+
+        def analyze(self, document):
+            with self._lock:
+                self.active += 1
+                self.max_active = max(self.max_active, self.active)
+            try:
+                # Force completion order to differ from input order.
+                time.sleep(0.04 if document["document_id"] == "doc_bl" else 0.01)
+                return super().analyze(document)
+            finally:
+                with self._lock:
+                    self.active -= 1
+
+    analyzer = ConcurrentAnalyzer()
+    state = run_review(
+        ReviewRunRequest(scenario_id="happy_path", llm_mode="llm"),
+        retriever=MockRegulationRetriever(),
+        analyzer=analyzer,
+    )
+
+    assert analyzer.max_active == 2
+    assert list(state["classified_documents"]) == ["doc_bl", "doc_inv", "doc_pl", "doc_co"]
+    assert [call["document_id"] for call in state["model_calls"]] == [
+        "doc_bl",
+        "doc_inv",
+        "doc_pl",
+        "doc_co",
+    ]
+
+
+def test_provider_wide_failure_finishes_admitted_wave_and_stops_later_waves():
+    analyzer = StaticAnalyzer(fail_document_id="doc_bl")
+    state = run_review(
+        ReviewRunRequest(scenario_id="happy_path", llm_mode="llm"),
+        retriever=MockRegulationRetriever(),
+        analyzer=analyzer,
+    )
+
+    assert set(analyzer.calls) == {"doc_bl", "doc_inv"}
+    assert [call["document_id"] for call in state["model_calls"]] == ["doc_inv"]
+    assert [(item["document_id"], item["code"]) for item in state["model_errors"]] == [
+        ("doc_bl", "provider_unavailable"),
+        ("doc_pl", "provider_not_attempted_after_failure"),
+        ("doc_co", "provider_not_attempted_after_failure"),
+    ]
 
 
 def test_llm_mode_rejects_implicit_mock_rag_before_analyzer_call():

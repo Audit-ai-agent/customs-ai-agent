@@ -261,17 +261,33 @@ def test_restored_source_registration_is_canonical_only_and_scope_limited():
         ).read_text(encoding="utf-8")
     )
 
-    assert dataset_lock["lock_revision"] == 3
+    assert dataset_lock["lock_revision"] == 4
     storage = dataset_lock["source_storage"]
     assert (
         storage["canonical_workspace_relative_path"]
-        == "_artifacts/datasets/trade_documents_images/source-v1/raw"
+        == "_local/data/trade_documents_images/source-v1/raw"
     )
     assert storage["runner_access_policy"] == "canonical_only"
     assert storage["root_reference_workspace_relative_path"] == "trade_documents_images"
-    assert storage["root_reference_preserved"] is True
+    assert storage["root_reference_preserved"] is False
+    assert storage["root_reference_status"] == "retired"
+    assert (
+        storage["root_reference_retired_by_migration_id"]
+        == "TASK-0028-dataset-canonical-relocation"
+    )
     assert storage["root_reference_runner_eligible"] is False
     assert storage["fallback_to_root_allowed"] is False
+
+    provenance_v2 = dataset_lock["dataset_provenance_v2"]
+    assert provenance_v2["schema_version"] == "customs-dataset-provenance-binding/v2"
+    assert provenance_v2["migration_id"] == "TASK-0028-dataset-canonical-relocation"
+    assert provenance_v2["root_reference_preserved"] is False
+    assert provenance_v2["root_reference_status"] == "retired"
+    assert provenance_v2["fallback_to_legacy_paths_allowed"] is False
+    assert (
+        provenance_v2["canonical_dataset_workspace_relative_path"]
+        == "_local/data/trade_documents_images/source-v1"
+    )
 
     integrity = dataset_lock["source_integrity"]
     assert integrity["source_file_count"] == 3002
@@ -289,9 +305,10 @@ def test_restored_source_registration_is_canonical_only_and_scope_limited():
         == "80edd388bd40c68b6c1c4cae6ddb6b9538502bc2a85d801707844ba1e6d591f0"
     )
     assert integrity["root_to_canonical_parity"] == {
-        "status": "byte_for_byte_identical",
+        "status": "verified_before_retirement",
         "comparison_scope": "all_relative_paths_sizes_and_sha256",
-        "source_deleted": False,
+        "source_deleted": True,
+        "retired_by_migration_id": "TASK-0028-dataset-canonical-relocation",
         "verification_pass_count": 2,
         "mismatch_count": 0,
     }

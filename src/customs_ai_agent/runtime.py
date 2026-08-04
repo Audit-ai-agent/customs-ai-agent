@@ -4,9 +4,11 @@ import copy
 import json
 import math
 import re
+import time
 from dataclasses import dataclass, field
 from os import PathLike
-from typing import Any
+from collections.abc import Callable
+from typing import Any, Literal
 
 from jsonschema import Draft202012Validator, FormatChecker
 from pydantic import SecretStr, ValidationError
@@ -15,6 +17,7 @@ from customs_ai_agent.adapters.llm import (
     ClaudeDocumentAnalyzer,
     ClaudeSettings,
     LLMError,
+    analysis_to_extracted_document,
 )
 from customs_ai_agent.adapters.ocr import OcrLayoutProvider, OcrLayoutProviderError
 from customs_ai_agent.adapters.retrieval import (
@@ -27,6 +30,7 @@ from customs_ai_agent.assertion_trust import (
     AssertionTrustStoreV1,
     SupportingDocumentAssertionVerifier,
 )
+from customs_ai_agent.build_info import package_code_snapshot_sha256
 from customs_ai_agent.contracts import get_schema
 from customs_ai_agent.contracts.evidence_runtime_release import (
     EvidenceRuntimeReleaseLockError,
@@ -35,8 +39,12 @@ from customs_ai_agent.contracts.evidence_runtime_release import (
 )
 from customs_ai_agent.ocr_release import ReleaseLockedOcrProvider
 from customs_ai_agent.runner import (
+    build_reused_extraction_state,
     CorrectionApplicationError,
+    WorkflowStageObserver,
+    WorkflowStageState,
     rerun_review,
+    rerun_review_to_retrieval,
     run_review_result_v2,
     run_review_v2,
     to_review_run_result_v2,
@@ -58,9 +66,12 @@ from customs_ai_agent.agentic import (
     verified_requirement_codes_by_item,
 )
 from customs_ai_agent.nodes.compliance import compliance_review
+from customs_ai_agent.nodes.normalize import normalize_documents
+from customs_ai_agent.nodes.pair import pair_documents
 from customs_ai_agent.nodes.report import generate_xai_report
 from customs_ai_agent.nodes.retrieve import retrieve_regulations
 from customs_ai_agent.nodes.route import route_to_human_or_complete
+from customs_ai_agent.nodes.validate import validate_cross_documents
 from customs_ai_agent.policies.outcome import extraction_completion_blockers
 from customs_ai_agent.schemas.models import (
     ReviewRunRequestV2,
@@ -78,8 +89,18 @@ from customs_ai_agent.schemas.v3 import (
     ReviewRevisionResultV1,
     ReviewRunResultV3,
     ServiceReviewRunRequestV3,
+    canonical_json_sha256,
     review_result_v3_sha256,
+    stable_object_id,
 )
+from customs_ai_agent.schemas.experience import (
+    AgentUatCapabilityAttestationV1,
+    AssistantAnswerV2,
+    CaseConversationRequestV2,
+    ReviewExperienceEnvelopeV1,
+    ReviewRevisionExperienceResultV1,
+)
+from customs_ai_agent.experience import answer_case_conversation, build_review_experience
 
 
 _FORBIDDEN_RESULT_KEYS = frozenset(
@@ -136,6 +157,10 @@ _FORBIDDEN_RESULT_KEY_TOKENS = frozenset(_key_safety_token(key) for key in _FORB
 
 class _DuplicateJsonKeyError(ValueError):
     pass
+
+
+class _ParentExtractionReuseMismatch(ValueError):
+    """The immutable parent extraction cannot be reused by this runtime."""
 
 
 def _reject_duplicate_json_keys(pairs: list[tuple[str, Any]]) -> dict[str, Any]:
@@ -616,10 +641,12 @@ def _assert_public_result_safe(
 class _RuntimeBoundedAdaptiveExecutor:
     """Runtime-owned active Tool composition over the mandatory workflow.
 
-    The request cannot inject handlers. A span reread is bound to canonical
-    FactLedger field references and re-invokes the pinned Claude analyzer over
-    the immutable text request. Evidence retry reuses only the already-pinned
-    v3 retriever. Both paths then run code-owned compliance/outcome stages.
+    The request cannot inject handlers. A field reread is bound to one
+    canonical FactLedger field reference, re-invokes the pinned Claude
+    analyzer for only the owning immutable document, and accepts only an exact
+    re-observation of that field's value and source span. Evidence retry reuses
+    only the already-pinned v3 retriever. Both paths then run code-owned
+    deterministic stages.
     """
 
     def __init__(
@@ -644,6 +671,8 @@ class _RuntimeBoundedAdaptiveExecutor:
         self._assertion_verifier = assertion_verifier
         self._reference_kinds: dict[str, str] = {}
         self._reference_documents: dict[str, str | None] = {}
+        self._field_targets: dict[str, dict[str, Any]] = {}
+        self._pending_reobserved_references: set[str] = set()
         self._pending_state: dict[str, Any] | None = None
         self._next_retrieval_attempt = int(state.get("retrieval_attempt") or 0)
 
@@ -658,6 +687,84 @@ class _RuntimeBoundedAdaptiveExecutor:
         attempt = self._next_retrieval_attempt
         self._next_retrieval_attempt += 1
         return attempt
+
+    def _index_field_targets(self) -> dict[str, dict[str, Any]]:
+        targets: dict[str, dict[str, Any]] = {}
+        for document in self._result.document_results:
+            for document_field in document.fields:
+                reference_id = stable_object_id(
+                    "field",
+                    {
+                        "document_id": document.document_id,
+                        "field_path": f"fields.{document_field.name}",
+                        "source": document_field.source.model_dump(mode="json"),
+                    },
+                )
+                targets[reference_id] = {
+                    "document_id": document.document_id,
+                    "field_name": document_field.name,
+                    "line_item_id": None,
+                    # A reread observes the source value, not the later
+                    # code-normalized projection. Normalization is rerun as a
+                    # separate deterministic stage after the observation.
+                    "value": document_field.value,
+                    "source": document_field.source.model_dump(mode="json"),
+                }
+            for line_item in document.line_items:
+                for item_field in line_item.fields:
+                    reference_id = stable_object_id(
+                        "field",
+                        {
+                            "document_id": document.document_id,
+                            "field_path": (f"line_items.{line_item.item_id}.{item_field.name}"),
+                            "source": item_field.source.model_dump(mode="json"),
+                        },
+                    )
+                    targets[reference_id] = {
+                        "document_id": document.document_id,
+                        "field_name": item_field.name,
+                        "line_item_id": line_item.item_id,
+                        "value": item_field.value,
+                        "source": item_field.source.model_dump(mode="json"),
+                    }
+        return targets
+
+    @staticmethod
+    def _mapped_field(
+        mapped_document: dict[str, Any],
+        target: dict[str, Any],
+    ) -> dict[str, Any] | None:
+        line_item_id = target["line_item_id"]
+        field_name = target["field_name"]
+        if line_item_id is None:
+            value = (mapped_document.get("fields") or {}).get(field_name)
+            return value if isinstance(value, dict) else None
+        for line_item in mapped_document.get("line_items") or []:
+            if (
+                isinstance(line_item, dict)
+                and line_item.get("item_id") == line_item_id
+                and isinstance(line_item.get(field_name), dict)
+            ):
+                return line_item[field_name]
+        return None
+
+    @staticmethod
+    def _same_public_value(left: Any, right: Any) -> bool:
+        return json.dumps(
+            left,
+            ensure_ascii=False,
+            allow_nan=False,
+            separators=(",", ":"),
+            sort_keys=True,
+            default=str,
+        ) == json.dumps(
+            right,
+            ensure_ascii=False,
+            allow_nan=False,
+            separators=(",", ":"),
+            sort_keys=True,
+            default=str,
+        )
 
     def _finalize_state(
         self,
@@ -738,43 +845,114 @@ class _RuntimeBoundedAdaptiveExecutor:
         return next_state, final_result, supporting_rejections
 
     def _reread_span(self, reference_ids: tuple[str, ...]) -> BoundedToolResult:
-        document_ids = {
-            self._reference_documents.get(reference_id)
-            for reference_id in reference_ids
-            if self._reference_kinds.get(reference_id) == "field_source"
-        }
-        if (
-            len(document_ids) == 0
-            or None in document_ids
-            or any(self._reference_kinds.get(item) != "field_source" for item in reference_ids)
-        ):
+        self._pending_reobserved_references = set()
+        if len(reference_ids) != 1:
             return BoundedToolResult(status="failed", reason_code="span_reference_not_grounded")
-        request_document_ids = {
-            document.document_id for document in self._service_request.documents or []
-        }
-        if not document_ids.issubset(request_document_ids):
+        reference_id = reference_ids[0]
+        target = self._field_targets.get(reference_id)
+        if self._reference_kinds.get(reference_id) != "field_source" or target is None:
+            return BoundedToolResult(status="failed", reason_code="span_reference_not_grounded")
+        document = next(
+            (
+                item
+                for item in self._service_request.documents or []
+                if item.document_id == target["document_id"]
+            ),
+            None,
+        )
+        if document is None or not document.content_text:
             return BoundedToolResult(status="failed", reason_code="span_document_not_in_request")
-        retrieval_attempt = self._reserve_retrieval_attempt()
+        source = target["source"]
+        text_start = source.get("text_start")
+        text_end = source.get("text_end")
+        if (
+            isinstance(text_start, bool)
+            or isinstance(text_end, bool)
+            or not isinstance(text_start, int)
+            or not isinstance(text_end, int)
+            or not 0 <= text_start < text_end <= len(document.content_text)
+        ):
+            return BoundedToolResult(
+                status="failed",
+                reason_code="span_coordinates_not_grounded",
+            )
+        analysis_document = document.model_dump(mode="python", warnings=False)
         try:
-            self._retriever.preflight(self._service_request.review_as_of)
-            workflow_request = ReviewRunRequestV2.model_validate(
-                self._service_request.model_dump(mode="python", warnings=False)
+            analysis = self._analyzer.analyze(analysis_document)
+            mapped = analysis_to_extracted_document(
+                analysis_document,
+                analysis,
             )
-            self._pending_state = run_review_v2(
-                workflow_request,
-                retriever=self._retriever,
-                analyzer=self._analyzer,
-                initial_retrieval_attempt=retrieval_attempt,
-            )
+            fresh_field = self._mapped_field(mapped, target)
         except (LLMError, RetrievalError, ValidationError, ValueError):
             self._pending_state = None
             return BoundedToolResult(status="failed", reason_code="span_reread_failed")
         except Exception:
             self._pending_state = None
             return BoundedToolResult(status="failed", reason_code="span_reread_failed")
+        if fresh_field is None:
+            return BoundedToolResult(
+                status="failed",
+                reason_code="span_target_not_reobserved",
+            )
+        fresh_value = fresh_field.get("value")
+        fresh_evidence = fresh_field.get("evidence")
+        fresh_start = fresh_evidence.get("text_start") if isinstance(fresh_evidence, dict) else None
+        fresh_end = fresh_evidence.get("text_end") if isinstance(fresh_evidence, dict) else None
+        source_overlap = (
+            isinstance(fresh_start, int)
+            and not isinstance(fresh_start, bool)
+            and isinstance(fresh_end, int)
+            and not isinstance(fresh_end, bool)
+            and 0 <= fresh_start < fresh_end <= len(document.content_text)
+            and max(text_start, fresh_start) < min(text_end, fresh_end)
+        )
+        if not self._same_public_value(fresh_value, target["value"]) or not source_overlap:
+            return BoundedToolResult(
+                status="failed",
+                reason_code="span_reobservation_conflicted",
+            )
+        next_state = copy.deepcopy(self._state)
+        model_calls = list(next_state.get("model_calls") or [])
+        model_calls.append(
+            {
+                "document_id": document.document_id,
+                **analysis.metadata.as_audit_dict(),
+            }
+        )
+        model_calls.extend(
+            {
+                "document_id": document.document_id,
+                **item.as_audit_dict(),
+            }
+            for item in analysis.additional_model_calls
+        )
+        next_state["model_calls"] = model_calls
+        next_state["model_errors"] = [
+            *(next_state.get("model_errors") or []),
+            *analysis.additional_model_errors,
+        ]
+        next_state["model_conflicts"] = [
+            *(next_state.get("model_conflicts") or []),
+            *analysis.model_conflicts,
+        ]
+        if analysis.additional_model_errors or analysis.model_conflicts:
+            self._pending_state = None
+            return BoundedToolResult(
+                status="failed",
+                reason_code="span_reobservation_provider_conflict",
+            )
+        # The value is intentionally not replaced and its fixed 0.85
+        # uncalibrated confidence is never increased. Re-run only the
+        # deterministic downstream stages over the immutable extraction.
+        next_state.update(normalize_documents(next_state))
+        next_state.update(pair_documents(next_state))
+        next_state.update(validate_cross_documents(next_state))
+        self._pending_state = next_state
+        self._pending_reobserved_references = {reference_id}
         return BoundedToolResult(
             status="succeeded",
-            reason_code="source_bound_text_reread_completed",
+            reason_code="source_bound_field_reobserved_exactly",
             output_reference_ids=reference_ids,
         )
 
@@ -824,6 +1002,7 @@ class _RuntimeBoundedAdaptiveExecutor:
             else ("evidence", "compliance", "outcome")
         )
         if observation.status != "succeeded" or pending is None or affected_stages != expected:
+            self._pending_reobserved_references = set()
             return DeterministicReevaluationResult(
                 status="failed",
                 reason_code="affected_stage_rerun_not_authorized",
@@ -831,17 +1010,46 @@ class _RuntimeBoundedAdaptiveExecutor:
         try:
             next_state, next_result, supporting_rejections = self._finalize_state(pending)
         except (LLMError, RetrievalError, ValidationError, ValueError):
+            self._pending_reobserved_references = set()
             return DeterministicReevaluationResult(
                 status="failed",
                 reason_code="deterministic_stage_rerun_failed",
             )
         except Exception:
+            self._pending_reobserved_references = set()
             return DeterministicReevaluationResult(
                 status="failed",
                 reason_code="deterministic_stage_rerun_failed",
             )
         if action.tool_name == "document.reread_span/v1":
-            resolved = not next_result.model_errors and not next_result.model_conflicts
+            reobserved_references = self._pending_reobserved_references
+            self._pending_reobserved_references = set()
+            exact_reobservation = (
+                bool(action.input_reference_ids)
+                and set(action.input_reference_ids) == reobserved_references
+                and not next_result.model_errors
+                and not next_result.model_conflicts
+            )
+            if not exact_reobservation:
+                return DeterministicReevaluationResult(
+                    status="failed",
+                    reason_code="deterministic_field_reobservation_not_grounded",
+                )
+            # A second observation is useful evidence that the deterministic
+            # downstream stages were rerun, but the current Claude extraction
+            # release remains fixed at an uncalibrated confidence of 0.85.
+            # Therefore the field_uncertainty Gap must stay open. Claiming it
+            # as resolved here would manufacture confidence that the provider
+            # did not supply.
+            self._state = next_state
+            self._result = next_result
+            self._supporting_rejections = supporting_rejections
+            return DeterministicReevaluationResult(
+                status="succeeded",
+                reason_code="affected_deterministic_stages_reexecuted_gap_open",
+                resolved_gap_ids=(),
+                output_reference_ids=tuple(sorted(reobserved_references)),
+            )
         else:
             resolved = (
                 next_result.retrieval_status == "ok"
@@ -868,11 +1076,34 @@ class _RuntimeBoundedAdaptiveExecutor:
         *,
         plan: ReviewPlanProposalV1,
         fact_ledger: FactLedgerV1,
+        uat_capability: AgentUatCapabilityAttestationV1 | None = None,
     ) -> ActiveBoundedRuntimeOutcome:
         self._reference_kinds = {entry.reference_id: entry.kind for entry in fact_ledger.entries}
         self._reference_documents = {
             entry.reference_id: entry.document_id for entry in fact_ledger.entries
         }
+        self._field_targets = self._index_field_targets()
+        self._pending_reobserved_references = set()
+        observed_model = (
+            self._result.model_calls[0].model_id
+            if self._result.model_calls
+            else self._analyzer.model_id
+        )
+        active_runtime_release = runtime_release_identity(
+            model_id=observed_model,
+            evidence_snapshot_id=self._result.knowledge_snapshot_id,
+            evidence_runtime_v3_sha256=(
+                self._retriever.expected_identity.runtime_release_v3_sha256
+            ),
+            assertion_trust_store=(
+                self._assertion_verifier.store
+                if isinstance(
+                    self._assertion_verifier,
+                    SupportingDocumentAssertionVerifier,
+                )
+                else None
+            ),
+        )
         traces, observations, resolved = execute_active_bounded_plan(
             plan,
             broker=BoundedToolBroker(
@@ -881,11 +1112,26 @@ class _RuntimeBoundedAdaptiveExecutor:
             ),
             reevaluate=self._reevaluate,
             policy_id=AGENT_POLICY_ID,
+            uat_capability=uat_capability,
+            runtime_release=active_runtime_release,
         )
         failures: set[str] = set()
         if len(traces) < len(plan.actions):
             failures.add("agent_budget_exhausted")
-        if any(item.status != "succeeded" for item in observations):
+        second_cycle_evidence_failed = any(
+            trace.tool_name == "evidence.retrieve/v3"
+            and trace.reason_code == "evidence_retry_cycle_2_if_unresolved"
+            and trace.cycle == 1
+            and trace.status == "failed"
+            for trace in traces
+        )
+        if second_cycle_evidence_failed:
+            failures.add("agent_budget_exhausted")
+        if any(
+            item.status == "failed"
+            or (item.status == "deferred" and item.reason_code != "gap_already_resolved")
+            for item in observations
+        ):
             failures.add("active_tool_execution_incomplete")
         return ActiveBoundedRuntimeOutcome(
             result=self._result,
@@ -908,6 +1154,8 @@ class AgentRuntime:
         "_retriever_v3",
         "_secret_markers",
         "_assertion_verifier",
+        "_uat_capability",
+        "_uat_expected_agent_commit",
     )
 
     def __init__(self, config: RuntimeConfig) -> None:
@@ -958,6 +1206,8 @@ class AgentRuntime:
         self._retriever_v3: ProductionHttpRegulationRetrieverV3 | None = None
         self._analyzer = analyzer
         self._assertion_verifier = config.verification_assertion_verifier
+        self._uat_capability: AgentUatCapabilityAttestationV1 | None = None
+        self._uat_expected_agent_commit: str | None = None
         self._closed = False
         self._secret_markers = tuple(
             marker
@@ -974,6 +1224,53 @@ class AgentRuntime:
                 "runtime_closed",
                 "The Agent runtime is closed.",
             )
+
+    def assert_uat_capability_current(
+        self,
+        *,
+        require_active: bool = False,
+    ) -> AgentUatCapabilityAttestationV1:
+        """Revalidate the time-bound local-UAT authority without I/O.
+
+        The service transport calls this before dependency readiness, and the
+        direct runtime methods call it again before Claude or Evidence. This
+        prevents a capability that expired after process startup from becoming
+        a reusable in-memory bearer capability.
+        """
+
+        self._assert_open()
+        capability = getattr(self, "_uat_capability", None)
+        if not isinstance(capability, AgentUatCapabilityAttestationV1):
+            raise RuntimeConfigurationError(
+                "uat_capability_invalid_or_expired",
+                "The local-UAT capability is absent, expired, or identity-mismatched.",
+            )
+        retriever = getattr(self, "_retriever_v3", None)
+        expected_identity = getattr(retriever, "expected_identity", None)
+        evidence_identity = getattr(
+            expected_identity,
+            "runtime_release_v3_sha256",
+            None,
+        )
+        from customs_ai_agent.uat_capability import assert_runtime_uat_capability
+
+        if not assert_runtime_uat_capability(
+            capability,
+            agent_code_snapshot_sha256=package_code_snapshot_sha256(),
+            model_id=self._analyzer.model_id,
+            evidence_runtime_v3_sha256=evidence_identity,
+            expected_agent_commit=getattr(
+                self,
+                "_uat_expected_agent_commit",
+                None,
+            ),
+            require_active=require_active,
+        ):
+            raise RuntimeConfigurationError(
+                "uat_capability_invalid_or_expired",
+                "The local-UAT capability is absent, expired, or identity-mismatched.",
+            )
+        return capability
 
     def _runtime_assertion_trust_store(self) -> AssertionTrustStoreV1 | None:
         """Return only the store owned by the concrete runtime verifier.
@@ -1237,6 +1534,7 @@ class AgentRuntime:
         request: ServiceReviewRunRequestV3 | dict[str, Any],
         *,
         _forced_human_review_reasons: tuple[str, ...] = (),
+        _stage_observer: WorkflowStageObserver | None = None,
     ) -> ReviewRunResultV3:
         """Execute mandatory policy stages plus release-gated bounded adaptation."""
 
@@ -1281,6 +1579,7 @@ class AgentRuntime:
             v2_request,
             request=service_request,
             retriever=retriever_v3,
+            stage_observer=_stage_observer,
         )
         supporting_rejections = sorted({*supporting_rejections, *_forced_human_review_reasons})
         active_executor = _RuntimeBoundedAdaptiveExecutor(
@@ -1293,15 +1592,55 @@ class AgentRuntime:
             supporting_document_rejections=supporting_rejections,
             assertion_verifier=self._assertion_verifier,
         )
-        result = to_review_run_result_v3(
-            v2_result,
-            service_request,
-            analyzer=self._analyzer,
-            evidence_runtime_v3_sha256=(retriever_v3.expected_identity.runtime_release_v3_sha256),
-            assertion_trust_store=self._runtime_assertion_trust_store(),
-            supporting_document_rejections=supporting_rejections,
-            active_executor=active_executor,
-        )
+        adaptive_started_ns = time.perf_counter_ns()
+        if _stage_observer is not None:
+            _stage_observer("__adaptive__", "started", {}, None)
+        try:
+            result = to_review_run_result_v3(
+                v2_result,
+                service_request,
+                analyzer=self._analyzer,
+                evidence_runtime_v3_sha256=(
+                    retriever_v3.expected_identity.runtime_release_v3_sha256
+                ),
+                assertion_trust_store=self._runtime_assertion_trust_store(),
+                supporting_document_rejections=supporting_rejections,
+                active_executor=active_executor,
+                uat_capability=getattr(self, "_uat_capability", None),
+            )
+        except Exception:
+            if _stage_observer is not None:
+                _stage_observer(
+                    "__adaptive__",
+                    "failed",
+                    {},
+                    max(
+                        1,
+                        min(
+                            300_000,
+                            round((time.perf_counter_ns() - adaptive_started_ns) / 1_000_000),
+                        ),
+                    ),
+                )
+            raise
+        if _stage_observer is not None:
+            _stage_observer(
+                "__adaptive__",
+                "completed",
+                {
+                    "issues": len(result.validation_issues),
+                    "findings": len(result.regulatory_findings),
+                    "evidence": len(result.rag_evidence),
+                    "actions": len(result.action_trace),
+                },
+                max(
+                    1,
+                    min(
+                        300_000,
+                        round((time.perf_counter_ns() - adaptive_started_ns) / 1_000_000),
+                    ),
+                ),
+            )
         _assert_public_result_safe(
             result.model_dump(mode="python", warnings=False),
             sensitive_markers=self._secret_markers,
@@ -1315,6 +1654,7 @@ class AgentRuntime:
         request: ServiceReviewRunRequestV3,
         retriever: ProductionHttpRegulationRetrieverV3,
         corrections: list[Any] | None = None,
+        stage_observer: WorkflowStageObserver | None = None,
     ) -> tuple[ReviewRunResultV2, list[str], dict[str, Any]]:
         try:
             retriever.preflight(service_request.review_as_of)
@@ -1325,6 +1665,7 @@ class AgentRuntime:
                 workflow_request,
                 retriever=retriever,
                 analyzer=self._analyzer,
+                stage_observer=stage_observer,
             )
             if corrections:
                 # Human corrections never mutate the immutable parent request.
@@ -1421,6 +1762,375 @@ class AgentRuntime:
         )
         return answer
 
+    def review_experience_json(
+        self,
+        payload: bytes | bytearray | memoryview,
+    ) -> ReviewExperienceEnvelopeV1:
+        """Run one canonical review and add a verified user presentation.
+
+        This additive boundary never mutates or replaces ``ReviewRunResultV3``.
+        It is disabled unless the local-UAT composition injected an exact,
+        unexpired capability attestation.
+        """
+
+        self._assert_open()
+        capability = self.assert_uat_capability_current()
+        result = self.review_v3_json(payload)
+        envelope = build_review_experience(
+            result,
+            analyzer=self._analyzer,
+            capability=capability,
+        )
+        _assert_public_result_safe(
+            envelope.model_dump(mode="python", warnings=False),
+            sensitive_markers=self._secret_markers,
+        )
+        return envelope
+
+    def review_experience_stream_json(
+        self,
+        payload: bytes | bytearray | memoryview,
+        stage_callback: Callable[[dict[str, Any]], None],
+        *,
+        _result_transform: Callable[[ReviewRunResultV3], ReviewRunResultV3] | None = None,
+    ) -> ReviewExperienceEnvelopeV1:
+        """Execute v3 while publishing only safe, actually observed stage boundaries."""
+
+        self._assert_open()
+        capability = self.assert_uat_capability_current()
+        document_analysis_started_ns: int | None = None
+
+        def emit_started(stage_code: str) -> int:
+            started_ns = time.perf_counter_ns()
+            stage_callback(
+                {
+                    "stage_code": stage_code,
+                    "state": "started",
+                    "duration_ms": None,
+                    "safe_counts": {},
+                }
+            )
+            return started_ns
+
+        def emit_finished(
+            stage_code: str,
+            started_ns: int,
+            *,
+            state: str,
+            safe_counts: dict[str, int] | None = None,
+            duration_ms: int | None = None,
+        ) -> None:
+            stage_callback(
+                {
+                    "stage_code": stage_code,
+                    "state": state,
+                    "duration_ms": (
+                        duration_ms
+                        if duration_ms is not None
+                        else max(
+                            1,
+                            min(
+                                300_000,
+                                round((time.perf_counter_ns() - started_ns) / 1_000_000),
+                            ),
+                        )
+                    ),
+                    "safe_counts": safe_counts or {},
+                }
+            )
+
+        request_validation_started = emit_started("request_validation")
+        try:
+            decoded = _decode_serialized_json_object(
+                payload,
+                invalid_code="review_v3_request_invalid",
+            )
+            service_request = ServiceReviewRunRequestV3.model_validate(decoded)
+            emit_finished(
+                "request_validation",
+                request_validation_started,
+                state="completed",
+                safe_counts={"documents": len(service_request.documents)},
+            )
+        except Exception:
+            emit_finished(
+                "request_validation",
+                request_validation_started,
+                state="failed",
+            )
+            raise
+
+        public_by_internal = {
+            "normalize_documents": "normalization",
+            "pair_documents": "document_pairing",
+            "validate_cross_documents": "cross_validation",
+            "retrieve_regulations": "evidence_retrieval",
+            "compliance_review": "compliance_review",
+        }
+
+        def observe(
+            internal_stage: str,
+            state: WorkflowStageState,
+            counts: dict[str, int],
+            duration_ms: int | None,
+        ) -> None:
+            nonlocal document_analysis_started_ns
+            if internal_stage == "classify_documents" and state == "started":
+                document_analysis_started_ns = emit_started("document_analysis")
+                return
+            if internal_stage in {"classify_documents", "extract_documents"}:
+                if state == "failed" and document_analysis_started_ns is not None:
+                    emit_finished(
+                        "document_analysis",
+                        document_analysis_started_ns,
+                        state="failed",
+                        safe_counts=counts,
+                    )
+                    document_analysis_started_ns = None
+                elif (
+                    internal_stage == "extract_documents"
+                    and state == "completed"
+                    and document_analysis_started_ns is not None
+                ):
+                    emit_finished(
+                        "document_analysis",
+                        document_analysis_started_ns,
+                        state="completed",
+                        safe_counts=counts,
+                    )
+                    document_analysis_started_ns = None
+                return
+            if internal_stage == "__adaptive__":
+                stage_callback(
+                    {
+                        "stage_code": "adaptive_investigation",
+                        "state": state,
+                        "duration_ms": duration_ms,
+                        "safe_counts": counts,
+                    }
+                )
+                return
+            public_stage = public_by_internal.get(internal_stage)
+            if public_stage is None:
+                return
+            stage_callback(
+                {
+                    "stage_code": public_stage,
+                    "state": state,
+                    "duration_ms": duration_ms,
+                    "safe_counts": counts,
+                }
+            )
+
+        result = self.review_v3(service_request, _stage_observer=observe)
+        if _result_transform is not None:
+            result = _result_transform(result)
+        envelope = build_review_experience(
+            result,
+            analyzer=self._analyzer,
+            capability=capability,
+            stage_callback=stage_callback,
+        )
+        result_validation_started = emit_started("result_validation")
+        try:
+            _assert_public_result_safe(
+                envelope.model_dump(mode="python", warnings=False),
+                sensitive_markers=self._secret_markers,
+            )
+            emit_finished(
+                "result_validation",
+                result_validation_started,
+                state="completed",
+                safe_counts={
+                    "statements": sum(
+                        len(section.statements) for section in envelope.user_presentation.sections
+                    )
+                },
+            )
+        except Exception:
+            emit_finished(
+                "result_validation",
+                result_validation_started,
+                state="failed",
+            )
+            raise
+        stage_callback(
+            {
+                "stage_code": "completed",
+                "state": "completed",
+                "duration_ms": None,
+                "safe_counts": {
+                    "documents": len(result.document_results),
+                    "issues": len(result.validation_issues),
+                    "findings": len(result.regulatory_findings),
+                    "evidence": len(result.rag_evidence),
+                },
+            }
+        )
+        return envelope
+
+    def answer_v2_json(
+        self,
+        payload: bytes | bytearray | memoryview,
+    ) -> AssistantAnswerV2:
+        self._assert_open()
+        self.assert_uat_capability_current()
+        decoded = _decode_serialized_json_object(
+            payload,
+            invalid_code="answer_v2_request_invalid",
+        )
+        try:
+            request = CaseConversationRequestV2.model_validate(decoded)
+        except ValidationError:
+            raise RuntimeInputError(
+                "answer_v2_request_invalid",
+                "The conversation request is stale or invalid.",
+            ) from None
+        answer = answer_case_conversation(request, analyzer=self._analyzer)
+        valid_fact_refs = {
+            (entry.kind, entry.reference_id) for entry in request.review_result.fact_ledger.entries
+        }
+        if any(
+            (citation.kind, citation.reference_id) not in valid_fact_refs
+            for citation in answer.citations
+        ):
+            raise RuntimeExecutionError(
+                "answer_grounding_invalid",
+                "The Assistant answer failed its canonical grounding check.",
+            )
+        _assert_public_result_safe(
+            answer.model_dump(mode="python", warnings=False),
+            sensitive_markers=self._secret_markers,
+        )
+        return answer
+
+    def answer_v2_stream_json(
+        self,
+        payload: bytes | bytearray | memoryview,
+        stage_callback: Callable[[dict[str, Any]], None],
+    ) -> AssistantAnswerV2:
+        """Publish safe Chat boundaries; answer prose is released only after verification."""
+
+        self._assert_open()
+        self.assert_uat_capability_current()
+
+        def observed_stage(
+            stage_code: str,
+            state: Literal["started", "completed", "failed"],
+            *,
+            started_ns: int | None = None,
+            safe_counts: dict[str, int] | None = None,
+        ) -> int:
+            now_ns = time.perf_counter_ns()
+            stage_callback(
+                {
+                    "stage_code": stage_code,
+                    "state": state,
+                    "duration_ms": (
+                        None
+                        if state == "started" or started_ns is None
+                        else max(
+                            1,
+                            min(
+                                300_000,
+                                round((now_ns - started_ns) / 1_000_000),
+                            ),
+                        )
+                    ),
+                    "safe_counts": safe_counts or {},
+                }
+            )
+            return now_ns
+
+        validation_started = observed_stage("request_validation", "started")
+        try:
+            decoded = _decode_serialized_json_object(
+                payload,
+                invalid_code="answer_v2_request_invalid",
+            )
+            request = CaseConversationRequestV2.model_validate(decoded)
+            observed_stage(
+                "request_validation",
+                "completed",
+                started_ns=validation_started,
+                safe_counts={"turns": len(request.recent_turns)},
+            )
+        except Exception:
+            observed_stage(
+                "request_validation",
+                "failed",
+                started_ns=validation_started,
+            )
+            raise
+
+        binding_started = observed_stage("conversation_binding", "started")
+        try:
+            assert_result_hash(request.review_result)
+            if request.bound_result_sha256 != request.review_result.result_sha256:
+                raise RuntimeConflictError(
+                    "stale_conversation",
+                    "The conversation is bound to a stale review result.",
+                )
+            observed_stage(
+                "conversation_binding",
+                "completed",
+                started_ns=binding_started,
+                safe_counts={"turns": len(request.recent_turns)},
+            )
+        except Exception:
+            observed_stage(
+                "conversation_binding",
+                "failed",
+                started_ns=binding_started,
+            )
+            raise
+
+        answer = answer_case_conversation(
+            request,
+            analyzer=self._analyzer,
+            stage_callback=stage_callback,
+        )
+        result_validation_started = observed_stage("result_validation", "started")
+        try:
+            valid_fact_refs = {
+                (entry.kind, entry.reference_id)
+                for entry in request.review_result.fact_ledger.entries
+            }
+            if any(
+                (citation.kind, citation.reference_id) not in valid_fact_refs
+                for citation in answer.citations
+            ):
+                raise RuntimeExecutionError(
+                    "answer_grounding_invalid",
+                    "The Assistant answer failed its canonical grounding check.",
+                )
+            _assert_public_result_safe(
+                answer.model_dump(mode="python", warnings=False),
+                sensitive_markers=self._secret_markers,
+            )
+            observed_stage(
+                "result_validation",
+                "completed",
+                started_ns=result_validation_started,
+                safe_counts={"citations": len(answer.citations)},
+            )
+        except Exception:
+            observed_stage(
+                "result_validation",
+                "failed",
+                started_ns=result_validation_started,
+            )
+            raise
+        stage_callback(
+            {
+                "stage_code": "completed",
+                "state": "completed",
+                "duration_ms": None,
+                "safe_counts": {"citations": len(answer.citations)},
+            }
+        )
+        return answer
+
     def revision_v3_json(
         self,
         payload: bytes | bytearray | memoryview,
@@ -1468,22 +2178,207 @@ class AgentRuntime:
             if any(decision.decision == "reject_review" for decision in revision.decisions)
             else ()
         )
-        if corrections:
-            child = self._review_v3_with_corrections(
-                revision.revised_request,
+        try:
+            child = self._review_v3_reusing_parent_extraction(
+                revision,
                 corrections,
                 forced_human_review_reasons=forced_reasons,
             )
+        except _ParentExtractionReuseMismatch:
+            if corrections:
+                child = self._review_v3_with_corrections(
+                    revision.revised_request,
+                    corrections,
+                    forced_human_review_reasons=forced_reasons,
+                )
+            else:
+                child = self.review_v3(
+                    revision.revised_request,
+                    _forced_human_review_reasons=forced_reasons,
+                )
+        if corrections:
             _assert_public_corrections_applied(child, corrections)
-        else:
-            child = self.review_v3(
-                revision.revised_request,
-                _forced_human_review_reasons=forced_reasons,
-            )
         result = ReviewRevisionResultV1(
             parent_result_sha256=revision.parent_result_sha256,
             child_result=child,
             applied_decision_ids=[item.decision_id for item in revision.decisions],
+        )
+        _assert_public_result_safe(
+            result.model_dump(mode="python", warnings=False),
+            sensitive_markers=self._secret_markers,
+        )
+        return result
+
+    def _revision_reuse_key(
+        self,
+        revision: ReviewRevisionRequestV1,
+        *,
+        retriever: ProductionHttpRegulationRetrieverV3,
+    ) -> str:
+        parent = revision.parent_result
+        current_release = runtime_release_identity(
+            model_id=self._analyzer.model_id,
+            evidence_snapshot_id=parent.knowledge_snapshot_id,
+            evidence_runtime_v3_sha256=retriever.expected_identity.runtime_release_v3_sha256,
+            assertion_trust_store=self._runtime_assertion_trust_store(),
+        )
+        extraction_identity_fields = (
+            "agent_code_snapshot_sha256",
+            "model_id",
+            "model_revision",
+            "extraction_prompt_sha256",
+            "extraction_schema_sha256",
+        )
+        if any(
+            getattr(parent.runtime_release, name) != getattr(current_release, name)
+            for name in extraction_identity_fields
+        ):
+            raise _ParentExtractionReuseMismatch("parent extraction runtime identity changed")
+        expected_document_ids = [
+            document.document_id for document in revision.parent_request.documents
+        ]
+        model_call_document_ids = [call.document_id for call in parent.model_calls]
+        if (
+            model_call_document_ids != expected_document_ids
+            or len(model_call_document_ids) != len(set(model_call_document_ids))
+            or any(
+                call.input_modality != "text"
+                or call.model_id != current_release.model_id
+                or call.prompt_sha256 != current_release.extraction_prompt_sha256
+                or call.output_schema_sha256 != current_release.extraction_schema_sha256
+                for call in parent.model_calls
+            )
+        ):
+            raise _ParentExtractionReuseMismatch("parent model-call identity is incomplete")
+        if parent.model_errors or parent.model_conflicts:
+            raise _ParentExtractionReuseMismatch("parent extraction is not release-clean")
+        parent_documents = {item.document_id: item for item in parent.document_results}
+        if set(parent_documents) != set(expected_document_ids):
+            raise _ParentExtractionReuseMismatch("parent document result set changed")
+        document_bindings = [
+            {
+                "document_id": document.document_id,
+                "input_sha256": canonical_json_sha256(document),
+                "extraction_sha256": canonical_json_sha256(parent_documents[document.document_id]),
+            }
+            for document in revision.parent_request.documents
+        ]
+        return canonical_json_sha256(
+            {
+                "schema_version": "parent-extraction-reuse/v1",
+                "parent_result_sha256": revision.parent_result_sha256,
+                "parent_input_manifest_sha256": revision.parent_input_manifest_sha256,
+                "extraction_identity": {
+                    name: getattr(current_release, name) for name in extraction_identity_fields
+                },
+                "documents": document_bindings,
+            }
+        )
+
+    def _review_v3_reusing_parent_extraction(
+        self,
+        revision: ReviewRevisionRequestV1,
+        corrections: list[Any],
+        *,
+        forced_human_review_reasons: tuple[str, ...] = (),
+    ) -> ReviewRunResultV3:
+        request = revision.revised_request
+        if _has_visual_documents(request):
+            raise _ParentExtractionReuseMismatch("visual extraction cannot be reused")
+        if not hasattr(self, "_analyzer") or not hasattr(self, "_config"):
+            # Direct compatibility tests may construct a minimal runtime and
+            # replace only the established full-analysis seam.
+            raise _ParentExtractionReuseMismatch("runtime extraction identity is unavailable")
+        retriever = self._get_retriever_v3()
+        aggregate_reuse_key_sha256 = self._revision_reuse_key(
+            revision,
+            retriever=retriever,
+        )
+        service_request = _project_service_request_v3_to_v2(request)
+        workflow_request = ReviewRunRequestV2.model_validate(
+            service_request.model_dump(mode="python", warnings=False)
+        )
+        try:
+            state = build_reused_extraction_state(
+                workflow_request,
+                revision.parent_result,
+                parent_result_sha256=revision.parent_result_sha256,
+                aggregate_reuse_key_sha256=aggregate_reuse_key_sha256,
+            )
+        except ValueError:
+            raise _ParentExtractionReuseMismatch(
+                "parent extraction source grounding changed"
+            ) from None
+        try:
+            retriever.preflight(service_request.review_as_of)
+            state = rerun_review_to_retrieval(state, corrections, retriever)
+            retrieval_request = state.get("retrieval_request") or {}
+            request_id = retrieval_request.get("request_id")
+            policies = retriever.policy_bindings(request_id) if isinstance(request_id, str) else {}
+            verified_by_item, supporting_rejections = verified_requirement_codes_by_item(
+                request.supporting_documents,
+                case_id=request.case_id,
+                review_as_of=request.review_as_of,
+                assertion_cutoff_at=request.assertion_cutoff_at,
+                retrieval_results=list(state.get("retrieval_results") or []),
+                policy_bindings=policies,
+                assertion_verifier=self._assertion_verifier,
+            )
+            supporting_rejections = sorted({*supporting_rejections, *forced_human_review_reasons})
+            state["verified_requirement_documents_by_item"] = verified_by_item
+            state["presented_requirement_documents_by_item"] = presented_requirement_codes_by_item(
+                request.supporting_documents,
+                retrieval_results=list(state.get("retrieval_results") or []),
+            )
+            for node in (compliance_review, generate_xai_report, route_to_human_or_complete):
+                state.update(node(state))
+            v2_result = to_review_run_result_v2(state)
+            _assert_result_correlated(service_request, v2_result)
+            _assert_public_result_safe(
+                v2_result.model_dump(mode="python"),
+                sensitive_markers=self._secret_markers,
+            )
+        except AgentRuntimeError:
+            raise
+        except CorrectionApplicationError:
+            raise RuntimeConflictError(
+                "correction_application_failed",
+                "An approved correction could not be applied exactly to the child review.",
+            ) from None
+        except (LLMError, OcrLayoutProviderError, RetrievalError, ValidationError, ValueError):
+            raise RuntimeExecutionError(
+                "review_execution_failed",
+                "The V3 Agent child review failed without exposing private execution details.",
+            ) from None
+        return to_review_run_result_v3(
+            v2_result,
+            request,
+            analyzer=self._analyzer,
+            evidence_runtime_v3_sha256=(retriever.expected_identity.runtime_release_v3_sha256),
+            assertion_trust_store=self._runtime_assertion_trust_store(),
+            supporting_document_rejections=supporting_rejections,
+            active_executor=None,
+            uat_capability=getattr(self, "_uat_capability", None),
+        )
+
+    def revision_experience_v3_json(
+        self,
+        payload: bytes | bytearray | memoryview,
+    ) -> ReviewRevisionExperienceResultV1:
+        """Run an approved child revision and compose its verified presentation."""
+
+        self._assert_open()
+        capability = self.assert_uat_capability_current()
+        revision = self.revision_v3_json(payload)
+        envelope = build_review_experience(
+            revision.child_result,
+            analyzer=self._analyzer,
+            capability=capability,
+        )
+        result = ReviewRevisionExperienceResultV1(
+            parent_result_sha256=revision.parent_result_sha256,
+            applied_decision_ids=revision.applied_decision_ids,
+            experience_envelope=envelope,
         )
         _assert_public_result_safe(
             result.model_dump(mode="python", warnings=False),
@@ -1530,6 +2425,7 @@ class AgentRuntime:
             assertion_trust_store=self._runtime_assertion_trust_store(),
             supporting_document_rejections=supporting_rejections,
             active_executor=active_executor,
+            uat_capability=getattr(self, "_uat_capability", None),
         )
 
 

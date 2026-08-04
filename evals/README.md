@@ -1,7 +1,7 @@
 # Evaluations
 
 모델·prompt·OCR·RAG 변경을 서로 분리해 검증하는 versioned 평가 영역이다. 실제 거래 문서와
-PII가 포함된 원본은 커밋하지 않고 `_artifacts/datasets/`에 보관하며, 저장소에는 비민감 schema,
+PII가 포함된 원본은 커밋하지 않고 `_local/data/`에 보관하며, 저장소에는 비민감 schema,
 hash lock, 평가 코드와 허용 가능한 partial Gold만 둔다.
 
 완전한 가상데이터의 Case Master, Gold 분리, controlled mutation, 사람 검수, Evidence/RAG,
@@ -54,7 +54,7 @@ uv run --locked python evals/run_evidence_live.py
 uv run --locked python evals/run_evidence_live.py `
   --live `
   --base-url http://127.0.0.1:8010 `
-  --env-file ..\_secrets\.env `
+  --env-file ..\_local\secrets\.env `
   --out ..\_artifacts\evidence-live-eval.json
 ```
 
@@ -100,7 +100,7 @@ uv run --locked python evals/run_evidence_live.py `
   --allow-unready-diagnostic `
   --diagnostic-review-as-of 2026-07-10 `
   --base-url http://127.0.0.1:8010 `
-  --env-file ..\_secrets\.env `
+  --env-file ..\_local\secrets\.env `
   --out ..\_artifacts\evidence-unready-diagnostic.json
 ```
 
@@ -118,13 +118,13 @@ Evidence Live/Release PASS가 아니다. 역사 redacted report SHA-256은
 Evidence consumer snapshot의 고정 SHA-256은
 `531b59ba4e86f78cef20a4fca052996efd8b88c48853ac12113ca76e69cdd69a`다. evaluator는 실제 local
 schema bytes, lock SHA, 이 기대 SHA가 모두 같은지 API 호출 전에 확인한다. lock의 release
-metadata는 final Data provider build candidate `evidence-api-v1.2.0`,
-`14cde864425eee615a2e3f6799f6f2719448aab9`와 build SHA-256
-`d7d64cf3df464cfc934ca0f347c1b1c461916fe12671eeeaf59c1445872486d3`다.
+metadata는 현재 Data provider build candidate `evidence-api-v1.2.0`,
+`b13e8bf7238a61eb185efcf2e9cd768ad5a908e2`와 build SHA-256
+`1591ebafb01aadc8d9c5e7fc91950e3bf5c7d44f88a7ff9e4065b7d57e2ed1b7`다.
 이 provider build pin은 Evidence V3 Production release 승인을 의미하지 않는다. 정책·검수자
 trust store·sealed knowledge generation이 발행되기 전까지 runtime release는 fail-closed다.
 
-이 candidate pin은 Data PR #1의 실제 merge commit `8012f8a...` clean tree에서
+이 candidate pin은 Data TASK-0033의 clean commit `b13e8bf...` tree에서
 생성·검증한 `provider-build.json`과 일치한다. release 이름은 계약 식별자이며 이번
 병합 작업에서 tag나 배포를 만들었다는 뜻은 아니다. evaluator 자체는 HTTP-only 경계를
 지키므로 실행 중 provider
@@ -149,7 +149,7 @@ source URI, token, `.env` 경로, 절대경로, raw snapshot ID는 기록하지 
 # 1문서 smoke
 uv run --locked python evals/run_claude_live.py `
   --live `
-  --env-file ..\_secrets\.env `
+  --env-file ..\_local\secrets\.env `
   --max-documents 1 `
   --max-calls 1 `
   --max-total-input-tokens 20000 `
@@ -158,7 +158,7 @@ uv run --locked python evals/run_claude_live.py `
 # 4종 text Gold
 uv run --locked python evals/run_claude_live.py `
   --live `
-  --env-file ..\_secrets\.env `
+  --env-file ..\_local\secrets\.env `
   --max-documents 4 `
   --max-calls 4 `
   --max-total-input-tokens 80000 `
@@ -167,7 +167,7 @@ uv run --locked python evals/run_claude_live.py `
 # 실제 Claude + deterministic workflow + 명시적 Mock RAG 진단
 uv run --locked python evals/run_claude_live.py `
   --live `
-  --env-file ..\_secrets\.env `
+  --env-file ..\_local\secrets\.env `
   --max-documents 4 `
   --max-calls 4 `
   --max-total-input-tokens 80000 `
@@ -177,7 +177,7 @@ uv run --locked python evals/run_claude_live.py `
 # adversarial baseline
 uv run --locked python evals/run_claude_live.py `
   --live `
-  --env-file ..\_secrets\.env `
+  --env-file ..\_local\secrets\.env `
   --gold evals/claude_text_adversarial_v1.json `
   --max-documents 1 `
   --max-calls 1 `
@@ -230,7 +230,7 @@ Packing List의 B/L label에 원본 픽셀에 없는 suffix가 확인됐다. 합
 정답 독립성을 제공하지 못했으므로 해당 Gold 전체를 영구 무효화했다.
 
 ```text
-_artifacts/datasets/trade_documents_images/source-v1/derived/
+_local/data/trade_documents_images/source-v1/derived/
   independent-review-a/v1/annotations.jsonl
   independent-review-b/v1/annotations.jsonl
   adjudicated-gold/v1/
@@ -275,7 +275,7 @@ canonical adjudication으로 사용하거나 hash 상수만 갱신해 case 0500�
 ### 비릴리스 이미지 서비스 진단기
 
 `run_image_runtime_diagnostic.py`는 canonical
-`_artifacts/datasets/trade_documents_images/source-v1/raw`의 hash-pinned Case 0097
+`_local/data/trade_documents_images/source-v1/raw`의 hash-pinned Case 0097
 CI/PL/B/L 3장만 evaluation-only composition에 넣어 OCR/Layout → Claude Vision → Evidence
 HTTP를 확인하는 별도 opt-in 진단기다. raw OCR provider를 공개 `AgentRuntime`에 연결하지
 않는다. `--live`와 `--nonrelease-ocr-diagnostic`을 동시에 요구하고, OCR provider/Python,
@@ -325,7 +325,7 @@ $OcrModelAssetsLock = "evals\ocr_environments\v1\model-assets.lock.json"
 $OcrModelAssetsLockSha256 = "<MODEL_ASSETS_LOCK_SHA256>"
 uv run --locked python -m evals.run_claude_vision `
   --live `
-  --env-file ..\_secrets\.env `
+  --env-file ..\_local\secrets\.env `
   --dataset-root "$Dataset\raw" `
   --gold "$Dataset\derived\adjudicated-gold\v1\adjudicated-gold.json" `
   --adjudication-worklist "$Dataset\derived\adjudicated-gold\v1\adjudications.jsonl" `
@@ -585,7 +585,7 @@ $OcrModelAssetsLock = "evals\ocr_environments\v1\model-assets.lock.json"
 $OcrModelAssetsLockSha256 = "<MODEL_ASSETS_LOCK_SHA256>"
 uv run --locked python evals/run_rendered_claude_live.py `
   --live `
-  --env-file ..\_secrets\.env `
+  --env-file ..\_local\secrets\.env `
   --descriptor "<SEALED_EVALUATION_V3_OCR_DESCRIPTOR>" `
   --rendered-root $RenderedRoot `
   --ocr-release-gate-report $OcrReleaseGateReport `
@@ -624,7 +624,9 @@ root, wheel pin, dependency lock path/hash, model-assets lock path/hash를 모�
 
 `trade_document_triplets/v1/dataset.lock.json`은 사용자가 제공한 CI/PL/B/L 100세트의 source
 bytes와 등록 기대값을 고정한다. 원본과 파생 PDF/PNG/Gold는
-`_artifacts/datasets/trade_document_triplets/source-v1/`에만 둔다.
+`_local/data/trade_document_triplets/source-v1/`에만 둔다. 이전 root 복사본과
+`_artifacts/datasets` 등록본은 TASK-0028 relocation manifest 검증 후 retired되며 runner
+fallback으로 사용할 수 없다.
 
 원본 값이 업무상 정합하지 않아 보여도 바로 수정하거나 “의도된 오류”로 간주하지 않는다.
 현재 `defect_intent_status=unknown`이므로 작성자 확인 또는 통제 generator 증거가 필요하다.

@@ -29,12 +29,23 @@ from customs_ai_agent.assertion_trust import (
     SupportingDocumentAssertionVerifier,
 )
 from customs_ai_agent.contracts.evidence_v3 import EvidenceRuntimeReleaseIdentityV3
-from customs_ai_agent.runtime import AgentRuntime, RuntimeExecutionError, RuntimeInputError
+from customs_ai_agent.runtime import (
+    AgentRuntime,
+    RuntimeConfigurationError,
+    RuntimeExecutionError,
+    RuntimeInputError,
+)
+from customs_ai_agent.experience import build_review_experience
 from customs_ai_agent.schemas.v3 import (
     ReviewRevisionResultV1,
     ReviewRunResultV3,
     review_result_v3_sha256,
 )
+from customs_ai_agent.schemas.experience import (
+    AgentUatCapabilityAttestationV1,
+    ReviewRevisionExperienceResultV1,
+)
+from customs_ai_agent.uat_capability import UatCapabilityError, load_uat_capability
 from customs_ai_agent.service.app import create_app
 from customs_ai_agent.service.controller import ServiceRuntime
 from customs_ai_agent.service.settings import ServiceConfigurationError, ServiceSettings
@@ -45,6 +56,7 @@ from tools.agent_execution_inspector.evidence_v3_conformance import (
 
 LOCAL_UAT_ACKNOWLEDGEMENT = "LOCAL_UAT_DIAGNOSTIC_NOT_PRODUCTION"
 _MANIFEST_SCHEMA_VERSION = "customs-agent-local-uat-manifest/v2"
+_MANIFEST_SCHEMA_VERSION_V3 = "customs-agent-local-uat-manifest/v3"
 _MANIFEST_FIELDS = frozenset(
     {
         "schema_version",
@@ -59,6 +71,16 @@ _MANIFEST_FIELDS = frozenset(
         "assertion_fixture_mode",
         "assertion_trust_store_path",
         "assertion_trust_store_sha256",
+    }
+)
+_MANIFEST_V3_FIELDS = frozenset(
+    {
+        *_MANIFEST_FIELDS,
+        "enhanced_experience_enabled",
+        "uat_adaptive_active",
+        "uat_capability_profile_path",
+        "uat_capability_profile_sha256",
+        "agent_commit",
     }
 )
 EvidenceMode = Literal[
@@ -127,7 +149,9 @@ _ASSERTION_FIXTURE_MODE = "LOOPBACK_TEST_ONLY_HUMAN_APPROVER"
 _UAT_APPROVER_AUTHORITY_ID = (
     "backend:principal-sha256:6cc4551495f1ec8da505fdeaa4f34c17eeb8c234bcaeb6ca184f92a0cdd6318d"
 )
-_THREE_LAW_EVIDENCE_HTTP_TIMEOUT_SECONDS = 195.0
+_THREE_LAW_DIAGNOSTIC_HTTP_TIMEOUT_SECONDS = 195.0
+_THREE_LAW_SCENARIO_EVAL_HTTP_TIMEOUT_SECONDS = 330.0
+_THREE_LAW_SCENARIO_EVAL_READINESS_CACHE_SECONDS = 600.0
 _SERVICE_ENV_KEYS = frozenset(
     {
         "CUSTOMS_AGENT_SERVICE_BEARER_TOKEN",
@@ -154,6 +178,9 @@ _SERVICE_ENV_KEYS = frozenset(
         "CUSTOMS_AGENT_READINESS_TIMEOUT_SECONDS",
         "CUSTOMS_AGENT_SHUTDOWN_GRACE_SECONDS",
         "CUSTOMS_AGENT_LOG_LEVEL",
+        "CUSTOMS_ENHANCED_AGENT_EXPERIENCE",
+        "CUSTOMS_UAT_ADAPTIVE_ACTIVE",
+        "CUSTOMS_AGENT_UAT_CAPABILITY_PATH",
     }
 )
 
@@ -226,10 +253,19 @@ class LocalUatManifest:
     ]
     assertion_trust_store: AssertionTrustStoreV1 | None
     manifest_sha256: str
+    enhanced_experience_enabled: bool = False
+    uat_adaptive_active: bool = False
+    uat_capability_profile_path: str | None = None
+    uat_capability_profile_sha256: str | None = None
+    agent_commit: str | None = None
 
     def safe_metadata(self) -> dict[str, Any]:
         return {
-            "schema_version": _MANIFEST_SCHEMA_VERSION,
+            "schema_version": (
+                _MANIFEST_SCHEMA_VERSION_V3
+                if self.enhanced_experience_enabled
+                else _MANIFEST_SCHEMA_VERSION
+            ),
             "manifest_sha256": self.manifest_sha256,
             "evidence_mode": self.evidence_mode,
             "evidence_policy_mode": _EVIDENCE_POLICY_MODES[self.evidence_mode],
@@ -247,6 +283,9 @@ class LocalUatManifest:
             "text_only": True,
             "mock_fallback_allowed": False,
             "auto_completion_allowed": False,
+            "enhanced_experience_enabled": self.enhanced_experience_enabled,
+            "uat_adaptive_active": self.uat_adaptive_active,
+            "uat_capability_file_sha256": self.uat_capability_profile_sha256,
         }
 
 
@@ -287,13 +326,14 @@ def _evidence_profile_metadata(mode: EvidenceMode) -> dict[str, Any]:
 
 
 def _evidence_timeout_seconds(mode: EvidenceMode) -> float:
-    # The actual-store provider performs fail-closed full-store attestation
-    # before and after retrieval under its own 180-second service deadline.
-    # Its HTTP consumer must have a strictly larger budget so a valid terminal
-    # response is not discarded at the same deadline boundary.
-    return (
-        _THREE_LAW_EVIDENCE_HTTP_TIMEOUT_SECONDS if mode in _ACTUAL_STORE_EVIDENCE_MODES else 30.0
-    )
+    # The actual-store provider performs fail-closed store observation and the
+    # scenario profile also runs the required CPU BGE reranker.  Its consumer
+    # keeps a response margin without weakening ranking or falling back.
+    if mode == "preserved-3law-v3-scenario-eval":
+        return _THREE_LAW_SCENARIO_EVAL_HTTP_TIMEOUT_SECONDS
+    if mode == "preserved-3law-v3-diagnostic":
+        return _THREE_LAW_DIAGNOSTIC_HTTP_TIMEOUT_SECONDS
+    return 30.0
 
 
 def _readiness_policy(mode: EvidenceMode) -> tuple[float, float]:
@@ -302,6 +342,21 @@ def _readiness_policy(mode: EvidenceMode) -> tuple[float, float]:
     # bounded TTL; otherwise a 30-second controller timeout leaves the
     # single-threaded probe running and every retry observes SERVICE_BUSY.
     return (60.0, 90.0) if mode in _ACTUAL_STORE_EVIDENCE_MODES else (5.0, 5.0)
+
+
+def _evidence_readiness_identity_cache_seconds(mode: EvidenceMode) -> float:
+    """Bridge one bounded UAT review without weakening POST identity binding.
+
+    The Agent service checks Data readiness immediately before admitting a
+    review.  Scenario evaluation then spends several minutes on four Claude
+    document analyses before retrieval.  Reusing that exact attestation for
+    one bounded review avoids a second expensive Store attestation; the POST
+    still has to echo all 17 identity headers before its body is accepted.
+    """
+
+    if mode == "preserved-3law-v3-scenario-eval":
+        return _THREE_LAW_SCENARIO_EVAL_READINESS_CACHE_SECONDS
+    return 0.0
 
 
 def _assert_evidence_policy_identity(
@@ -323,6 +378,13 @@ def _assert_evidence_policy_identity(
         raise LocalUatConfigurationError("uat_evidence_policy_identity_mismatch")
 
 
+def _is_local_uat_secret_path(path: Path) -> bool:
+    parts = tuple(part.casefold() for part in path.parts)
+    return any(
+        parts[index : index + 2] == ("_local", "secrets") for index in range(max(0, len(parts) - 1))
+    )
+
+
 def _load_uat_assertion_trust_store(
     path_value: object,
     expected_sha256: object,
@@ -341,7 +403,7 @@ def _load_uat_assertion_trust_store(
         raise LocalUatConfigurationError("uat_assertion_trust_store_path_invalid")
     try:
         resolved = path.resolve(strict=True)
-        if not resolved.is_file() or "_secrets" not in {part.casefold() for part in resolved.parts}:
+        if not resolved.is_file() or not _is_local_uat_secret_path(resolved):
             raise LocalUatConfigurationError("uat_assertion_trust_store_path_invalid")
         raw = resolved.read_bytes()
     except LocalUatConfigurationError:
@@ -391,10 +453,16 @@ def load_local_uat_manifest(path: str | os.PathLike[str]) -> LocalUatManifest:
         )
     except (UnicodeError, ValueError, RecursionError):
         raise LocalUatConfigurationError("uat_manifest_invalid") from None
-    if not isinstance(payload, dict) or set(payload) != _MANIFEST_FIELDS:
+    if not isinstance(payload, dict):
+        raise LocalUatConfigurationError("uat_manifest_shape_invalid")
+    schema_version = payload.get("schema_version")
+    expected_fields = (
+        _MANIFEST_V3_FIELDS if schema_version == _MANIFEST_SCHEMA_VERSION_V3 else _MANIFEST_FIELDS
+    )
+    if set(payload) != expected_fields:
         raise LocalUatConfigurationError("uat_manifest_shape_invalid")
     if (
-        payload.get("schema_version") != _MANIFEST_SCHEMA_VERSION
+        schema_version not in {_MANIFEST_SCHEMA_VERSION, _MANIFEST_SCHEMA_VERSION_V3}
         or payload.get("acknowledgement") != LOCAL_UAT_ACKNOWLEDGEMENT
         or payload.get("diagnostic_only") is not True
         or payload.get("text_only") is not True
@@ -428,6 +496,49 @@ def load_local_uat_manifest(path: str | os.PathLike[str]) -> LocalUatManifest:
         ):
             raise LocalUatConfigurationError("uat_assertion_fixture_policy_invalid")
         assertion_trust_store = None
+    enhanced_experience_enabled = schema_version == _MANIFEST_SCHEMA_VERSION_V3 and (
+        payload.get("enhanced_experience_enabled") is True
+    )
+    uat_adaptive_active = schema_version == _MANIFEST_SCHEMA_VERSION_V3 and (
+        payload.get("uat_adaptive_active") is True
+    )
+    capability_path_value = payload.get("uat_capability_profile_path")
+    capability_sha_value = payload.get("uat_capability_profile_sha256")
+    agent_commit_value = payload.get("agent_commit")
+    if schema_version == _MANIFEST_SCHEMA_VERSION_V3:
+        if (
+            not enhanced_experience_enabled
+            or not scenario_eval
+            or not isinstance(capability_path_value, str)
+            or not isinstance(capability_sha_value, str)
+            or len(capability_sha_value) != 64
+            or any(character not in "0123456789abcdef" for character in capability_sha_value)
+            or not isinstance(agent_commit_value, str)
+            or len(agent_commit_value) != 40
+            or any(character not in "0123456789abcdef" for character in agent_commit_value)
+        ):
+            raise LocalUatConfigurationError("uat_capability_manifest_policy_invalid")
+        capability_path = Path(capability_path_value)
+        if not capability_path.is_absolute() or capability_path.is_symlink():
+            raise LocalUatConfigurationError("uat_capability_path_invalid")
+        try:
+            resolved_capability_path = capability_path.resolve(strict=True)
+        except OSError:
+            raise LocalUatConfigurationError("uat_capability_unavailable") from None
+        if not resolved_capability_path.is_file() or not _is_local_uat_secret_path(
+            resolved_capability_path
+        ):
+            raise LocalUatConfigurationError("uat_capability_path_invalid")
+        capability_path_value = str(resolved_capability_path)
+    elif any(
+        value is not None
+        for value in (
+            capability_path_value,
+            capability_sha_value,
+            agent_commit_value,
+        )
+    ):
+        raise LocalUatConfigurationError("uat_capability_manifest_policy_invalid")
     return LocalUatManifest(
         evidence_mode=payload["evidence_mode"],
         evidence_base_url=base_url,
@@ -435,6 +546,11 @@ def load_local_uat_manifest(path: str | os.PathLike[str]) -> LocalUatManifest:
         assertion_fixture_mode=fixture_mode,
         assertion_trust_store=assertion_trust_store,
         manifest_sha256=hashlib.sha256(_canonical_json_bytes(payload)).hexdigest(),
+        enhanced_experience_enabled=enhanced_experience_enabled,
+        uat_adaptive_active=uat_adaptive_active,
+        uat_capability_profile_path=capability_path_value,
+        uat_capability_profile_sha256=capability_sha_value,
+        agent_commit=agent_commit_value,
     )
 
 
@@ -508,6 +624,10 @@ def local_uat_service_settings(
             "EVIDENCE_SERVICE_TOKEN_HEADER": "Authorization",
             "CUSTOMS_AGENT_READINESS_TTL_SECONDS": str(readiness_ttl),
             "CUSTOMS_AGENT_READINESS_TIMEOUT_SECONDS": str(readiness_timeout),
+            "CUSTOMS_ENHANCED_AGENT_EXPERIENCE": (
+                "true" if manifest.enhanced_experience_enabled else "false"
+            ),
+            "CUSTOMS_UAT_ADAPTIVE_ACTIVE": ("true" if manifest.uat_adaptive_active else "false"),
         }
     )
     try:
@@ -519,6 +639,8 @@ def local_uat_service_settings(
         or settings.host != "127.0.0.1"
         or settings.max_concurrency != 1
         or settings.run_timeout_seconds <= _evidence_timeout_seconds(manifest.evidence_mode)
+        or settings.enhanced_agent_experience != manifest.enhanced_experience_enabled
+        or settings.uat_adaptive_active != manifest.uat_adaptive_active
     ):
         raise LocalUatConfigurationError("uat_service_boundary_invalid")
     return settings
@@ -585,9 +707,11 @@ class LocalUatDiagnosticRuntime:
         )
 
     def review_v3_json(self, payload: bytes) -> ReviewRunResultV3:
+        self._retriever.invalidate_readiness_identity_cache()
         return _diagnostic_result(self._core.review_v3_json(payload))
 
     def revision_v3_json(self, payload: bytes) -> ReviewRevisionResultV1:
+        self._retriever.invalidate_readiness_identity_cache()
         result = self._core.revision_v3_json(payload)
         return ReviewRevisionResultV1(
             parent_result_sha256=result.parent_result_sha256,
@@ -597,6 +721,69 @@ class LocalUatDiagnosticRuntime:
 
     def answer_v3_json(self, payload: bytes) -> Any:
         return self._core.answer_v3_json(payload)
+
+    def assert_uat_capability_current(
+        self,
+        *,
+        require_active: bool = False,
+    ) -> AgentUatCapabilityAttestationV1:
+        return self._core.assert_uat_capability_current(
+            require_active=require_active,
+        )
+
+    def review_experience_json(self, payload: bytes) -> Any:
+        self._retriever.invalidate_readiness_identity_cache()
+        capability = self.assert_uat_capability_current()
+        result = _diagnostic_result(self._core.review_v3_json(payload))
+        return build_review_experience(
+            result,
+            analyzer=self._core._analyzer,
+            capability=capability,
+        )
+
+    def revision_experience_v3_json(
+        self,
+        payload: bytes,
+    ) -> ReviewRevisionExperienceResultV1:
+        self._retriever.invalidate_readiness_identity_cache()
+        capability = self.assert_uat_capability_current()
+        revision = self._core.revision_v3_json(payload)
+        child_result = _diagnostic_result(revision.child_result)
+        return ReviewRevisionExperienceResultV1(
+            parent_result_sha256=revision.parent_result_sha256,
+            applied_decision_ids=revision.applied_decision_ids,
+            experience_envelope=build_review_experience(
+                child_result,
+                analyzer=self._core._analyzer,
+                capability=capability,
+            ),
+        )
+
+    def answer_v2_json(self, payload: bytes) -> Any:
+        return self._core.answer_v2_json(payload)
+
+    def review_experience_stream_json(
+        self,
+        payload: bytes,
+        stage_callback: Callable[[dict[str, Any]], None],
+    ) -> Any:
+        self._retriever.invalidate_readiness_identity_cache()
+        return self._core.review_experience_stream_json(
+            payload,
+            stage_callback,
+            _result_transform=_diagnostic_result,
+        )
+
+    def answer_v2_stream_json(
+        self,
+        payload: bytes,
+        stage_callback: Callable[[dict[str, Any]], None],
+    ) -> Any:
+        return self._core.answer_v2_stream_json(payload, stage_callback)
+
+    @property
+    def uat_capability(self) -> AgentUatCapabilityAttestationV1 | None:
+        return getattr(self._core, "_uat_capability", None)
 
     def preflight(self) -> object:
         return self._retriever.preflight()
@@ -628,6 +815,9 @@ def build_local_uat_runtime(
             acknowledge_non_release=True,
             timeout_seconds=_evidence_timeout_seconds(manifest.evidence_mode),
             max_retries=0,
+            readiness_identity_cache_ttl_seconds=(
+                _evidence_readiness_identity_cache_seconds(manifest.evidence_mode)
+            ),
         )
     except Exception:
         analyzer.close()
@@ -635,14 +825,39 @@ def build_local_uat_runtime(
     core = object.__new__(AgentRuntime)
     core._analyzer = analyzer
     core._closed = False
-    core._config = None
-    core._retriever = None
+    core._config = None  # type: ignore[assignment]
+    core._retriever = None  # type: ignore[assignment]
     core._retriever_v3 = retriever
     core._assertion_verifier = (
         SupportingDocumentAssertionVerifier(manifest.assertion_trust_store)
         if manifest.assertion_trust_store is not None
         else None
     )
+    core._uat_expected_agent_commit = manifest.agent_commit
+    capability: AgentUatCapabilityAttestationV1 | None = None
+    if manifest.enhanced_experience_enabled:
+        if (
+            manifest.uat_capability_profile_path is None
+            or manifest.uat_capability_profile_sha256 is None
+            or manifest.agent_commit is None
+        ):
+            analyzer.close()
+            raise LocalUatConfigurationError("uat_capability_manifest_policy_invalid")
+        try:
+            capability = load_uat_capability(
+                manifest.uat_capability_profile_path,
+                expected_file_sha256=manifest.uat_capability_profile_sha256,
+                expected_agent_commit=manifest.agent_commit,
+                expected_model_id=claude_settings.model,
+                expected_evidence_runtime_v3_sha256=(
+                    manifest.evidence_runtime_identity.runtime_release_v3_sha256
+                ),
+                require_active=manifest.uat_adaptive_active,
+            )
+        except UatCapabilityError as exc:
+            analyzer.close()
+            raise LocalUatConfigurationError(exc.code) from None
+    core._uat_capability = capability
     core._secret_markers = (
         claude_settings.api_key.get_secret_value(),
         evidence_service_token,
@@ -659,8 +874,14 @@ def _uat_metadata(
     manifest: LocalUatManifest,
     *,
     model_id: str,
+    capability: AgentUatCapabilityAttestationV1 | None = None,
 ) -> dict[str, Any]:
     metadata = copy.deepcopy(dict(base))
+    if capability is not None:
+        if manifest.agent_commit is None or capability.agent_commit != manifest.agent_commit:
+            raise LocalUatConfigurationError("uat_capability_commit_mismatch")
+        metadata["agent"]["build_sha"] = manifest.agent_commit
+        metadata["runtime_release"]["agent_git_sha"] = manifest.agent_commit
     metadata["status"] = "ready"
     metadata["service_mode"] = "local_user_uat_diagnostic"
     metadata["assurance_level"] = "diagnostic"
@@ -672,11 +893,27 @@ def _uat_metadata(
     }
     metadata["agentic_limits"].update(
         {
-            "planner_mode": "shadow",
+            "planner_mode": ("active" if manifest.uat_adaptive_active else "shadow"),
             "active_execution_authorized_by_release": False,
-            "effective_execution_mode": "shadow",
+            "effective_execution_mode": (
+                "uat_active" if manifest.uat_adaptive_active else "shadow"
+            ),
+            "uat_adaptive_active": manifest.uat_adaptive_active,
         }
     )
+    metadata["enhanced_experience_enabled"] = manifest.enhanced_experience_enabled
+    metadata["uat_capability_status"] = "valid" if capability is not None else "disabled"
+    metadata["uat_capability_sha256"] = (
+        capability.capability_sha256 if capability is not None else None
+    )
+    metadata["uat_capability_file_sha256"] = manifest.uat_capability_profile_sha256
+    metadata["uat_capability_expires_at"] = (
+        capability.expires_at.isoformat() if capability is not None else None
+    )
+    metadata["uat_capability_attestation"] = (
+        capability.model_dump(mode="json", warnings=False) if capability is not None else None
+    )
+    metadata["agent_commit"] = manifest.agent_commit
     metadata["automatic_completion_release"]["uat_forced_disabled"] = True
     return metadata
 
@@ -747,10 +984,23 @@ def _compose_local_uat_app(
         "Loopback-only text UAT with actual Claude and an explicitly pinned "
         "diagnostic Evidence V3 provider. Never Production evidence."
     )
+    capability = getattr(runtime, "uat_capability", None)
+    if capability is not None and not isinstance(
+        capability,
+        AgentUatCapabilityAttestationV1,
+    ):
+        raise LocalUatConfigurationError("uat_capability_contract_invalid")
     app.state.build_metadata = _uat_metadata(
         app.state.build_metadata,
         manifest,
         model_id=model_id,
+        capability=capability,
+    )
+    app.state.build_metadata_v3 = _uat_metadata(
+        app.state.build_metadata_v3,
+        manifest,
+        model_id=model_id,
+        capability=capability,
     )
 
     @app.middleware("http")
@@ -774,6 +1024,11 @@ def _compose_local_uat_app(
     @app.get("/health/uat-ready", summary="LOCAL UAT dependency readiness")
     async def uat_ready(request: Request) -> JSONResponse:
         controller = request.app.state.controller
+        if manifest.enhanced_experience_enabled:
+            try:
+                controller.assert_uat_capability_current(require_active=False)
+            except RuntimeConfigurationError:
+                return _boundary_error("uat_capability_invalid_or_expired")
         if not await controller.ready():
             return _boundary_error("uat_dependency_unready")
         return JSONResponse(
@@ -801,6 +1056,22 @@ def _compose_local_uat_app(
                 "trusted_assertion_verifier_configured": (
                     manifest.assertion_trust_store is not None
                 ),
+                "enhanced_experience_enabled": manifest.enhanced_experience_enabled,
+                "uat_adaptive_active": manifest.uat_adaptive_active,
+                "uat_capability_status": ("valid" if capability is not None else "disabled"),
+                "uat_capability_sha256": (
+                    capability.capability_sha256 if capability is not None else None
+                ),
+                "uat_capability_file_sha256": manifest.uat_capability_profile_sha256,
+                "uat_capability_expires_at": (
+                    capability.expires_at.isoformat() if capability is not None else None
+                ),
+                "uat_capability_attestation": (
+                    capability.model_dump(mode="json", warnings=False)
+                    if capability is not None
+                    else None
+                ),
+                "agent_commit": manifest.agent_commit,
                 "manifest_sha256": manifest.manifest_sha256,
             },
         )

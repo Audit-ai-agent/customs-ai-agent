@@ -70,6 +70,7 @@ from customs_ai_agent.schemas.models import (
     ReviewRunRequestV2,
     ReviewRunResultV2,
 )
+from tools.dataset_provenance import DatasetProvenanceError, verify_dataset_provenance
 
 
 ProviderName = Literal["paddle", "docling"]
@@ -137,17 +138,24 @@ FIXED_DOCUMENTS = (
 
 
 def _discover_canonical_dataset_root() -> Path:
-    relative = Path("_artifacts") / "datasets" / "trade_documents_images" / "source-v1" / "raw"
+    relative = Path("_local") / "data" / "trade_documents_images" / "source-v1" / "raw"
     for ancestor in Path(__file__).resolve().parents:
         candidate = ancestor / relative
         if candidate.is_dir():
             return candidate
     # A deterministic missing location keeps imports side-effect free.  The
-    # preflight will fail rather than falling back to the root reference copy.
+    # Preflight fails rather than falling back to either retired legacy copy.
     return Path(__file__).resolve().parent / "__canonical_dataset_not_found__"
 
 
 CANONICAL_DATASET_ROOT = _discover_canonical_dataset_root()
+DATASET_LOCK_PATH = (
+    Path(__file__).resolve().parents[1]
+    / "fixtures"
+    / "trade_documents_images"
+    / "v1"
+    / "dataset.lock.json"
+)
 CANONICAL_GOLD_FILE = (
     CANONICAL_DATASET_ROOT.parent / "derived" / "adjudicated-gold" / "v1" / "adjudicated-gold.json"
 )
@@ -291,6 +299,13 @@ def _base_report(
 def _read_gold_and_validate_sources() -> list[Path]:
     root = CANONICAL_DATASET_ROOT
     gold_file = CANONICAL_GOLD_FILE
+    try:
+        verify_dataset_provenance(
+            DATASET_LOCK_PATH,
+            expected_raw_root=root,
+        )
+    except DatasetProvenanceError as exc:
+        raise ImageRuntimeDiagnosticError(exc.code) from None
     try:
         resolved_root = root.resolve(strict=True)
         resolved_gold = gold_file.resolve(strict=True)
@@ -441,6 +456,7 @@ def _preflight_status(code: str) -> DiagnosticStatus:
     evaluation_asset_prefixes = (
         "adjudicated_gold_",
         "canonical_dataset_",
+        "dataset_",
         "fixed_adjudicated_",
         "fixed_source_image_",
     )

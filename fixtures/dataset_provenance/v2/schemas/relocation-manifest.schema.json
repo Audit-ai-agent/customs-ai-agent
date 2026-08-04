@@ -1,0 +1,39 @@
+{
+  "$schema": "https://json-schema.org/draft/2020-12/schema",
+  "$id": "urn:customs:dataset-relocation-manifest:v1",
+  "type": "object",
+  "additionalProperties": false,
+  "required": ["schema_version", "migration_id", "relocation_status", "verified_at", "binding_repository_relative_path", "binding_sha256", "datasets"],
+  "properties": {
+    "schema_version": {"const": "customs-dataset-relocation-manifest/v1"},
+    "migration_id": {"const": "TASK-0028-dataset-canonical-relocation"},
+    "relocation_status": {"const": "completed_and_verified"},
+    "verified_at": {"type": "string", "format": "date-time"},
+    "binding_repository_relative_path": {"const": "fixtures/dataset_provenance/v2/relocation-binding.json"},
+    "binding_sha256": {"type": "string", "pattern": "^[0-9a-f]{64}$"},
+    "datasets": {
+      "type": "array",
+      "minItems": 1,
+      "maxItems": 2,
+      "items": {
+        "type": "object",
+        "additionalProperties": false,
+        "required": ["dataset_id", "dataset_version", "canonical_dataset_workspace_relative_path", "canonical_raw_workspace_relative_path", "provenance_sha256", "raw_file_count", "raw_bytes", "raw_checksums_sha256", "inventory_sha256", "legacy_source_reference_removed", "legacy_canonical_registration_removed", "canonical_hash_verification_passed"],
+        "properties": {
+          "dataset_id": {"enum": ["trade_document_triplets", "trade_documents_images"]},
+          "dataset_version": {"const": "source-v1"},
+          "canonical_dataset_workspace_relative_path": {"type": "string", "pattern": "^_local/data/"},
+          "canonical_raw_workspace_relative_path": {"type": "string", "pattern": "^_local/data/.+/raw$"},
+          "provenance_sha256": {"type": "string", "pattern": "^[0-9a-f]{64}$"},
+          "raw_file_count": {"type": "integer", "minimum": 1},
+          "raw_bytes": {"type": "integer", "minimum": 1},
+          "raw_checksums_sha256": {"type": "string", "pattern": "^[0-9a-f]{64}$"},
+          "inventory_sha256": {"type": "string", "pattern": "^[0-9a-f]{64}$"},
+          "legacy_source_reference_removed": {"const": true},
+          "legacy_canonical_registration_removed": {"const": true},
+          "canonical_hash_verification_passed": {"const": true}
+        }
+      }
+    }
+  }
+}

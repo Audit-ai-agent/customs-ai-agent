@@ -34,6 +34,7 @@ try:
         SELECTION_SCHEMA,
         evaluate_gate,
     )
+    from tools.dataset_provenance import DatasetProvenanceError, verify_dataset_provenance
 except ModuleNotFoundError:  # Support direct `python tools/<script>.py` execution.
     from build_trade_image_diagnostic_selection import (  # type: ignore[no-redef]
         ADJUDICATION_SCHEMA,
@@ -43,6 +44,10 @@ except ModuleNotFoundError:  # Support direct `python tools/<script>.py` executi
         SELECTION_ID,
         SELECTION_SCHEMA,
         evaluate_gate,
+    )
+    from dataset_provenance import (  # type: ignore[no-redef]
+        DatasetProvenanceError,
+        verify_dataset_provenance,
     )
 
 
@@ -74,6 +79,9 @@ DEFAULT_GOLD_SCHEMA_PATH = (
     / "v1"
     / "schemas"
     / "adjudicated-gold.schema.json"
+)
+DEFAULT_DATASET_LOCK = (
+    REPOSITORY_ROOT / "fixtures" / "trade_documents_images" / "v1" / "dataset.lock.json"
 )
 
 DOCUMENT_ORDER = (
@@ -698,7 +706,7 @@ def _artifact_relative_reference(path: Path, artifact_root: Path) -> str:
         relative = resolved.relative_to(root)
     except ValueError as exc:
         raise ReviewReconciliationError(
-            "review annotations must be stored under the declared _artifacts root"
+            "review annotations must be stored under the declared canonical data root"
         ) from exc
     return relative.as_posix()
 
@@ -708,14 +716,21 @@ def _validate_artifact_output_location(
     output_dir: Path,
 ) -> tuple[Path, Path]:
     root = artifact_root.resolve()
-    if root.name != "_artifacts" or not root.is_dir() or artifact_root.is_symlink():
-        raise ReviewReconciliationError("artifact root must be a real directory named _artifacts")
+    expected_suffix = Path("_local/data/trade_documents_images/source-v1")
+    if (
+        not root.is_dir()
+        or artifact_root.is_symlink()
+        or root.parts[-len(expected_suffix.parts) :] != expected_suffix.parts
+    ):
+        raise ReviewReconciliationError(
+            "data root must be the real canonical _local/data trade image dataset"
+        )
     resolved_output = output_dir.resolve()
     try:
         relative = resolved_output.relative_to(root)
     except ValueError as exc:
         raise ReviewReconciliationError(
-            "value-bearing Gold output must remain under _artifacts"
+            "value-bearing Gold output must remain under canonical _local/data"
         ) from exc
     if not relative.parts:
         raise ReviewReconciliationError("Gold output requires a dedicated directory")
@@ -942,6 +957,7 @@ def _parse_args() -> argparse.Namespace:
     parser.add_argument("--review-a", type=Path, required=True)
     parser.add_argument("--review-b", type=Path, required=True)
     parser.add_argument("--artifact-root", type=Path, required=True)
+    parser.add_argument("--dataset-lock", type=Path, default=DEFAULT_DATASET_LOCK)
     parser.add_argument("--output-dir", type=Path, required=True)
     parser.add_argument(
         "--diagnostic-schema",
@@ -961,6 +977,10 @@ def _parse_args() -> argparse.Namespace:
 def main() -> int:
     args = _parse_args()
     try:
+        verify_dataset_provenance(
+            args.dataset_lock,
+            expected_dataset_root=args.artifact_root,
+        )
         bundle = build_reconciliation_bundle(
             selection_path=args.selection,
             review_paths=[args.review_a, args.review_b],
@@ -972,6 +992,9 @@ def main() -> int:
             gold_set_id=args.gold_set_id,
             refresh=args.refresh,
         )
+    except DatasetProvenanceError as exc:
+        print(f"review reconciliation failed: {exc.code}")
+        return 1
     except ReviewReconciliationError as exc:
         print(f"review reconciliation failed: {exc}")
         return 1

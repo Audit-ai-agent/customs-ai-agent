@@ -63,6 +63,7 @@ class LoopbackEvidenceV3DiagnosticRetriever(ProductionHttpRegulationRetrieverV3)
         acknowledge_non_release: Literal[True],
         timeout_seconds: float = 30.0,
         max_retries: int = 0,
+        readiness_identity_cache_ttl_seconds: float = 0.0,
     ) -> None:
         if acknowledge_non_release is not True:
             raise ValueError("explicit non-release conformance acknowledgement is required")
@@ -71,9 +72,13 @@ class LoopbackEvidenceV3DiagnosticRetriever(ProductionHttpRegulationRetrieverV3)
         _validate_transport_settings(timeout_seconds, max_retries)
         if service_token is None:
             raise ValueError("Diagnostic Evidence bearer token is required")
+        if not 0.0 <= readiness_identity_cache_ttl_seconds <= 600.0:
+            raise ValueError("Diagnostic Evidence readiness cache TTL is invalid")
         self._conformance_identity = conformance_identity
         self._successful_readiness_get_count = 0
         self._successful_retrieval_post_count = 0
+        self._readiness_identity_cache_ttl_seconds = readiness_identity_cache_ttl_seconds
+        self._readiness_identity_cache: tuple[float, EvidenceRuntimeReleaseIdentityV3] | None = None
         # Initialize the parent-owned transport fields explicitly. Calling the
         # Production constructor here would load the packaged *released*
         # identity and would either fail or tempt a process-global monkeypatch.
@@ -90,6 +95,7 @@ class LoopbackEvidenceV3DiagnosticRetriever(ProductionHttpRegulationRetrieverV3)
         import threading
 
         self._local = threading.local()
+        self._readiness_identity_cache_lock = threading.Lock()
 
     def preflight(
         self,
@@ -97,6 +103,16 @@ class LoopbackEvidenceV3DiagnosticRetriever(ProductionHttpRegulationRetrieverV3)
         *,
         _deadline: float | None = None,
     ) -> EvidenceRuntimeReleaseIdentityV3:
+        with self._readiness_identity_cache_lock:
+            cached = self._readiness_identity_cache
+        if review_as_of is not None and cached is not None and time.monotonic() < cached[0]:
+            identity = cached[1]
+            if (
+                review_as_of is None
+                or review_as_of == identity.base_runtime_release.supported_review_as_of
+            ):
+                return identity
+
         deadline = _new_deadline(self.timeout_seconds) if _deadline is None else _deadline
         headers = {"Accept": "application/json", **self._auth_header}
         url = f"{self._base_url}/internal/rag/v3/health/ready"
@@ -114,6 +130,12 @@ class LoopbackEvidenceV3DiagnosticRetriever(ProductionHttpRegulationRetrieverV3)
                 ):
                     raise ValueError("diagnostic runtime v3 does not support review_as_of")
                 self._successful_readiness_get_count += 1
+                if review_as_of is not None and self._readiness_identity_cache_ttl_seconds > 0.0:
+                    with self._readiness_identity_cache_lock:
+                        self._readiness_identity_cache = (
+                            time.monotonic() + self._readiness_identity_cache_ttl_seconds,
+                            identity,
+                        )
                 return identity
             except (
                 HTTPError,
@@ -128,6 +150,12 @@ class LoopbackEvidenceV3DiagnosticRetriever(ProductionHttpRegulationRetrieverV3)
                     break
         reason = _safe_failure_reason(last_error or RuntimeError("internal state"))
         raise RetrievalError(f"Evidence v3 readiness request failed: {reason}") from None
+
+    def invalidate_readiness_identity_cache(self) -> None:
+        """Start each review with a fresh dated readiness attestation."""
+
+        with self._readiness_identity_cache_lock:
+            self._readiness_identity_cache = None
 
     def retrieve(self, request: EvidenceRetrievalRequest) -> EvidenceRetrievalResponse:
         response = super().retrieve(request)

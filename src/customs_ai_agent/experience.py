@@ -1,0 +1,3200 @@
+from __future__ import annotations
+
+import hashlib
+import re
+import time
+import unicodedata
+from collections.abc import Callable, Iterable, Mapping
+from dataclasses import dataclass
+from typing import Any, Literal
+
+from customs_ai_agent.adapters.llm import (
+    ClaudeDocumentAnalyzer,
+    LLMError,
+    StructuredAgenticResult,
+    anthropic_output_schema_sha256,
+)
+from customs_ai_agent.meaning_catalog import (
+    GENERAL_CUSTOMS_GUIDANCE,
+    user_action_text,
+    user_meaning_for_finding,
+    user_meaning_for_issue,
+)
+from customs_ai_agent.prompts import (
+    CASE_ANSWER_V2_PROMPT_ID,
+    CASE_ANSWER_VERIFIER_PROMPT_ID,
+    EXPERIENCE_ENTAILMENT_PROMPT_ID,
+    EXPERIENCE_REPORT_PROMPT_ID,
+    load_case_answer_v2_system_prompt,
+    load_case_answer_verifier_system_prompt,
+    load_case_scope_classifier_system_prompt,
+    load_experience_entailment_system_prompt,
+    load_experience_report_system_prompt,
+)
+from customs_ai_agent.schemas.experience import (
+    AgentUatCapabilityAttestationV1,
+    AnswerScopeClassificationAuditV1,
+    AnswerScopeV2,
+    AssistantAnswerV2,
+    CanonicalClaimV1,
+    CaseConversationRequestV2,
+    ExperienceGenerationAuditV1,
+    ExperienceVerificationAuditV1,
+    GroundedPresentationSectionV1,
+    GroundedPresentationStatementV1,
+    GroundedPresentationV1,
+    PresentationSectionCode,
+    PresentationStatementRole,
+    ReviewExperienceEnvelopeV1,
+    UserActionEventV1,
+    assistant_answer_verified_content_sha256,
+    case_conversation_request_sha256,
+    presentation_verified_content_sha256,
+)
+from customs_ai_agent.schemas.v3 import (
+    CitationReferenceV1,
+    ReviewRunResultV3,
+    canonical_json_sha256,
+    stable_object_id,
+)
+from customs_ai_agent.security_guard import prompt_injection_unmet_reason_codes
+from customs_ai_agent.v3_semantics import reconstruct_v3_current_semantics
+
+
+ExperienceStageCallback = Callable[[dict[str, Any]], None]
+AnswerIntent = Literal[
+    "summary",
+    "reason",
+    "evidence",
+    "impact",
+    "next_action",
+    "priority_action",
+    "comparison",
+    "scope_limit",
+    "correction_guard",
+    "clarification",
+    "general",
+]
+
+_SAFE_SUGGESTED_QUESTIONS = [
+    "이 결과가 나온 가장 중요한 이유는 무엇입니까?",
+    "담당자가 먼저 확인할 항목은 무엇입니까?",
+    "연결된 법령 근거가 이 심사 건에서 어떤 의미입니까?",
+]
+
+
+def _stage_started(
+    callback: ExperienceStageCallback | None,
+    stage_code: str,
+) -> int:
+    started_ns = time.perf_counter_ns()
+    if callback is not None:
+        callback(
+            {
+                "stage_code": stage_code,
+                "state": "started",
+                "duration_ms": None,
+                "safe_counts": {},
+            }
+        )
+    return started_ns
+
+
+def _stage_finished(
+    callback: ExperienceStageCallback | None,
+    stage_code: str,
+    started_ns: int,
+    *,
+    state: Literal["completed", "failed"],
+    safe_counts: dict[str, int] | None = None,
+) -> None:
+    if callback is None:
+        return
+    callback(
+        {
+            "stage_code": stage_code,
+            "state": state,
+            "duration_ms": max(
+                1,
+                min(
+                    300_000,
+                    round((time.perf_counter_ns() - started_ns) / 1_000_000),
+                ),
+            ),
+            "safe_counts": safe_counts or {},
+        }
+    )
+
+
+_SECTION_ORDER: tuple[PresentationSectionCode, ...] = (
+    "conclusion",
+    "process",
+    "document_comparison",
+    "issues_and_causes",
+    "regulatory_meaning",
+    "business_impact",
+    "next_actions",
+    "scope_and_limits",
+)
+_SECTION_TITLES: dict[PresentationSectionCode, str] = {
+    "conclusion": "한눈에 보는 결론",
+    "process": "Agent가 수행한 검토 과정",
+    "document_comparison": "문서 대조 결과",
+    "issues_and_causes": "발견된 문제와 원인",
+    "regulatory_meaning": "법령 근거와 이 심사 건에서의 의미",
+    "business_impact": "업무상 영향",
+    "next_actions": "담당자의 다음 조치",
+    "scope_and_limits": "검토 범위와 한계",
+}
+_ANSWER_AREAS: tuple[str, ...] = (
+    "direct_answer",
+    "explanation",
+    "evidence_meaning",
+    "impact",
+    "next_steps",
+)
+_ANSWER_AREA_ROLES: dict[str, frozenset[PresentationStatementRole]] = {
+    "direct_answer": frozenset(
+        {"conclusion", "observation", "reason", "evidence", "impact", "action", "limitation"}
+    ),
+    "explanation": frozenset({"conclusion", "observation", "reason", "limitation"}),
+    "evidence_meaning": frozenset({"evidence", "limitation"}),
+    "impact": frozenset({"impact"}),
+    "next_steps": frozenset({"action"}),
+}
+_ANSWER_AREA_REPAIR_PREFIX: dict[str, str] = {
+    "explanation": "확인된 내용을 근거와 함께 설명하면, ",
+    "evidence_meaning": "법령 근거의 의미를 설명하면, ",
+    "impact": "업무상 영향을 설명하면, ",
+    "next_steps": "담당자의 다음 조치를 설명하면, ",
+}
+
+
+@dataclass(frozen=True)
+class _AnswerCompositionPlan:
+    intent: AnswerIntent
+    claims_by_area: dict[str, tuple[CanonicalClaimV1, ...]]
+    used_context_message_ids: tuple[str, ...]
+
+    def claim_selections(self) -> dict[str, list[str]]:
+        return {
+            area: [claim.claim_id for claim in self.claims_by_area.get(area, ())]
+            for area in _ANSWER_AREAS
+        }
+
+    def selected_claims(self) -> list[CanonicalClaimV1]:
+        return list(
+            {
+                claim.claim_id: claim
+                for area in _ANSWER_AREAS
+                for claim in self.claims_by_area.get(area, ())
+            }.values()
+        )
+
+
+_CASE_LIMITATION = "답변은 현재 심사 회차와 연결된 문서·법령 근거 범위에 한정됩니다."
+_GENERAL_GUIDANCE_LIMITATION = (
+    "위 내용은 일반 통관 안내이며 현재 심사 건의 판정이나 법적 의무를 뜻하지 않습니다."
+)
+_DOCUMENT_TYPE_LABELS = {
+    "invoice": "상업송장(CI)",
+    "packing_list": "포장명세서(PL)",
+    "bill_of_lading": "선하증권(B/L)",
+    "certificate_of_origin": "원산지증명서(C/O)",
+    "unknown": "제출 문서",
+}
+_FIELD_LABELS = {
+    "invoice_no": "송장번호",
+    "invoice_number": "송장번호",
+    "invoice_date": "송장 발행일",
+    "packing_no": "포장명세서 번호",
+    "bl_no": "선하증권 번호",
+    "certificate_no": "원산지증명서 번호",
+    "seller": "판매자",
+    "buyer": "구매자",
+    "exporter": "수출자",
+    "importer": "수입자",
+    "shipper": "송하인",
+    "consignee": "수하인",
+    "notify_party": "착하통지처",
+    "vessel": "선박명",
+    "voyage_no": "항차",
+    "port_of_loading": "선적항",
+    "port_of_discharge": "양륙항",
+    "departure_date": "출항일",
+    "country_of_origin": "원산지",
+    "origin_country": "원산지",
+    "hs_code": "품목분류번호(HSK)",
+    "description": "품명",
+    "goods_description": "물품 설명",
+    "quantity": "수량",
+    "unit_price": "단가",
+    "line_amount": "품목 금액",
+    "total_amount": "총금액",
+    "currency": "통화",
+    "packages": "포장 수량",
+    "gross_weight_kg": "총중량",
+    "total_gross_weight_kg": "전체 총중량",
+    "net_weight_kg": "순중량",
+    "measurement_cbm": "용적",
+    "container_numbers": "컨테이너 번호",
+    "seal_numbers": "봉인 번호",
+    "shipping_marks": "화인",
+}
+_FIELD_PRIORITY = {
+    name: index
+    for index, name in enumerate(
+        (
+            "invoice_no",
+            "invoice_number",
+            "invoice_date",
+            "packing_no",
+            "bl_no",
+            "certificate_no",
+            "hs_code",
+            "description",
+            "goods_description",
+            "quantity",
+            "unit_price",
+            "line_amount",
+            "total_amount",
+            "currency",
+            "country_of_origin",
+            "origin_country",
+            "seller",
+            "buyer",
+            "exporter",
+            "importer",
+            "shipper",
+            "consignee",
+            "vessel",
+            "voyage_no",
+            "port_of_loading",
+            "port_of_discharge",
+            "departure_date",
+            "packages",
+            "gross_weight_kg",
+            "total_gross_weight_kg",
+            "net_weight_kg",
+            "measurement_cbm",
+            "container_numbers",
+            "seal_numbers",
+            "shipping_marks",
+        )
+    )
+}
+
+# Claude may write the connective, explanatory prose, but factual atoms remain
+# provider-owned.  These patterns intentionally target values whose invention
+# would materially change a customs review: numbers/units, document and HSK
+# identifiers, law names, institutions and opaque internal identifiers.  The
+# semantic verifier remains responsible for contradictions that contain no new
+# lexical atom.
+_URL_RE = re.compile(r"(?i)(?:https?://|www\.)\S+")
+_HTML_RE = re.compile(r"<\s*/?\s*[A-Za-z][^>]*>")
+_OPAQUE_INTERNAL_RE = re.compile(
+    r"(?i)(?:experience_claim|statement|fact|issue|finding|ev|outcome)_[a-f0-9]{32,}"
+    r"|(?<![A-Fa-f0-9])[A-Fa-f0-9]{64}(?![A-Fa-f0-9])"
+)
+_NUMBER_RE = re.compile(
+    r"(?<![0-9])(?P<number>\d+(?:,\d{3})*(?:\.\d+)?)"
+    r"\s*(?P<unit>%|원|달러|유로|엔|kg|㎏|g|톤|개|건|종|회|일|개월|년|월|조|항|호)?"
+    r"(?![0-9])",
+    re.IGNORECASE,
+)
+_ALPHANUMERIC_IDENTIFIER_RE = re.compile(
+    r"(?<![A-Za-z0-9])(?=[A-Za-z0-9._:/-]{3,}(?![A-Za-z0-9._:/-]))"
+    r"(?=[A-Za-z0-9._:/-]*[A-Za-z])(?=[A-Za-z0-9._:/-]*\d)"
+    r"[A-Za-z0-9][A-Za-z0-9._:/-]*"
+)
+_UPPERCASE_IDENTIFIER_RE = re.compile(
+    r"(?<![A-Za-z0-9])(?:[A-Z]{2,}(?:[-_/][A-Z0-9]+)*)(?![A-Za-z0-9])"
+)
+_KOREAN_LAW_RE = re.compile(
+    r"(?<![가-힣])(?:[가-힣]{2,30}(?:시행규칙|시행령|법률|고시)|[가-힣]{2,30}법)"
+    r"(?=$|[\s.,;:!?()\[\]{}“”\"']|은|는|이|가|을|를|의|에|에서|으로|로|과|와|도|만)"
+)
+_NON_LAW_SUFFIXES = (
+    "방법",
+    "기법",
+    "해법",
+    "문법",
+    "어법",
+    "용법",
+    "화법",
+    "농법",
+    "공법",
+    "수법",
+    "비법",
+    "요법",
+)
+_KOREAN_INSTITUTION_RE = re.compile(
+    r"(?<![가-힣])(?:[가-힣]{2,24}\s*)"
+    r"(?:관세청|세관|주식회사|유한회사|법인|은행|항만공사|항만|공항)"
+    r"(?=$|[\s.,;:!?()\[\]{}“”\"']|은|는|이|가|을|를|의|에|에서|으로|로|과|와|도|만)"
+)
+_ASCII_ORGANIZATION_RE = re.compile(
+    r"(?<![A-Za-z])(?:[A-Z][A-Za-z&.-]*\s+){0,4}"
+    r"(?:CORP(?:ORATION)?|CO(?:MPANY)?|LTD|INC|LLC)(?![A-Za-z])",
+    re.IGNORECASE,
+)
+_COUNTRY_RE = re.compile(
+    r"(?<![가-힣])(?:대한민국|한국|중국|일본|미국|독일|프랑스|영국|베트남|태국|"
+    r"인도네시아|인도|호주|캐나다|러시아|대만|홍콩|싱가포르|말레이시아|필리핀|"
+    r"네덜란드|이탈리아|스페인|브라질|멕시코)"
+    r"(?=$|[\s.,;:!?()\[\]{}“”\"']|은|는|이|가|을|를|의|에|에서|으로|로|과|와|도|만|산)"
+)
+_KOREAN_PORT_RE = re.compile(
+    r"(?<![가-힣])(?:[가-힣]{2,24}(?:항구|항))"
+    r"(?=$|[\s.,;:!?()\[\]{}“”\"']|은|는|이|가|을|를|의|에|에서|으로|로|과|와|도|만)"
+)
+_NON_PORT_SUFFIXES = ("사항", "문항", "조항", "항목")
+_GENERAL_GUIDANCE_CASE_ASSERTION_RE = re.compile(
+    r"(?:현재|이|해당)\s*(?:심사\s*건|건|case).{0,40}"
+    r"(?:판정|결과|의무|적용|승인|자동\s*완료|문제\s*(?:없|있))",
+    re.IGNORECASE,
+)
+_COUNT_UNITS = {"개": "count", "건": "count", "종": "count"}
+_PRESENTATION_MIN_TOTAL_MATERIAL_CHARS = 650
+_PRESENTATION_MIN_SECTION_CHARS = 28
+_PRESENTATION_MIN_MATERIAL_STATEMENT_CHARS = 18
+_PRESENTATION_MIN_KOREAN_RATIO = 0.65
+
+
+def answer_limitation_source(scope: AnswerScopeV2) -> str:
+    return _GENERAL_GUIDANCE_LIMITATION if scope == "general_customs_guidance" else _CASE_LIMITATION
+
+
+_PRESENTATION_OUTPUT_SCHEMA: dict[str, Any] = {
+    "type": "object",
+    "additionalProperties": False,
+    "required": ["prose_by_claim_group"],
+    "properties": {
+        "prose_by_claim_group": {
+            "type": "array",
+            "minItems": 1,
+            "maxItems": 100,
+            "items": {
+                "type": "object",
+                "additionalProperties": False,
+                "required": ["group_id", "prose"],
+                "properties": {
+                    "group_id": {
+                        "type": "string",
+                        "pattern": r"^presentation_group_[a-f0-9]{64}$",
+                    },
+                    "prose": {"type": "string", "minLength": 1, "maxLength": 4000},
+                },
+            },
+        }
+    },
+}
+_ENTAILMENT_OUTPUT_SCHEMA: dict[str, Any] = {
+    "type": "object",
+    "additionalProperties": False,
+    "required": ["verdicts"],
+    "properties": {
+        "verdicts": {
+            "type": "array",
+            "minItems": 1,
+            "maxItems": 100,
+            "items": {
+                "type": "object",
+                "additionalProperties": False,
+                "required": ["statement_id", "supported", "reason_code"],
+                "properties": {
+                    "statement_id": {
+                        "type": "string",
+                        "pattern": r"^statement_[a-f0-9]{64}$",
+                    },
+                    "supported": {"type": "boolean"},
+                    "reason_code": {
+                        "type": "string",
+                        "minLength": 1,
+                        "maxLength": 128,
+                        "pattern": r"^[a-z][a-z0-9_]*$",
+                    },
+                },
+            },
+        }
+    },
+}
+_CHAT_OUTPUT_SCHEMA: dict[str, Any] = {
+    "type": "object",
+    "additionalProperties": False,
+    "required": [
+        "direct_answer",
+        "explanation",
+        "evidence_meaning",
+        "impact",
+        "next_steps",
+    ],
+    "properties": {
+        "direct_answer": {"type": "string", "minLength": 1, "maxLength": 4000},
+        "explanation": {
+            "type": "array",
+            "maxItems": 20,
+            "items": {"type": "string", "minLength": 1, "maxLength": 2000},
+        },
+        "evidence_meaning": {
+            "type": "array",
+            "maxItems": 20,
+            "items": {"type": "string", "minLength": 1, "maxLength": 2000},
+        },
+        "impact": {
+            "type": "array",
+            "maxItems": 20,
+            "items": {"type": "string", "minLength": 1, "maxLength": 2000},
+        },
+        "next_steps": {
+            "type": "array",
+            "maxItems": 20,
+            "items": {"type": "string", "minLength": 1, "maxLength": 2000},
+        },
+    },
+}
+_ANSWER_VERIFIER_SCHEMA: dict[str, Any] = {
+    "type": "object",
+    "additionalProperties": False,
+    "required": ["supported", "reason_codes"],
+    "properties": {
+        "supported": {"type": "boolean"},
+        "reason_codes": {
+            "type": "array",
+            "maxItems": 20,
+            "uniqueItems": True,
+            "items": {
+                "type": "string",
+                "minLength": 1,
+                "maxLength": 128,
+                "pattern": r"^[a-z][a-z0-9_]*$",
+            },
+        },
+    },
+}
+_SCOPE_CLASSIFIER_SCHEMA: dict[str, Any] = {
+    "type": "object",
+    "additionalProperties": False,
+    "required": ["answer_scope", "reason_code", "guidance_topics"],
+    "properties": {
+        "answer_scope": {
+            "type": "string",
+            "enum": [
+                "case_grounded",
+                "evidence_grounded",
+                "general_customs_guidance",
+                "clarification_needed",
+                "insufficient_evidence",
+                "out_of_scope",
+            ],
+        },
+        "reason_code": {
+            "type": "string",
+            "minLength": 1,
+            "maxLength": 128,
+            "pattern": r"^[a-z][a-z0-9_]*$",
+        },
+        "guidance_topics": {
+            "type": "array",
+            "maxItems": 3,
+            "uniqueItems": True,
+            "items": {
+                "type": "string",
+                "enum": [
+                    "invoice",
+                    "packing_list",
+                    "bill_of_lading",
+                    "certificate_of_origin",
+                    "hsk",
+                    "hs_hsk_comparison",
+                    "customs_review",
+                    "import_declaration",
+                    "customs_valuation",
+                    "duties_and_taxes",
+                    "free_trade_agreement",
+                    "import_requirements",
+                    "inspection_and_supplement",
+                    "document_correction",
+                    "customs_broker",
+                ],
+            },
+        },
+    },
+}
+
+
+def experience_schema_hashes() -> dict[str, str]:
+    return {
+        "presentation": anthropic_output_schema_sha256(_PRESENTATION_OUTPUT_SCHEMA),
+        "entailment": anthropic_output_schema_sha256(_ENTAILMENT_OUTPUT_SCHEMA),
+        "chat": anthropic_output_schema_sha256(_CHAT_OUTPUT_SCHEMA),
+        "chat_verifier": anthropic_output_schema_sha256(_ANSWER_VERIFIER_SCHEMA),
+        "scope_classifier": anthropic_output_schema_sha256(_SCOPE_CLASSIFIER_SCHEMA),
+        "scope_classifier_semantic": canonical_json_sha256(_SCOPE_CLASSIFIER_SCHEMA),
+    }
+
+
+def experience_prompt_hashes() -> dict[str, str]:
+    return {
+        "presentation": hashlib.sha256(
+            load_experience_report_system_prompt().encode("utf-8")
+        ).hexdigest(),
+        "entailment": hashlib.sha256(
+            load_experience_entailment_system_prompt().encode("utf-8")
+        ).hexdigest(),
+        "chat": hashlib.sha256(load_case_answer_v2_system_prompt().encode("utf-8")).hexdigest(),
+        "chat_verifier": hashlib.sha256(
+            load_case_answer_verifier_system_prompt().encode("utf-8")
+        ).hexdigest(),
+        "scope_classifier": hashlib.sha256(
+            load_case_scope_classifier_system_prompt().encode("utf-8")
+        ).hexdigest(),
+    }
+
+
+def _citation(kind: str, reference_id: str) -> CitationReferenceV1:
+    return CitationReferenceV1(kind=kind, reference_id=reference_id)  # type: ignore[arg-type]
+
+
+def _claim(
+    section: PresentationSectionCode,
+    role: PresentationStatementRole,
+    text: str,
+    citations: Iterable[CitationReferenceV1],
+    *,
+    material: bool = True,
+) -> CanonicalClaimV1:
+    citation_list = list({(item.kind, item.reference_id): item for item in citations}.values())
+    payload = {
+        "section_code": section,
+        "role": role,
+        "canonical_text": " ".join(text.split()),
+        "citation_references": [
+            item.model_dump(mode="json", warnings=False) for item in citation_list
+        ],
+        "material": material,
+    }
+    return CanonicalClaimV1.model_validate(
+        {
+            "claim_id": stable_object_id("experience_claim", payload),
+            **payload,
+        }
+    )
+
+
+def _issue_observation_text(title: str) -> str:
+    return f"문서 대조 결과, {title}."
+
+
+def _normalized_prose(value: str) -> str:
+    return " ".join(unicodedata.normalize("NFKC", value).split())
+
+
+def _normalized_atom(value: str) -> str:
+    normalized = unicodedata.normalize("NFKC", value)
+    return re.sub(r"\s+", "", normalized).replace(",", "").casefold().strip(".,;:()[]{}“”\"'")
+
+
+def _factual_atoms(text: str) -> frozenset[str]:
+    """Extract high-risk lexical facts without attempting semantic reasoning.
+
+    This deliberately errs on the side of rejecting a Claude candidate.  A
+    rejected candidate is regenerated once and then replaced by a detailed
+    deterministic report/answer, so false positives reduce fluency rather than
+    safety.
+    """
+
+    text = unicodedata.normalize("NFKC", text)
+    atoms: set[str] = set()
+    for match in _NUMBER_RE.finditer(text):
+        number = match.group("number").replace(",", "")
+        atoms.add(f"number:{number}")
+        unit = (match.group("unit") or "").casefold()
+        if unit:
+            atoms.add(f"number-unit:{number}:{_COUNT_UNITS.get(unit, unit)}")
+    for pattern, prefix in (
+        (_ALPHANUMERIC_IDENTIFIER_RE, "identifier"),
+        (_UPPERCASE_IDENTIFIER_RE, "identifier"),
+        (_KOREAN_LAW_RE, "law"),
+        (_KOREAN_INSTITUTION_RE, "entity"),
+        (_ASCII_ORGANIZATION_RE, "entity"),
+        (_COUNTRY_RE, "entity"),
+        (_KOREAN_PORT_RE, "entity"),
+    ):
+        for match in pattern.finditer(text):
+            atom = _normalized_atom(match.group(0))
+            if prefix == "law" and atom.endswith(_NON_LAW_SUFFIXES):
+                continue
+            if pattern is _KOREAN_PORT_RE and atom.endswith(_NON_PORT_SUFFIXES):
+                continue
+            if atom:
+                atoms.add(f"{prefix}:{atom}")
+    for match in re.finditer(r"[“\"]([^“”\"\r\n]{1,80})[”\"]", text):
+        literal = _normalized_atom(match.group(1))
+        if literal:
+            atoms.add(f"value:{literal}")
+    labelled_value = re.compile(
+        r"(?:원산지|선적항|양륙항|도착항|출발항|선박명|통화|판매자|구매자|수출자|"
+        r"수입자|송하인|수하인)(?:은|는|이|가|:)?\s*[“\"]?"
+        r"([A-Za-z가-힣][A-Za-z가-힣0-9 .,&()/_-]{0,40}?)"
+        r"(?:[”\"]?(?:입니다|이며|이고|로 확인|으로 확인|로 기재|으로 기재))"
+    )
+    for match in labelled_value.finditer(text):
+        atom = _normalized_atom(match.group(1))
+        if atom:
+            atoms.add(f"value:{atom}")
+    return frozenset(atoms)
+
+
+def _grounded_prose_blockers(
+    text: str,
+    source_texts: Iterable[str],
+    *,
+    prefix: str,
+    minimum_chars: int = 1,
+    require_formal_korean: bool = True,
+) -> list[str]:
+    normalized = _normalized_prose(text)
+    source = "\n".join(_normalized_prose(item) for item in source_texts)
+    blockers: list[str] = []
+    if len(normalized) < minimum_chars:
+        blockers.append(f"{prefix}_too_short")
+    if any(
+        ord(character) < 32 and character not in "\t\n\r" for character in text
+    ) or _HTML_RE.search(normalized):
+        blockers.append(f"{prefix}_unsafe_markup")
+    if _URL_RE.search(normalized):
+        blockers.append(f"{prefix}_url_not_allowed")
+    if _OPAQUE_INTERNAL_RE.search(normalized):
+        blockers.append(f"{prefix}_internal_identifier_not_allowed")
+    if not _factual_atoms(normalized).issubset(_factual_atoms(source)):
+        blockers.append(f"{prefix}_unsupported_factual_atom")
+    if require_formal_korean and not normalized.endswith("니다."):
+        blockers.append(f"{prefix}_formal_style_required")
+    return blockers
+
+
+def _safe_exception_reason(prefix: str, exc: Exception) -> str:
+    """Return an actionable diagnostic code without persisting provider/model text."""
+
+    if isinstance(exc, LLMError) and re.fullmatch(r"[a-z][a-z0-9_]{0,95}", exc.code):
+        return f"{prefix}_{exc.code}"[:128]
+    explicit = str(exc)
+    if explicit in {
+        "presentation_model_identity_mismatch",
+        "answer_model_identity_mismatch",
+        "entailment_model_identity_mismatch",
+    }:
+        return explicit
+    return f"{prefix}_{type(exc).__name__.casefold()}"[:128]
+
+
+def _safe_model_reason_codes(raw: Any, *, default: str) -> list[str]:
+    """Retain bounded machine codes only; never surface free-form model output."""
+
+    if not isinstance(raw, list):
+        return [default]
+    codes = sorted(
+        {
+            item
+            for item in raw
+            if isinstance(item, str) and re.fullmatch(r"[a-z][a-z0-9_]{0,127}", item)
+        }
+    )
+    return codes or [default]
+
+
+def _presentation_group_diagnostics(
+    *,
+    group_index: int,
+    section_code: PresentationSectionCode,
+    text: str,
+    source_texts: Iterable[str],
+    blockers: Iterable[str],
+) -> list[str]:
+    """Describe a rejected group by safe position/category, never by generated prose."""
+
+    diagnostics = [
+        f"presentation_group_{group_index:02d}_{section_code}_{blocker.removeprefix('presentation_')}"
+        for blocker in sorted(set(blockers))
+    ]
+    extra_atoms = _factual_atoms(text).difference(_factual_atoms("\n".join(source_texts)))
+    for category in sorted({atom.partition(":")[0] for atom in extra_atoms}):
+        diagnostics.append(
+            f"presentation_group_{group_index:02d}_{section_code}_unsupported_{category}"
+        )
+    return diagnostics
+
+
+def _korean_letter_ratio(text: str) -> float:
+    hangul = sum("가" <= character <= "힣" for character in text)
+    latin = sum(
+        ("a" <= character.casefold() <= "z") for character in text if len(character.casefold()) == 1
+    )
+    denominator = hangul + latin
+    return hangul / denominator if denominator else 0.0
+
+
+def _presentation_statement_options(
+    claims: Iterable[CanonicalClaimV1],
+) -> list[dict[str, Any]]:
+    """Return non-overlapping factual claim groups for Claude to explain.
+
+    Every canonical claim is placed in exactly one option. Claims can be
+    combined only when their section and semantic role are identical.  Unlike
+    the former finite rendering menu, the model authors new explanatory prose;
+    the claim IDs, protected factual atoms and independent entailment verifier
+    keep that prose grounded.
+    """
+
+    groups: dict[
+        tuple[PresentationSectionCode, PresentationStatementRole],
+        list[CanonicalClaimV1],
+    ] = {}
+    for claim in claims:
+        groups.setdefault((claim.section_code, claim.role), []).append(claim)
+    options: list[dict[str, Any]] = []
+    for (section, role), grouped in groups.items():
+        chunks: list[list[CanonicalClaimV1]] = []
+        current: list[CanonicalClaimV1] = []
+        current_citations: set[tuple[str, str]] = set()
+        for claim in grouped:
+            claim_citations = {
+                (str(citation.kind), citation.reference_id)
+                for citation in claim.citation_references
+            }
+            candidate = [*current, claim]
+            candidate_citations = current_citations | claim_citations
+            candidate_source = " ".join(item.canonical_text for item in candidate)
+            if current and (
+                len(candidate) > 20
+                or len(candidate_citations) > 100
+                or len(candidate_source) > 4000
+            ):
+                chunks.append(current)
+                current = [claim]
+                current_citations = claim_citations
+            else:
+                current = candidate
+                current_citations = candidate_citations
+        if current:
+            chunks.append(current)
+        for chunk in chunks:
+            group_payload = {
+                "section_code": section,
+                "role": role,
+                "source_claim_ids": [claim.claim_id for claim in chunk],
+            }
+            options.append(
+                {
+                    "group_id": stable_object_id("presentation_group", group_payload),
+                    "section_code": section,
+                    "role": role,
+                    "source_claim_ids": group_payload["source_claim_ids"],
+                    "canonical_claims": [
+                        {
+                            "claim_id": claim.claim_id,
+                            "canonical_text": claim.canonical_text,
+                            "citation_references": [
+                                citation.model_dump(mode="json", warnings=False)
+                                for citation in claim.citation_references
+                            ],
+                        }
+                        for claim in chunk
+                    ],
+                    "protected_factual_atoms": sorted(
+                        _factual_atoms(" ".join(claim.canonical_text for claim in chunk))
+                    ),
+                }
+            )
+    return options
+
+
+def _claim_sources(claims: Iterable[CanonicalClaimV1]) -> list[str]:
+    return [claim.canonical_text for claim in claims]
+
+
+def _strict_presentation_group_prose(option: Mapping[str, Any]) -> str:
+    """Return the code-owned repair text for one already-grounded claim group."""
+
+    return " ".join(
+        str(claim["canonical_text"])
+        for claim in option["canonical_claims"]
+        if isinstance(claim, Mapping)
+    )
+
+
+def _preserve_occurrence_meanings(
+    text: str,
+    claims: Iterable[CanonicalClaimV1],
+) -> str:
+    """Keep provider-owned Issue/Finding meanings explicit in fluent prose.
+
+    Claude may explain the surrounding context naturally, but a material
+    occurrence must not be reduced to a generic phrase such as "a value did
+    not match".  The exact, versioned Korean meaning remains server-owned and
+    is prefixed only when the model did not already retain it.
+    """
+
+    exact_meanings = [
+        claim.canonical_text
+        for claim in claims
+        if any(citation.kind in {"issue", "finding"} for citation in claim.citation_references)
+    ]
+    missing = [meaning for meaning in exact_meanings if meaning not in text]
+    return " ".join([*missing, text]) if missing else text
+
+
+def _field_fact_claims(result: ReviewRunResultV3) -> list[CanonicalClaimV1]:
+    """Expose bounded, user-readable document facts for grounded Case questions.
+
+    These claims are used by Chat only. They are deliberately kept out of the
+    mandatory report catalog so a four-document review does not become a raw
+    field dump.
+    """
+
+    document_types = {
+        item.document_id: _DOCUMENT_TYPE_LABELS.get(item.document_type, "제출 문서")
+        for item in result.document_results
+    }
+    candidates = [
+        item
+        for item in result.fact_ledger.entries
+        if item.kind == "field_source"
+        and item.value.strip().casefold() not in {"", "null", "none", "[]", "{}"}
+    ]
+
+    def sort_key(item: Any) -> tuple[int, str, str]:
+        field_name = item.label.rsplit(".", 1)[-1]
+        return (
+            _FIELD_PRIORITY.get(field_name, len(_FIELD_PRIORITY) + 1),
+            item.document_id or "",
+            item.reference_id,
+        )
+
+    claims: list[CanonicalClaimV1] = []
+    for entry in sorted(candidates, key=sort_key)[:80]:
+        field_name = entry.label.rsplit(".", 1)[-1]
+        field_label = _FIELD_LABELS.get(field_name, "문서 기재 항목")
+        document_label = document_types.get(entry.document_id or "", "제출 문서")
+        value = " ".join(entry.value.split())[:1_000]
+        claims.append(
+            _claim(
+                "document_comparison",
+                "observation",
+                f"{document_label}에서 {field_label}의 기록값은 “{value}”로 확인되었습니다.",
+                [_citation("field_source", entry.reference_id)],
+            )
+        )
+    return claims
+
+
+def build_answer_claim_catalog(result: ReviewRunResultV3) -> list[CanonicalClaimV1]:
+    return [*build_canonical_claim_catalog(result), *_field_fact_claims(result)]
+
+
+def answer_claim_bindings(
+    answer: AssistantAnswerV2,
+    result: ReviewRunResultV3,
+) -> dict[str, tuple[CanonicalClaimV1, ...]]:
+    """Reconstruct the exact canonical claims selected for each Chat area.
+
+    The live evaluator and independent consumers use this projection to prove
+    that a fluent but irrelevant answer did not pass merely because it cited
+    some fact from the same Case. It never interprets free prose: only the
+    provider-owned, verifier-approved renderings are accepted.
+    """
+
+    claims = build_answer_claim_catalog(result)
+    claim_index = {claim.claim_id: claim for claim in claims}
+    values = answer.claim_selections.model_dump(mode="json", warnings=False)
+    return {
+        area: tuple(claim_index[claim_id] for claim_id in claim_ids if claim_id in claim_index)
+        for area, claim_ids in values.items()
+    }
+
+
+def build_canonical_claim_catalog(result: ReviewRunResultV3) -> list[CanonicalClaimV1]:
+    facts = {(entry.kind, entry.reference_id): entry for entry in result.fact_ledger.entries}
+    current_semantics = reconstruct_v3_current_semantics(result)
+    expected_occurrence_references = [
+        *(("issue", reference_id) for reference_id in current_semantics.issue_reference_ids),
+        *(("finding", reference_id) for reference_id in current_semantics.finding_reference_ids),
+    ]
+    if any(reference not in facts for reference in expected_occurrence_references):
+        raise ValueError("canonical occurrence reference is absent from the FactLedger")
+    outcome_entry = next(entry for entry in result.fact_ledger.entries if entry.kind == "outcome")
+    outcome = _citation("outcome", outcome_entry.reference_id)
+    finding_citations = [
+        _citation("finding", reference_id)
+        for reference_id in current_semantics.finding_reference_ids
+    ]
+    document_consistency_complete = (
+        not result.model_errors
+        and not result.model_conflicts
+        and bool(result.document_results)
+        and all(item.extraction_status == "completed" for item in result.document_results)
+    )
+    claims: list[CanonicalClaimV1] = []
+    conclusion_citations = [outcome]
+    if result.assessment == "no_issue_detected":
+        conclusion = (
+            "제출된 문서와 현재 조회된 법령 근거 범위에서는 별도의 불일치나 규정상 누락을 "
+            "확인하지 못했습니다."
+        )
+    elif result.assessment == "issues_detected":
+        if (
+            document_consistency_complete
+            and not result.validation_issues
+            and result.regulatory_findings
+        ):
+            conclusion = (
+                "문서 정합성 검토에서는 제출 문서 사이의 값 불일치가 발견되지 "
+                "않았습니다. 이와 별도로 규정 검토에서는 담당자가 확인하고 보완해야 할 "
+                "사항이 발견되었습니다."
+            )
+            conclusion_citations.extend(finding_citations)
+        else:
+            conclusion = (
+                "문서 또는 규정 검토에서 담당자가 확인하고 보완해야 할 사항이 발견되었습니다."
+            )
+    else:
+        conclusion = (
+            "현재 자료와 근거만으로 심사 결과를 확정하기 어려워 담당자의 추가 확인이 필요합니다."
+        )
+    claims.append(_claim("conclusion", "conclusion", conclusion, conclusion_citations))
+    claims.append(
+        _claim(
+            "conclusion",
+            "limitation",
+            (
+                "이 결과는 자동 통관 승인이 아니라 내부 사전심사 결과이며, 현재 환경에서는 "
+                "모든 심사 건을 담당자가 최종 확인합니다."
+            ),
+            [outcome],
+        )
+    )
+    claims.append(
+        _claim(
+            "process",
+            "observation",
+            (
+                "Agent는 문서 분석, 값 정규화, 문서 연결, 교차검증, 법령 근거 조회, 규정 검토와 "
+                "결과 검증을 정해진 순서로 수행했습니다."
+            ),
+            [outcome],
+        )
+    )
+    if result.action_trace:
+        succeeded = sum(item.status == "succeeded" for item in result.action_trace)
+        deferred = sum(item.status == "deferred" for item in result.action_trace)
+        claims.append(
+            _claim(
+                "process",
+                "observation",
+                (
+                    f"제한형 추가 조사에서는 {succeeded}개 작업이 완료되었고 "
+                    f"{deferred}개 작업은 안전 정책에 따라 담당자 확인으로 남겼습니다."
+                ),
+                [outcome],
+            )
+        )
+    if result.validation_issues:
+        for issue, reference in zip(
+            result.validation_issues,
+            current_semantics.issue_reference_ids,
+            strict=True,
+        ):
+            meaning = user_meaning_for_issue(issue.issue_code)
+            claims.extend(
+                [
+                    _claim(
+                        "document_comparison",
+                        "observation",
+                        _issue_observation_text(meaning.title),
+                        [_citation("issue", reference)],
+                    ),
+                    _claim(
+                        "issues_and_causes",
+                        "reason",
+                        meaning.explanation,
+                        [_citation("issue", reference)],
+                    ),
+                    _claim(
+                        "business_impact",
+                        "impact",
+                        meaning.impact,
+                        [_citation("issue", reference)],
+                    ),
+                ]
+            )
+    elif document_consistency_complete:
+        claims.append(
+            _claim(
+                "document_comparison",
+                "observation",
+                "현재 검증 기준으로 문서 사이의 값 불일치는 발견되지 않았습니다.",
+                [outcome],
+            )
+        )
+        claims.append(
+            _claim(
+                "issues_and_causes",
+                "observation",
+                "문서 교차검증에서 별도로 설명할 오류 원인은 확인되지 않았습니다.",
+                [outcome],
+            )
+        )
+    else:
+        claims.append(
+            _claim(
+                "document_comparison",
+                "limitation",
+                "문서 분석이 완전히 끝나지 않아 문서 사이의 값 일치 여부를 확정하지 않았습니다.",
+                [outcome],
+            )
+        )
+        claims.append(
+            _claim(
+                "issues_and_causes",
+                "limitation",
+                "완료되지 않은 문서 분석이 있어 교차검증 결과와 오류 원인을 추가로 확인해야 합니다.",
+                [outcome],
+            )
+        )
+    if result.regulatory_findings:
+        for finding, reference in zip(
+            result.regulatory_findings,
+            current_semantics.finding_reference_ids,
+            strict=True,
+        ):
+            meaning = user_meaning_for_finding(finding.finding_code)
+            claims.extend(
+                [
+                    _claim(
+                        "issues_and_causes",
+                        "reason",
+                        meaning.explanation,
+                        [_citation("finding", reference)],
+                    ),
+                    _claim(
+                        "business_impact",
+                        "impact",
+                        meaning.impact,
+                        [_citation("finding", reference)],
+                    ),
+                ]
+            )
+    evidence_claims = 0
+    for evidence in result.rag_evidence[:12]:
+        if ("evidence", evidence.evidence_id) not in facts:
+            continue
+        identity = " · ".join(
+            value for value in (evidence.law_name, evidence.article_no, evidence.title) if value
+        )
+        methods = {
+            "exact_hs": "품목코드 구조 조회",
+            "dense": "의미 유사도 검색",
+            "bm25": "핵심어 검색",
+            "graph": "법령 관계 확장",
+        }
+        observed_methods = ", ".join(
+            methods[item] for item in evidence.retrieval_methods if item in methods
+        )
+        text = f"현재 심사 건의 법령 근거로 {identity}을(를) 확인했습니다."
+        if observed_methods:
+            text += f" 이 근거는 {observed_methods} 경로에서 관측되었습니다."
+        claims.append(
+            _claim(
+                "regulatory_meaning",
+                "evidence",
+                text,
+                [_citation("evidence", evidence.evidence_id)],
+            )
+        )
+        evidence_claims += 1
+    if not evidence_claims:
+        claims.append(
+            _claim(
+                "regulatory_meaning",
+                "limitation",
+                "현재 결과에 사용자에게 제시할 수 있는 법령 근거가 충분히 연결되지 않았습니다.",
+                [outcome],
+            )
+        )
+    if not result.validation_issues and not result.regulatory_findings:
+        claims.append(
+            _claim(
+                "business_impact",
+                "impact",
+                (
+                    "문서상 보완 항목은 없지만 로컬 검증 환경의 자동 처리 기능이 꺼져 있어 "
+                    "담당자 확인 후 다음 업무를 진행해야 합니다."
+                ),
+                [outcome],
+            )
+        )
+    for action in result.required_actions:
+        citations = [
+            _citation(facts[(kind, reference_id)].kind, reference_id)
+            for reference_id in action.source_reference_ids
+            for kind in ("field_source", "issue", "finding", "evidence", "outcome")
+            if (kind, reference_id) in facts
+        ]
+        if not citations:
+            citations = [outcome]
+        claims.append(
+            _claim(
+                "next_actions",
+                "action",
+                user_action_text(action.action_code, action.message),
+                citations,
+            )
+        )
+    if not result.required_actions:
+        claims.append(
+            _claim(
+                "next_actions",
+                "action",
+                "담당자는 문서 대조 결과와 법령 근거를 확인하고 심사 의견을 기록합니다.",
+                [outcome],
+            )
+        )
+    claims.extend(
+        [
+            _claim(
+                "scope_and_limits",
+                "limitation",
+                (
+                    "자연어 수정 요청은 값을 자동으로 변경하지 않으며, 수정 제안을 "
+                    "다른 담당자가 승인한 뒤 새 심사 회차에서만 반영합니다."
+                ),
+                [outcome],
+            ),
+            _claim(
+                "scope_and_limits",
+                "limitation",
+                (
+                    "현재 UAT는 텍스트 문서만 처리하며 이미지·PDF의 OCR 결과는 심사 입력으로 "
+                    "받지 않습니다."
+                ),
+                [outcome],
+            ),
+            _claim(
+                "scope_and_limits",
+                "limitation",
+                (
+                    "법령 조회는 보존된 3개 법령 범위의 실제 RAG를 사용하므로 대한민국 통관 법령 "
+                    "전체를 대표하지 않습니다."
+                ),
+                [outcome],
+            ),
+            _claim(
+                "scope_and_limits",
+                "limitation",
+                (
+                    "현재 결과는 법적 통관 승인이나 관세 당국의 최종 판단이 아니며 Production "
+                    "자동완료 기능은 꺼져 있습니다."
+                ),
+                [outcome],
+            ),
+        ]
+    )
+    present = {item.section_code for item in claims}
+    if present != set(_SECTION_ORDER):
+        raise ValueError("canonical presentation catalog is incomplete")
+    claim_ids = [item.claim_id for item in claims]
+    if len(claim_ids) != len(set(claim_ids)):
+        raise ValueError("canonical presentation claim IDs must be unique")
+    return claims
+
+
+def _statement(
+    claim_group: list[CanonicalClaimV1],
+    text: str | None = None,
+) -> GroundedPresentationStatementV1:
+    citations = list(
+        {
+            (citation.kind, citation.reference_id): citation
+            for claim in claim_group
+            for citation in claim.citation_references
+        }.values()
+    )
+    payload = {
+        "role": claim_group[0].role,
+        "text": text or " ".join(claim.canonical_text for claim in claim_group),
+        "source_claim_ids": [claim.claim_id for claim in claim_group],
+        "citation_references": [
+            citation.model_dump(mode="json", warnings=False) for citation in citations
+        ],
+        "material": any(claim.material for claim in claim_group),
+    }
+    return GroundedPresentationStatementV1.model_validate(
+        {
+            "statement_id": stable_object_id("statement", payload),
+            **payload,
+        }
+    )
+
+
+def _headline(result: ReviewRunResultV3) -> str:
+    if result.assessment == "no_issue_detected":
+        return "문서와 법령 근거 범위에서 별도의 문제를 확인하지 못했습니다"
+    if result.assessment == "issues_detected":
+        return "담당자가 확인하고 보완해야 할 사항이 발견되었습니다"
+    return "현재 근거만으로 확정하기 어려워 담당자 확인이 필요합니다"
+
+
+def _fallback_presentation(
+    result: ReviewRunResultV3,
+    claims: list[CanonicalClaimV1],
+    *,
+    reason_codes: list[str],
+    attempt_count: int,
+) -> GroundedPresentationV1:
+    sections = [
+        GroundedPresentationSectionV1(
+            section_code=section,
+            title=_SECTION_TITLES[section],
+            statements=[_statement([claim]) for claim in claims if claim.section_code == section],
+        )
+        for section in _SECTION_ORDER
+    ]
+    prompt_hash = experience_prompt_hashes()["presentation"]
+    schema_hash = experience_schema_hashes()["presentation"]
+    headline = _headline(result)
+    payload = {
+        "schema_version": "1.0",
+        "headline": headline,
+        "sections": sections,
+        "generation_audit": ExperienceGenerationAuditV1(
+            mode="deterministic_fallback",
+            task_id=EXPERIENCE_REPORT_PROMPT_ID,
+            prompt_sha256=prompt_hash,
+            output_schema_sha256=schema_hash,
+            attempt_count=attempt_count,
+        ),
+        "verification_audit": ExperienceVerificationAuditV1(
+            status="fallback",
+            deterministic_checks_passed=True,
+            entailment_verifier="not_run",
+            verifier_prompt_sha256=experience_prompt_hashes()["entailment"],
+            verifier_schema_sha256=experience_schema_hashes()["entailment"],
+            verified_content_sha256=presentation_verified_content_sha256(
+                headline,
+                sections,
+            ),
+            checked_statement_count=sum(len(item.statements) for item in sections),
+            reason_codes=sorted(set(reason_codes or ["claude_presentation_unavailable"])),
+        ),
+    }
+    payload["presentation_sha256"] = canonical_json_sha256(payload)
+    return GroundedPresentationV1.model_validate(payload)
+
+
+def _validated_presentation_group_prose(
+    claims: list[CanonicalClaimV1],
+    options: list[dict[str, Any]],
+    call: StructuredAgenticResult,
+    *,
+    strict_prose_by_group_id: Mapping[str, str] | None = None,
+) -> tuple[dict[str, str], list[str]]:
+    """Validate one bounded batch while retaining every independently safe group."""
+
+    claim_index = {claim.claim_id: claim for claim in claims}
+    raw_prose = call.value.get("prose_by_claim_group")
+    if not isinstance(raw_prose, list) or any(not isinstance(item, dict) for item in raw_prose):
+        return {}, ["presentation_group_prose_invalid"]
+    expected_ids = {str(option["group_id"]) for option in options}
+    outputs_by_id: dict[str, list[str]] = {}
+    blockers: list[str] = []
+    for item in raw_prose:
+        group_id = item.get("group_id")
+        prose = item.get("prose")
+        if not isinstance(group_id, str) or not isinstance(prose, str):
+            blockers.append("presentation_group_prose_invalid")
+            continue
+        if group_id not in expected_ids:
+            blockers.append("presentation_unknown_group")
+            continue
+        outputs_by_id.setdefault(group_id, []).append(prose)
+    accepted: dict[str, str] = {}
+    for group_index, option in enumerate(options):
+        group_id = str(option["group_id"])
+        values = outputs_by_id.get(group_id, [])
+        if not values:
+            blockers.append(f"presentation_group_{group_index:02d}_missing")
+            continue
+        if len(values) != 1:
+            blockers.append(f"presentation_group_{group_index:02d}_duplicated")
+            continue
+        claim_ids = option["source_claim_ids"]
+        typed_source = [claim_index[claim_id] for claim_id in claim_ids]
+        normalized_text = " ".join(values[0].split())
+        normalized_text = _preserve_occurrence_meanings(normalized_text, typed_source)
+        strict_prose = (
+            strict_prose_by_group_id.get(group_id) if strict_prose_by_group_id is not None else None
+        )
+        if strict_prose is not None and normalized_text != _normalized_prose(strict_prose):
+            blockers.append(f"presentation_group_{group_index:02d}_strict_repair_mismatch")
+            continue
+        source_texts = _claim_sources(typed_source)
+        prose_blockers = _grounded_prose_blockers(
+            normalized_text,
+            source_texts,
+            prefix="presentation",
+            minimum_chars=_PRESENTATION_MIN_MATERIAL_STATEMENT_CHARS,
+        )
+        if prose_blockers:
+            blockers.extend(prose_blockers)
+            blockers.extend(
+                _presentation_group_diagnostics(
+                    group_index=group_index,
+                    section_code=option["section_code"],
+                    text=normalized_text,
+                    source_texts=source_texts,
+                    blockers=prose_blockers,
+                )
+            )
+            continue
+        accepted[group_id] = normalized_text
+    if len(accepted) != len(options):
+        blockers.extend(
+            [
+                "presentation_group_count_mismatch",
+                f"presentation_expected_groups_{len(options):02d}",
+                f"presentation_observed_groups_{len(accepted):02d}",
+            ]
+        )
+    return accepted, sorted(set(blockers))
+
+
+def _presentation_sections_from_group_prose(
+    claims: list[CanonicalClaimV1],
+    options: list[dict[str, Any]],
+    prose_by_group_id: dict[str, str],
+) -> tuple[list[GroundedPresentationSectionV1], list[str]]:
+    claim_index = {claim.claim_id: claim for claim in claims}
+    statements_by_section: dict[PresentationSectionCode, list[GroundedPresentationStatementV1]] = {
+        section: [] for section in _SECTION_ORDER
+    }
+    used_claims: set[str] = set()
+    blockers: list[str] = []
+    for option in options:
+        section: PresentationSectionCode = option["section_code"]
+        claim_ids = option["source_claim_ids"]
+        typed_source = [claim_index[claim_id] for claim_id in claim_ids]
+        normalized_text = prose_by_group_id.get(str(option["group_id"]))
+        if normalized_text is None:
+            continue
+        used_claims.update(claim_ids)
+        statements_by_section[section].append(_statement(typed_source, normalized_text))
+    if used_claims != set(claim_index):
+        blockers.append("presentation_claim_coverage_incomplete")
+    if any(not statements_by_section[section] for section in _SECTION_ORDER):
+        blockers.append("presentation_section_missing")
+    section_texts = {
+        section: " ".join(statement.text for statement in statements_by_section[section])
+        for section in _SECTION_ORDER
+    }
+    if any(
+        len(section_texts[section]) < _PRESENTATION_MIN_SECTION_CHARS for section in _SECTION_ORDER
+    ):
+        blockers.append("presentation_section_too_short")
+    material_text = " ".join(
+        statement.text
+        for section in _SECTION_ORDER
+        for statement in statements_by_section[section]
+        if statement.material
+    )
+    if len(material_text) < _PRESENTATION_MIN_TOTAL_MATERIAL_CHARS:
+        blockers.append("presentation_material_content_too_short")
+    if _korean_letter_ratio(material_text) < _PRESENTATION_MIN_KOREAN_RATIO:
+        blockers.append("presentation_korean_ratio_too_low")
+    return (
+        [
+            GroundedPresentationSectionV1(
+                section_code=section,
+                title=_SECTION_TITLES[section],
+                statements=statements_by_section[section],
+            )
+            for section in _SECTION_ORDER
+            if statements_by_section[section]
+        ],
+        blockers,
+    )
+
+
+def _is_exact_code_owned_presentation(
+    claims: list[CanonicalClaimV1],
+    sections: list[GroundedPresentationSectionV1],
+) -> bool:
+    """Return true only when every statement is the exact canonical projection."""
+
+    claim_index = {claim.claim_id: claim for claim in claims}
+    observed_claim_ids: list[str] = []
+    for section in sections:
+        for statement in section.statements:
+            if any(claim_id not in claim_index for claim_id in statement.source_claim_ids):
+                return False
+            expected = _normalized_prose(
+                " ".join(
+                    claim_index[claim_id].canonical_text for claim_id in statement.source_claim_ids
+                )
+            )
+            if _normalized_prose(statement.text) != expected:
+                return False
+            observed_claim_ids.extend(statement.source_claim_ids)
+    return len(observed_claim_ids) == len(set(observed_claim_ids)) and set(
+        observed_claim_ids
+    ) == set(claim_index)
+
+
+def _candidate_presentation(
+    result: ReviewRunResultV3,
+    claims: list[CanonicalClaimV1],
+    call: StructuredAgenticResult,
+    *,
+    attempt_count: int,
+) -> tuple[list[GroundedPresentationSectionV1], list[str]]:
+    del result, attempt_count
+    options = _presentation_statement_options(claims)
+    accepted, blockers = _validated_presentation_group_prose(claims, options, call)
+    if blockers:
+        return [], blockers
+    return _presentation_sections_from_group_prose(claims, options, accepted)
+
+
+def _verify_presentation_with_claude(
+    analyzer: ClaudeDocumentAnalyzer,
+    claims: list[CanonicalClaimV1],
+    sections: list[GroundedPresentationSectionV1],
+) -> tuple[StructuredAgenticResult, list[str], str]:
+    statements = [statement for section in sections for statement in section.statements]
+    claim_index = {claim.claim_id: claim for claim in claims}
+    verifier_context = {
+        "candidate_statements": [
+            {
+                **statement.model_dump(mode="json", warnings=False),
+                "canonical_claims": [
+                    claim_index[claim_id].model_dump(mode="json", warnings=False)
+                    for claim_id in statement.source_claim_ids
+                ],
+            }
+            for statement in statements
+        ],
+    }
+    call = analyzer.run_bounded_agentic_task(
+        task_id=EXPERIENCE_ENTAILMENT_PROMPT_ID,
+        system_prompt=load_experience_entailment_system_prompt(),
+        untrusted_context=verifier_context,
+        output_schema=_ENTAILMENT_OUTPUT_SCHEMA,
+        max_tokens=4096,
+    )
+    verdicts = call.value.get("verdicts")
+    if not isinstance(verdicts, list):
+        return call, ["entailment_verdict_invalid"], canonical_json_sha256(verifier_context)
+    verdict_index = {
+        item.get("statement_id"): item
+        for item in verdicts
+        if isinstance(item, dict) and isinstance(item.get("statement_id"), str)
+    }
+    if set(verdict_index) != {statement.statement_id for statement in statements}:
+        return call, ["entailment_coverage_incomplete"], canonical_json_sha256(verifier_context)
+    rejected_reasons = [
+        item.get("reason_code")
+        for item in verdict_index.values()
+        if item.get("supported") is not True
+    ]
+    blockers = (
+        _safe_model_reason_codes(rejected_reasons, default="entailment_unsupported")
+        if rejected_reasons
+        else []
+    )
+    return call, blockers, canonical_json_sha256(verifier_context)
+
+
+def build_grounded_presentation(
+    result: ReviewRunResultV3,
+    *,
+    analyzer: ClaudeDocumentAnalyzer | None,
+    stage_callback: ExperienceStageCallback | None = None,
+) -> GroundedPresentationV1:
+    claims = build_canonical_claim_catalog(result)
+    if analyzer is None:
+        composition_started = _stage_started(stage_callback, "report_composition")
+        verification_started: int | None = None
+        try:
+            presentation = _fallback_presentation(
+                result,
+                claims,
+                reason_codes=["claude_presentation_unavailable"],
+                attempt_count=1,
+            )
+            _stage_finished(
+                stage_callback,
+                "report_composition",
+                composition_started,
+                state="completed",
+                safe_counts={
+                    "statements": sum(len(section.statements) for section in presentation.sections)
+                },
+            )
+            verification_started = _stage_started(
+                stage_callback,
+                "grounding_verification",
+            )
+            # Model validation above is the deterministic claim/citation/hash
+            # verifier used by the safe fallback.
+            _stage_finished(
+                stage_callback,
+                "grounding_verification",
+                verification_started,
+                state="completed",
+                safe_counts={
+                    "statements": sum(len(section.statements) for section in presentation.sections)
+                },
+            )
+            return presentation
+        except Exception:
+            _stage_finished(
+                stage_callback,
+                (
+                    "grounding_verification"
+                    if verification_started is not None
+                    else "report_composition"
+                ),
+                verification_started or composition_started,
+                state="failed",
+            )
+            raise
+    options = _presentation_statement_options(claims)
+    accepted_prose_by_group_id: dict[str, str] = {}
+    retry_blockers: list[str] = []
+    for attempt in range(1, 3):
+        pending_options = [
+            option
+            for option in options
+            if str(option["group_id"]) not in accepted_prose_by_group_id
+        ]
+        strict_prose_by_group_id = (
+            {
+                str(option["group_id"]): _strict_presentation_group_prose(option)
+                for option in pending_options
+            }
+            if attempt == 2
+            else {}
+        )
+        requested_options = [
+            {
+                **option,
+                **(
+                    {"strict_repair_prose": strict_prose_by_group_id[str(option["group_id"])]}
+                    if attempt == 2
+                    else {}
+                ),
+            }
+            for option in pending_options
+        ]
+        generation_started = _stage_started(stage_callback, "report_composition")
+        generation_completed = False
+        try:
+            generation = analyzer.run_bounded_agentic_task(
+                task_id=EXPERIENCE_REPORT_PROMPT_ID,
+                system_prompt=load_experience_report_system_prompt(),
+                untrusted_context={
+                    "required_claim_groups": requested_options,
+                    "accepted_group_ids": [
+                        option["group_id"]
+                        for option in options
+                        if str(option["group_id"]) in accepted_prose_by_group_id
+                    ],
+                    "total_required_claim_group_count": len(options),
+                    "current_required_claim_group_count": len(pending_options),
+                    "fixed_headline": _headline(result),
+                    "fixed_section_order": list(_SECTION_ORDER),
+                    "quality_requirements": {
+                        "minimum_total_material_characters": (
+                            _PRESENTATION_MIN_TOTAL_MATERIAL_CHARS
+                        ),
+                        "minimum_section_characters": _PRESENTATION_MIN_SECTION_CHARS,
+                        "minimum_material_statement_characters": (
+                            _PRESENTATION_MIN_MATERIAL_STATEMENT_CHARS
+                        ),
+                        "minimum_korean_letter_ratio": _PRESENTATION_MIN_KOREAN_RATIO,
+                        "formal_sentence_ending": "니다.",
+                    },
+                    "previous_verification_failures": retry_blockers,
+                },
+                output_schema=_PRESENTATION_OUTPUT_SCHEMA,
+                max_tokens=8192,
+            )
+            _stage_finished(
+                stage_callback,
+                "report_composition",
+                generation_started,
+                state="completed",
+            )
+            generation_completed = True
+            if generation.model_id != result.runtime_release.model_id:
+                raise ValueError("presentation_model_identity_mismatch")
+            accepted, blockers = _validated_presentation_group_prose(
+                claims,
+                pending_options,
+                generation,
+                strict_prose_by_group_id=strict_prose_by_group_id,
+            )
+            accepted_prose_by_group_id.update(accepted)
+            missing_group_ids = {
+                str(option["group_id"])
+                for option in options
+                if str(option["group_id"]) not in accepted_prose_by_group_id
+            }
+            if blockers:
+                retry_blockers = blockers
+                if missing_group_ids and attempt == 1:
+                    continue
+                if missing_group_ids and attempt == 2:
+                    # Never weaken the grounding gate for a second bad response.
+                    # Discard only unresolved model prose and restore those
+                    # groups from the server-owned canonical claims.
+                    for option in pending_options:
+                        group_id = str(option["group_id"])
+                        if group_id in missing_group_ids:
+                            accepted_prose_by_group_id[group_id] = strict_prose_by_group_id[
+                                group_id
+                            ]
+                else:
+                    # A response with every expected group plus malformed or
+                    # surplus content is a protocol violation, not a repairable
+                    # omission. It cannot be certified as a Claude report.
+                    accepted_prose_by_group_id.clear()
+                    continue
+            sections, blockers = _presentation_sections_from_group_prose(
+                claims,
+                options,
+                accepted_prose_by_group_id,
+            )
+            if blockers:
+                accepted_prose_by_group_id.clear()
+                retry_blockers = blockers
+                continue
+            verification_started = _stage_started(
+                stage_callback,
+                "grounding_verification",
+            )
+            verification: StructuredAgenticResult | None = None
+            verifier_context_sha256: str | None = None
+            try:
+                if not _is_exact_code_owned_presentation(claims, sections):
+                    verification, blockers, verifier_context_sha256 = (
+                        _verify_presentation_with_claude(
+                            analyzer,
+                            claims,
+                            sections,
+                        )
+                    )
+                else:
+                    blockers = []
+                _stage_finished(
+                    stage_callback,
+                    "grounding_verification",
+                    verification_started,
+                    state="completed",
+                    safe_counts={"statements": sum(len(item.statements) for item in sections)},
+                )
+            except (LLMError, ValueError):
+                _stage_finished(
+                    stage_callback,
+                    "grounding_verification",
+                    verification_started,
+                    state="failed",
+                )
+                raise
+            if (
+                verification is not None
+                and verification.model_id != result.runtime_release.model_id
+            ):
+                blockers.append("entailment_model_identity_mismatch")
+            if blockers:
+                if attempt == 2:
+                    exact_prose_by_group_id = {
+                        str(option["group_id"]): _strict_presentation_group_prose(option)
+                        for option in options
+                    }
+                    exact_sections, exact_blockers = _presentation_sections_from_group_prose(
+                        claims,
+                        options,
+                        exact_prose_by_group_id,
+                    )
+                    if not exact_blockers and _is_exact_code_owned_presentation(
+                        claims,
+                        exact_sections,
+                    ):
+                        # The verifier rejected a mixed model/canonical repair. The
+                        # final user text can still be certified without another
+                        # model call by projecting every server-owned Claim exactly.
+                        sections = exact_sections
+                        blockers = []
+                        verification = None
+                        verifier_context_sha256 = None
+                if blockers:
+                    accepted_prose_by_group_id.clear()
+                    retry_blockers = blockers
+                    continue
+            headline = _headline(result)
+            payload = {
+                "schema_version": "1.0",
+                "headline": headline,
+                "sections": sections,
+                "generation_audit": ExperienceGenerationAuditV1(
+                    mode="claude",
+                    task_id=EXPERIENCE_REPORT_PROMPT_ID,
+                    model_id=generation.model_id,
+                    prompt_sha256=generation.prompt_sha256,
+                    output_schema_sha256=generation.output_schema_sha256,
+                    input_tokens=generation.input_tokens,
+                    output_tokens=generation.output_tokens,
+                    latency_ms=generation.latency_ms,
+                    attempt_count=attempt,
+                ),
+                "verification_audit": ExperienceVerificationAuditV1(
+                    status="passed",
+                    deterministic_checks_passed=True,
+                    entailment_verifier=("claude" if verification is not None else "not_run"),
+                    verifier_model_id=(verification.model_id if verification is not None else None),
+                    verifier_prompt_sha256=experience_prompt_hashes()["entailment"],
+                    verifier_schema_sha256=experience_schema_hashes()["entailment"],
+                    verifier_context_sha256=verifier_context_sha256,
+                    verified_content_sha256=presentation_verified_content_sha256(
+                        headline,
+                        sections,
+                    ),
+                    checked_statement_count=sum(len(item.statements) for item in sections),
+                ),
+            }
+            payload["presentation_sha256"] = canonical_json_sha256(payload)
+            return GroundedPresentationV1.model_validate(payload)
+        except (LLMError, ValueError) as exc:
+            # A provider exception happens before the normal completed event.
+            # Candidate/identity validation failures happen after a successful
+            # provider call and therefore retain the completed event above.
+            if not generation_completed:
+                _stage_finished(
+                    stage_callback,
+                    "report_composition",
+                    generation_started,
+                    state="failed",
+                )
+            retry_blockers = [
+                _safe_exception_reason(
+                    (
+                        "claude_presentation_verifier_failed"
+                        if generation_completed
+                        else "claude_presentation_composer_failed"
+                    ),
+                    exc,
+                )
+            ]
+            accepted_prose_by_group_id.clear()
+    composition_started = _stage_started(stage_callback, "report_composition")
+    verification_started = None
+    try:
+        presentation = _fallback_presentation(
+            result,
+            claims,
+            reason_codes=retry_blockers,
+            attempt_count=2,
+        )
+        _stage_finished(
+            stage_callback,
+            "report_composition",
+            composition_started,
+            state="completed",
+            safe_counts={
+                "statements": sum(len(section.statements) for section in presentation.sections)
+            },
+        )
+        verification_started = _stage_started(
+            stage_callback,
+            "grounding_verification",
+        )
+        _stage_finished(
+            stage_callback,
+            "grounding_verification",
+            verification_started,
+            state="completed",
+            safe_counts={
+                "statements": sum(len(section.statements) for section in presentation.sections)
+            },
+        )
+        return presentation
+    except Exception:
+        _stage_finished(
+            stage_callback,
+            (
+                "grounding_verification"
+                if verification_started is not None
+                else "report_composition"
+            ),
+            verification_started or composition_started,
+            state="failed",
+        )
+        raise
+
+
+def build_user_action_events(
+    result: ReviewRunResultV3,
+    *,
+    presentation: GroundedPresentationV1 | None = None,
+) -> list[UserActionEventV1]:
+    events: list[UserActionEventV1] = []
+    for action in result.required_actions:
+        payload = {
+            "schema_version": "1.0",
+            "action_code": action.action_code,
+            "title": "담당자 확인이 필요합니다",
+            "description": user_action_text(action.action_code, action.message),
+            "status": "needs_attention",
+            "source_reference_ids": action.source_reference_ids,
+        }
+        events.append(
+            UserActionEventV1.model_validate(
+                {
+                    "event_id": stable_object_id("user_action", payload),
+                    **payload,
+                }
+            )
+        )
+    for trace in result.action_trace:
+        if trace.tool_name not in {
+            "document.reread_span/v1",
+            "evidence.retrieve/v3",
+            "human.request/v1",
+        }:
+            continue
+        title = {
+            "document.reread_span/v1": "문서 값을 다시 확인했습니다",
+            "evidence.retrieve/v3": "법령 근거를 다시 조회했습니다",
+            "human.request/v1": "담당자 확인을 요청했습니다",
+        }[trace.tool_name]
+        payload = {
+            "schema_version": "1.0",
+            "action_code": trace.tool_name,
+            "title": title,
+            "description": (
+                "안전하게 허용된 범위에서 추가 확인을 수행했습니다."
+                if trace.status == "succeeded"
+                else "자동 확인을 완료하지 못해 담당자 검토로 남겼습니다."
+            ),
+            "status": (
+                "completed"
+                if trace.status == "succeeded"
+                else ("deferred" if trace.status == "deferred" else "needs_attention")
+            ),
+            "source_reference_ids": trace.input_reference_ids,
+        }
+        events.append(
+            UserActionEventV1.model_validate(
+                {
+                    "event_id": stable_object_id("user_action", payload),
+                    **payload,
+                }
+            )
+        )
+    if presentation is not None:
+        statement_ids = sorted(
+            {
+                statement.statement_id
+                for section in presentation.sections
+                for statement in section.statements
+            }
+        )[:100]
+        payload = {
+            "schema_version": "1.0",
+            "action_code": "explanation.compose/v2",
+            "title": "사용자용 심사 설명을 작성했습니다",
+            "description": (
+                "검증된 심사 사실과 근거만 사용해 사용자용 설명을 작성하고 "
+                "근거 결박 검사를 완료했습니다."
+            ),
+            "status": "completed",
+            "source_reference_ids": statement_ids,
+        }
+        events.append(
+            UserActionEventV1.model_validate(
+                {
+                    "event_id": stable_object_id("user_action", payload),
+                    **payload,
+                }
+            )
+        )
+    return events
+
+
+def build_review_experience(
+    result: ReviewRunResultV3,
+    *,
+    analyzer: ClaudeDocumentAnalyzer | None,
+    capability: AgentUatCapabilityAttestationV1,
+    stage_callback: ExperienceStageCallback | None = None,
+) -> ReviewExperienceEnvelopeV1:
+    presentation = build_grounded_presentation(
+        result,
+        analyzer=analyzer,
+        stage_callback=stage_callback,
+    )
+    payload = {
+        "schema_version": "1.0",
+        "canonical_result": result,
+        "user_presentation": presentation,
+        "capability_attestation": capability,
+        "user_action_events": build_user_action_events(
+            result,
+            presentation=presentation,
+        ),
+    }
+    payload["envelope_sha256"] = canonical_json_sha256(payload)
+    return ReviewExperienceEnvelopeV1.model_validate(payload)
+
+
+def _non_model_scope_audit(
+    *,
+    mode: Literal["deterministic_guard", "fallback"],
+    scope: AnswerScopeV2,
+    reason_code: str,
+) -> AnswerScopeClassificationAuditV1:
+    hashes = experience_schema_hashes()
+    return AnswerScopeClassificationAuditV1(
+        mode=mode,
+        task_id="customs_case_scope_classifier",
+        classified_scope=scope,
+        prompt_sha256=experience_prompt_hashes()["scope_classifier"],
+        output_schema_sha256=hashes["scope_classifier"],
+        semantic_output_schema_sha256=hashes["scope_classifier_semantic"],
+        reason_code=reason_code,
+        guidance_topics=[],
+    )
+
+
+def _classify_question_scope(
+    request: CaseConversationRequestV2,
+    analyzer: ClaudeDocumentAnalyzer | None,
+) -> tuple[AnswerScopeV2, AnswerScopeClassificationAuditV1]:
+    # Only the explicit security guard is deterministic. All ordinary intent
+    # classification is delegated to the pinned structured Claude task so a
+    # harmless wording variation cannot be rejected by a token list.
+    if prompt_injection_unmet_reason_codes(
+        [request.question, *(turn.content for turn in request.recent_turns)]
+    ):
+        return (
+            "out_of_scope",
+            _non_model_scope_audit(
+                mode="deterministic_guard",
+                scope="out_of_scope",
+                reason_code="prompt_injection_blocked",
+            ),
+        )
+    if analyzer is None:
+        return (
+            "clarification_needed",
+            _non_model_scope_audit(
+                mode="fallback",
+                scope="clarification_needed",
+                reason_code="scope_classifier_unavailable",
+            ),
+        )
+    try:
+        call = analyzer.run_bounded_agentic_task(
+            task_id="customs_case_scope_classifier",
+            system_prompt=load_case_scope_classifier_system_prompt(),
+            untrusted_context={
+                "question": request.question,
+                "recent_turns": [
+                    turn.model_dump(mode="json", warnings=False) for turn in request.recent_turns
+                ],
+                "case_context_available": bool(request.review_result.fact_ledger.entries),
+                "evidence_available": bool(request.review_result.rag_evidence),
+                "review_disposition": request.review_result.review_disposition,
+                "assessment": request.review_result.assessment,
+                "scope_definitions": {
+                    "case_grounded": "current Case facts, outcome, cause, impact, or action",
+                    "evidence_grounded": "current Case Evidence and its meaning",
+                    "general_customs_guidance": "general customs term or procedure",
+                    "clarification_needed": "possibly relevant but ambiguous",
+                    "insufficient_evidence": "requires facts or law outside available scope",
+                    "out_of_scope": "clearly unrelated to customs review",
+                },
+            },
+            output_schema=_SCOPE_CLASSIFIER_SCHEMA,
+            max_tokens=512,
+        )
+        if call.model_id != request.review_result.runtime_release.model_id:
+            raise ValueError("scope_classifier_model_identity_mismatch")
+        raw_scope = call.value.get("answer_scope")
+        reason_code = call.value.get("reason_code")
+        guidance_topics = call.value.get("guidance_topics")
+        if (
+            not isinstance(raw_scope, str)
+            or not isinstance(reason_code, str)
+            or not isinstance(guidance_topics, list)
+            or any(not isinstance(topic, str) for topic in guidance_topics)
+        ):
+            raise ValueError("scope_classifier_output_invalid")
+        if raw_scope == "general_customs_guidance":
+            if not 1 <= len(guidance_topics) <= 3 or len(guidance_topics) != len(
+                set(guidance_topics)
+            ):
+                raise ValueError("scope_classifier_guidance_topics_invalid")
+        elif guidance_topics:
+            raise ValueError("scope_classifier_guidance_topics_not_allowed")
+        scope: AnswerScopeV2 = raw_scope  # type: ignore[assignment]
+        if scope == "evidence_grounded" and not request.review_result.rag_evidence:
+            scope = "insufficient_evidence"
+            reason_code = "evidence_unavailable_reclassified"
+            guidance_topics = []
+        audit = AnswerScopeClassificationAuditV1(
+            mode="claude",
+            task_id="customs_case_scope_classifier",
+            classified_scope=scope,
+            model_id=call.model_id,
+            prompt_sha256=call.prompt_sha256,
+            output_schema_sha256=call.output_schema_sha256,
+            semantic_output_schema_sha256=call.semantic_output_schema_sha256,
+            input_tokens=call.input_tokens,
+            output_tokens=call.output_tokens,
+            latency_ms=call.latency_ms,
+            reason_code=reason_code,
+            guidance_topics=guidance_topics,
+        )
+        return scope, audit
+    except (LLMError, ValueError, TypeError):
+        return (
+            "clarification_needed",
+            _non_model_scope_audit(
+                mode="fallback",
+                scope="clarification_needed",
+                reason_code="scope_classifier_failed",
+            ),
+        )
+
+
+def _answer_source_claims(
+    request: CaseConversationRequestV2,
+    scope: AnswerScopeV2,
+    classification_audit: AnswerScopeClassificationAuditV1,
+) -> tuple[list[CanonicalClaimV1], dict[str, str]]:
+    claims = build_answer_claim_catalog(request.review_result)
+    guidance: dict[str, str] = {}
+    if scope == "evidence_grounded":
+        claims = [item for item in claims if item.section_code == "regulatory_meaning"]
+    elif scope == "case_grounded":
+        # The classifier has already established Case scope. Give the answer
+        # composer the complete bounded claim catalog instead of applying a
+        # second keyword filter that could silently omit the user's intent.
+        pass
+    elif scope == "general_customs_guidance":
+        guidance = {
+            topic: GENERAL_CUSTOMS_GUIDANCE[topic] for topic in classification_audit.guidance_topics
+        }
+        claims = []
+    else:
+        claims = []
+    return claims[:100], guidance
+
+
+_SUMMARY_INTENT_MARKERS = ("결론", "결과", "요약", "상태", "판정")
+_REASON_INTENT_MARKERS = ("왜", "이유", "원인", "근거로 판단")
+_EVIDENCE_INTENT_MARKERS = ("법령", "규정", "법적 근거", "근거의 의미", "요건")
+_IMPACT_INTENT_MARKERS = ("영향", "위험", "업무상", "문제가 되", "문제가 됩")
+_ACTION_INTENT_MARKERS = (
+    "조치",
+    "해야",
+    "확인",
+    "다음",
+    "대응",
+    "보완",
+    "수정",
+    "담당자",
+)
+_PRIORITY_INTENT_MARKERS = ("가장 먼저", "먼저", "최우선", "우선", "첫 번째")
+_COMPARISON_INTENT_MARKERS = ("비교", "대조", "차이", "불일치", "일치 여부", "기재값")
+_SCOPE_LIMIT_INTENT_MARKERS = (
+    "한계",
+    "확정된",
+    "확정된 것",
+    "통관 승인",
+    "법적 판단",
+    "최종 판단",
+)
+_CORRECTION_GUARD_INTENT_MARKERS = (
+    "바로 바뀌",
+    "바로 바뀝",
+    "바로 적용",
+    "즉시 적용",
+    "자동 적용",
+)
+_FOLLOW_UP_MARKERS = (
+    "방금",
+    "앞서",
+    "이전 답변",
+    "그러면",
+    "그다음",
+    "그 다음",
+    "그럼",
+    "그 이유",
+    "그 근거",
+    "그 법령",
+    "그 항목",
+    "그중",
+    "그것",
+    "그게",
+    "중에서",
+    "수정하려면",
+    "현재 case",
+)
+_REVIEW_DISPOSITION_REASON_MARKERS = (
+    "사람 검토",
+    "담당자 검토",
+    "담당자 확인",
+    "최종 확인",
+    "인적 검토",
+    "human review",
+)
+
+
+def _contains_any(value: str, markers: Iterable[str]) -> bool:
+    return any(marker in value for marker in markers)
+
+
+def _answer_intent(
+    request: CaseConversationRequestV2,
+    scope: AnswerScopeV2,
+) -> AnswerIntent:
+    if scope == "general_customs_guidance":
+        return "general"
+    if scope not in {"case_grounded", "evidence_grounded"}:
+        return "clarification"
+    question = _normalized_prose(request.question).casefold()
+    summary = _contains_any(question, _SUMMARY_INTENT_MARKERS)
+    reason = _contains_any(question, _REASON_INTENT_MARKERS)
+    action = _contains_any(question, _ACTION_INTENT_MARKERS)
+    if _contains_any(question, _CORRECTION_GUARD_INTENT_MARKERS):
+        return "correction_guard"
+    if action and _contains_any(question, _PRIORITY_INTENT_MARKERS):
+        return "priority_action"
+    if scope == "evidence_grounded" or _contains_any(question, _EVIDENCE_INTENT_MARKERS):
+        return "evidence"
+    if _contains_any(question, _IMPACT_INTENT_MARKERS):
+        return "impact"
+    if _contains_any(question, _SCOPE_LIMIT_INTENT_MARKERS):
+        return "scope_limit"
+    if reason:
+        return "reason"
+    if action:
+        return "next_action"
+    if _contains_any(question, _COMPARISON_INTENT_MARKERS):
+        return "comparison"
+    if summary:
+        return "summary"
+    return "clarification"
+
+
+def _intent_context_message_ids(
+    request: CaseConversationRequestV2,
+) -> tuple[str, ...]:
+    question = _normalized_prose(request.question).casefold()
+    if not request.recent_turns or not _contains_any(question, _FOLLOW_UP_MARKERS):
+        return ()
+    return tuple(turn.message_id for turn in request.recent_turns[-2:])
+
+
+def _answer_composition_plan(
+    request: CaseConversationRequestV2,
+    scope: AnswerScopeV2,
+    claims: list[CanonicalClaimV1],
+) -> _AnswerCompositionPlan:
+    intent = _answer_intent(request, scope)
+    by_area: dict[str, list[CanonicalClaimV1]] = {area: [] for area in _ANSWER_AREAS}
+    used: set[str] = set()
+
+    def take(
+        area: str,
+        *,
+        sections: tuple[PresentationSectionCode, ...],
+        roles: tuple[PresentationStatementRole, ...],
+        limit: int,
+    ) -> None:
+        for section in sections:
+            for role in roles:
+                for claim in claims:
+                    if (
+                        len(by_area[area]) >= limit
+                        or claim.claim_id in used
+                        or claim.section_code != section
+                        or claim.role != role
+                    ):
+                        continue
+                    by_area[area].append(claim)
+                    used.add(claim.claim_id)
+        return None
+
+    explicit_review_disposition_reason = _contains_any(
+        _normalized_prose(request.question).casefold(),
+        _REVIEW_DISPOSITION_REASON_MARKERS,
+    )
+    contextual_review_disposition_reason = (
+        request.review_result.assessment == "no_issue_detected"
+        and request.review_result.review_disposition == "human_review_required"
+        and bool(_intent_context_message_ids(request))
+    )
+    review_disposition_reason = intent == "reason" and (
+        explicit_review_disposition_reason or contextual_review_disposition_reason
+    )
+
+    if intent == "summary":
+        take("direct_answer", sections=("conclusion",), roles=("conclusion",), limit=1)
+        take(
+            "explanation",
+            sections=("issues_and_causes", "document_comparison", "process", "scope_and_limits"),
+            roles=("reason", "observation", "limitation"),
+            limit=4,
+        )
+    elif review_disposition_reason:
+        # A clean Case can still require a person because the Local UAT
+        # release guard keeps automatic completion disabled.  In that
+        # situation an "errors and causes" claim is true but does not answer
+        # why the disposition is human review.  Bind the answer to the
+        # provider-owned release limitation, then expose the clean conclusion,
+        # operational impact and next action in their proper answer areas.
+        take(
+            "direct_answer",
+            sections=("conclusion", "scope_and_limits"),
+            roles=("limitation",),
+            limit=1,
+        )
+        take(
+            "explanation",
+            sections=("conclusion", "process"),
+            roles=("conclusion", "observation"),
+            limit=3,
+        )
+        take(
+            "impact",
+            sections=("business_impact",),
+            roles=("impact",),
+            limit=1,
+        )
+        take(
+            "next_steps",
+            sections=("next_actions",),
+            roles=("action",),
+            limit=1,
+        )
+    elif intent == "reason":
+        take(
+            "direct_answer",
+            sections=("issues_and_causes", "document_comparison", "scope_and_limits", "conclusion"),
+            roles=("reason", "observation", "limitation", "conclusion"),
+            limit=1,
+        )
+        take(
+            "explanation",
+            sections=("issues_and_causes", "document_comparison", "process", "scope_and_limits"),
+            roles=("reason", "observation", "limitation"),
+            limit=4,
+        )
+    elif intent == "evidence":
+        take(
+            "direct_answer",
+            sections=("regulatory_meaning",),
+            roles=("evidence", "limitation"),
+            limit=1,
+        )
+        by_area["evidence_meaning"].extend(by_area["direct_answer"])
+        take(
+            "evidence_meaning",
+            sections=("regulatory_meaning",),
+            roles=("evidence", "limitation"),
+            limit=4,
+        )
+    elif intent in {"scope_limit", "correction_guard"}:
+        question = _normalized_prose(request.question).casefold()
+        preferred_fragment = None
+        if intent == "correction_guard":
+            preferred_fragment = "수정 요청은 값을 자동으로 변경하지 않으며"
+        elif "hsk" in question or "법령" in question or "3개" in question:
+            preferred_fragment = "보존된 3개 법령 범위"
+        elif "통관 승인" in question or "법적" in question or "확정" in question:
+            preferred_fragment = "법적 통관 승인"
+        preferred = next(
+            (
+                claim
+                for claim in claims
+                if claim.section_code == "scope_and_limits"
+                and claim.role == "limitation"
+                and preferred_fragment is not None
+                and preferred_fragment in claim.canonical_text
+            ),
+            None,
+        )
+        if preferred is not None:
+            by_area["direct_answer"].append(preferred)
+            used.add(preferred.claim_id)
+        else:
+            take(
+                "direct_answer",
+                sections=("scope_and_limits", "conclusion"),
+                roles=("limitation",),
+                limit=1,
+            )
+        by_area["explanation"].extend(by_area["direct_answer"])
+    elif intent == "impact":
+        take(
+            "direct_answer",
+            sections=("business_impact",),
+            roles=("impact",),
+            limit=1,
+        )
+        # The catalog can contain only one material impact claim.  It still
+        # has to answer the question directly and populate the UI's explicit
+        # impact area, so reuse that same server-owned claim in both areas.
+        by_area["impact"].extend(by_area["direct_answer"])
+        take(
+            "impact",
+            sections=("business_impact",),
+            roles=("impact",),
+            limit=4,
+        )
+    elif intent in {"next_action", "priority_action"}:
+        take(
+            "direct_answer",
+            sections=("next_actions",),
+            roles=("action",),
+            limit=1,
+        )
+        if intent == "priority_action":
+            # A priority follow-up must explain why the action comes first and
+            # still expose it in the UI's explicit next-step section.  Reusing
+            # the same provider-owned action claim across those two visible
+            # areas is intentional: Claude may rephrase it, but cannot invent
+            # another action or change the canonical outcome.
+            take(
+                "explanation",
+                sections=("conclusion", "scope_and_limits"),
+                roles=("limitation",),
+                limit=1,
+            )
+            take(
+                "impact",
+                sections=("business_impact",),
+                roles=("impact",),
+                limit=1,
+            )
+            by_area["next_steps"].extend(by_area["direct_answer"])
+        else:
+            by_area["next_steps"].extend(by_area["direct_answer"])
+            take(
+                "next_steps",
+                sections=("next_actions",),
+                roles=("action",),
+                limit=4,
+            )
+    elif intent == "comparison":
+        take(
+            "direct_answer",
+            sections=("document_comparison", "issues_and_causes"),
+            roles=("observation", "reason"),
+            limit=1,
+        )
+        take(
+            "explanation",
+            sections=("document_comparison", "issues_and_causes"),
+            roles=("observation", "reason"),
+            limit=4,
+        )
+    return _AnswerCompositionPlan(
+        intent=intent,
+        claims_by_area={area: tuple(items) for area, items in by_area.items()},
+        used_context_message_ids=_intent_context_message_ids(request),
+    )
+
+
+def _reclassified_scope_audit(
+    audit: AnswerScopeClassificationAuditV1,
+    *,
+    scope: AnswerScopeV2,
+    reason_code: str,
+) -> AnswerScopeClassificationAuditV1:
+    return audit.model_copy(
+        update={
+            "classified_scope": scope,
+            "reason_code": reason_code,
+            "guidance_topics": [],
+        }
+    )
+
+
+def _plan_citations(plan: _AnswerCompositionPlan) -> list[CitationReferenceV1]:
+    return list(
+        {
+            (citation.kind, citation.reference_id): citation
+            for claim in plan.selected_claims()
+            for citation in claim.citation_references
+        }.values()
+    )
+
+
+def _fallback_answer(
+    request: CaseConversationRequestV2,
+    scope: AnswerScopeV2,
+    guidance: dict[str, str],
+    plan: _AnswerCompositionPlan,
+    classification_audit: AnswerScopeClassificationAuditV1,
+    *,
+    reasons: list[str],
+    attempt_count: int,
+) -> AssistantAnswerV2:
+    selected_claims: list[CanonicalClaimV1] = []
+    claim_selections: dict[str, list[str]] = {
+        "direct_answer": [],
+        "explanation": [],
+        "evidence_meaning": [],
+        "impact": [],
+        "next_steps": [],
+    }
+    if scope == "out_of_scope":
+        status: Literal[
+            "answered", "clarification_needed", "insufficient_evidence", "out_of_scope"
+        ] = "out_of_scope"
+        direct = (
+            "이 요청은 통관 심사 지원 범위에서 답변할 수 없습니다. 현재 심사 건의 문서, "
+            "법령 근거, 보완 조치 또는 일반 통관 절차를 질문해 주십시오."
+        )
+        explanation: list[str] = []
+    elif scope == "clarification_needed":
+        status = "clarification_needed"
+        direct = (
+            "질문의 대상을 조금 더 구체적으로 알려주시면 현재 심사 결과에 맞추어 설명하겠습니다."
+        )
+        explanation = [
+            "예를 들어 발견된 문제의 원인, 적용된 법령 근거, 업무상 영향 또는 다음 조치 중 무엇을 "
+            "확인하려는지 알려주십시오."
+        ]
+    elif scope == "insufficient_evidence":
+        status = "insufficient_evidence"
+        direct = (
+            "현재 심사 결과에는 이 질문에 답할 수 있는 충분한 법령 근거가 연결되어 있지 않습니다."
+        )
+        explanation = ["추가 법령 범위 또는 담당자 확인이 필요합니다."]
+    elif scope == "general_customs_guidance":
+        status = "answered"
+        direct = next(iter(guidance.values()))
+        explanation = list(guidance.values())[1:]
+    else:
+        status = "answered"
+        direct_claim = plan.claims_by_area["direct_answer"][0]
+        explanation_claims = list(plan.claims_by_area["explanation"])
+        direct = direct_claim.canonical_text
+        explanation = [item.canonical_text for item in explanation_claims]
+        claim_selections = plan.claim_selections()
+        selected_claims.extend(plan.selected_claims())
+    evidence_claims = (
+        list(plan.claims_by_area["evidence_meaning"])
+        if status == "answered" and scope != "general_customs_guidance"
+        else []
+    )
+    impact_claims = (
+        list(plan.claims_by_area["impact"])
+        if status == "answered" and scope != "general_customs_guidance"
+        else []
+    )
+    action_claims = (
+        list(plan.claims_by_area["next_steps"])
+        if status == "answered" and scope != "general_customs_guidance"
+        else []
+    )
+    selected_claims.extend([*evidence_claims, *impact_claims, *action_claims])
+    claim_selections["evidence_meaning"] = [item.claim_id for item in evidence_claims]
+    claim_selections["impact"] = [item.claim_id for item in impact_claims]
+    claim_selections["next_steps"] = [item.claim_id for item in action_claims]
+    evidence_meaning = [item.canonical_text for item in evidence_claims]
+    impact = [item.canonical_text for item in impact_claims]
+    next_steps = [item.canonical_text for item in action_claims]
+    citations = list(
+        {
+            (citation.kind, citation.reference_id): citation
+            for claim in selected_claims
+            for citation in claim.citation_references
+        }.values()
+    )
+    if scope == "general_customs_guidance":
+        limitations = [_GENERAL_GUIDANCE_LIMITATION]
+    else:
+        limitations = [_CASE_LIMITATION]
+    answer_content = {
+        "request_sha256": case_conversation_request_sha256(request),
+        "answer_scope": scope,
+        "status": status,
+        "direct_answer": direct,
+        "explanation": explanation,
+        "evidence_meaning": evidence_meaning,
+        "impact": impact,
+        "next_steps": next_steps,
+        "limitations": limitations,
+        "claim_selections": claim_selections,
+        "citations": citations if status == "answered" else [],
+        "suggested_questions": _SAFE_SUGGESTED_QUESTIONS,
+        "used_context_message_ids": list(plan.used_context_message_ids),
+    }
+    payload = {
+        "schema_version": "2.0",
+        **answer_content,
+        "generation_audit": ExperienceGenerationAuditV1(
+            mode="deterministic_fallback",
+            task_id=CASE_ANSWER_V2_PROMPT_ID,
+            prompt_sha256=experience_prompt_hashes()["chat"],
+            output_schema_sha256=experience_schema_hashes()["chat"],
+            attempt_count=attempt_count,
+            scope_classification=classification_audit,
+        ),
+        "verification_audit": ExperienceVerificationAuditV1(
+            status="fallback",
+            deterministic_checks_passed=True,
+            entailment_verifier="not_run",
+            verifier_prompt_sha256=experience_prompt_hashes()["chat_verifier"],
+            verifier_schema_sha256=experience_schema_hashes()["chat_verifier"],
+            verified_content_sha256=assistant_answer_verified_content_sha256(answer_content),
+            checked_statement_count=(
+                1
+                + len(explanation)
+                + len(evidence_meaning)
+                + len(impact)
+                + len(next_steps)
+                + len(limitations)
+            ),
+            reason_codes=sorted(set(reasons or ["claude_answer_unavailable"])),
+        ),
+    }
+    payload["answer_sha256"] = canonical_json_sha256(payload)
+    return AssistantAnswerV2.model_validate(payload)
+
+
+def _answer_values_safe(
+    values: dict[str, Any],
+    *,
+    claims: list[CanonicalClaimV1],
+    guidance: dict[str, str],
+    allowed_context_ids: set[str],
+    scope: AnswerScopeV2,
+) -> list[str]:
+    blockers: list[str] = []
+    raw_areas: dict[str, Any] = {
+        "direct_answer": [values.get("direct_answer")],
+        "explanation": values.get("explanation"),
+        "evidence_meaning": values.get("evidence_meaning"),
+        "impact": values.get("impact"),
+        "next_steps": values.get("next_steps"),
+    }
+    if any(
+        not isinstance(items, list) or any(not isinstance(item, str) for item in items)
+        for items in raw_areas.values()
+    ):
+        blockers.append("answer_prose_invalid")
+        typed_areas: dict[str, list[str]] = {}
+    else:
+        typed_areas = {
+            area: [" ".join(item.split()) for item in items] for area, items in raw_areas.items()
+        }
+    limitations = values.get("limitations")
+    if not isinstance(limitations, list) or any(not isinstance(item, str) for item in limitations):
+        blockers.append("answer_limitations_invalid")
+        typed_limitations: list[str] = []
+    else:
+        typed_limitations = [" ".join(item.split()) for item in limitations]
+
+    claim_index = {claim.claim_id: claim for claim in claims}
+    selected_claims: dict[str, CanonicalClaimV1] = {}
+    raw_selections = values.get("claim_selections")
+    expected_areas = set(_ANSWER_AREAS)
+    if (
+        not isinstance(raw_selections, dict)
+        or set(raw_selections) != expected_areas
+        or any(
+            not isinstance(raw_selections.get(area), list)
+            or any(not isinstance(item, str) for item in raw_selections[area])
+            or len(raw_selections[area]) != len(set(raw_selections[area]))
+            for area in expected_areas
+        )
+    ):
+        blockers.append("answer_claim_selections_invalid")
+        typed_selections: dict[str, list[str]] = {area: [] for area in expected_areas}
+    else:
+        typed_selections = {area: list(raw_selections[area]) for area in expected_areas}
+    if not blockers:
+        if scope in {"case_grounded", "evidence_grounded"}:
+            for area, claim_ids in typed_selections.items():
+                area_claims = [claim_index.get(claim_id) for claim_id in claim_ids]
+                if any(claim is None for claim in area_claims):
+                    blockers.append(f"answer_{area}_unknown_claim")
+                    continue
+                typed_claims = [claim for claim in area_claims if claim is not None]
+                if any(claim.role not in _ANSWER_AREA_ROLES[area] for claim in typed_claims):
+                    blockers.append(f"answer_{area}_claim_role_invalid")
+                    continue
+                if len(typed_areas[area]) != len(typed_claims):
+                    blockers.append(f"answer_{area}_claim_coverage_invalid")
+                    continue
+                for text, claim in zip(typed_areas[area], typed_claims, strict=True):
+                    blockers.extend(
+                        _grounded_prose_blockers(
+                            text,
+                            [claim.canonical_text],
+                            prefix=f"answer_{area}",
+                            minimum_chars=18,
+                        )
+                    )
+                for claim in typed_claims:
+                    selected_claims[claim.claim_id] = claim
+            if not typed_areas["direct_answer"] or not typed_selections["direct_answer"]:
+                blockers.append("answer_direct_answer_missing")
+            if not typed_limitations:
+                blockers.append("answer_limitation_missing")
+            for limitation in typed_limitations:
+                blockers.extend(
+                    _grounded_prose_blockers(
+                        limitation,
+                        [_CASE_LIMITATION],
+                        prefix="answer_limitation",
+                        minimum_chars=18,
+                    )
+                )
+        elif scope == "general_customs_guidance":
+            if any(typed_selections.values()):
+                blockers.append("answer_guidance_claim_selection_not_allowed")
+            guidance_values = list(guidance.values())
+            if (
+                not guidance_values
+                or not typed_areas["direct_answer"]
+                or any(typed_areas[area] for area in ("evidence_meaning", "impact", "next_steps"))
+            ):
+                blockers.append("answer_guidance_coverage_invalid")
+            else:
+                for area in ("direct_answer", "explanation"):
+                    for text in typed_areas[area]:
+                        blockers.extend(
+                            _grounded_prose_blockers(
+                                text,
+                                guidance_values,
+                                prefix=f"answer_guidance_{area}",
+                                minimum_chars=18,
+                            )
+                        )
+                        if _GENERAL_GUIDANCE_CASE_ASSERTION_RE.search(text):
+                            blockers.append("answer_guidance_case_assertion_not_allowed")
+            if not typed_limitations:
+                blockers.append("answer_limitation_missing")
+            for limitation in typed_limitations:
+                blockers.extend(
+                    _grounded_prose_blockers(
+                        limitation,
+                        [_GENERAL_GUIDANCE_LIMITATION],
+                        prefix="answer_guidance_limitation",
+                        minimum_chars=18,
+                    )
+                )
+        elif any(typed_selections.values()):
+            blockers.append("answer_claim_selection_not_allowed")
+
+    valid_citations = {
+        (citation.kind, citation.reference_id)
+        for claim in claims
+        for citation in claim.citation_references
+    }
+    raw_citations = values.get("citation_references")
+    if not isinstance(raw_citations, list):
+        blockers.append("answer_citations_invalid")
+    else:
+        observed = {
+            (item.get("kind"), item.get("reference_id"))
+            for item in raw_citations
+            if isinstance(item, dict)
+        }
+        if len(observed) != len(raw_citations) or not observed.issubset(valid_citations):
+            blockers.append("answer_unknown_citation")
+        if scope in {"case_grounded", "evidence_grounded"} and not observed:
+            blockers.append("answer_citation_missing")
+        if scope in {"case_grounded", "evidence_grounded"}:
+            expected_citations = {
+                (citation.kind, citation.reference_id)
+                for claim in selected_claims.values()
+                for citation in claim.citation_references
+            }
+            if observed != expected_citations:
+                blockers.append("answer_claim_citation_binding_mismatch")
+        if scope not in {"case_grounded", "evidence_grounded"} and observed:
+            blockers.append("answer_citation_not_allowed")
+    used_ids = values.get("used_context_message_ids")
+    if not isinstance(used_ids, list) or not set(used_ids).issubset(allowed_context_ids):
+        blockers.append("answer_context_reference_invalid")
+    return blockers
+
+
+def answer_case_conversation(
+    request: CaseConversationRequestV2,
+    *,
+    analyzer: ClaudeDocumentAnalyzer | None,
+    stage_callback: ExperienceStageCallback | None = None,
+) -> AssistantAnswerV2:
+    planning_started = _stage_started(stage_callback, "answer_planning")
+    try:
+        scope, classification_audit = _classify_question_scope(request, analyzer)
+        _stage_finished(
+            stage_callback,
+            "answer_planning",
+            planning_started,
+            state="completed",
+        )
+    except Exception:
+        _stage_finished(
+            stage_callback,
+            "answer_planning",
+            planning_started,
+            state="failed",
+        )
+        raise
+    if (
+        scope in {"clarification_needed", "insufficient_evidence"}
+        and len(request.recent_turns) >= 2
+        and request.recent_turns[-2].role == "user"
+        and request.recent_turns[-1].role == "assistant"
+        and _intent_context_message_ids(request)
+        and _answer_intent(request, "case_grounded") == "priority_action"
+        and not _contains_any(
+            _normalized_prose(request.question).casefold(),
+            _EVIDENCE_INTENT_MARKERS,
+        )
+    ):
+        # A question that explicitly asks for the first action in the prior
+        # answer has a bounded Case target even when the model classifies its
+        # pronoun as ambiguous or mistakes the requested operational action
+        # for a request for additional legal evidence.  Keep genuinely vague
+        # and explicitly legal-scope follow-ups unchanged.
+        scope = "case_grounded"
+        classification_audit = _reclassified_scope_audit(
+            classification_audit,
+            scope=scope,
+            reason_code="priority_action_follow_up_context_bound",
+        )
+    claims, guidance = _answer_source_claims(request, scope, classification_audit)
+    plan = _answer_composition_plan(request, scope, claims)
+    if scope in {"case_grounded", "evidence_grounded"} and plan.intent == "clarification":
+        scope = "clarification_needed"
+        classification_audit = _reclassified_scope_audit(
+            classification_audit,
+            scope=scope,
+            reason_code="answer_intent_ambiguous_reclassified",
+        )
+        claims, guidance = _answer_source_claims(request, scope, classification_audit)
+        plan = _answer_composition_plan(request, scope, claims)
+    elif (
+        scope in {"case_grounded", "evidence_grounded"} and not plan.claims_by_area["direct_answer"]
+    ):
+        scope = "insufficient_evidence"
+        classification_audit = _reclassified_scope_audit(
+            classification_audit,
+            scope=scope,
+            reason_code=f"answer_intent_{plan.intent}_claim_unavailable",
+        )
+        claims, guidance = _answer_source_claims(request, scope, classification_audit)
+        plan = _answer_composition_plan(request, scope, claims)
+
+    def observed_fallback(
+        *,
+        reasons: list[str],
+        attempt_count: int,
+    ) -> AssistantAnswerV2:
+        composition_started = _stage_started(stage_callback, "answer_composition")
+        verification_started: int | None = None
+        try:
+            fallback = _fallback_answer(
+                request,
+                scope,
+                guidance,
+                plan,
+                classification_audit,
+                reasons=reasons,
+                attempt_count=attempt_count,
+            )
+            _stage_finished(
+                stage_callback,
+                "answer_composition",
+                composition_started,
+                state="completed",
+            )
+            verification_started = _stage_started(
+                stage_callback,
+                "grounding_verification",
+            )
+            _stage_finished(
+                stage_callback,
+                "grounding_verification",
+                verification_started,
+                state="completed",
+                safe_counts={"citations": len(fallback.citations)},
+            )
+            return fallback
+        except Exception:
+            _stage_finished(
+                stage_callback,
+                (
+                    "grounding_verification"
+                    if verification_started is not None
+                    else "answer_composition"
+                ),
+                verification_started or composition_started,
+                state="failed",
+            )
+            raise
+
+    if analyzer is None or scope in {
+        "out_of_scope",
+        "clarification_needed",
+        "insufficient_evidence",
+    }:
+        return observed_fallback(
+            reasons=["claude_answer_unavailable"],
+            attempt_count=1,
+        )
+    blockers: list[str] = []
+    allowed_context_ids = {turn.message_id for turn in request.recent_turns}
+    fixed_status = "answered"
+    for attempt in range(1, 3):
+        composition_started = _stage_started(stage_callback, "answer_composition")
+        composition_completed = False
+        try:
+            call = analyzer.run_bounded_agentic_task(
+                task_id=CASE_ANSWER_V2_PROMPT_ID,
+                system_prompt=load_case_answer_v2_system_prompt(),
+                untrusted_context={
+                    "question": request.question,
+                    "answer_scope": scope,
+                    "answer_intent": plan.intent,
+                    "fixed_status": fixed_status,
+                    "allowed_claims": [
+                        {
+                            **item.model_dump(mode="json", warnings=False),
+                            "allowed_answer_areas": sorted(
+                                area
+                                for area, roles in _ANSWER_AREA_ROLES.items()
+                                if item.role in roles
+                            ),
+                            "protected_factual_atoms": sorted(_factual_atoms(item.canonical_text)),
+                        }
+                        for item in claims
+                    ],
+                    "fixed_claim_assignments": {
+                        area: [
+                            {
+                                **claim.model_dump(mode="json", warnings=False),
+                                "protected_factual_atoms": sorted(
+                                    _factual_atoms(claim.canonical_text)
+                                ),
+                            }
+                            for claim in plan.claims_by_area[area]
+                        ]
+                        for area in _ANSWER_AREAS
+                    },
+                    "general_guidance": {
+                        topic: {
+                            "canonical_text": text,
+                            "allowed_answer_areas": ["direct_answer", "explanation"],
+                            "protected_factual_atoms": sorted(_factual_atoms(text)),
+                        }
+                        for topic, text in guidance.items()
+                    },
+                    "fixed_limitation_source": (answer_limitation_source(scope)),
+                    "fixed_used_context_message_ids": list(plan.used_context_message_ids),
+                    "recent_turns": [
+                        turn.model_dump(mode="json", warnings=False)
+                        for turn in request.recent_turns
+                    ],
+                    "previous_verification_failures": blockers,
+                },
+                output_schema=_CHAT_OUTPUT_SCHEMA,
+                max_tokens=6144,
+            )
+            _stage_finished(
+                stage_callback,
+                "answer_composition",
+                composition_started,
+                state="completed",
+            )
+            composition_completed = True
+            if call.model_id != request.review_result.runtime_release.model_id:
+                raise ValueError("answer_model_identity_mismatch")
+            normalized_candidate = {
+                "direct_answer": " ".join(call.value["direct_answer"].split()),
+                "explanation": [" ".join(item.split()) for item in call.value["explanation"]],
+                "evidence_meaning": [
+                    " ".join(item.split()) for item in call.value["evidence_meaning"]
+                ],
+                "impact": [" ".join(item.split()) for item in call.value["impact"]],
+                "next_steps": [" ".join(item.split()) for item in call.value["next_steps"]],
+                "limitations": [answer_limitation_source(scope)],
+                "claim_selections": plan.claim_selections(),
+                "citation_references": [
+                    citation.model_dump(mode="json", warnings=False)
+                    for citation in _plan_citations(plan)
+                ],
+                "suggested_questions": _SAFE_SUGGESTED_QUESTIONS,
+                "used_context_message_ids": list(plan.used_context_message_ids),
+            }
+            if scope in {"case_grounded", "evidence_grounded"}:
+                # The server owns the answer composition plan.  Model prose in
+                # an unassigned area is never user-visible and must not make an
+                # otherwise grounded direct answer fail.  Assigned areas remain
+                # strict: missing or surplus prose still triggers regeneration.
+                for area in ("explanation", "evidence_meaning", "impact", "next_steps"):
+                    if not plan.claims_by_area[area]:
+                        normalized_candidate[area] = []
+                count_blockers = [
+                    f"answer_{area}_prose_count_mismatch"
+                    for area in ("explanation", "evidence_meaning", "impact", "next_steps")
+                    if len(normalized_candidate[area]) != len(plan.claims_by_area[area])
+                ]
+                repairable_missing_prose = count_blockers and all(
+                    len(normalized_candidate[area]) < len(plan.claims_by_area[area])
+                    for area in ("explanation", "evidence_meaning", "impact", "next_steps")
+                    if len(normalized_candidate[area]) != len(plan.claims_by_area[area])
+                )
+                if repairable_missing_prose and attempt == 2:
+                    for area in ("explanation", "evidence_meaning", "impact", "next_steps"):
+                        if len(normalized_candidate[area]) == len(plan.claims_by_area[area]):
+                            continue
+                        normalized_candidate[area] = [
+                            _ANSWER_AREA_REPAIR_PREFIX[area] + claim.canonical_text
+                            for claim in plan.claims_by_area[area]
+                        ]
+                    count_blockers = [
+                        f"answer_{area}_prose_count_mismatch"
+                        for area in ("explanation", "evidence_meaning", "impact", "next_steps")
+                        if len(normalized_candidate[area]) != len(plan.claims_by_area[area])
+                    ]
+                if count_blockers:
+                    blockers = [
+                        *count_blockers,
+                        *(f"answer_intent_{plan.intent}_{item}" for item in count_blockers),
+                    ]
+                    continue
+            blockers = _answer_values_safe(
+                normalized_candidate,
+                claims=claims,
+                guidance=guidance,
+                allowed_context_ids=allowed_context_ids,
+                scope=scope,
+            )
+            if blockers and attempt == 2:
+                strict_answer = _fallback_answer(
+                    request,
+                    scope,
+                    guidance,
+                    plan,
+                    classification_audit,
+                    reasons=["strict_answer_projection"],
+                    attempt_count=attempt,
+                )
+                normalized_candidate = {
+                    "direct_answer": strict_answer.direct_answer,
+                    "explanation": strict_answer.explanation,
+                    "evidence_meaning": strict_answer.evidence_meaning,
+                    "impact": strict_answer.impact,
+                    "next_steps": strict_answer.next_steps,
+                    "limitations": strict_answer.limitations,
+                    "claim_selections": strict_answer.claim_selections.model_dump(
+                        mode="json",
+                        warnings=False,
+                    ),
+                    "citation_references": [
+                        citation.model_dump(mode="json", warnings=False)
+                        for citation in strict_answer.citations
+                    ],
+                    "suggested_questions": _SAFE_SUGGESTED_QUESTIONS,
+                    "used_context_message_ids": strict_answer.used_context_message_ids,
+                }
+                blockers = _answer_values_safe(
+                    normalized_candidate,
+                    claims=claims,
+                    guidance=guidance,
+                    allowed_context_ids=allowed_context_ids,
+                    scope=scope,
+                )
+            if blockers:
+                blockers = sorted(
+                    {
+                        *blockers,
+                        *(f"answer_intent_{plan.intent}_{item}" for item in blockers),
+                    }
+                )
+                continue
+            verification_started = _stage_started(
+                stage_callback,
+                "grounding_verification",
+            )
+            verifier_context = {
+                "question": request.question,
+                "recent_turns": [
+                    turn.model_dump(mode="json", warnings=False) for turn in request.recent_turns
+                ],
+                "answer_scope": scope,
+                "answer_intent": plan.intent,
+                "allowed_claims": [item.model_dump(mode="json", warnings=False) for item in claims],
+                "fixed_claim_assignments": {
+                    area: [
+                        claim.model_dump(mode="json", warnings=False)
+                        for claim in plan.claims_by_area[area]
+                    ]
+                    for area in _ANSWER_AREAS
+                },
+                "general_guidance": guidance,
+                "fixed_limitation_source": (answer_limitation_source(scope)),
+                "fixed_used_context_message_ids": list(plan.used_context_message_ids),
+                "candidate_answer": normalized_candidate,
+            }
+            try:
+                verifier = analyzer.run_bounded_agentic_task(
+                    task_id=CASE_ANSWER_VERIFIER_PROMPT_ID,
+                    system_prompt=load_case_answer_verifier_system_prompt(),
+                    untrusted_context=verifier_context,
+                    output_schema=_ANSWER_VERIFIER_SCHEMA,
+                    max_tokens=1024,
+                )
+                _stage_finished(
+                    stage_callback,
+                    "grounding_verification",
+                    verification_started,
+                    state="completed",
+                    safe_counts={
+                        "citations": len(normalized_candidate.get("citation_references") or [])
+                    },
+                )
+            except (LLMError, ValueError, KeyError, TypeError):
+                _stage_finished(
+                    stage_callback,
+                    "grounding_verification",
+                    verification_started,
+                    state="failed",
+                )
+                raise
+            if (
+                verifier.model_id != request.review_result.runtime_release.model_id
+                or verifier.value.get("supported") is not True
+            ):
+                blockers = []
+                if verifier.model_id != request.review_result.runtime_release.model_id:
+                    blockers.append("answer_verifier_model_identity_mismatch")
+                if verifier.value.get("supported") is not True:
+                    blockers.extend(
+                        _safe_model_reason_codes(
+                            verifier.value.get("reason_codes"),
+                            default="answer_entailment_reason_invalid",
+                        )
+                    )
+                blockers.append("answer_entailment_failed")
+                continue
+            citations = [
+                CitationReferenceV1.model_validate(item)
+                for item in normalized_candidate["citation_references"]
+            ]
+            answer_content = {
+                "request_sha256": case_conversation_request_sha256(request),
+                "answer_scope": scope,
+                "status": fixed_status,
+                "direct_answer": normalized_candidate["direct_answer"],
+                "explanation": normalized_candidate["explanation"],
+                "evidence_meaning": normalized_candidate["evidence_meaning"],
+                "impact": normalized_candidate["impact"],
+                "next_steps": normalized_candidate["next_steps"],
+                "limitations": normalized_candidate["limitations"],
+                "claim_selections": normalized_candidate["claim_selections"],
+                "citations": citations,
+                # Follow-up prompts are product navigation, not model claims.
+                # Keep them deterministic so unverified Claude prose cannot be
+                # surfaced outside the claim/citation verifier.
+                "suggested_questions": _SAFE_SUGGESTED_QUESTIONS,
+                "used_context_message_ids": normalized_candidate["used_context_message_ids"],
+            }
+            payload = {
+                "schema_version": "2.0",
+                **answer_content,
+                "generation_audit": ExperienceGenerationAuditV1(
+                    mode="claude",
+                    task_id=CASE_ANSWER_V2_PROMPT_ID,
+                    model_id=call.model_id,
+                    prompt_sha256=call.prompt_sha256,
+                    output_schema_sha256=call.output_schema_sha256,
+                    input_tokens=call.input_tokens,
+                    output_tokens=call.output_tokens,
+                    latency_ms=call.latency_ms,
+                    attempt_count=attempt,
+                    scope_classification=classification_audit,
+                ),
+                "verification_audit": ExperienceVerificationAuditV1(
+                    status="passed",
+                    deterministic_checks_passed=True,
+                    entailment_verifier="claude",
+                    verifier_model_id=verifier.model_id,
+                    verifier_prompt_sha256=verifier.prompt_sha256,
+                    verifier_schema_sha256=verifier.output_schema_sha256,
+                    verifier_context_sha256=canonical_json_sha256(verifier_context),
+                    verified_content_sha256=assistant_answer_verified_content_sha256(
+                        answer_content
+                    ),
+                    checked_statement_count=(
+                        1
+                        + len(answer_content["explanation"])
+                        + len(answer_content["evidence_meaning"])
+                        + len(answer_content["impact"])
+                        + len(answer_content["next_steps"])
+                        + len(answer_content["limitations"])
+                    ),
+                ),
+            }
+            payload["answer_sha256"] = canonical_json_sha256(payload)
+            return AssistantAnswerV2.model_validate(payload)
+        except (LLMError, ValueError, KeyError, TypeError) as exc:
+            if not composition_completed:
+                _stage_finished(
+                    stage_callback,
+                    "answer_composition",
+                    composition_started,
+                    state="failed",
+                )
+            blockers = [
+                _safe_exception_reason(
+                    (
+                        "claude_answer_verifier_failed"
+                        if composition_completed
+                        else "claude_answer_composer_failed"
+                    ),
+                    exc,
+                )
+            ]
+    return observed_fallback(
+        reasons=blockers,
+        attempt_count=2,
+    )
+
+
+__all__ = [
+    "answer_limitation_source",
+    "answer_claim_bindings",
+    "answer_case_conversation",
+    "build_answer_claim_catalog",
+    "build_canonical_claim_catalog",
+    "build_grounded_presentation",
+    "build_review_experience",
+    "build_user_action_events",
+    "experience_prompt_hashes",
+    "experience_schema_hashes",
+]

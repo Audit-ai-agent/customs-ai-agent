@@ -4,6 +4,8 @@ import base64
 import hashlib
 import inspect
 import json
+from dataclasses import replace
+from datetime import datetime, timezone
 from pathlib import Path
 from typing import Any
 
@@ -15,7 +17,8 @@ from pydantic import SecretStr
 
 import customs_ai_agent.adapters.retrieval_v3 as production_retrieval_v3
 import customs_ai_agent.assertion_trust as assertion_trust
-from customs_ai_agent.runtime import RuntimeExecutionError
+from customs_ai_agent.runtime import RuntimeConfigurationError, RuntimeExecutionError
+from customs_ai_agent.schemas.experience import AgentUatCapabilityAttestationV1
 from customs_ai_agent.service.settings import ServiceSettings
 from tests.test_evidence_v3_consumer import _identity
 from tests.test_v3_conformance_runner import _result
@@ -28,9 +31,11 @@ from tools.local_uat_agent_service.app import (
     LocalUatConfigurationError,
     LocalUatDiagnosticRuntime,
     _evidence_timeout_seconds,
+    _evidence_readiness_identity_cache_seconds,
     _readiness_policy,
     LocalUatManifest,
     _compose_local_uat_app,
+    _uat_metadata,
     create_local_uat_app,
     load_local_uat_manifest,
     local_uat_service_settings,
@@ -156,7 +161,7 @@ def _write_uat_assertion_trust_store(
         ],
     }
     payload["trust_store_sha256"] = assertion_trust._sha256(payload)
-    path = tmp_path / "_secrets" / "uat" / "assertion-trust-store.json"
+    path = tmp_path / "_local" / "secrets" / "uat" / "assertion-trust-store.json"
     path.parent.mkdir(parents=True, exist_ok=True)
     path.write_text(json.dumps(payload), encoding="utf-8")
     return path, payload, private
@@ -249,6 +254,37 @@ def _app(
         readiness_probe=probe,
         model_id="claude-sonnet-5",
     )
+
+
+def test_enhanced_uat_metadata_binds_the_validated_capability_commit(
+    tmp_path: Path,
+) -> None:
+    commit = "1" * 40
+    manifest = replace(
+        _load_manifest(tmp_path),
+        enhanced_experience_enabled=True,
+        agent_commit=commit,
+    )
+    capability = AgentUatCapabilityAttestationV1.model_construct(
+        agent_commit=commit,
+        capability_sha256="2" * 64,
+        expires_at=datetime(2026, 8, 2, tzinfo=timezone.utc),
+    )
+    observed = _uat_metadata(
+        {
+            "agent": {"build_sha": "unknown"},
+            "model": {"id": "unbound"},
+            "runtime_release": {"agent_git_sha": None},
+            "agentic_limits": {},
+            "automatic_completion_release": {},
+        },
+        manifest,
+        model_id="claude-sonnet-5",
+        capability=capability,
+    )
+
+    assert observed["agent"]["build_sha"] == commit
+    assert observed["runtime_release"]["agent_git_sha"] == commit
 
 
 def test_manifest_requires_explicit_non_release_policy_and_literal_loopback(
@@ -478,6 +514,21 @@ def test_scenario_eval_rejects_stale_or_non_secret_assertion_trust_paths(
             assertion_trust_store_sha256=valid_store["trust_store_sha256"],
         )
 
+    retired = tmp_path / "_secrets" / "uat" / valid_path.name
+    retired.parent.mkdir(parents=True)
+    retired.write_bytes(valid_path.read_bytes())
+    with pytest.raises(
+        LocalUatConfigurationError,
+        match="uat_assertion_trust_store_path_invalid",
+    ):
+        _load_manifest(
+            tmp_path,
+            evidence_mode="preserved-3law-v3-scenario-eval",
+            assertion_fixture_mode="LOOPBACK_TEST_ONLY_HUMAN_APPROVER",
+            assertion_trust_store_path=str(retired.resolve()),
+            assertion_trust_store_sha256=valid_store["trust_store_sha256"],
+        )
+
 
 def test_non_scenario_profiles_reject_assertion_fixture_activation(tmp_path: Path) -> None:
     trust_path, trust_store, _private = _write_uat_assertion_trust_store(tmp_path)
@@ -498,10 +549,13 @@ def test_non_scenario_profiles_reject_assertion_fixture_activation(tmp_path: Pat
 def test_actual_store_profile_has_a_bounded_longer_http_budget() -> None:
     assert _evidence_timeout_seconds("synthetic-v3") == 30.0
     assert _evidence_timeout_seconds("preserved-3law-v3-diagnostic") == 195.0
-    assert _evidence_timeout_seconds("preserved-3law-v3-scenario-eval") == 195.0
+    assert _evidence_timeout_seconds("preserved-3law-v3-scenario-eval") == 330.0
     assert _readiness_policy("synthetic-v3") == (5.0, 5.0)
     assert _readiness_policy("preserved-3law-v3-diagnostic") == (60.0, 90.0)
     assert _readiness_policy("preserved-3law-v3-scenario-eval") == (60.0, 90.0)
+    assert _evidence_readiness_identity_cache_seconds("synthetic-v3") == 0.0
+    assert _evidence_readiness_identity_cache_seconds("preserved-3law-v3-diagnostic") == 0.0
+    assert _evidence_readiness_identity_cache_seconds("preserved-3law-v3-scenario-eval") == 600.0
 
 
 @pytest.mark.parametrize(
@@ -792,6 +846,40 @@ def test_uat_health_metadata_and_v2_routes_are_explicit_and_safe(tmp_path: Path)
         "ANTHROPIC_API_KEY",
     ):
         assert secret not in encoded
+
+
+def test_enhanced_uat_health_rejects_expired_capability_before_evidence_probe(
+    tmp_path: Path,
+) -> None:
+    manifest = replace(
+        _load_manifest(
+            tmp_path,
+            evidence_mode="preserved-3law-v3-scenario-eval",
+        ),
+        enhanced_experience_enabled=True,
+    )
+    readiness_calls = 0
+
+    def probe() -> object:
+        nonlocal readiness_calls
+        readiness_calls += 1
+        return object()
+
+    class ExpiredRuntime(_RouteRuntime):
+        def assert_uat_capability_current(self, *, require_active: bool = False) -> None:
+            assert require_active is False
+            raise RuntimeConfigurationError(
+                "uat_capability_invalid_or_expired",
+                "expired test capability",
+            )
+
+    app = _app(manifest, ExpiredRuntime(), probe=probe)
+    with TestClient(app, raise_server_exceptions=False) as client:
+        response = client.get("/health/uat-ready")
+
+    assert response.status_code == 503
+    assert response.json()["error"]["code"] == "uat_capability_invalid_or_expired"
+    assert readiness_calls == 0
 
 
 def test_preserved_three_law_mode_is_visible_but_stays_non_release(

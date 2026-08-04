@@ -266,7 +266,7 @@ def test_checkout_and_packaged_v2_release_resources_are_byte_identical() -> None
         ).read_bytes()
     )
     assert hashlib.sha256(provider_lock).hexdigest() == (
-        "d87f1b86af4812f3de7a2de070f23453c354c0be1534725950f154befffb557f"
+        "3b8f5955422060dc1dc732b79d4cd8222ce3adbca2f32961a0e69b90156e921f"
     )
 
 
@@ -274,12 +274,12 @@ def test_packaged_provider_runtime_pin_is_exact_and_tamper_evident(
     monkeypatch: pytest.MonkeyPatch,
 ) -> None:
     identity = load_pinned_evidence_provider_runtime_identity()
-    assert identity.provider_revision == "14cde864425eee615a2e3f6799f6f2719448aab9"
+    assert identity.provider_revision == "b13e8bf7238a61eb185efcf2e9cd768ad5a908e2"
     assert identity.provider_build_sha256 == (
-        "d7d64cf3df464cfc934ca0f347c1b1c461916fe12671eeeaf59c1445872486d3"
+        "1591ebafb01aadc8d9c5e7fc91950e3bf5c7d44f88a7ff9e4065b7d57e2ed1b7"
     )
     assert identity.provider_source_manifest_sha256 == (
-        "dd8ceb68c2da83d1fdb82f3d00f4f1137a559fcb577efdf86b6f87e52d84db1c"
+        "ddf271e0e0f8b3628917146d6f1a83bedb8e17d9dc98de30f50e12e0c8b1d8e0"
     )
 
     original = release_module._read_resource_bytes
@@ -287,7 +287,7 @@ def test_packaged_provider_runtime_pin_is_exact_and_tamper_evident(
     def tampered(name: str) -> bytes:
         raw = original(name)
         if name == "provider-runtime-lock.json":
-            return raw.replace(b"14cde864", b"04cde864", 1)
+            return raw.replace(b"ddf271e0", b"0df271e0", 1)
         return raw
 
     monkeypatch.setattr(release_module, "_read_resource_bytes", tampered)
@@ -794,7 +794,7 @@ def test_release_lock_builder_requires_exact_data_code_and_schema_lock() -> None
     fixture_root = Path(__file__).parent / "fixtures" / "evidence_runtime_v2"
     lock_bytes = (fixture_root / "provider-runtime-lock.json").read_bytes()
     assert hashlib.sha256(lock_bytes).hexdigest() == (
-        "d87f1b86af4812f3de7a2de070f23453c354c0be1534725950f154befffb557f"
+        "3b8f5955422060dc1dc732b79d4cd8222ce3adbca2f32961a0e69b90156e921f"
     )
     expected = json.loads(lock_bytes)
     identity = _identity(

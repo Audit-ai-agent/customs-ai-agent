@@ -58,6 +58,7 @@ customs_ai_agent = [
   "schemas/internal/v1/*.json",
   "schemas/internal/v2/*.json",
   "schemas/local/v1/*.json",
+  "schemas/service/v3/*.json",
 ]
 
 [tool.pytest.ini_options]
