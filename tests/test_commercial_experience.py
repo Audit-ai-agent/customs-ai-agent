@@ -2139,6 +2139,116 @@ def test_human_review_reason_is_bound_to_release_guard_not_clean_issue_claim() -
     assert fixed_assignments["direct_answer"][0]["claim_id"] == direct_claim.claim_id
 
 
+def test_contextual_reason_follow_up_uses_human_review_limitation_for_clean_case() -> None:
+    request = _conversation(
+        "그중 가장 중요한 이유는 무엇입니까?",
+        turns=_follow_up_turns(),
+    )
+    analyzer = _NaturalChatAnalyzer(request.review_result.runtime_release.model_id)
+
+    answer = answer_case_conversation(request, analyzer=analyzer)  # type: ignore[arg-type]
+
+    bindings = answer_claim_bindings(answer, request.review_result)
+    direct_claim = bindings["direct_answer"][0]
+    assert answer.generation_audit.mode == "claude"
+    assert answer.verification_audit.status == "passed"
+    assert direct_claim.section_code == "conclusion"
+    assert direct_claim.role == "limitation"
+    assert "담당자가 최종 확인" in direct_claim.canonical_text
+    assert answer.used_context_message_ids == ["turn-user-1", "turn-assistant-1"]
+    assert all(
+        claim.section_code != "issues_and_causes" for area in bindings.values() for claim in area
+    )
+
+
+def test_conjugated_problem_follow_up_selects_business_impact() -> None:
+    request = _conversation(
+        "그게 왜 문제가 됩니까?",
+        turns=_follow_up_turns(),
+    )
+    analyzer = _NaturalChatAnalyzer(request.review_result.runtime_release.model_id)
+
+    answer = answer_case_conversation(request, analyzer=analyzer)  # type: ignore[arg-type]
+
+    bindings = answer_claim_bindings(answer, request.review_result)
+    assert answer.generation_audit.mode == "claude"
+    assert answer.verification_audit.status == "passed"
+    assert [claim.section_code for claim in bindings["direct_answer"]] == ["business_impact"]
+    assert [claim.section_code for claim in bindings["impact"]] == ["business_impact"]
+    assert [claim.role for claim in bindings["impact"]] == ["impact"]
+    assert bindings["impact"][0].claim_id == bindings["direct_answer"][0].claim_id
+    assert answer.used_context_message_ids == ["turn-user-1", "turn-assistant-1"]
+
+
+def test_evidence_follow_up_reuses_single_grounded_claim_in_meaning_area() -> None:
+    request = _conversation(
+        "그럼 HSK가 법령 조회와 어떻게 연결됩니까?",
+        turns=_follow_up_turns(),
+    )
+    analyzer = _NaturalChatAnalyzer(request.review_result.runtime_release.model_id)
+
+    answer = answer_case_conversation(request, analyzer=analyzer)  # type: ignore[arg-type]
+
+    bindings = answer_claim_bindings(answer, request.review_result)
+    assert answer.generation_audit.mode == "claude"
+    assert answer.verification_audit.status == "passed"
+    assert [claim.section_code for claim in bindings["direct_answer"]] == ["regulatory_meaning"]
+    assert [claim.section_code for claim in bindings["evidence_meaning"]] == ["regulatory_meaning"]
+    assert bindings["evidence_meaning"][0].claim_id == bindings["direct_answer"][0].claim_id
+    assert answer.used_context_message_ids == ["turn-user-1", "turn-assistant-1"]
+
+
+def test_hsk_confirmation_follow_up_selects_three_law_scope_limit() -> None:
+    request = _conversation(
+        "현재 Case의 HSK 판정도 확정된 것입니까?",
+        turns=_follow_up_turns(),
+    )
+    analyzer = _NaturalChatAnalyzer(request.review_result.runtime_release.model_id)
+
+    answer = answer_case_conversation(request, analyzer=analyzer)  # type: ignore[arg-type]
+
+    bindings = answer_claim_bindings(answer, request.review_result)
+    direct_claim = bindings["direct_answer"][0]
+    assert answer.generation_audit.mode == "claude"
+    assert answer.verification_audit.status == "passed"
+    assert direct_claim.section_code == "scope_and_limits"
+    assert direct_claim.role == "limitation"
+    assert "보존된 3개 법령 범위" in direct_claim.canonical_text
+    assert bindings["explanation"][0].claim_id == direct_claim.claim_id
+    assert answer.used_context_message_ids == ["turn-user-1", "turn-assistant-1"]
+
+
+def test_natural_language_correction_request_explains_approval_guard() -> None:
+    request = _conversation("이 값을 수정해 달라고 하면 바로 바뀝니까?")
+    analyzer = _NaturalChatAnalyzer(request.review_result.runtime_release.model_id)
+
+    answer = answer_case_conversation(request, analyzer=analyzer)  # type: ignore[arg-type]
+
+    bindings = answer_claim_bindings(answer, request.review_result)
+    direct_claim = bindings["direct_answer"][0]
+    assert answer.generation_audit.mode == "claude"
+    assert answer.verification_audit.status == "passed"
+    assert direct_claim.section_code == "scope_and_limits"
+    assert direct_claim.role == "limitation"
+    assert "수정 요청은 값을 자동으로 변경하지 않으며" in direct_claim.canonical_text
+    assert bindings["explanation"][0].claim_id == direct_claim.claim_id
+
+
+def test_correction_procedure_follow_up_uses_recent_context() -> None:
+    request = _conversation("수정하려면 어떤 절차를 거칩니까?", turns=_follow_up_turns())
+    analyzer = _NaturalChatAnalyzer(request.review_result.runtime_release.model_id)
+
+    answer = answer_case_conversation(request, analyzer=analyzer)  # type: ignore[arg-type]
+
+    bindings = answer_claim_bindings(answer, request.review_result)
+    assert answer.generation_audit.mode == "claude"
+    assert answer.verification_audit.status == "passed"
+    assert [claim.section_code for claim in bindings["direct_answer"]] == ["next_actions"]
+    assert [claim.section_code for claim in bindings["next_steps"]] == ["next_actions"]
+    assert bindings["next_steps"][0].claim_id == bindings["direct_answer"][0].claim_id
+    assert answer.used_context_message_ids == ["turn-user-1", "turn-assistant-1"]
+
+
 def test_generic_reason_question_keeps_issue_cause_selection() -> None:
     request = _conversation("현재 심사 결과의 원인을 설명해 주십시오.")
     analyzer = _NaturalChatAnalyzer(request.review_result.runtime_release.model_id)
@@ -2152,7 +2262,7 @@ def test_generic_reason_question_keeps_issue_cause_selection() -> None:
     assert direct_claim.role in {"reason", "observation"}
 
 
-def test_chat_rejects_new_number_before_verifier_and_falls_back_after_one_retry() -> None:
+def test_chat_rejects_new_number_then_verifies_safe_canonical_recovery() -> None:
     request = _conversation("현재 심사 결과의 결론을 설명해 주십시오.")
     analyzer = _NaturalChatAnalyzer(
         request.review_result.runtime_release.model_id,
@@ -2162,9 +2272,9 @@ def test_chat_rejects_new_number_before_verifier_and_falls_back_after_one_retry(
     answer = answer_case_conversation(request, analyzer=analyzer)  # type: ignore[arg-type]
 
     assert analyzer.answer_calls == 2
-    assert analyzer.verifier_calls == 0
-    assert answer.generation_audit.mode == "deterministic_fallback"
-    assert answer.verification_audit.status == "fallback"
+    assert analyzer.verifier_calls == 1
+    assert answer.generation_audit.mode == "claude"
+    assert answer.verification_audit.status == "passed"
 
 
 def test_chat_regenerates_once_then_falls_back_when_entailment_verifier_rejects() -> None:

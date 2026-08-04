@@ -7,7 +7,7 @@
     "scenario_question": 54,
     "unrelated": 10
   },
-  "dataset_sha256": "0653c203e3199fd127add6588132ac3e1e7d027ee185dab05f6a2548c8384d84",
+  "dataset_sha256": "2bc3e97730fff3f5062d73640e60b7072dd6088307db1c3ec0f55bf1528e6b74",
   "description": "No document text, credentials, or model responses are stored.",
   "entries": [
     {
@@ -1741,7 +1741,7 @@
     },
     {
       "accepted_claim_roles": [
-        "conclusion"
+        "limitation"
       ],
       "category": "paraphrase",
       "eval_id": "paraphrase-16",
@@ -1753,7 +1753,7 @@
         "direct_answer"
       ],
       "required_claim_sections": [
-        "conclusion"
+        "scope_and_limits"
       ],
       "required_guidance_topics": [],
       "requires_citations": true,
@@ -1891,8 +1891,7 @@
     },
     {
       "accepted_claim_roles": [
-        "reason",
-        "observation"
+        "limitation"
       ],
       "category": "multi_turn",
       "eval_id": "multi-turn-02",
@@ -1901,10 +1900,10 @@
       "prohibits_automatic_correction": false,
       "question": "그중 가장 중요한 이유는 무엇입니까?",
       "required_answer_areas": [
-        "explanation"
+        "direct_answer"
       ],
       "required_claim_sections": [
-        "issues_and_causes"
+        "conclusion"
       ],
       "required_guidance_topics": [],
       "requires_citations": true,

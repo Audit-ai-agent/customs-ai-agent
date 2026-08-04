@@ -70,6 +70,8 @@ AnswerIntent = Literal[
     "next_action",
     "priority_action",
     "comparison",
+    "scope_limit",
+    "correction_guard",
     "clarification",
     "general",
 ]
@@ -1164,6 +1166,15 @@ def build_canonical_claim_catalog(result: ReviewRunResultV3) -> list[CanonicalCl
                 "scope_and_limits",
                 "limitation",
                 (
+                    "자연어 수정 요청은 값을 자동으로 변경하지 않으며, 수정 제안을 "
+                    "다른 담당자가 승인한 뒤 새 심사 회차에서만 반영합니다."
+                ),
+                [outcome],
+            ),
+            _claim(
+                "scope_and_limits",
+                "limitation",
+                (
                     "현재 UAT는 텍스트 문서만 처리하며 이미지·PDF의 OCR 결과는 심사 입력으로 "
                     "받지 않습니다."
                 ),
@@ -2095,7 +2106,7 @@ def _answer_source_claims(
 _SUMMARY_INTENT_MARKERS = ("결론", "결과", "요약", "상태", "판정")
 _REASON_INTENT_MARKERS = ("왜", "이유", "원인", "근거로 판단")
 _EVIDENCE_INTENT_MARKERS = ("법령", "규정", "법적 근거", "근거의 의미", "요건")
-_IMPACT_INTENT_MARKERS = ("영향", "위험", "업무상", "문제가 되")
+_IMPACT_INTENT_MARKERS = ("영향", "위험", "업무상", "문제가 되", "문제가 됩")
 _ACTION_INTENT_MARKERS = (
     "조치",
     "해야",
@@ -2108,6 +2119,21 @@ _ACTION_INTENT_MARKERS = (
 )
 _PRIORITY_INTENT_MARKERS = ("가장 먼저", "먼저", "최우선", "우선", "첫 번째")
 _COMPARISON_INTENT_MARKERS = ("비교", "대조", "차이", "불일치", "일치 여부", "기재값")
+_SCOPE_LIMIT_INTENT_MARKERS = (
+    "한계",
+    "확정된",
+    "확정된 것",
+    "통관 승인",
+    "법적 판단",
+    "최종 판단",
+)
+_CORRECTION_GUARD_INTENT_MARKERS = (
+    "바로 바뀌",
+    "바로 바뀝",
+    "바로 적용",
+    "즉시 적용",
+    "자동 적용",
+)
 _FOLLOW_UP_MARKERS = (
     "방금",
     "앞서",
@@ -2115,6 +2141,7 @@ _FOLLOW_UP_MARKERS = (
     "그러면",
     "그다음",
     "그 다음",
+    "그럼",
     "그 이유",
     "그 근거",
     "그 법령",
@@ -2123,6 +2150,8 @@ _FOLLOW_UP_MARKERS = (
     "그것",
     "그게",
     "중에서",
+    "수정하려면",
+    "현재 case",
 )
 _REVIEW_DISPOSITION_REASON_MARKERS = (
     "사람 검토",
@@ -2150,12 +2179,16 @@ def _answer_intent(
     summary = _contains_any(question, _SUMMARY_INTENT_MARKERS)
     reason = _contains_any(question, _REASON_INTENT_MARKERS)
     action = _contains_any(question, _ACTION_INTENT_MARKERS)
+    if _contains_any(question, _CORRECTION_GUARD_INTENT_MARKERS):
+        return "correction_guard"
     if action and _contains_any(question, _PRIORITY_INTENT_MARKERS):
         return "priority_action"
     if scope == "evidence_grounded" or _contains_any(question, _EVIDENCE_INTENT_MARKERS):
         return "evidence"
     if _contains_any(question, _IMPACT_INTENT_MARKERS):
         return "impact"
+    if _contains_any(question, _SCOPE_LIMIT_INTENT_MARKERS):
+        return "scope_limit"
     if reason:
         return "reason"
     if action:
@@ -2206,9 +2239,17 @@ def _answer_composition_plan(
                     used.add(claim.claim_id)
         return None
 
-    review_disposition_reason = intent == "reason" and _contains_any(
+    explicit_review_disposition_reason = _contains_any(
         _normalized_prose(request.question).casefold(),
         _REVIEW_DISPOSITION_REASON_MARKERS,
+    )
+    contextual_review_disposition_reason = (
+        request.review_result.assessment == "no_issue_detected"
+        and request.review_result.review_disposition == "human_review_required"
+        and bool(_intent_context_message_ids(request))
+    )
+    review_disposition_reason = intent == "reason" and (
+        explicit_review_disposition_reason or contextual_review_disposition_reason
     )
 
     if intent == "summary":
@@ -2270,12 +2311,44 @@ def _answer_composition_plan(
             roles=("evidence", "limitation"),
             limit=1,
         )
+        by_area["evidence_meaning"].extend(by_area["direct_answer"])
         take(
             "evidence_meaning",
             sections=("regulatory_meaning",),
             roles=("evidence", "limitation"),
             limit=4,
         )
+    elif intent in {"scope_limit", "correction_guard"}:
+        question = _normalized_prose(request.question).casefold()
+        preferred_fragment = None
+        if intent == "correction_guard":
+            preferred_fragment = "수정 요청은 값을 자동으로 변경하지 않으며"
+        elif "hsk" in question or "법령" in question or "3개" in question:
+            preferred_fragment = "보존된 3개 법령 범위"
+        elif "통관 승인" in question or "법적" in question or "확정" in question:
+            preferred_fragment = "법적 통관 승인"
+        preferred = next(
+            (
+                claim
+                for claim in claims
+                if claim.section_code == "scope_and_limits"
+                and claim.role == "limitation"
+                and preferred_fragment is not None
+                and preferred_fragment in claim.canonical_text
+            ),
+            None,
+        )
+        if preferred is not None:
+            by_area["direct_answer"].append(preferred)
+            used.add(preferred.claim_id)
+        else:
+            take(
+                "direct_answer",
+                sections=("scope_and_limits", "conclusion"),
+                roles=("limitation",),
+                limit=1,
+            )
+        by_area["explanation"].extend(by_area["direct_answer"])
     elif intent == "impact":
         take(
             "direct_answer",
@@ -2283,6 +2356,10 @@ def _answer_composition_plan(
             roles=("impact",),
             limit=1,
         )
+        # The catalog can contain only one material impact claim.  It still
+        # has to answer the question directly and populate the UI's explicit
+        # impact area, so reuse that same server-owned claim in both areas.
+        by_area["impact"].extend(by_area["direct_answer"])
         take(
             "impact",
             sections=("business_impact",),
@@ -2316,6 +2393,7 @@ def _answer_composition_plan(
             )
             by_area["next_steps"].extend(by_area["direct_answer"])
         else:
+            by_area["next_steps"].extend(by_area["direct_answer"])
             take(
                 "next_steps",
                 sections=("next_actions",),
