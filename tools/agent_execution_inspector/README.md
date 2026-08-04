@@ -28,7 +28,7 @@ localhost 전용 엔지니어링 도구다.
 ## 준비물
 
 1. clean commit 상태의 `customs-data-platform` TASK worktree
-2. 같은 Data commit으로 생성한 production provider context
+2. 같은 Data commit으로 생성한 Local UAT provider context
 3. 새 bearer token 파일
 4. 새 diagnostic manifest 출력 경로
 5. `ANTHROPIC_API_KEY`와 Claude 설정이 있는 절대경로 `.env`
@@ -42,7 +42,7 @@ Git에 추가하지 않는다.
 Data worktree가 clean committed HEAD인지 확인한 뒤 실행한다.
 
 ```powershell
-& $UV run --locked python tools/build_production_context.py `
+& $UV run --locked python tools/build_provider_context.py `
   --repository $DATA_WORKTREE `
   --output $PROVIDER_CONTEXT
 ```

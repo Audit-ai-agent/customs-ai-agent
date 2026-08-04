@@ -2,8 +2,38 @@ name: ai-agent-ci
 
 on:
   pull_request:
+    paths:
+      - ".github/workflows/ci.yml"
+      - "pyproject.toml"
+      - "uv.lock"
+      - "MANIFEST.in"
+      - "src/**"
+      - "tests/**"
+      - "tools/**"
+      - "contracts/**"
+      - "evals/**"
+      - "fixtures/**"
+      - "prompts/**"
+      - "security/**"
   push:
     branches: [main]
+    paths:
+      - ".github/workflows/ci.yml"
+      - "pyproject.toml"
+      - "uv.lock"
+      - "MANIFEST.in"
+      - "src/**"
+      - "tests/**"
+      - "tools/**"
+      - "contracts/**"
+      - "evals/**"
+      - "fixtures/**"
+      - "prompts/**"
+      - "security/**"
+
+concurrency:
+  group: ai-agent-${{ github.workflow }}-${{ github.event.pull_request.number || github.ref }}
+  cancel-in-progress: true
 
 permissions:
   contents: read
@@ -42,4 +72,5 @@ jobs:
             tests/test_evidence_contract_lock.py \
             tests/test_evidence_runtime_release_v2.py \
             tests/test_evidence_v3_consumer.py \
-            tests/test_v1_wire_compatibility.py
+            tests/test_v1_wire_compatibility.py \
+            tests/test_source_snapshot.py
