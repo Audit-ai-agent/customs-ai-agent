@@ -10,7 +10,7 @@ readme = "README.md"
 requires-python = ">=3.11,<3.12"
 dependencies = [
   "anthropic>=0.117.0,<1",
-  "cryptography>=48.0.1,<49",
+  "cryptography>=50,<51",
   "fastapi>=0.115,<1",
   "jsonschema[format]>=4.23,<5",
   "langgraph>=0.2.0,<2",
