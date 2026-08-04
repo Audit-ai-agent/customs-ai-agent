@@ -78,9 +78,7 @@ class LoopbackEvidenceV3DiagnosticRetriever(ProductionHttpRegulationRetrieverV3)
         self._successful_readiness_get_count = 0
         self._successful_retrieval_post_count = 0
         self._readiness_identity_cache_ttl_seconds = readiness_identity_cache_ttl_seconds
-        self._readiness_identity_cache: (
-            tuple[float, EvidenceRuntimeReleaseIdentityV3] | None
-        ) = None
+        self._readiness_identity_cache: tuple[float, EvidenceRuntimeReleaseIdentityV3] | None = None
         # Initialize the parent-owned transport fields explicitly. Calling the
         # Production constructor here would load the packaged *released*
         # identity and would either fail or tempt a process-global monkeypatch.
@@ -132,10 +130,7 @@ class LoopbackEvidenceV3DiagnosticRetriever(ProductionHttpRegulationRetrieverV3)
                 ):
                     raise ValueError("diagnostic runtime v3 does not support review_as_of")
                 self._successful_readiness_get_count += 1
-                if (
-                    review_as_of is not None
-                    and self._readiness_identity_cache_ttl_seconds > 0.0
-                ):
+                if review_as_of is not None and self._readiness_identity_cache_ttl_seconds > 0.0:
                     with self._readiness_identity_cache_lock:
                         self._readiness_identity_cache = (
                             time.monotonic() + self._readiness_identity_cache_ttl_seconds,
