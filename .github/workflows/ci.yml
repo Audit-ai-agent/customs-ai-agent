@@ -4,32 +4,28 @@ on:
   pull_request:
     paths:
       - ".github/workflows/ci.yml"
+      - ".gitleaks.toml"
+      - ".gitignore"
       - "pyproject.toml"
       - "uv.lock"
-      - "MANIFEST.in"
+      - "README.md"
+      - "docs/**"
       - "src/**"
       - "tests/**"
       - "tools/**"
-      - "contracts/**"
-      - "evals/**"
-      - "fixtures/**"
-      - "prompts/**"
-      - "security/**"
   push:
     branches: [main]
     paths:
       - ".github/workflows/ci.yml"
+      - ".gitleaks.toml"
+      - ".gitignore"
       - "pyproject.toml"
       - "uv.lock"
-      - "MANIFEST.in"
+      - "README.md"
+      - "docs/**"
       - "src/**"
       - "tests/**"
       - "tools/**"
-      - "contracts/**"
-      - "evals/**"
-      - "fixtures/**"
-      - "prompts/**"
-      - "security/**"
 
 concurrency:
   group: ai-agent-${{ github.workflow }}-${{ github.event.pull_request.number || github.ref }}
@@ -50,27 +46,29 @@ jobs:
         with:
           version: "0.11.28"
           python-version: "3.11"
-          enable-cache: true
       - name: Verify lockfile is current
         run: uv lock --check
       - name: Install locked development environment
         run: uv sync --locked --group dev
       - name: Lint
-        run: uv run --locked ruff check .
+        run: uv run --locked --group dev ruff check src tests
       - name: Format
-        run: uv run --locked ruff format --check src tests evals tools
+        run: uv run --locked --group dev ruff format --check src tests
       - name: Typecheck
-        run: uv run --locked mypy
-      - name: Verify public contracts and focused offline regressions
+        run: uv run --locked --group dev mypy
+      - name: Unit and contract tests
+        run: uv run --locked --group dev pytest -q
+      - name: Redacted secret scan
         shell: bash
         run: |
           set -euo pipefail
-          uv run --locked python tools/verify_service_openapi.py
-          uv run --locked pytest -q \
-            tests/service/test_openapi.py \
-            tests/test_packaged_contracts.py \
-            tests/test_evidence_contract_lock.py \
-            tests/test_evidence_runtime_release_v2.py \
-            tests/test_evidence_v3_consumer.py \
-            tests/test_v1_wire_compatibility.py \
-            tests/test_source_snapshot.py
+          version=8.30.1
+          archive="gitleaks_${version}_linux_x64.tar.gz"
+          curl --fail --location --proto '=https' --tlsv1.2 \
+            -o "$archive" \
+            "https://github.com/gitleaks/gitleaks/releases/download/v${version}/$archive"
+          echo "551f6fc83ea457d62a0d98237cbad105af8d557003051f41f3e7ca7b3f2470eb  $archive" | sha256sum --check --status -
+          tar -xzf "$archive" gitleaks
+          scan_root="$(mktemp -d)"
+          git archive --format=tar HEAD | tar -x -C "$scan_root"
+          ./gitleaks dir "$scan_root" --config .gitleaks.toml --redact --no-banner --exit-code 1

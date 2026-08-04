@@ -23,6 +23,8 @@ security/.gitleaks-report-*.json
 src/customs_ai_agent/build-manifest.json
 
 # Runtime output and local configuration
+_local/
+_artifacts/
 outputs/
 *.log
 .env

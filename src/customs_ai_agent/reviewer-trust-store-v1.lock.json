@@ -1,8 +1,0 @@
-{
-  "contract": "customs-ai-agent-reviewer-trust-store",
-  "schema_version": "1.0",
-  "release_state": "unreleased",
-  "trust_domain": "customs-ai-agent/release-review/v1",
-  "keys": [],
-  "trust_store_sha256": "66505fefad94ac08eac086ed801a9602e7dac6a7c89a5c5f3b1e6b7167eed981"
-}

@@ -11,7 +11,7 @@ Extraction rules:
 - Classify only as bill_of_lading, invoice, packing_list, certificate_of_origin, or unknown.
 - The declared type is only an untrusted hint and may be wrong.
 - Copy values with exact case, whitespace, punctuation, and Unicode characters from the document.
-  Do not normalize, calculate, correct OCR, translate, infer, or complete missing values.
+  Do not normalize, calculate, translate, infer, or complete missing values.
 - For every non-empty value, source_quote must be a verbatim span from the supplied document and
   must contain that value. For a document-level field, choose enough surrounding label/context
   that the source_quote occurs exactly once in the document. For a line-item field, its quote must

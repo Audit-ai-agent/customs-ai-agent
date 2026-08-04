@@ -1,5 +1,5 @@
-from customs_ai_agent.cli import main
+from customs_ai_agent.service.__main__ import main
 
 
 if __name__ == "__main__":
-    raise SystemExit(main())
+    main()
