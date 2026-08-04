@@ -203,17 +203,12 @@ uv run --locked pytest -q `
   tests/test_evidence_contract_lock.py `
   tests/test_evidence_runtime_release_v2.py `
   tests/test_evidence_v3_consumer.py `
-  tests/test_v1_wire_compatibility.py
+  tests/test_v1_wire_compatibility.py `
+  tests/test_source_snapshot.py
 ```
 
-전체 회귀와 배포 인증은 Release 판정 때만 실행한다. 배포 산출물은 exact-commit
-builder를 사용한다.
-
-```powershell
-$BuildSha = git rev-parse HEAD
-uv run --locked python -m tools.build_release_distributions `
-  --expected-git-sha $BuildSha --output-root dist --replace
-```
+전체 회귀는 계약·모델·데이터 경계를 바꾸는 작업에서만 실행한다. 일상 개발은 위의
+quick 검사와 계약 검증으로 충분하며, 이 저장소는 운영 배포 산출물을 만들지 않는다.
 
 기존 텍스트 회귀 CLI:
 
@@ -286,7 +281,7 @@ provider는 호출자 소유이므로 Runtime이 닫지 않으며 Backend가 별
 
 ## Text-only internal Production service
 
-OCR을 활성화하지 않는 독립 Agent 배포에는 `customs-ai-agent-serve` entry point를 사용한다.
+Local UAT에서 Agent HTTP 경계가 필요하면 `customs-ai-agent-serve` entry point를 사용한다.
 이 서비스는 기존 `AgentRuntime.review_json()` 앞에 private ASGI transport를 추가하며 core
 workflow를 대체하지 않는다.
 
@@ -302,9 +297,8 @@ workflow를 대체하지 않는다.
 Evidence 호출 전에 거부한다. Case/Job/HITL과 복제본 간 durable idempotency는 Backend
 소유이므로 여러 Agent replica에서 exactly-once를 주장하지 않는다.
 
-설계와 운영 기준은 [Production Service](docs/PRODUCTION_SERVICE.md), 장애 대응과 배포 절차는
-[Service Runbook](docs/RUNBOOK.md)을 따른다. 현재 실제 Data 3/58 상태에서는 service code가
-정상이어도 `/health/ready` 503이 올바른 결과다.
+이 HTTP 경계는 Local UAT용이며 배포·자동완료 권한을 소유하지 않는다. 현재 실제 Data 3/58
+상태에서는 service code가 정상이어도 `/health/ready` 503이 올바른 결과다.
 
 제품 Evidence 경로는 readiness의 provider/schema/build와 sealed generation/evaluation identity를
 8개 `X-Evidence-*` POST header로 전달하고 response의 같은 header를 body보다 먼저 exact
