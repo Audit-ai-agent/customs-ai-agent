@@ -555,10 +555,7 @@ def test_actual_store_profile_has_a_bounded_longer_http_budget() -> None:
     assert _readiness_policy("preserved-3law-v3-scenario-eval") == (60.0, 90.0)
     assert _evidence_readiness_identity_cache_seconds("synthetic-v3") == 0.0
     assert _evidence_readiness_identity_cache_seconds("preserved-3law-v3-diagnostic") == 0.0
-    assert (
-        _evidence_readiness_identity_cache_seconds("preserved-3law-v3-scenario-eval")
-        == 600.0
-    )
+    assert _evidence_readiness_identity_cache_seconds("preserved-3law-v3-scenario-eval") == 600.0
 
 
 @pytest.mark.parametrize(

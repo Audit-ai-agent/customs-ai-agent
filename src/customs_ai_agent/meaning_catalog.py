@@ -28,12 +28,8 @@ class UserMeaning:
 ISSUE_MEANINGS: Mapping[str, UserMeaning] = {
     "INVOICE_NO_MISMATCH": UserMeaning(
         title="상업송장과 포장명세서의 송장 번호가 일치하지 않습니다",
-        explanation=(
-            "상업송장과 포장명세서에 기재된 송장번호가 서로 다르게 확인되었습니다."
-        ),
-        impact=(
-            "문서 연결과 신고정보 확정에 영향을 줄 수 있어 올바른 송장번호를 확인해야 합니다."
-        ),
+        explanation=("상업송장과 포장명세서에 기재된 송장번호가 서로 다르게 확인되었습니다."),
+        impact=("문서 연결과 신고정보 확정에 영향을 줄 수 있어 올바른 송장번호를 확인해야 합니다."),
         next_action="두 문서의 송장번호를 원문과 대조하고 올바른 값을 정정합니다.",
     ),
     "QTY_MISMATCH_INVOICE_PACKING": UserMeaning(
