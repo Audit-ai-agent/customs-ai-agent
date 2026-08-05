@@ -25,14 +25,9 @@ class RuntimeExecutionError(AgentRuntimeError):
     pass
 
 
-class RuntimeConflictError(AgentRuntimeError):
-    pass
-
-
 __all__ = [
     "AgentRuntimeError",
     "RuntimeConfigurationError",
-    "RuntimeConflictError",
     "RuntimeExecutionError",
     "RuntimeInputError",
 ]

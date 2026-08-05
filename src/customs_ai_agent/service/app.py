@@ -279,13 +279,6 @@ def create_app(
         payload = await admitted_body(request)
         inspection = inspect_text_request(payload, active_settings)
         controller: AgentServiceController = request.app.state.controller
-        if not await controller.ready():
-            raise ServiceHttpError(
-                "dependency_unready",
-                503,
-                retryable=True,
-                execution_state="not-started",
-            )
         outcome, replayed = await controller.submit(
             payload=payload,
             review_run_id=inspection.review_run_id,

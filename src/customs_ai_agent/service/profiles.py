@@ -7,7 +7,6 @@ import ipaddress
 import json
 import re
 from collections.abc import Mapping
-from datetime import date
 from typing import Any, Literal
 from urllib.error import HTTPError, URLError
 from urllib.parse import urlsplit
@@ -171,31 +170,6 @@ class ProfileEvidenceRetriever:
         ):
             raise RetrievalError("Data service response does not satisfy the shared contract")
         return response
-
-    def preflight(self, review_as_of: date) -> None:
-        self.readiness()
-        if self.mode == "local-development":
-            self.retrieve(
-                {
-                    "schema_version": "3.0",
-                    "request_id": f"dev-{review_as_of.isoformat()}",
-                    "case_id": "dev-fixture",
-                    "review_run_id": "dev-fixture",
-                    "review_as_of": review_as_of.isoformat(),
-                    "jurisdiction": "KR",
-                    "trade_type": "import",
-                    "top_k": 5,
-                    "items": [
-                        {
-                            "item_id": "dev-fixture-item",
-                            "description": "development fixture item",
-                            "hs_code": "731815",
-                            "origin_country": None,
-                            "destination_country": "KR",
-                        }
-                    ],
-                }
-            )
 
 
 class _DeterministicDocumentAnalyzer:
@@ -448,7 +422,6 @@ class ProfileRuntime:
                 self._analyzer.analyze(document.model_dump(mode="json", warnings=False))
                 for document in request.documents
             ]
-            self._retriever.preflight(request.review_as_of)
             data_response = self._retriever.retrieve(_retrieve_request(request, analyses))
             evidence = _evidence_from_data(data_response)
             findings = _findings(request, analyses, evidence)
