@@ -20,8 +20,9 @@ _MESSAGES = {
     "review_timeout": "The review exceeded the service execution deadline.",
     "service_busy": "The service is at its configured processing capacity.",
     "service_draining": "The service is shutting down.",
+    "service_mode_mismatch": "The caller service mode does not match this Agent profile.",
     "unsupported_media_type": "The request media type is not supported.",
-    "visual_input_not_supported": "This service release accepts text documents only.",
+    "visual_input_not_supported": "This service accepts text documents only.",
 }
 
 

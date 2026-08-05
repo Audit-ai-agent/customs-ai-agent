@@ -1,4 +1,4 @@
-"""Production transport for the text-only Customs AI Agent."""
+"""Loopback transport for the text-only Customs AI Agent."""
 
 from customs_ai_agent.service.app import create_app
 from customs_ai_agent.service.settings import ServiceConfigurationError, ServiceSettings

@@ -1,8 +1,0 @@
-{
-  "contract": "customs-ai-agent-assertion-trust-store",
-  "schema_version": "1.0",
-  "release_state": "unreleased",
-  "trust_domain": "customs-ai-agent/supporting-document-verification/v1",
-  "keys": [],
-  "trust_store_sha256": "ccad11713d4c18b4f19246f32fc68cbd4faba2d66889f9c037845fdf66db3b13"
-}
