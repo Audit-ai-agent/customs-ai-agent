@@ -64,19 +64,35 @@ def test_profile_rejects_non_loopback_evidence() -> None:
     assert raised.value.code == "evidence_base_url_invalid"
 
 
-def test_profile_keeps_backend_v3_body_human_only(monkeypatch: pytest.MonkeyPatch) -> None:
-    monkeypatch.setattr(ProfileEvidenceRetriever, "preflight", lambda *_args: None)
-    monkeypatch.setattr(
-        ProfileEvidenceRetriever,
-        "retrieve",
-        lambda _self, request: {
+def test_review_uses_one_readiness_then_one_retrieve_and_stays_human_only(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    calls: list[tuple[str, str]] = []
+
+    def data_request(
+        _self: ProfileEvidenceRetriever,
+        path: str,
+        *,
+        method: str,
+        payload: dict[str, Any] | None = None,
+    ) -> dict[str, Any]:
+        calls.append((method, path))
+        if path == ProfileEvidenceRetriever.readiness_path:
+            assert method == "GET"
+            assert payload is None
+            return {"status": "ready"}
+        assert path == ProfileEvidenceRetriever.retrieve_path
+        assert method == "POST"
+        assert payload is not None
+        return {
             "schema_version": "3.0",
-            "request_id": request["request_id"],
+            "request_id": payload["request_id"],
             "status": "ok",
             "knowledge_snapshot_id": "dev-fixture",
             "results": [],
-        },
-    )
+        }
+
+    monkeypatch.setattr(ProfileEvidenceRetriever, "_request", data_request)
     runtime = ProfileRuntime(_settings())
     result = runtime.review_v3_json(
         json.dumps(
@@ -101,6 +117,10 @@ def test_profile_keeps_backend_v3_body_human_only(monkeypatch: pytest.MonkeyPatc
     assert result.requires_human_review is True
     assert result.engine is not None and result.engine.kind == "deterministic"
     assert any(action.action_code == "human_review_required" for action in result.required_actions)
+    assert calls == [
+        ("GET", ProfileEvidenceRetriever.readiness_path),
+        ("POST", ProfileEvidenceRetriever.retrieve_path),
+    ]
 
 
 def test_internal_api_requires_matching_mode_header() -> None:
@@ -134,8 +154,6 @@ def test_internal_api_requires_matching_mode_header() -> None:
 
 
 def test_http_review_keeps_human_only_v3_result(monkeypatch: pytest.MonkeyPatch) -> None:
-    monkeypatch.setattr(ProfileEvidenceRetriever, "preflight", lambda *_args: None)
-    monkeypatch.setattr(ProfileEvidenceRetriever, "readiness", lambda *_args: {"status": "ready"})
     monkeypatch.setattr(
         ProfileEvidenceRetriever,
         "retrieve",

@@ -76,8 +76,6 @@ class ServiceSettings:
     run_timeout_seconds: float = 420.0
     replay_ttl_seconds: float = 600.0
     replay_max_entries: int = 1_000
-    replay_max_bytes: int = 64 * 1024 * 1024
-    readiness_ttl_seconds: float = 5.0
     readiness_timeout_seconds: float = 5.0
     shutdown_grace_seconds: float = 30.0
     log_level: str = "INFO"
@@ -117,10 +115,6 @@ class ServiceSettings:
             raise ServiceConfigurationError("customs_agent_replay_ttl_seconds_invalid")
         if not 1 <= self.replay_max_entries <= 10_000:
             raise ServiceConfigurationError("customs_agent_replay_max_entries_invalid")
-        if not 1 * 1024 * 1024 <= self.replay_max_bytes <= 256 * 1024 * 1024:
-            raise ServiceConfigurationError("customs_agent_replay_max_bytes_invalid")
-        if not 0.1 <= self.readiness_ttl_seconds <= 60:
-            raise ServiceConfigurationError("customs_agent_readiness_ttl_seconds_invalid")
         if not 0.1 <= self.readiness_timeout_seconds <= 120:
             raise ServiceConfigurationError("customs_agent_readiness_timeout_seconds_invalid")
         if not 1 <= self.shutdown_grace_seconds <= 900:
@@ -176,16 +170,6 @@ class ServiceSettings:
             replay_ttl_seconds=_number(source, "CUSTOMS_AGENT_REPLAY_TTL_SECONDS", 600, 1, 86_400),
             replay_max_entries=_integer(
                 source, "CUSTOMS_AGENT_REPLAY_MAX_ENTRIES", 1_000, 1, 10_000
-            ),
-            replay_max_bytes=_integer(
-                source,
-                "CUSTOMS_AGENT_REPLAY_MAX_BYTES",
-                64 * 1024 * 1024,
-                1 * 1024 * 1024,
-                256 * 1024 * 1024,
-            ),
-            readiness_ttl_seconds=_number(
-                source, "CUSTOMS_AGENT_READINESS_TTL_SECONDS", 5, 0.1, 60
             ),
             readiness_timeout_seconds=_number(
                 source, "CUSTOMS_AGENT_READINESS_TIMEOUT_SECONDS", 5, 0.1, 120
