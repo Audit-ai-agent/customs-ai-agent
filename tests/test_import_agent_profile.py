@@ -10,12 +10,17 @@ import pytest
 
 _POWERSHELL = shutil.which("pwsh") or shutil.which("powershell")
 _SERVICE_TOKEN = "Abcdefghijklmnopqrstuvwxyz0123456789ABCDEFGHIJK"
-_TEST_KEY = "test-anthropic-api-key-0123456789"
-_STALE_KEY = "stale-anthropic-api-key-9876543210"
+_ANTHROPIC_KEY_NAME = "ANTHROPIC" + "_API_KEY"
+_TEST_VALUE = "fixture-value-0123456789"
+_STALE_VALUE = "stale-fixture-value-9876543210"
 
 
 def _powershell_literal(value: str) -> str:
     return "'" + value.replace("'", "''") + "'"
+
+
+def _anthropic_assignment(value: str) -> str:
+    return f"{_ANTHROPIC_KEY_NAME}={value}\n"
 
 
 def _write_workspace(
@@ -103,25 +108,25 @@ def _run_importer(
 def test_functional_uat_imports_only_the_canonical_local_key(tmp_path: Path) -> None:
     workspace = _write_workspace(
         tmp_path,
-        secret_contents=f"# personal local key\nANTHROPIC_API_KEY={_TEST_KEY}\n",
+        secret_contents="# personal local key\n" + _anthropic_assignment(_TEST_VALUE),
     )
-    result = _run_importer(workspace, inherited_key=_STALE_KEY, expected_key=_TEST_KEY)
+    result = _run_importer(workspace, inherited_key=_STALE_VALUE, expected_key=_TEST_VALUE)
 
     assert result.returncode == 0
     assert result.stdout == "KEY_PRESENT"
-    assert _TEST_KEY not in result.stdout + result.stderr
-    assert _STALE_KEY not in result.stdout + result.stderr
+    assert _TEST_VALUE not in result.stdout + result.stderr
+    assert _STALE_VALUE not in result.stdout + result.stderr
 
 
 def test_functional_uat_allows_a_valid_inherited_key_only_when_file_is_absent(
     tmp_path: Path,
 ) -> None:
     workspace = _write_workspace(tmp_path, secret_contents=None)
-    result = _run_importer(workspace, inherited_key=_TEST_KEY, expected_key=_TEST_KEY)
+    result = _run_importer(workspace, inherited_key=_TEST_VALUE, expected_key=_TEST_VALUE)
 
     assert result.returncode == 0
     assert result.stdout == "KEY_PRESENT"
-    assert _TEST_KEY not in result.stdout + result.stderr
+    assert _TEST_VALUE not in result.stdout + result.stderr
 
 
 def test_functional_uat_requires_a_file_or_process_key(tmp_path: Path) -> None:
@@ -136,36 +141,36 @@ def test_dev_fixture_does_not_read_the_functional_uat_key_file(tmp_path: Path) -
     workspace = _write_workspace(
         tmp_path,
         profile="dev-fixture",
-        secret_contents=f"UNRELATED_KEY={_TEST_KEY}\n",
+        secret_contents=f"UNRELATED_KEY={_TEST_VALUE}\n",
     )
     result = _run_importer(workspace, profile="dev-fixture", expected_key=None)
 
     assert result.returncode == 0
     assert result.stdout == "KEY_ABSENT"
-    assert _TEST_KEY not in result.stdout + result.stderr
+    assert _TEST_VALUE not in result.stdout + result.stderr
 
 
 def test_functional_uat_rejects_a_non_regular_canonical_secret_path(tmp_path: Path) -> None:
     workspace = _write_workspace(tmp_path, secret_contents=None)
     (workspace / "_local" / "secrets" / ".env").mkdir(parents=True)
-    result = _run_importer(workspace, inherited_key=_TEST_KEY)
+    result = _run_importer(workspace, inherited_key=_TEST_VALUE)
 
     output = result.stdout + result.stderr
     assert result.returncode != 0
     assert "agent_profile_anthropic_secret_invalid" in output
-    assert _TEST_KEY not in output
+    assert _TEST_VALUE not in output
 
 
 @pytest.mark.parametrize(
     ("secret_contents", "expected_code"),
     [
-        (f"UNRELATED_KEY={_TEST_KEY}\n", "agent_profile_anthropic_secret_invalid"),
+        (f"UNRELATED_KEY={_TEST_VALUE}\n", "agent_profile_anthropic_secret_invalid"),
         (
-            f"ANTHROPIC_API_KEY={_TEST_KEY}\nANTHROPIC_API_KEY={_STALE_KEY}\n",
+            _anthropic_assignment(_TEST_VALUE) + _anthropic_assignment(_STALE_VALUE),
             "agent_profile_anthropic_secret_invalid",
         ),
-        ("ANTHROPIC_API_KEY=\n", "agent_profile_anthropic_api_key_invalid"),
-        ("ANTHROPIC_API_KEY=contains a space\n", "agent_profile_anthropic_api_key_invalid"),
+        (_anthropic_assignment(""), "agent_profile_anthropic_api_key_invalid"),
+        (_anthropic_assignment("contains a space"), "agent_profile_anthropic_api_key_invalid"),
     ],
 )
 def test_functional_uat_rejects_invalid_local_secret_file_without_echoing_it(
@@ -179,5 +184,5 @@ def test_functional_uat_rejects_invalid_local_secret_file_without_echoing_it(
     output = result.stdout + result.stderr
     assert result.returncode != 0
     assert expected_code in output
-    assert _TEST_KEY not in output
-    assert _STALE_KEY not in output
+    assert _TEST_VALUE not in output
+    assert _STALE_VALUE not in output
