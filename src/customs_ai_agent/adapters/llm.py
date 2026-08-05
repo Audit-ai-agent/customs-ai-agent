@@ -11,6 +11,7 @@ from typing import Any, Mapping, Protocol
 from pydantic import BaseModel, ConfigDict, Field, SecretStr, ValidationError, field_validator
 
 from customs_ai_agent.prompts import load_document_analysis_system_prompt
+from customs_ai_agent.scenario_transcript import ScenarioTranscriptRun
 from customs_ai_agent.schemas.llm import ClaudeDocumentCandidate
 
 
@@ -84,7 +85,9 @@ class DocumentAnalysis:
 class DocumentAnalyzer(Protocol):
     model_id: str
 
-    def analyze(self, document: Mapping[str, Any]) -> DocumentAnalysis: ...
+    def analyze(
+        self, document: Mapping[str, Any], *, transcript: ScenarioTranscriptRun | None = None
+    ) -> DocumentAnalysis: ...
 
 
 class ClaudeDocumentAnalyzer:
@@ -115,7 +118,9 @@ class ClaudeDocumentAnalyzer:
             ) from None
         return cls(settings, client)
 
-    def analyze(self, document: Mapping[str, Any]) -> DocumentAnalysis:
+    def analyze(
+        self, document: Mapping[str, Any], *, transcript: ScenarioTranscriptRun | None = None
+    ) -> DocumentAnalysis:
         document_id = document.get("document_id")
         filename = document.get("filename")
         text = document.get("content_text")
@@ -127,35 +132,86 @@ class ClaudeDocumentAnalyzer:
             raise LLMProviderError("The text document is invalid.")
         if not text.strip() or len(text) > 200_000:
             raise LLMProviderError("The text document exceeds the profile limit.")
+        user_message = (
+            "Return only the requested JSON for this document.\n"
+            f"document_id: {document_id}\nfilename: {filename}\ntext:\n{text}"
+        )
+        request_payload = {
+            "provider": "anthropic",
+            "model": self.model_id,
+            "max_tokens": self._settings.max_tokens,
+            "temperature": 0,
+            "system_prompt": self._system_prompt,
+            "messages": [{"role": "user", "content": user_message}],
+        }
+        if transcript is not None:
+            # The adapter is also directly unit-testable.  Add the live key at
+            # this boundary even when a caller supplied a bare transcript run.
+            transcript = transcript.with_sensitive_values(
+                (self._settings.api_key.get_secret_value(),)
+            )
+            transcript.write("claude", "request_started", request_payload)
         try:
             response = self._client.messages.create(
                 model=self.model_id,
                 max_tokens=self._settings.max_tokens,
                 temperature=0,
                 system=self._system_prompt,
-                messages=[
-                    {
-                        "role": "user",
-                        "content": (
-                            "Return only the requested JSON for this document.\n"
-                            f"document_id: {document_id}\nfilename: {filename}\ntext:\n{text}"
-                        ),
-                    }
-                ],
+                messages=request_payload["messages"],
             )
         except Exception:
+            if transcript is not None:
+                transcript.write(
+                    "claude",
+                    "request_failed",
+                    {
+                        "provider": "anthropic",
+                        "model": self.model_id,
+                        "error_code": "provider_request_failed",
+                    },
+                )
             raise LLMProviderError("Claude document analysis is unavailable.") from None
         content = getattr(response, "content", None)
         if not isinstance(content, list):
+            if transcript is not None:
+                transcript.write(
+                    "claude",
+                    "response_invalid",
+                    {
+                        "provider": "anthropic",
+                        "model": self.model_id,
+                        "error_code": "provider_response_invalid",
+                    },
+                )
             raise LLMOutputValidationError("Claude did not return a text result.")
         output = "".join(
             part
             for part in (getattr(item, "text", None) for item in content)
             if isinstance(part, str)
         ).strip()
+        if transcript is not None:
+            transcript.write(
+                "claude",
+                "response_received",
+                {
+                    "provider": "anthropic",
+                    "model": self.model_id,
+                    "output_text": output,
+                },
+            )
         try:
             candidate = ClaudeDocumentCandidate.model_validate_json(output)
         except (ValidationError, ValueError):
+            if transcript is not None:
+                transcript.write(
+                    "claude",
+                    "response_invalid",
+                    {
+                        "provider": "anthropic",
+                        "model": self.model_id,
+                        "error_code": "provider_output_invalid",
+                    },
+                )
             raise LLMOutputValidationError(
                 "Claude returned an invalid document analysis."
             ) from None

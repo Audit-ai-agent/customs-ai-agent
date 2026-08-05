@@ -75,7 +75,9 @@ def test_review_uses_one_readiness_then_one_retrieve_and_stays_human_only(
         *,
         method: str,
         payload: dict[str, Any] | None = None,
+        review_run_id: str | None = None,
     ) -> dict[str, Any]:
+        assert review_run_id == "run-profile-v3"
         calls.append((method, path))
         if path == ProfileEvidenceRetriever.readiness_path:
             assert method == "GET"
