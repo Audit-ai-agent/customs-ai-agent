@@ -40,11 +40,17 @@ EVIDENCE_SERVICE_TOKEN_HEADER=Authorization
 CUSTOMS_AGENT_SERVICE_MODE          # local-development 또는 functional-uat
 ```
 
-기능 UAT에는 여기에 개인 `ANTHROPIC_API_KEY`를 추가합니다. 법령 원문, DB dump, 모델 파일, 토큰을 저장소·Docker image·공유 ZIP에 넣지 않습니다.
+기능 UAT에는 여기에 개인 `ANTHROPIC_API_KEY`를 추가합니다. 기본 입력 위치는 Git이 무시하는 workspace의 `../_local/secrets/.env`이며, 파일에는 아래 한 항목만 둡니다.
+
+```text
+ANTHROPIC_API_KEY=personal-key
+```
+
+`functional-uat-3law` importer만 이 파일을 읽어 현재 Agent PowerShell 세션과 그 자식 프로세스에 값을 넣습니다. 빈 줄과 `#` 주석 외의 다른 키·중복 키·공백이 있는 값은 거부하며, 값은 출력하지 않습니다. 파일이 없을 때만 기존의 현재-세션 환경변수 주입을 호환용으로 허용합니다. `dev-fixture`와 legacy `../_local/secrets/uat/agent.env`는 이 파일을 읽지 않습니다. 법령 원문, DB dump, 모델 파일, 토큰을 저장소·Docker image·공유 ZIP에 넣지 않습니다.
 
 Backend profile 초기화는 `../_local/profiles/<profile>/backend.env`에 `CUSTOMS_AGENT_SERVICE_BEARER_TOKEN`과 `CUSTOMS_AGENT_SERVICE_MODE`를 만듭니다. Data의 `dev-fixture` 첫 실행 또는 `functional-uat-3law init`은 Evidence 토큰을 `../_local/profiles/dev-fixture/evidence-service-token` 또는 `../_local/profiles/functional-uat-3law/evidence-service-token`에 만듭니다. Agent는 값을 복사하거나 생성하지 않습니다.
 
-`tools/Import-AgentProfile.ps1`는 위의 두 **생성된** 파일만 읽어 현재 PowerShell 세션의 Agent 환경변수에 넣습니다. 토큰·원문·환경변수 값을 출력하지 않고, 파일 누락·profile/mode 불일치·형식 오류만 코드로 실패합니다. 반드시 점(`.`)으로 dot-source 하여 실행합니다.
+`tools/Import-AgentProfile.ps1`는 위의 두 **생성된** 파일을 읽어 현재 PowerShell 세션의 Agent 환경변수에 넣습니다. `functional-uat-3law`일 때만 추가로 `../_local/secrets/.env`의 개인 Claude 키를 좁게 읽습니다. 토큰·원문·환경변수 값을 출력하지 않고, 파일 누락·profile/mode 불일치·형식 오류만 코드로 실패합니다. 반드시 점(`.`)으로 dot-source 하여 실행합니다.
 
 ## 실행 순서
 
@@ -64,7 +70,7 @@ Backend profile 초기화는 `../_local/profiles/<profile>/backend.env`에 `CUST
 uv run --locked --no-sync --group dev customs-ai-agent-dev-serve
 ```
 
-기능 UAT에서는 Data가 `functional-uat-3law` 법령 수집·store build를 끝낸 뒤 같은 방식으로 Agent를 시작합니다. 개인 `ANTHROPIC_API_KEY`는 승인된 비밀 전달 방식으로 현재 세션에만 주입한 뒤 실행합니다. importer는 그 키를 읽거나 출력하지 않습니다.
+기능 UAT에서는 Data가 `functional-uat-3law` 법령 수집·store build를 끝낸 뒤 같은 방식으로 Agent를 시작합니다. 먼저 `../_local/secrets/.env`에 새 개인 키를 한 줄로 넣고, importer를 dot-source 합니다. importer는 그 키를 현재 세션에만 주입하고 출력하지 않습니다.
 
 ```powershell
 . .\tools\Import-AgentProfile.ps1 -Profile functional-uat-3law
