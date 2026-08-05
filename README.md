@@ -52,6 +52,41 @@ Backend profile 초기화는 `../_local/profiles/<profile>/backend.env`에 `CUST
 
 `tools/Import-AgentProfile.ps1`는 위의 두 **생성된** 파일을 읽어 현재 PowerShell 세션의 Agent 환경변수에 넣습니다. `functional-uat-3law`일 때만 추가로 `../_local/secrets/.env`의 개인 Claude 키를 좁게 읽습니다. 토큰·원문·환경변수 값을 출력하지 않고, 파일 누락·profile/mode 불일치·형식 오류만 코드로 실패합니다. 반드시 점(`.`)으로 dot-source 하여 실행합니다.
 
+## 상세 시나리오 transcript
+
+일반 Agent 로그와 CI는 문서 본문·prompt·응답 본문을 남기지 않습니다.
+`functional-uat`은 시작 시 고정된 workspace 경로
+`../_local/state/scenario-runs/`을 자동 생성·검증하고, 각 실제 review run의 상세
+transcript를 반드시 남깁니다. 이 경로를 다른 값으로 덮어쓰거나 생성·기록·비밀 제거에
+실패하면 UAT는 불완전한 것으로 실패합니다.
+
+기본 `local-development`는 계속 경량입니다. 사람이 명시적 시나리오 실행기를 재검토할
+때만 Agent를 시작하기 **전에** 아래의 절대 경로를 설정해 같은 형식의 기록을 켤 수
+있습니다.
+
+```powershell
+$env:CUSTOMS_SCENARIO_TRANSCRIPT_ROOT = [System.IO.Path]::GetFullPath(
+  (Join-Path $PWD.Path "..\_local\state\scenario-runs")
+)
+```
+
+상세 transcript는 `_local/state/scenario-runs/<review-run-id>/`에 다음의 실제 non-secret
+body를 기록합니다.
+
+- `agent-data.jsonl`: Agent → Data readiness/retrieve 요청과 응답
+- `claude.jsonl`: `functional-uat`에서 실제 호출한 system/user prompt와 Claude 텍스트
+  응답 전문, 또는 안전한 실패 코드. `local-development`에서는 Claude를 호출하지 않았다는
+  항목만 기록
+
+`backend-agent.jsonl`과 `public-api.jsonl`은 Backend가 같은 run 디렉터리에 기록합니다.
+Agent는 `agent-data.jsonl`과 `claude.jsonl`만 소유합니다.
+
+HTTP Authorization/Cookie 헤더, 세션·서비스 token, API key, 비밀번호, DSN, 환경변수는
+기록하지 않으며 credential-shaped 문자열도 `[REDACTED]` 처리합니다. transcript는
+현재 PC의 `_local`에만 두고 Git, `_artifacts`, 채팅, PR, 공유 압축 파일에는 넣지 않습니다.
+공개 API 사용자 여정과 합성 문서 본문은 Backend의 상세 시나리오 실행기가 같은 run
+디렉터리에 기록합니다.
+
 ## 실행 순서
 
 전체 서비스는 sibling 저장소를 같은 workspace에 둔 뒤 다음 순서로 준비·실행합니다.
@@ -104,4 +139,4 @@ uv run --locked --group dev mypy
 uv run --locked --group dev pytest -q
 ```
 
-실제 기능 UAT는 GitHub Actions에서 실행하지 않습니다. 개인 권한과 로컬 Data 입력이 준비된 사람이 명시적으로 실행하며, 결과는 workspace `_artifacts/functional-uat/`에만 남깁니다.
+실제 기능 UAT는 GitHub Actions에서 실행하지 않습니다. 개인 권한과 로컬 Data 입력이 준비된 사람이 명시적으로 실행하며, 요약 manifest는 workspace `_artifacts/functional-uat/`에 남고 상세 non-secret body는 항상 별도의 `_local/state/scenario-runs/`에 남습니다. 기본 개발에서는 명시적으로 transcript를 켠 경우에만 같은 경로에 남습니다.

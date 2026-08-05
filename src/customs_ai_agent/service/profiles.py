@@ -25,6 +25,7 @@ from customs_ai_agent.schemas.llm import (
     ClaudeFieldCandidate,
     ClaudeLineItemCandidate,
 )
+from customs_ai_agent.scenario_transcript import ScenarioTranscriptRoot, ScenarioTranscriptRun
 from customs_ai_agent.schemas.v3 import (
     RequiredActionV1,
     ReviewRunResultV3,
@@ -61,6 +62,27 @@ def service_mode(settings: ServiceSettings) -> ServiceMode:
     raise RuntimeConfigurationError("service_mode_invalid", "The Agent profile mode is invalid.")
 
 
+def _service_secret_values(settings: ServiceSettings) -> tuple[str, str]:
+    """Values held by this process that must never survive in a transcript."""
+
+    return (
+        settings.bearer_token.get_secret_value(),
+        settings.evidence_service_token.get_secret_value(),
+    )
+
+
+def _transcript_root(
+    settings: ServiceSettings, supplied: ScenarioTranscriptRoot | None = None
+) -> ScenarioTranscriptRoot:
+    """Functional UAT always records locally; development remains explicit opt-in."""
+
+    mode = service_mode(settings)
+    root = supplied or ScenarioTranscriptRoot.for_service_mode(
+        mode, sensitive_values=_service_secret_values(settings)
+    )
+    return root.with_sensitive_values(_service_secret_values(settings))
+
+
 def _one_header(response: Any, name: str) -> str | None:
     headers = getattr(response, "headers", None)
     values = getattr(headers, "get_all", lambda _name: None)(name)
@@ -76,9 +98,12 @@ class ProfileEvidenceRetriever:
     readiness_path = "/internal/rag/v3/health/ready"
     retrieve_path = "/internal/rag/v3/retrieve"
 
-    def __init__(self, settings: ServiceSettings) -> None:
+    def __init__(
+        self, settings: ServiceSettings, *, transcript_root: ScenarioTranscriptRoot | None = None
+    ) -> None:
         self.mode = service_mode(settings)
         self._timeout = settings.readiness_timeout_seconds
+        self._transcript_root = _transcript_root(settings, transcript_root)
         token = settings.evidence_service_token
         if token is None:
             raise RuntimeConfigurationError(
@@ -113,6 +138,7 @@ class ProfileEvidenceRetriever:
         *,
         method: Literal["GET", "POST"],
         payload: dict[str, Any] | None = None,
+        review_run_id: str | None = None,
     ) -> dict[str, Any]:
         encoded = (
             json.dumps(
@@ -137,37 +163,123 @@ class ProfileEvidenceRetriever:
         try:
             with _HTTP.open(request, timeout=self._timeout) as response:
                 if _one_header(response, SERVICE_MODE_HEADER) != self.mode:
+                    self._record_failure(
+                        review_run_id, method=method, path=path, error_code="data_mode_mismatch"
+                    )
                     raise RetrievalError("Data service mode mismatch")
                 raw = response.read(_MAX_RESPONSE_BYTES + 1)
         except RetrievalError:
             raise
         except (HTTPError, URLError, TimeoutError, OSError):
+            self._record_failure(
+                review_run_id, method=method, path=path, error_code="data_request_failed"
+            )
             raise RetrievalError("Data service request failed") from None
         if not isinstance(raw, bytes) or len(raw) > _MAX_RESPONSE_BYTES:
+            self._record_failure(
+                review_run_id, method=method, path=path, error_code="data_response_invalid"
+            )
             raise RetrievalError("Data service response is invalid")
         try:
             decoded = json.loads(raw.decode("utf-8"))
         except (UnicodeDecodeError, ValueError):
+            self._record_failure(
+                review_run_id, method=method, path=path, error_code="data_response_invalid"
+            )
             raise RetrievalError("Data service response is invalid") from None
         if not isinstance(decoded, dict):
+            self._record_failure(
+                review_run_id, method=method, path=path, error_code="data_response_invalid"
+            )
             raise RetrievalError("Data service response is invalid")
+        self._record_exchange(
+            review_run_id,
+            method=method,
+            path=path,
+            request_body=payload,
+            response_body=decoded,
+        )
         return decoded
 
-    def readiness(self) -> dict[str, str]:
-        response = self._request(self.readiness_path, method="GET")
+    def _record_exchange(
+        self,
+        review_run_id: str | None,
+        *,
+        method: Literal["GET", "POST"],
+        path: str,
+        request_body: dict[str, Any] | None,
+        response_body: dict[str, Any],
+    ) -> None:
+        if review_run_id is None:
+            return
+        transcript = self._transcript_root.for_run(review_run_id)
+        if transcript is not None:
+            transcript.write(
+                "agent-data",
+                "http_exchange",
+                {
+                    "method": method,
+                    "path": path,
+                    "request_body": request_body,
+                    "response_body": response_body,
+                },
+            )
+
+    def _record_failure(
+        self,
+        review_run_id: str | None,
+        *,
+        method: Literal["GET", "POST"],
+        path: str,
+        error_code: str,
+    ) -> None:
+        if review_run_id is None:
+            return
+        transcript = self._transcript_root.for_run(review_run_id)
+        if transcript is not None:
+            # Do not retain a provider error body or the original request on a
+            # failed exchange.  The safe code is enough to diagnose the edge.
+            transcript.write(
+                "agent-data",
+                "http_failed",
+                {"method": method, "path": path, "error_code": error_code},
+            )
+
+    def readiness(self, *, review_run_id: str | None = None) -> dict[str, str]:
+        response = self._request(self.readiness_path, method="GET", review_run_id=review_run_id)
         if response != {"status": "ready"}:
+            self._record_failure(
+                review_run_id,
+                method="GET",
+                path=self.readiness_path,
+                error_code="data_readiness_invalid",
+            )
             raise RetrievalError("Data service is not ready")
         return {"status": "ready"}
 
     def retrieve(self, request: dict[str, Any]) -> dict[str, Any]:
-        self.readiness()
-        response = self._request(self.retrieve_path, method="POST", payload=request)
+        review_run_id = request.get("review_run_id")
+        if not isinstance(review_run_id, str):
+            raise RetrievalError("Data service request is invalid")
+        self.readiness(review_run_id=review_run_id)
+        response = self._request(
+            self.retrieve_path,
+            method="POST",
+            payload=request,
+            review_run_id=review_run_id,
+        )
         if (
             response.get("schema_version") != "3.0"
             or response.get("request_id") != request["request_id"]
             or response.get("status") not in {"ok", "partial", "failed"}
             or not isinstance(response.get("results"), list)
         ):
+            self._record_failure(
+                review_run_id,
+                method="POST",
+                path=self.retrieve_path,
+                error_code="data_contract_invalid",
+            )
             raise RetrievalError("Data service response does not satisfy the shared contract")
         return response
 
@@ -177,7 +289,10 @@ class _DeterministicDocumentAnalyzer:
 
     model_id = "development-fixture-deterministic"
 
-    def analyze(self, document: Mapping[str, Any]) -> DocumentAnalysis:
+    def analyze(
+        self, document: Mapping[str, Any], *, transcript: ScenarioTranscriptRun | None = None
+    ) -> DocumentAnalysis:
+        del transcript
         text = str(document.get("content_text") or "")
         upper = text.upper()
         document_type: Literal["invoice", "unknown"] = (
@@ -381,22 +496,27 @@ def _actions(findings: list[dict[str, Any]]) -> list[RequiredActionV1]:
 
 
 class ProfileRuntime:
-    def __init__(self, settings: ServiceSettings) -> None:
+    def __init__(
+        self, settings: ServiceSettings, *, transcript_root: ScenarioTranscriptRoot | None = None
+    ) -> None:
         self.mode = service_mode(settings)
         self._closed = False
-        self._retriever = ProfileEvidenceRetriever(settings)
+        self._transcript_root = _transcript_root(settings, transcript_root)
         if self.mode == "local-development":
             self._analyzer: Any = _DeterministicDocumentAnalyzer()
         else:
             try:
-                self._analyzer = ClaudeDocumentAnalyzer.from_settings(
-                    ClaudeSettings.from_environment()
+                claude_settings = ClaudeSettings.from_environment()
+                self._transcript_root = self._transcript_root.with_sensitive_values(
+                    (claude_settings.api_key.get_secret_value(),)
                 )
+                self._analyzer = ClaudeDocumentAnalyzer.from_settings(claude_settings)
             except Exception:
                 raise RuntimeConfigurationError(
                     "functional_uat_claude_configuration_invalid",
                     "Functional UAT requires a valid local Claude configuration.",
                 ) from None
+        self._retriever = ProfileEvidenceRetriever(settings, transcript_root=self._transcript_root)
 
     def _assert_open(self) -> None:
         if self._closed:
@@ -417,9 +537,22 @@ class ProfileRuntime:
     def review_v3_json(self, payload: bytes) -> ReviewRunResultV3:
         self._assert_open()
         request = self._decode(payload)
+        transcript = self._transcript_root.for_run(request.review_run_id)
+        if transcript is not None and self.mode == "local-development":
+            transcript.write(
+                "claude",
+                "not_called",
+                {
+                    "provider": "claude",
+                    "called": False,
+                    "reason": "local-development uses the deterministic document analyzer",
+                },
+            )
         try:
             analyses = [
-                self._analyzer.analyze(document.model_dump(mode="json", warnings=False))
+                self._analyzer.analyze(
+                    document.model_dump(mode="json", warnings=False), transcript=transcript
+                )
                 for document in request.documents
             ]
             data_response = self._retriever.retrieve(_retrieve_request(request, analyses))
@@ -476,11 +609,12 @@ class ProfileRuntime:
         }
         payload_result["result_sha256"] = review_result_v3_sha256(payload_result)
         try:
-            return ReviewRunResultV3.model_validate(payload_result)
+            result = ReviewRunResultV3.model_validate(payload_result)
         except ValidationError:
             raise RuntimeExecutionError(
                 "profile_result_invalid", "The Agent result could not be validated."
             ) from None
+        return result
 
     def close(self) -> None:
         self._closed = True
