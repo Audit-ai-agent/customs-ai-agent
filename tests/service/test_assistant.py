@@ -159,6 +159,19 @@ def test_assistant_draft_is_non_mutating_and_endpoint_is_profile_protected(
     assert answer.correction_draft.new_value == "2 PCS"
     assert result.result_sha256 == original_hash
 
+    english_template = runtime.assistant_answer_json(
+        _answer_payload(
+            result,
+            question=(
+                "document=invoice; field=quantity; value=2 PCS; "
+                "reason=Invoice and Packing List require a reviewed correction"
+            ),
+        )
+    )
+    assert english_template.answer_scope == "case_grounded"
+    assert english_template.correction_draft is not None
+    assert english_template.correction_draft.document_id == "invoice"
+
     app = create_app(_settings())
     with TestClient(app, raise_server_exceptions=False) as client:
         review = client.post(

@@ -345,7 +345,13 @@ def _primary_comparison(result: ReviewRunResultV3):
 
 
 def _mentions_case_reference(question: str) -> bool:
-    return bool(re.search(r"(?:이\s*사건|현재\s*사건|문서|심사|finding|비교)", question, re.I))
+    return bool(
+        re.search(
+            r"(?:이\s*사건|현재\s*사건|문서|심사|finding|비교|document|case|review)",
+            question,
+            re.I,
+        )
+    )
 
 
 def _classify_question(question: str, result: ReviewRunResultV3) -> _QuestionPolicy:
