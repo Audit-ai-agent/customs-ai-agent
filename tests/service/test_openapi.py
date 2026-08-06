@@ -37,3 +37,5 @@ def test_openapi_exposes_only_active_backend_surface() -> None:
         "const": True,
         "type": "boolean",
     }
+    assert response_schema["properties"]["schema_version"] == {"const": "3.1", "type": "string"}
+    assert {"workflow", "document_analyses", "comparisons"} <= set(response_schema["required"])

@@ -64,9 +64,9 @@ class ServiceSettings:
     evidence_service_token: SecretStr
     service_mode: ServiceMode = "local-development"
     host: str = "127.0.0.1"
-    # Backend owns 8080.  Keeping Agent on 8090 makes the sibling default
-    # topology work without a per-developer port override.
-    port: int = 8090
+    # Backend owns 18081 and Data fixture owns 18083.  18090 avoids the
+    # Windows-reserved 80xx range while remaining loopback-only.
+    port: int = 18090
     max_body_bytes: int = _MAX_BODY_BYTES
     max_documents: int = _MAX_DOCUMENTS
     max_text_characters: int = _MAX_TEXT_CHARACTERS
@@ -147,7 +147,7 @@ class ServiceSettings:
             evidence_service_token=SecretStr(_required(source, "EVIDENCE_SERVICE_TOKEN")),
             service_mode=cast(ServiceMode, configured_mode),
             host=source.get("CUSTOMS_AGENT_HOST", "127.0.0.1").strip(),
-            port=_integer(source, "CUSTOMS_AGENT_PORT", 8090, 1, 65_535),
+            port=_integer(source, "CUSTOMS_AGENT_PORT", 18090, 1, 65_535),
             max_body_bytes=_integer(
                 source, "CUSTOMS_AGENT_MAX_BODY_BYTES", _MAX_BODY_BYTES, 1_024, 32 * 1024 * 1024
             ),
