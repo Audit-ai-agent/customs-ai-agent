@@ -2,6 +2,7 @@
 
 from customs_ai_agent.adapters.llm import (
     ClaudeDocumentAnalyzer,
+    ClaudeGroundedResponder,
     ClaudeSettings,
     DocumentAnalysis,
     DocumentAnalyzer,
@@ -10,6 +11,7 @@ from customs_ai_agent.adapters.retrieval import RetrievalError, validate_evidenc
 
 __all__ = [
     "ClaudeDocumentAnalyzer",
+    "ClaudeGroundedResponder",
     "ClaudeSettings",
     "DocumentAnalysis",
     "DocumentAnalyzer",

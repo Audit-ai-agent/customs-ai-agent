@@ -1,8 +1,9 @@
 """Text-only wire models for the active Backend-to-Agent endpoint.
 
 The endpoint keeps its historical ``v3`` route and request shape.  Result
-``3.1`` adds source-grounded workflow data so a human reviewer can understand
-what the bounded Agent did without turning the result into an approval signal.
+``3.2`` keeps the V3.1 source-grounded workflow and adds an inspectable plan,
+an eight-section grounded report, and explicitly labelled human corrections.
+None of the values is an approval signal.
 """
 
 from __future__ import annotations
@@ -47,12 +48,29 @@ class ServiceReviewRunRequestV3(V3WireModel):
     trade_type: Literal["import", "export"]
     jurisdiction: Literal["KR"]
     documents: list[TextDocumentInputV3] = Field(min_length=1, max_length=20)
+    parent_review_run_id: str | None = Field(
+        default=None,
+        max_length=128,
+        pattern=r"^[A-Za-z0-9][A-Za-z0-9._:-]*$",
+    )
+    applied_correction_proposal_ids: list[str] = Field(default_factory=list, max_length=50)
+    human_corrections: list["HumanCorrectionInputV3"] = Field(default_factory=list, max_length=50)
 
     @model_validator(mode="after")
     def _document_ids_are_unique(self) -> "ServiceReviewRunRequestV3":
         document_ids = [document.document_id for document in self.documents]
         if len(document_ids) != len(set(document_ids)):
             raise ValueError("document_id values must be unique within a review run")
+        proposal_ids = self.applied_correction_proposal_ids
+        if len(proposal_ids) != len(set(proposal_ids)):
+            raise ValueError("applied correction proposal IDs must be unique")
+        correction_ids = [item.correction_proposal_id for item in self.human_corrections]
+        if len(correction_ids) != len(set(correction_ids)):
+            raise ValueError("human correction proposal IDs must be unique")
+        if set(correction_ids) != set(proposal_ids):
+            raise ValueError("human corrections must exactly match applied correction proposal IDs")
+        if any(item.document_id not in set(document_ids) for item in self.human_corrections):
+            raise ValueError("human correction document_id must refer to an input document")
         return self
 
 
@@ -60,6 +78,23 @@ class ReviewReportV3(V3WireModel):
     overall_status: Literal["needs_review", "blocked"]
     summary: str = Field(min_length=1, max_length=4000)
     disclaimer: str = Field(min_length=1, max_length=2000)
+    sections: list["ReportSectionV3"] = Field(min_length=8, max_length=8)
+
+    @model_validator(mode="after")
+    def _has_exactly_one_of_each_report_section(self) -> "ReviewReportV3":
+        expected = {
+            "conclusion",
+            "execution_process",
+            "document_comparison",
+            "issues_and_causes",
+            "legal_evidence",
+            "impact",
+            "next_actions",
+            "limitations",
+        }
+        if {section.section for section in self.sections} != expected:
+            raise ValueError("report must include each required section exactly once")
+        return self
 
 
 class EvidenceV3(V3WireModel):
@@ -77,9 +112,33 @@ class EvidenceV3(V3WireModel):
 class SourceV3(V3WireModel):
     """A verbatim quote and its zero-based occurrence in one input document."""
 
+    source_kind: Literal["document"] = "document"
     document_id: str = Field(min_length=1, max_length=128)
     quote: str = Field(min_length=1, max_length=4000)
     occurrence: int = Field(ge=0, le=100_000)
+
+
+class HumanProvidedSourceV3(V3WireModel):
+    """A reviewer-supplied fact that deliberately has no invented document quote."""
+
+    source_kind: Literal["human_provided"] = "human_provided"
+    document_id: str = Field(min_length=1, max_length=128)
+    correction_proposal_id: str = Field(min_length=1, max_length=128)
+    reason: str = Field(min_length=1, max_length=2000)
+
+
+class HumanCorrectionInputV3(V3WireModel):
+    """One already-approved correction for a new child review run."""
+
+    correction_proposal_id: str = Field(min_length=1, max_length=128)
+    document_id: str = Field(min_length=1, max_length=128)
+    item_id: str | None = Field(default=None, max_length=256)
+    fact_id: str | None = Field(default=None, max_length=256)
+    field_name: str = Field(min_length=1, max_length=64)
+    new_value: str = Field(min_length=1, max_length=2000)
+    unit: str | None = Field(default=None, max_length=64)
+    reason: str = Field(min_length=1, max_length=2000)
+    source_kind: Literal["human_provided"] = "human_provided"
 
 
 class FactV3(V3WireModel):
@@ -88,7 +147,7 @@ class FactV3(V3WireModel):
     raw_value: str = Field(min_length=1, max_length=2000)
     normalized_value: str | None = Field(default=None, max_length=2000)
     unit: str | None = Field(default=None, max_length=64)
-    source: SourceV3
+    source: SourceV3 | HumanProvidedSourceV3
 
 
 class LineItemV3(V3WireModel):
@@ -182,10 +241,41 @@ class WorkflowStageV3(V3WireModel):
     summary: str = Field(min_length=1, max_length=2000)
 
 
+class PlannerActionV3(V3WireModel):
+    """A high-level action from the intentionally small Agent tool surface."""
+
+    cycle: int = Field(ge=1, le=2)
+    action: Literal[
+        "analyze_documents",
+        "apply_human_corrections",
+        "compare_documents",
+        "reextract_documents",
+        "retrieve_evidence",
+        "generate_report",
+    ]
+    status: Literal["completed", "skipped", "needs_review", "failed"]
+    summary: str = Field(min_length=1, max_length=2000)
+    correction_proposal_ids: list[str] = Field(default_factory=list, max_length=50)
+
+
+class PlannerTraceV3(V3WireModel):
+    cycle_count: int = Field(ge=1, le=2)
+    actions: list[PlannerActionV3] = Field(min_length=1, max_length=6)
+
+    @model_validator(mode="after")
+    def _is_bounded_and_ordered(self) -> "PlannerTraceV3":
+        if any(action.cycle > self.cycle_count for action in self.actions):
+            raise ValueError("planner action cycle must not exceed cycle_count")
+        if self.actions != sorted(self.actions, key=lambda action: action.cycle):
+            raise ValueError("planner actions must be ordered by cycle")
+        return self
+
+
 class WorkflowV3(V3WireModel):
     status: Literal["completed", "partial", "failed"]
     stages: list[WorkflowStageV3] = Field(min_length=1, max_length=8)
     reextractions: list[ReextractionV3] = Field(default_factory=list, max_length=20)
+    planner: PlannerTraceV3
 
     @model_validator(mode="after")
     def _stages_are_unique(self) -> "WorkflowV3":
@@ -217,6 +307,35 @@ class RequiredActionV1(V3WireModel):
     finding_ids: list[str] = Field(default_factory=list, max_length=256)
 
 
+class ReportClaimV3(V3WireModel):
+    claim_id: str = Field(min_length=1, max_length=256)
+    text: str = Field(min_length=1, max_length=4000)
+    fact_ids: list[str] = Field(default_factory=list, max_length=64)
+    comparison_ids: list[str] = Field(default_factory=list, max_length=64)
+    evidence_ids: list[str] = Field(default_factory=list, max_length=64)
+
+    @model_validator(mode="after")
+    def _is_grounded(self) -> "ReportClaimV3":
+        if not (self.fact_ids or self.comparison_ids or self.evidence_ids):
+            raise ValueError("report claim must reference a fact, comparison, or evidence")
+        return self
+
+
+class ReportSectionV3(V3WireModel):
+    section: Literal[
+        "conclusion",
+        "execution_process",
+        "document_comparison",
+        "issues_and_causes",
+        "legal_evidence",
+        "impact",
+        "next_actions",
+        "limitations",
+    ]
+    title: str = Field(min_length=1, max_length=128)
+    claims: list[ReportClaimV3] = Field(min_length=1, max_length=32)
+
+
 class EngineV3(V3WireModel):
     kind: Literal["deterministic", "claude"]
     model_id: str = Field(min_length=1, max_length=256)
@@ -241,7 +360,7 @@ class ReviewRunResultV3(V3WireModel):
     findings: list[FindingV3] = Field(default_factory=list, max_length=2000)
     required_actions: list[RequiredActionV1] = Field(min_length=1, max_length=2001)
     result_sha256: str = Field(pattern=r"^[a-f0-9]{64}$")
-    schema_version: Literal["3.1"] = "3.1"
+    schema_version: Literal["3.2"] = "3.2"
     engine: EngineV3 | None = None
 
     @model_validator(mode="after")
@@ -258,6 +377,12 @@ class ReviewRunResultV3(V3WireModel):
             raise ValueError("finding_id values must be unique")
         known_findings = set(finding_ids)
         known_comparisons = set(comparison_ids)
+        known_evidence = {entry.evidence_id for entry in self.evidence}
+        known_facts: set[str] = set()
+        for analysis in self.document_analyses:
+            known_facts.update(fact.fact_id for fact in analysis.facts)
+            for item in analysis.line_items:
+                known_facts.update(fact.fact_id for fact in item.facts)
         if any(
             finding.comparison_id is not None and finding.comparison_id not in known_comparisons
             for finding in self.findings
@@ -269,6 +394,14 @@ class ReviewRunResultV3(V3WireModel):
             for finding_id in action.finding_ids
         ):
             raise ValueError("action finding_ids must refer to findings")
+        for section in self.report.sections:
+            for claim in section.claims:
+                if not set(claim.fact_ids) <= known_facts:
+                    raise ValueError("report claim fact_ids must refer to extracted facts")
+                if not set(claim.comparison_ids) <= known_comparisons:
+                    raise ValueError("report claim comparison_ids must refer to comparisons")
+                if not set(claim.evidence_ids) <= known_evidence:
+                    raise ValueError("report claim evidence_ids must refer to evidence")
         if self.result_sha256 != review_result_v3_sha256(self):
             raise ValueError("result_sha256 does not match the public result")
         return self
@@ -312,8 +445,14 @@ __all__ = [
     "ExtractionWarningV3",
     "FactV3",
     "FindingV3",
+    "HumanCorrectionInputV3",
+    "HumanProvidedSourceV3",
     "LineItemV3",
+    "PlannerActionV3",
+    "PlannerTraceV3",
     "ReextractionV3",
+    "ReportClaimV3",
+    "ReportSectionV3",
     "RequiredActionV1",
     "ReviewReportV3",
     "ReviewRunResultV3",

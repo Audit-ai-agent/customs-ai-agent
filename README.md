@@ -118,16 +118,19 @@ Data profile을 같은 PC에서 병렬로 띄울 때에는 Data를 다른 loopba
 
 ## HTTP 계약
 
-Backend가 사용하는 경로는 아래 네 개뿐입니다.
+Backend가 사용하는 경로는 아래 다섯 개뿐입니다.
 
 ```text
 GET  /health/live
 GET  /health/ready
 GET  /internal/agent/v2/metadata
 POST /internal/agent/v2/reviews
+POST /internal/agent/v2/assistant/answers
 ```
 
-`POST /internal/agent/v2/reviews`는 텍스트 문서, Case ID, 실행 ID, 기준일, 무역 유형, `KR`만 받습니다. V3.1 응답은 사람 검토 상태와 함께 실제 workflow 단계, 문서별 추출 사실과 원문 인용, 코드 기반 비교 결과, Evidence에 연결된 finding·담당자 조치를 담습니다. 수량·금액·원산지·문서 식별자 판정은 LLM이 아니라 코드가 수행하며, 결과는 언제나 자동완료 대상이 아닙니다.
+`POST /internal/agent/v2/reviews`는 텍스트 문서, Case ID, 실행 ID, 기준일, 무역 유형, `KR`만 받습니다. V3.2 응답은 사람 검토 상태와 함께 실제 workflow 단계, 최대 2 cycle·6 action의 제한된 계획 trace, 문서별 추출 사실과 원문 인용, 코드 기반 비교 결과, Evidence에 연결된 finding·담당자 조치, 8구역 근거 보고서를 담습니다. 승인된 사람 수정은 원문을 덮어쓰지 않고 `human_provided` 사실로 별도 표시합니다. 수량·금액·원산지·문서 식별자 판정은 LLM이 아니라 코드가 수행하며, 결과는 언제나 자동완료 대상이 아닙니다.
+
+`POST /internal/agent/v2/assistant/answers`는 Backend가 저장한 Review Run snapshot, 질문, 최근 검증 대화 최대 8턴만 받습니다. 답변은 Case·Evidence 근거 또는 제한된 일반 통관 안내로 분류되며, 사건 답변에는 사실·비교·Evidence ID 인용이 반드시 붙습니다. 이 호출은 Case, 문서, finding, 수정 제안을 직접 바꾸지 않습니다.
 
 패키지 안 `src/customs_ai_agent/contracts/schemas/backend/v3/`가 유일한 Agent HTTP 계약 원본입니다. Backend 소비자는 이 schema bytes를 자신의 저장소에 갱신해 사용합니다. Data Evidence 계약은 Data 저장소가 소유하며, Agent는 실행에 필요한 Data V3 schema bytes만 package에 두고 Harness가 sibling 바이트를 비교합니다.
 

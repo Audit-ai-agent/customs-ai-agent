@@ -25,7 +25,35 @@ _REQUIRED_REQUEST_FIELDS = {
     "review_run_id",
     "trade_type",
 }
-_ALLOWED_REQUEST_FIELDS = _REQUIRED_REQUEST_FIELDS
+_CHILD_REQUEST_FIELDS = {
+    "parent_review_run_id",
+    "applied_correction_proposal_ids",
+    "human_corrections",
+}
+_ALLOWED_REQUEST_FIELDS = _REQUIRED_REQUEST_FIELDS | _CHILD_REQUEST_FIELDS
+_CORRECTION_REQUIRED_FIELDS = {
+    "correction_proposal_id",
+    "document_id",
+    "field_name",
+    "new_value",
+    "reason",
+    "source_kind",
+}
+_CORRECTION_ALLOWED_FIELDS = _CORRECTION_REQUIRED_FIELDS | {
+    "item_id",
+    "fact_id",
+    "unit",
+}
+_ASSISTANT_REQUIRED_FIELDS = {
+    "schema_version",
+    "case_id",
+    "review_run_id",
+    "conversation_id",
+    "review_result",
+    "question",
+    "recent_turns",
+}
+_ASSISTANT_ALLOWED_FIELDS = _ASSISTANT_REQUIRED_FIELDS
 
 ERROR_RESPONSE_SCHEMA: dict[str, Any] = {
     "type": "object",
@@ -142,6 +170,71 @@ class InspectedRequest:
     canonical_sha256: str
 
 
+@dataclass(frozen=True, slots=True)
+class InspectedAssistantRequest:
+    review_run_id: str
+
+
+def _bounded_string(value: object, *, minimum: int, maximum: int) -> bool:
+    return isinstance(value, str) and minimum <= len(value) <= maximum
+
+
+def _inspect_child_context(decoded: dict[str, Any]) -> None:
+    """Validate the bounded, append-only child-run context before execution.
+
+    The runtime still owns model-level semantic validation, but admission must
+    accept every schema-valid V3.2 child request and reject unbounded nested
+    values before a review can be scheduled.  This keeps correction payloads
+    on the same small JSON surface as the text-only request itself.
+    """
+
+    parent_review_run_id = decoded.get("parent_review_run_id")
+    if parent_review_run_id is not None and (
+        not isinstance(parent_review_run_id, str) or _RUN_ID.fullmatch(parent_review_run_id) is None
+    ):
+        raise ServiceHttpError("request_invalid", 422)
+
+    proposal_ids = decoded.get("applied_correction_proposal_ids", [])
+    if not isinstance(proposal_ids, list) or len(proposal_ids) > 50:
+        raise ServiceHttpError("request_invalid", 422)
+    if not all(_bounded_string(value, minimum=1, maximum=128) for value in proposal_ids):
+        raise ServiceHttpError("request_invalid", 422)
+    if len(proposal_ids) != len(set(proposal_ids)):
+        raise ServiceHttpError("request_invalid", 422)
+
+    corrections = decoded.get("human_corrections", [])
+    if not isinstance(corrections, list) or len(corrections) > 50:
+        raise ServiceHttpError("request_invalid", 422)
+    correction_ids: list[str] = []
+    for correction in corrections:
+        if (
+            not isinstance(correction, dict)
+            or set(correction) - _CORRECTION_ALLOWED_FIELDS
+            or not _CORRECTION_REQUIRED_FIELDS.issubset(correction)
+        ):
+            raise ServiceHttpError("request_invalid", 422)
+        if not _bounded_string(correction["correction_proposal_id"], minimum=1, maximum=128):
+            raise ServiceHttpError("request_invalid", 422)
+        if not _bounded_string(correction["document_id"], minimum=1, maximum=128):
+            raise ServiceHttpError("request_invalid", 422)
+        if not _bounded_string(correction["field_name"], minimum=1, maximum=64):
+            raise ServiceHttpError("request_invalid", 422)
+        if not _bounded_string(correction["new_value"], minimum=1, maximum=2_000):
+            raise ServiceHttpError("request_invalid", 422)
+        if not _bounded_string(correction["reason"], minimum=1, maximum=2_000):
+            raise ServiceHttpError("request_invalid", 422)
+        if correction["source_kind"] != "human_provided":
+            raise ServiceHttpError("request_invalid", 422)
+        for optional_field, maximum in (("item_id", 256), ("fact_id", 256), ("unit", 64)):
+            value = correction.get(optional_field)
+            if value is not None and not _bounded_string(value, minimum=0, maximum=maximum):
+                raise ServiceHttpError("request_invalid", 422)
+        correction_ids.append(correction["correction_proposal_id"])
+
+    if len(correction_ids) != len(set(correction_ids)) or set(correction_ids) != set(proposal_ids):
+        raise ServiceHttpError("request_invalid", 422)
+
+
 def inspect_text_request(payload: bytes, settings: ServiceSettings) -> InspectedRequest:
     """Reject malformed, visual, or oversized calls before worker execution."""
 
@@ -184,6 +277,7 @@ def inspect_text_request(payload: bytes, settings: ServiceSettings) -> Inspected
         text_characters += len(content_text)
         if text_characters > settings.max_text_characters:
             raise ServiceHttpError("request_too_large", 413)
+    _inspect_child_context(decoded)
     canonical = json.dumps(
         decoded,
         ensure_ascii=False,
@@ -198,9 +292,40 @@ def inspect_text_request(payload: bytes, settings: ServiceSettings) -> Inspected
     )
 
 
+def inspect_assistant_request(payload: bytes) -> InspectedAssistantRequest:
+    """Reject malformed or oversized assistant context before runtime execution."""
+
+    try:
+        decoded = json.loads(
+            payload.decode("utf-8"),
+            object_pairs_hook=_object_without_duplicates,
+            parse_constant=_reject_constant,
+        )
+    except (UnicodeDecodeError, ValueError, RecursionError):
+        raise ServiceHttpError("request_invalid", 422) from None
+    if not isinstance(decoded, dict) or set(decoded) - _ASSISTANT_ALLOWED_FIELDS:
+        raise ServiceHttpError("request_invalid", 422)
+    if not _ASSISTANT_REQUIRED_FIELDS.issubset(decoded):
+        raise ServiceHttpError("required_field_missing", 422)
+    if decoded.get("schema_version") != "1.0":
+        raise ServiceHttpError("request_invalid", 422)
+    review_run_id = decoded.get("review_run_id")
+    if not isinstance(review_run_id, str) or _RUN_ID.fullmatch(review_run_id) is None:
+        raise ServiceHttpError("request_invalid", 422)
+    question = decoded.get("question")
+    turns = decoded.get("recent_turns")
+    if not isinstance(question, str) or not 1 <= len(question) <= 4000:
+        raise ServiceHttpError("request_invalid", 422)
+    if not isinstance(turns, list) or len(turns) > 8:
+        raise ServiceHttpError("request_invalid", 422)
+    return InspectedAssistantRequest(review_run_id=review_run_id)
+
+
 __all__ = [
     "ERROR_RESPONSE_SCHEMA",
     "InspectedRequest",
+    "InspectedAssistantRequest",
+    "inspect_assistant_request",
     "inspect_text_request",
     "raw_header_values",
     "read_bounded_json_body",

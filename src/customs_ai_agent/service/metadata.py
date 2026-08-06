@@ -28,7 +28,13 @@ def build_metadata(settings: ServiceSettings) -> dict[str, Any]:
         "service_api_version": SERVICE_API_VERSION,
         "service_mode": settings.service_mode,
         "human_review_only": True,
-        "capabilities": ["text", "evidence_http", "profile_mode_handshake"],
+        "capabilities": [
+            "text",
+            "evidence_http",
+            "bounded_planner",
+            "grounded_assistant",
+            "profile_mode_handshake",
+        ],
         "limits": {
             "max_body_bytes": settings.max_body_bytes,
             "max_documents": settings.max_documents,
@@ -38,6 +44,12 @@ def build_metadata(settings: ServiceSettings) -> dict[str, Any]:
         "schemas": {
             "review_request_v3_sha256": schema_sha256("backend", "v3", "review-request"),
             "review_result_v3_sha256": schema_sha256("backend", "v3", "review-result"),
+            "assistant_answer_request_v1_sha256": schema_sha256(
+                "backend", "v3", "assistant-answer-request"
+            ),
+            "assistant_answer_response_v1_sha256": schema_sha256(
+                "backend", "v3", "assistant-answer-response"
+            ),
             "evidence_retrieval_v3_sha256": schema_sha256("evidence", "v3", "rag-retrieval"),
             "evidence_readiness_v3_sha256": schema_sha256("evidence", "v3", "readiness"),
         },

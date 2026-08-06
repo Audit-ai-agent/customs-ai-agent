@@ -23,6 +23,8 @@ from customs_ai_agent.service.settings import ServiceSettings
 class ServiceRuntime(Protocol):
     def review_v3_json(self, payload: bytes) -> Any: ...
 
+    def assistant_answer_json(self, payload: bytes) -> Any: ...
+
     def close(self) -> None: ...
 
 
@@ -100,7 +102,7 @@ class AgentServiceController:
                     if completed is None:
                         raise ServiceHttpError("service_busy", 503, retryable=True)
                     self._replays.pop(completed, None)
-                task = asyncio.create_task(self._run_once(payload))
+                task = asyncio.create_task(self._run_once(payload, runtime_method_name))
                 replay = _Replay(request_hash=request_hash, task=task)
                 self._replays[review_run_id] = replay
                 replayed = False
@@ -111,7 +113,16 @@ class AgentServiceController:
                 task.add_done_callback(_mark_done)
         return await asyncio.shield(task), replayed
 
-    async def _run_once(self, payload: bytes) -> ServiceOutcome:
+    async def execute(self, *, payload: bytes, runtime_method_name: str) -> ServiceOutcome:
+        """Run one non-idempotent internal capability under the same bound."""
+
+        if runtime_method_name != "assistant_answer_json":
+            raise ServiceHttpError("capability_unavailable", 503, retryable=True)
+        if self._closing:
+            raise ServiceHttpError("service_draining", 503, retryable=True)
+        return await self._run_once(payload, runtime_method_name)
+
+    async def _run_once(self, payload: bytes, runtime_method_name: str) -> ServiceOutcome:
         try:
             await asyncio.wait_for(
                 self._capacity.acquire(), timeout=self._settings.queue_wait_seconds
@@ -119,8 +130,13 @@ class AgentServiceController:
         except TimeoutError:
             return ServiceOutcome(status_code=503, error_code="service_busy", retryable=True)
         try:
+            method = getattr(self._runtime, runtime_method_name, None)
+            if not callable(method):
+                raise RuntimeConfigurationError(
+                    "runtime_capability_unavailable", "The Agent capability is unavailable."
+                )
             result = await asyncio.wait_for(
-                asyncio.to_thread(self._runtime.review_v3_json, payload),
+                asyncio.to_thread(method, payload),
                 timeout=self._settings.run_timeout_seconds,
             )
             public = result.model_dump(mode="json", warnings=False)

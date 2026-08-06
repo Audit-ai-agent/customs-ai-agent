@@ -3,6 +3,7 @@
 from __future__ import annotations
 
 import importlib
+import json
 import os
 import re
 from dataclasses import dataclass
@@ -10,7 +11,11 @@ from typing import Any, Mapping, Protocol
 
 from pydantic import BaseModel, ConfigDict, Field, SecretStr, ValidationError, field_validator
 
-from customs_ai_agent.prompts import load_document_analysis_system_prompt
+from customs_ai_agent.prompts import (
+    load_document_analysis_system_prompt,
+    load_grounded_assistant_system_prompt,
+    load_grounded_report_system_prompt,
+)
 from customs_ai_agent.scenario_transcript import ScenarioTranscriptRun
 from customs_ai_agent.schemas.llm import ClaudeDocumentCandidate
 
@@ -238,8 +243,139 @@ class ClaudeDocumentAnalyzer:
             close()
 
 
+class ClaudeGroundedResponder:
+    """One bounded Claude response for a review report or assistant answer.
+
+    The caller validates the returned JSON against the public wire model and
+    uses a deterministic fallback for any provider or grounding failure.
+    """
+
+    def __init__(self, settings: ClaudeSettings, client: Any) -> None:
+        self._settings = settings
+        self._client = client
+        self.model_id = settings.model
+        self._system_prompt = load_grounded_assistant_system_prompt()
+        self._report_system_prompt = load_grounded_report_system_prompt()
+
+    @classmethod
+    def from_settings(cls, settings: ClaudeSettings) -> "ClaudeGroundedResponder":
+        try:
+            module = importlib.import_module("anthropic")
+            client = module.Anthropic(
+                api_key=settings.api_key.get_secret_value(),
+                timeout=settings.timeout_seconds,
+                max_retries=1,
+            )
+        except ModuleNotFoundError:
+            raise LLMConfigurationError(
+                "Install the functional-uat extra before Claude UAT."
+            ) from None
+        except Exception:
+            raise LLMConfigurationError(
+                "The local Claude client could not be initialized."
+            ) from None
+        return cls(settings, client)
+
+    def respond(
+        self,
+        payload: Mapping[str, Any],
+        *,
+        transcript: ScenarioTranscriptRun | None = None,
+        purpose: str,
+    ) -> dict[str, Any]:
+        """Make exactly one direct provider call and return its JSON object."""
+
+        if purpose not in {"assistant_answer", "review_report"}:
+            raise LLMOutputValidationError("Claude response purpose is invalid.")
+        system_prompt = (
+            self._report_system_prompt if purpose == "review_report" else self._system_prompt
+        )
+        user_message = json.dumps(payload, ensure_ascii=False, separators=(",", ":"), default=str)
+        request_payload = {
+            "provider": "anthropic",
+            "purpose": purpose,
+            "model": self.model_id,
+            "max_tokens": self._settings.max_tokens,
+            "temperature": 0,
+            "system_prompt": system_prompt,
+            "messages": [{"role": "user", "content": user_message}],
+        }
+        if transcript is not None:
+            transcript = transcript.with_sensitive_values(
+                (self._settings.api_key.get_secret_value(),)
+            )
+            transcript.write("claude", f"{purpose}_request_started", request_payload)
+        try:
+            response = self._client.messages.create(
+                model=self.model_id,
+                max_tokens=self._settings.max_tokens,
+                temperature=0,
+                system=system_prompt,
+                messages=request_payload["messages"],
+            )
+        except Exception:
+            if transcript is not None:
+                transcript.write(
+                    "claude",
+                    f"{purpose}_request_failed",
+                    {
+                        "provider": "anthropic",
+                        "model": self.model_id,
+                        "error_code": "provider_request_failed",
+                    },
+                )
+            raise LLMProviderError("Claude grounded response is unavailable.") from None
+        content = getattr(response, "content", None)
+        if not isinstance(content, list):
+            if transcript is not None:
+                transcript.write(
+                    "claude",
+                    f"{purpose}_response_invalid",
+                    {
+                        "provider": "anthropic",
+                        "model": self.model_id,
+                        "error_code": "provider_response_invalid",
+                    },
+                )
+            raise LLMOutputValidationError("Claude did not return a text result.")
+        output = "".join(
+            part
+            for part in (getattr(item, "text", None) for item in content)
+            if isinstance(part, str)
+        ).strip()
+        if transcript is not None:
+            transcript.write(
+                "claude",
+                f"{purpose}_response_received",
+                {"provider": "anthropic", "model": self.model_id, "output_text": output},
+            )
+        try:
+            parsed = json.loads(output)
+        except (TypeError, ValueError):
+            if transcript is not None:
+                transcript.write(
+                    "claude",
+                    f"{purpose}_response_invalid",
+                    {
+                        "provider": "anthropic",
+                        "model": self.model_id,
+                        "error_code": "provider_output_invalid",
+                    },
+                )
+            raise LLMOutputValidationError("Claude returned invalid JSON.") from None
+        if not isinstance(parsed, dict):
+            raise LLMOutputValidationError("Claude returned an invalid JSON object.")
+        return parsed
+
+    def close(self) -> None:
+        close = getattr(self._client, "close", None)
+        if callable(close):
+            close()
+
+
 __all__ = [
     "ClaudeDocumentAnalyzer",
+    "ClaudeGroundedResponder",
     "ClaudeSettings",
     "DEFAULT_CLAUDE_MODEL",
     "DocumentAnalysis",
