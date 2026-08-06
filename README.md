@@ -98,7 +98,7 @@ HTTP Authorization/Cookie 헤더, 세션·서비스 token, API key, 비밀번호
 
 여기서 Backend profile init은 Agent용 bearer token을 로컬에 만들기 위한 준비 단계일 뿐 Backend 서버를 먼저 띄우는 뜻이 아닙니다. Data `dev-fixture`는 첫 실행 때 토큰을 생성하므로, 실행 순서의 첫 단계가 끝난 뒤 Agent importer를 실행할 수 있습니다.
 
-기본 개발에서는 Data의 `dev-fixture`를 먼저 실행하고 Agent를 시작합니다. 기본 Agent 포트는 Backend와 겹치지 않는 `127.0.0.1:8090`입니다.
+기본 개발에서는 Data의 `dev-fixture`를 먼저 실행하고 Agent를 시작합니다. 기본 Agent 포트는 Backend와 겹치지 않고 Windows의 예약 80xx 범위를 피하는 `127.0.0.1:18090`입니다.
 
 ```powershell
 . .\tools\Import-AgentProfile.ps1 -Profile dev-fixture
@@ -112,7 +112,7 @@ uv run --locked --no-sync --group dev customs-ai-agent-dev-serve
 uv run --locked --no-sync --group dev --extra functional-uat customs-ai-agent-functional-uat-serve
 ```
 
-Data profile을 같은 PC에서 병렬로 띄울 때에는 Data를 다른 loopback 포트로 실행하고, Agent importer에도 같은 포트를 지정합니다. 예를 들어 UAT Data를 `18183`으로 실행했다면 `-EvidencePort 18183`을 추가합니다. 표준 전체 서비스 topology에서 Agent는 Backend가 가리키는 `8090`을 유지합니다.
+Data profile을 같은 PC에서 병렬로 띄울 때에는 Data를 다른 loopback 포트로 실행하고, Agent importer에도 같은 포트를 지정합니다. 예를 들어 UAT Data를 `18183`으로 실행했다면 `-EvidencePort 18183`을 추가합니다. 표준 전체 서비스 topology에서 Agent는 Backend가 가리키는 `18090`을 유지합니다.
 
 모든 내부 요청은 `127.0.0.1`에만 바인딩되고, 요청·응답의 `X-Customs-Service-Mode`가 일치해야 합니다.
 
@@ -127,7 +127,7 @@ GET  /internal/agent/v2/metadata
 POST /internal/agent/v2/reviews
 ```
 
-`POST /internal/agent/v2/reviews`는 텍스트 문서, Case ID, 실행 ID, 기준일, 무역 유형, `KR`만 받습니다. 응답은 사람 검토 상태, 간단한 요약, Data Evidence, 확인 항목, 결과 hash를 담습니다.
+`POST /internal/agent/v2/reviews`는 텍스트 문서, Case ID, 실행 ID, 기준일, 무역 유형, `KR`만 받습니다. V3.1 응답은 사람 검토 상태와 함께 실제 workflow 단계, 문서별 추출 사실과 원문 인용, 코드 기반 비교 결과, Evidence에 연결된 finding·담당자 조치를 담습니다. 수량·금액·원산지·문서 식별자 판정은 LLM이 아니라 코드가 수행하며, 결과는 언제나 자동완료 대상이 아닙니다.
 
 패키지 안 `src/customs_ai_agent/contracts/schemas/backend/v3/`가 유일한 Agent HTTP 계약 원본입니다. Backend 소비자는 이 schema bytes를 자신의 저장소에 갱신해 사용합니다. Data Evidence 계약은 Data 저장소가 소유하며, Agent는 실행에 필요한 Data V3 schema bytes만 package에 두고 Harness가 sibling 바이트를 비교합니다.
 

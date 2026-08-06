@@ -38,7 +38,7 @@ Allowed document fields:
 - unknown: no fields and no line items
 
 Allowed invoice line-item fields:
-description, hs_code, quantity, unit_price, amount, origin_country
+description, hs_code, quantity, unit, unit_price, amount, origin_country
 
 Allowed packing-list line-item fields:
 item_no, description, quantity, unit, net_weight_kg, gross_weight_kg, package_count, package_type,

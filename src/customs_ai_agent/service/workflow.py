@@ -1,0 +1,1391 @@
+"""Bounded, source-grounded document-review workflow.
+
+The workflow deliberately has no open-ended planner or tool surface.  A
+profile-specific analyzer can only extract text facts.  Everything that turns
+those facts into a comparison, finding, or retrieval request is deterministic
+Python code in this module.
+"""
+
+from __future__ import annotations
+
+import hashlib
+import json
+import re
+import unicodedata
+from dataclasses import dataclass, replace
+from decimal import Decimal, InvalidOperation
+from typing import Any, Iterable, Literal, Mapping, Protocol
+
+from customs_ai_agent.adapters.llm import DocumentAnalysis
+from customs_ai_agent.schemas.llm import ClaudeDocumentCandidate
+from customs_ai_agent.schemas.v3 import (
+    ComparisonOperandV3,
+    ComparisonV3,
+    DocumentAnalysisV3,
+    ExtractionWarningV3,
+    FactV3,
+    FindingV3,
+    LineItemV3,
+    ReextractionV3,
+    ServiceReviewRunRequestV3,
+    SourceV3,
+    WorkflowStageV3,
+    WorkflowV3,
+)
+from customs_ai_agent.scenario_transcript import ScenarioTranscriptRun
+
+
+_KNOWN_TYPES = {
+    "invoice",
+    "packing_list",
+    "bill_of_lading",
+    "certificate_of_origin",
+}
+_NUMERIC_FIELDS = {
+    "quantity",
+    "unit_price",
+    "amount",
+    "total_amount",
+    "gross_weight_kg",
+    "total_gross_weight_kg",
+    "net_weight_kg",
+    "total_net_weight_kg",
+    "package_count",
+    "packages",
+    "measurement_cbm",
+    "total_measurement_cbm",
+}
+_IDENTIFIER_FIELDS = {
+    "invoice_no",
+    "packing_no",
+    "bl_no",
+    "certificate_no",
+    "shipment_id",
+    "container_numbers",
+}
+_ORIGIN_FIELDS = {"origin_country", "country_of_origin"}
+_DESCRIPTION_FIELDS = {"description", "goods_description"}
+_CURRENCY_RE = re.compile(r"\b(KRW|USD|EUR|JPY|CNY|GBP)\b", re.IGNORECASE)
+_NUMBER_RE = re.compile(r"[-+]?\d[\d,]*(?:\.\d+)?")
+_CONTAINER_RE = re.compile(r"\b[A-Z]{4}\d{7}\b")
+_SAFE_NAME = re.compile(r"[^a-z0-9_]+")
+
+
+class _Analyzer(Protocol):
+    model_id: str
+
+    def analyze(
+        self,
+        document: Mapping[str, Any],
+        *,
+        transcript: ScenarioTranscriptRun | None = None,
+        focus_fields: tuple[str, ...] = (),
+    ) -> DocumentAnalysis: ...
+
+
+@dataclass(frozen=True)
+class BoundedWorkflowOutput:
+    """The deterministic work completed before the single Evidence call."""
+
+    document_analyses: list[DocumentAnalysisV3]
+    comparisons: list[ComparisonV3]
+    findings: list[FindingV3]
+    workflow: WorkflowV3
+    retrieval_items: list[dict[str, Any]]
+
+    def with_evidence_status(self, data_status: str) -> "BoundedWorkflowOutput":
+        """Record the one actual Evidence result without changing comparisons."""
+
+        retrieval_status = {
+            "ok": "completed",
+            "partial": "needs_review",
+            "failed": "failed",
+        }.get(data_status, "failed")
+        stages = [
+            stage.model_copy(
+                update={"status": retrieval_status, "summary": _evidence_summary(data_status)}
+            )
+            if stage.stage == "retrieve_evidence"
+            else stage
+            for stage in self.workflow.stages
+        ]
+        stages = [
+            stage.model_copy(
+                update={
+                    "status": (
+                        "completed" if data_status in {"ok", "partial", "failed"} else "failed"
+                    ),
+                    "summary": "제한된 심사 결과를 생성했습니다.",
+                }
+            )
+            if stage.stage == "generate_result"
+            else stage
+            for stage in stages
+        ]
+        workflow_status: Literal["completed", "partial", "failed"]
+        if data_status == "failed":
+            workflow_status = "failed"
+        elif data_status == "partial" or self.workflow.status == "partial":
+            workflow_status = "partial"
+        else:
+            workflow_status = "completed"
+        return replace(
+            self,
+            workflow=WorkflowV3(
+                status=workflow_status,
+                stages=stages,
+                reextractions=self.workflow.reextractions,
+            ),
+        )
+
+
+def run_bounded_workflow(
+    request: ServiceReviewRunRequestV3,
+    analyzer: _Analyzer,
+    *,
+    transcript: ScenarioTranscriptRun | None = None,
+) -> BoundedWorkflowOutput:
+    """Extract once, make at most one focused retry per document, then compare."""
+
+    initial: dict[str, DocumentAnalysis] = {}
+    for document in request.documents:
+        initial[document.document_id] = analyzer.analyze(
+            document.model_dump(mode="json", warnings=False), transcript=transcript
+        )
+
+    retry_targets = _reextraction_targets(request, initial)
+    analyses = dict(initial)
+    reextractions: list[ReextractionV3] = []
+    retry_unavailable = False
+    for document in request.documents:
+        requested_fields = retry_targets.get(document.document_id)
+        if not requested_fields:
+            continue
+        try:
+            candidate = analyzer.analyze(
+                document.model_dump(mode="json", warnings=False),
+                transcript=transcript,
+                focus_fields=tuple(requested_fields),
+            )
+        except Exception:
+            retry_unavailable = True
+            reextractions.append(
+                ReextractionV3(
+                    document_id=document.document_id,
+                    requested_fields=requested_fields,
+                    status="unavailable",
+                )
+            )
+            continue
+        analyses[document.document_id] = _prefer_more_complete(
+            analyses[document.document_id], candidate
+        )
+        reextractions.append(
+            ReextractionV3(
+                document_id=document.document_id,
+                requested_fields=requested_fields,
+                status="completed",
+            )
+        )
+
+    rendered = [
+        _render_analysis(document, analyses[document.document_id]) for document in request.documents
+    ]
+    comparisons = _comparisons(rendered)
+    findings = _findings_from_comparisons(comparisons)
+    findings.extend(_warning_findings(rendered))
+    retrieval_items = retrieval_items_from_analyses(request, rendered)
+    stages = _workflow_stages(
+        rendered,
+        comparisons,
+        reextractions,
+        retry_unavailable=retry_unavailable,
+    )
+    workflow_status: Literal["completed", "partial", "failed"] = (
+        "partial" if retry_unavailable else "completed"
+    )
+    return BoundedWorkflowOutput(
+        document_analyses=rendered,
+        comparisons=comparisons,
+        findings=_dedupe_findings(findings),
+        workflow=WorkflowV3(
+            status=workflow_status,
+            stages=stages,
+            reextractions=reextractions,
+        ),
+        retrieval_items=retrieval_items,
+    )
+
+
+def retrieval_items_from_analyses(
+    request: ServiceReviewRunRequestV3,
+    analyses: list[DocumentAnalysisV3],
+) -> list[dict[str, Any]]:
+    """Build the one shared Data request from extracted, source-grounded facts."""
+
+    items: list[dict[str, Any]] = []
+    for document, analysis in zip(request.documents, analyses, strict=True):
+        item_candidates = list(analysis.line_items)
+        has_item_hs = False
+        for position, item in enumerate(item_candidates, start=1):
+            hs = _first_fact(item.facts, "hs_code")
+            description = _first_fact(item.facts, *_DESCRIPTION_FIELDS)
+            origin = _first_fact(item.facts, *_ORIGIN_FIELDS)
+            if hs is None:
+                continue
+            has_item_hs = True
+            items.append(
+                {
+                    "item_id": f"{document.document_id}-{position}"[:128],
+                    "description": (description.raw_value if description else item.source.quote)[
+                        :2000
+                    ],
+                    "hs_code": hs.normalized_value or hs.raw_value,
+                    "origin_country": (origin.normalized_value if origin else None),
+                    "destination_country": "KR",
+                }
+            )
+        document_hs = _first_fact(analysis.facts, "hs_code", "hs_codes")
+        # The deterministic extractor can find the same HS code both in a
+        # document-level field and in its only line item.  The line item is
+        # the more precise retrieval target, so querying the document copy as
+        # well would duplicate Evidence and its downstream finding.
+        if document_hs is not None and not has_item_hs:
+            description = _first_fact(analysis.facts, *_DESCRIPTION_FIELDS)
+            origin = _first_fact(analysis.facts, *_ORIGIN_FIELDS)
+            items.append(
+                {
+                    "item_id": f"{document.document_id}-document"[:128],
+                    "description": (
+                        description.raw_value if description else document.content_text[:2000]
+                    )[:2000],
+                    "hs_code": document_hs.normalized_value or document_hs.raw_value,
+                    "origin_country": (origin.normalized_value if origin else None),
+                    "destination_country": "KR",
+                }
+            )
+        if not any(item["item_id"].startswith(f"{document.document_id}-") for item in items):
+            origin = _first_fact(analysis.facts, *_ORIGIN_FIELDS)
+            items.append(
+                {
+                    "item_id": f"{document.document_id}-document"[:128],
+                    "description": document.content_text[:2000].strip() or "customs document",
+                    "hs_code": None,
+                    "origin_country": (origin.normalized_value if origin else None),
+                    "destination_country": "KR",
+                }
+            )
+    return items[:100]
+
+
+def finding_for_evidence_requirement(
+    *,
+    code: str,
+    message: str,
+    item_id: str,
+    evidence_id: str,
+) -> FindingV3:
+    """Create a stable finding for a Data-required document check."""
+
+    return _finding(
+        code=code,
+        severity="medium",
+        message=message,
+        item_id=item_id,
+        evidence_ids=[evidence_id],
+        document_ids=[item_id.rsplit("-", 1)[0]] if "-" in item_id else [],
+    )
+
+
+def _render_analysis(
+    document: Any,
+    analysis: DocumentAnalysis,
+) -> DocumentAnalysisV3:
+    candidate = analysis.candidate
+    warnings: list[ExtractionWarningV3] = []
+    document_type = candidate.document_type
+    classification_source: SourceV3 | None = None
+    if document_type != "unknown":
+        classification_source = _source(
+            document,
+            candidate.classification_source_quote,
+            warnings,
+            code="classification_source_invalid",
+            label="문서 유형 근거",
+        )
+        if classification_source is None:
+            document_type = "unknown"
+
+    facts: list[FactV3] = []
+    for index, field in enumerate(candidate.fields, start=1):
+        fact = _render_fact(
+            document,
+            field.name,
+            field.value,
+            field.source_quote,
+            fact_id=f"{document.document_id}:field:{_safe_name_value(field.name)}:{index}",
+            warnings=warnings,
+        )
+        if fact is not None:
+            facts.append(fact)
+
+    line_items: list[LineItemV3] = []
+    for item_index, item in enumerate(candidate.line_items, start=1):
+        item_source = _source(
+            document,
+            item.source_quote,
+            warnings,
+            code="line_item_source_invalid",
+            label="품목 근거",
+        )
+        if item_source is None:
+            continue
+        item_id = f"{document.document_id}:item:{item_index}"
+        item_facts: list[FactV3] = []
+        for field_index, field in enumerate(item.fields, start=1):
+            fact = _render_fact(
+                document,
+                field.name,
+                field.value,
+                field.source_quote,
+                fact_id=(f"{item_id}:field:{_safe_name_value(field.name)}:{field_index}"),
+                warnings=warnings,
+                containing_quote=item.source_quote,
+            )
+            if fact is not None:
+                item_facts.append(fact)
+        line_items.append(LineItemV3(item_id=item_id, source=item_source, facts=item_facts))
+
+    return DocumentAnalysisV3(
+        document_id=document.document_id,
+        filename=document.filename,
+        declared_type=document.declared_type,
+        document_type=document_type,
+        classification_source=classification_source,
+        extraction_status="needs_review" if warnings or document_type == "unknown" else "complete",
+        facts=facts,
+        line_items=line_items,
+        warnings=warnings,
+    )
+
+
+def _source(
+    document: Any,
+    quote: str,
+    warnings: list[ExtractionWarningV3],
+    *,
+    code: str,
+    label: str,
+) -> SourceV3 | None:
+    text = document.content_text
+    if not quote or quote not in text:
+        warnings.append(
+            ExtractionWarningV3(
+                code=code,
+                message=f"{label} 인용문이 입력 문서 본문에서 확인되지 않았습니다.",
+            )
+        )
+        return None
+    start = text.find(quote)
+    occurrence = len(list(re.finditer(re.escape(quote), text[:start])))
+    return SourceV3(document_id=document.document_id, quote=quote, occurrence=occurrence)
+
+
+def _render_fact(
+    document: Any,
+    name: str,
+    value: str,
+    quote: str,
+    *,
+    fact_id: str,
+    warnings: list[ExtractionWarningV3],
+    containing_quote: str | None = None,
+) -> FactV3 | None:
+    if not value or value not in quote:
+        warnings.append(
+            ExtractionWarningV3(
+                code="field_source_invalid",
+                message=f"{name} 값의 원문 인용을 확인할 수 없습니다.",
+            )
+        )
+        return None
+    if containing_quote is not None and quote not in containing_quote:
+        warnings.append(
+            ExtractionWarningV3(
+                code="line_item_field_source_invalid",
+                message=f"{name} 값의 인용문이 품목 원문 범위 안에 있지 않습니다.",
+            )
+        )
+        return None
+    source = _source(
+        document,
+        quote,
+        warnings,
+        code="field_source_invalid",
+        label=f"{name} 값",
+    )
+    if source is None:
+        return None
+    normalized_value, unit = _normalize_value(name, value)
+    return FactV3(
+        fact_id=fact_id,
+        name=name.strip().casefold(),
+        raw_value=value,
+        normalized_value=normalized_value,
+        unit=unit,
+        source=source,
+    )
+
+
+def _normalize_value(name: str, raw: str) -> tuple[str | None, str | None]:
+    name = name.strip().casefold()
+    text = unicodedata.normalize("NFKC", raw).strip()
+    if not text:
+        return None, None
+    if name in {"hs_code", "hs_codes"}:
+        digits = re.sub(r"\D", "", text)
+        return (digits, None) if re.fullmatch(r"\d{6,10}", digits) else (None, None)
+    if name in _ORIGIN_FIELDS:
+        return re.sub(r"\s+", " ", text).upper(), None
+    if name in _DESCRIPTION_FIELDS:
+        return re.sub(r"\s+", " ", text).casefold(), None
+    if name == "container_numbers":
+        containers = sorted(set(_CONTAINER_RE.findall(text.upper())))
+        if containers:
+            return "|".join(containers), None
+        return re.sub(r"\s+", "", text).upper(), None
+    if name in _IDENTIFIER_FIELDS:
+        return re.sub(r"\s+", "", text).upper(), None
+    if name in _NUMERIC_FIELDS:
+        match = _NUMBER_RE.search(text)
+        if match is None:
+            return None, _unit_for_numeric(name, text)
+        try:
+            number = Decimal(match.group(0).replace(",", ""))
+        except InvalidOperation:
+            return None, _unit_for_numeric(name, text)
+        return _decimal_text(number), _unit_for_numeric(name, text)
+    return re.sub(r"\s+", " ", text).casefold(), None
+
+
+def _unit_for_numeric(name: str, text: str) -> str | None:
+    currency = _CURRENCY_RE.search(text)
+    if name in {"unit_price", "amount", "total_amount"}:
+        return currency.group(1).upper() if currency else None
+    unit = re.search(
+        r"\b(KGS?|KG|GRAMS?|G|TONS?|TON|PCS?|PIECES?|EA|CTNS?|CARTONS?|CBM)\b", text, re.I
+    )
+    if unit is None:
+        return None
+    value = unit.group(1).upper()
+    return {
+        "KGS": "KG",
+        "GRAM": "G",
+        "GRAMS": "G",
+        "TONS": "TON",
+        "PC": "PCS",
+        "PIECES": "PCS",
+        "CTN": "CTN",
+        "CARTONS": "CTN",
+    }.get(value, value)
+
+
+def _decimal_text(value: Decimal) -> str:
+    text = format(value.normalize(), "f")
+    return text.rstrip("0").rstrip(".") if "." in text else text
+
+
+def _comparisons(analyses: list[DocumentAnalysisV3]) -> list[ComparisonV3]:
+    comparisons: list[ComparisonV3] = []
+    comparisons.extend(_classification_and_required_field_checks(analyses))
+    comparisons.extend(_invoice_packing_checks(analyses))
+    comparisons.extend(_invoice_origin_checks(analyses))
+    comparisons.extend(_bill_packing_checks(analyses))
+    return comparisons
+
+
+def _classification_and_required_field_checks(
+    analyses: list[DocumentAnalysisV3],
+) -> list[ComparisonV3]:
+    comparisons: list[ComparisonV3] = []
+    requirements: dict[str, tuple[str, ...]] = {
+        "invoice": ("invoice_no", "total_amount", "hs_code"),
+        "packing_list": ("packing_no",),
+        "certificate_of_origin": ("certificate_no", "origin_country", "hs_code"),
+        "bill_of_lading": ("bl_no",),
+    }
+    for analysis in analyses:
+        if analysis.document_type == "unknown":
+            comparisons.append(
+                _comparison(
+                    rule_code="document_type_classification",
+                    status="needs_review",
+                    left=_operand(document_id=analysis.document_id),
+                    right=_operand(),
+                    message="문서 유형을 신뢰할 수 있게 판별하지 못했습니다.",
+                )
+            )
+            continue
+        for name in requirements.get(analysis.document_type, ()):
+            fact = _first_fact_from_analysis(analysis, name)
+            code = "hs_code_presence" if name == "hs_code" else "required_field_presence"
+            comparisons.append(
+                _comparison(
+                    rule_code=code,
+                    status="pass" if fact is not None else "needs_review",
+                    left=_operand_from_fact(analysis, None, fact),
+                    right=_operand(),
+                    expected_value=name,
+                    observed_value=fact.raw_value if fact else None,
+                    unit=fact.unit if fact else None,
+                    message=(
+                        f"{analysis.filename}에서 필수 {name} 값을 확인했습니다."
+                        if fact is not None
+                        else f"{analysis.filename}에서 필수 {name} 값을 확인할 수 없습니다."
+                    ),
+                )
+            )
+    return comparisons
+
+
+def _invoice_packing_checks(analyses: list[DocumentAnalysisV3]) -> list[ComparisonV3]:
+    invoice, packing, ambiguity = _unique_pair(analyses, "invoice", "packing_list")
+    if ambiguity is not None:
+        return [ambiguity]
+    if invoice is None or packing is None:
+        return [
+            _comparison(
+                rule_code="invoice_packing_quantity_unit",
+                status="skip",
+                left=_operand(document_id=invoice.document_id if invoice else None),
+                right=_operand(document_id=packing.document_id if packing else None),
+                message="Invoice와 Packing List가 모두 있을 때 수량과 단위를 대조합니다.",
+            ),
+            _invoice_total_comparison(invoice),
+        ]
+    comparisons = _match_invoice_packing_items(invoice, packing)
+    comparisons.append(_invoice_total_comparison(invoice))
+    return comparisons
+
+
+def _match_invoice_packing_items(
+    invoice: DocumentAnalysisV3, packing: DocumentAnalysisV3
+) -> list[ComparisonV3]:
+    if not invoice.line_items or not packing.line_items:
+        return [
+            _comparison(
+                rule_code="invoice_packing_item_match",
+                status="needs_review",
+                left=_operand(document_id=invoice.document_id),
+                right=_operand(document_id=packing.document_id),
+                message="Invoice 또는 Packing List에서 비교 가능한 품목을 추출하지 못했습니다.",
+            )
+        ]
+    comparisons: list[ComparisonV3] = []
+    unmatched = set(range(len(packing.line_items)))
+    for invoice_item in invoice.line_items:
+        matches = [
+            index for index in unmatched if _item_match(invoice_item, packing.line_items[index])
+        ]
+        if len(matches) != 1:
+            comparisons.append(
+                _comparison(
+                    rule_code="invoice_packing_item_match",
+                    status="needs_review",
+                    left=_operand_from_item(invoice, invoice_item),
+                    right=_operand(document_id=packing.document_id),
+                    message="Invoice 품목에 대응하는 Packing List 품목을 하나로 정할 수 없습니다.",
+                )
+            )
+            continue
+        packing_item = packing.line_items[matches[0]]
+        unmatched.remove(matches[0])
+        comparisons.append(_quantity_unit_comparison(invoice, invoice_item, packing, packing_item))
+        comparisons.append(_invoice_amount_comparison(invoice, invoice_item))
+    for index in sorted(unmatched):
+        comparisons.append(
+            _comparison(
+                rule_code="invoice_packing_item_match",
+                status="needs_review",
+                left=_operand(document_id=invoice.document_id),
+                right=_operand_from_item(packing, packing.line_items[index]),
+                message="Packing List 품목에 대응하는 Invoice 품목을 하나로 정할 수 없습니다.",
+            )
+        )
+    return comparisons
+
+
+def _quantity_unit_comparison(
+    invoice: DocumentAnalysisV3,
+    invoice_item: LineItemV3,
+    packing: DocumentAnalysisV3,
+    packing_item: LineItemV3,
+) -> ComparisonV3:
+    invoice_qty = _first_fact(invoice_item.facts, "quantity")
+    packing_qty = _first_fact(packing_item.facts, "quantity")
+    if invoice_qty is None or packing_qty is None:
+        return _comparison(
+            rule_code="invoice_packing_quantity_unit",
+            status="needs_review",
+            left=_operand_from_fact(invoice, invoice_item, invoice_qty),
+            right=_operand_from_fact(packing, packing_item, packing_qty),
+            message="Invoice와 Packing List의 수량 또는 단위를 모두 확인할 수 없습니다.",
+        )
+    if invoice_qty.normalized_value is None or packing_qty.normalized_value is None:
+        return _comparison(
+            rule_code="invoice_packing_quantity_unit",
+            status="needs_review",
+            left=_operand_from_fact(invoice, invoice_item, invoice_qty),
+            right=_operand_from_fact(packing, packing_item, packing_qty),
+            message="수량을 코드로 비교할 수 있는 형식으로 정규화하지 못했습니다.",
+        )
+    invoice_unit = _effective_quantity_unit(invoice_item, invoice_qty)
+    packing_unit = _effective_quantity_unit(packing_item, packing_qty)
+    if not invoice_unit or not packing_unit or invoice_unit != packing_unit:
+        return _comparison(
+            rule_code="invoice_packing_quantity_unit",
+            status="needs_review",
+            left=_operand_from_fact(invoice, invoice_item, invoice_qty),
+            right=_operand_from_fact(packing, packing_item, packing_qty),
+            expected_value=invoice_qty.normalized_value,
+            observed_value=packing_qty.normalized_value,
+            unit=invoice_unit or packing_unit,
+            message="수량 단위가 없거나 서로 달라 자동으로 동등성을 판단하지 않았습니다.",
+        )
+    status = "pass" if invoice_qty.normalized_value == packing_qty.normalized_value else "mismatch"
+    return _comparison(
+        rule_code="invoice_packing_quantity_unit",
+        status=status,
+        left=_operand_from_fact(invoice, invoice_item, invoice_qty),
+        right=_operand_from_fact(packing, packing_item, packing_qty),
+        expected_value=invoice_qty.normalized_value,
+        observed_value=packing_qty.normalized_value,
+        unit=invoice_unit,
+        message=(
+            "Invoice와 Packing List의 수량·단위가 일치합니다."
+            if status == "pass"
+            else "Invoice와 Packing List의 수량이 일치하지 않습니다."
+        ),
+    )
+
+
+def _invoice_amount_comparison(invoice: DocumentAnalysisV3, item: LineItemV3) -> ComparisonV3:
+    quantity = _first_fact(item.facts, "quantity")
+    unit_price = _first_fact(item.facts, "unit_price")
+    amount = _first_fact(item.facts, "amount")
+    facts = [fact for fact in (quantity, unit_price) if fact is not None]
+    if quantity is None or unit_price is None or amount is None:
+        return _comparison(
+            rule_code="invoice_line_amount",
+            status="needs_review",
+            left=_operand_from_facts(invoice, item, facts),
+            right=_operand_from_fact(invoice, item, amount),
+            message="Invoice 품목의 수량·단가·금액을 모두 확인할 수 없습니다.",
+        )
+    if (
+        quantity.normalized_value is None
+        or unit_price.normalized_value is None
+        or amount.normalized_value is None
+        or not unit_price.unit
+        or unit_price.unit != amount.unit
+    ):
+        return _comparison(
+            rule_code="invoice_line_amount",
+            status="needs_review",
+            left=_operand_from_facts(invoice, item, facts),
+            right=_operand_from_fact(invoice, item, amount),
+            message="Invoice 품목 금액을 같은 통화와 숫자 형식으로 계산할 수 없습니다.",
+        )
+    expected = Decimal(quantity.normalized_value) * Decimal(unit_price.normalized_value)
+    expected_text = _decimal_text(expected)
+    status = "pass" if expected_text == amount.normalized_value else "mismatch"
+    return _comparison(
+        rule_code="invoice_line_amount",
+        status=status,
+        left=_operand_from_facts(
+            invoice,
+            item,
+            facts,
+            display_value=f"{quantity.normalized_value} × {unit_price.normalized_value}",
+        ),
+        right=_operand_from_fact(invoice, item, amount),
+        expected_value=expected_text,
+        observed_value=amount.normalized_value,
+        unit=amount.unit,
+        message=(
+            "Invoice 품목의 수량×단가와 금액이 일치합니다."
+            if status == "pass"
+            else "Invoice 품목의 수량×단가와 기재 금액이 일치하지 않습니다."
+        ),
+    )
+
+
+def _invoice_total_comparison(invoice: DocumentAnalysisV3 | None) -> ComparisonV3:
+    if invoice is None:
+        return _comparison(
+            rule_code="invoice_total_amount",
+            status="skip",
+            left=_operand(),
+            right=_operand(),
+            message="Invoice가 있을 때 품목 금액 합계와 총액을 대조합니다.",
+        )
+    total = _first_fact(invoice.facts, "total_amount")
+    amount_facts = [
+        fact for item in invoice.line_items for fact in item.facts if fact.name == "amount"
+    ]
+    if total is None or not amount_facts:
+        return _comparison(
+            rule_code="invoice_total_amount",
+            status="needs_review",
+            left=_operand_from_facts(invoice, None, amount_facts),
+            right=_operand_from_fact(invoice, None, total),
+            message="Invoice 품목 금액과 총액을 모두 확인할 수 없습니다.",
+        )
+    if (
+        total.normalized_value is None
+        or not total.unit
+        or any(fact.normalized_value is None or fact.unit != total.unit for fact in amount_facts)
+    ):
+        return _comparison(
+            rule_code="invoice_total_amount",
+            status="needs_review",
+            left=_operand_from_facts(invoice, None, amount_facts),
+            right=_operand_from_fact(invoice, None, total),
+            message="Invoice 품목 금액과 총액의 통화 또는 숫자 형식을 통일할 수 없습니다.",
+        )
+    expected = sum((Decimal(fact.normalized_value or "0") for fact in amount_facts), Decimal("0"))
+    expected_text = _decimal_text(expected)
+    status = "pass" if expected_text == total.normalized_value else "mismatch"
+    return _comparison(
+        rule_code="invoice_total_amount",
+        status=status,
+        left=_operand_from_facts(invoice, None, amount_facts, display_value=expected_text),
+        right=_operand_from_fact(invoice, None, total),
+        expected_value=expected_text,
+        observed_value=total.normalized_value,
+        unit=total.unit,
+        message=(
+            "Invoice 품목 금액 합계와 총액이 일치합니다."
+            if status == "pass"
+            else "Invoice 품목 금액 합계와 총액이 일치하지 않습니다."
+        ),
+    )
+
+
+def _invoice_origin_checks(analyses: list[DocumentAnalysisV3]) -> list[ComparisonV3]:
+    invoice, certificate, ambiguity = _unique_pair(analyses, "invoice", "certificate_of_origin")
+    if ambiguity is not None:
+        return [ambiguity]
+    if invoice is None or certificate is None:
+        return [
+            _comparison(
+                rule_code="invoice_certificate_origin",
+                status="skip",
+                left=_operand(document_id=invoice.document_id if invoice else None),
+                right=_operand(document_id=certificate.document_id if certificate else None),
+                message="Invoice와 원산지증명서가 모두 있을 때 원산지를 대조합니다.",
+            )
+        ]
+    invoice_origin = _first_fact_from_analysis(invoice, *_ORIGIN_FIELDS)
+    certificate_origin = _first_fact_from_analysis(certificate, *_ORIGIN_FIELDS)
+    return [
+        _simple_fact_comparison(
+            "invoice_certificate_origin",
+            invoice,
+            None,
+            invoice_origin,
+            certificate,
+            None,
+            certificate_origin,
+            missing_message="Invoice와 원산지증명서의 원산지를 모두 확인할 수 없습니다.",
+            pass_message="Invoice와 원산지증명서의 원산지가 일치합니다.",
+            mismatch_message="Invoice와 원산지증명서의 원산지가 일치하지 않습니다.",
+        )
+    ]
+
+
+def _bill_packing_checks(analyses: list[DocumentAnalysisV3]) -> list[ComparisonV3]:
+    bill, packing, ambiguity = _unique_pair(analyses, "bill_of_lading", "packing_list")
+    if ambiguity is not None:
+        return [ambiguity]
+    if bill is None or packing is None:
+        return [
+            _comparison(
+                rule_code=rule,
+                status="skip",
+                left=_operand(document_id=bill.document_id if bill else None),
+                right=_operand(document_id=packing.document_id if packing else None),
+                message="B/L과 Packing List가 모두 있을 때 대조합니다.",
+            )
+            for rule in (
+                "bill_packing_bl_no",
+                "bill_packing_container",
+                "bill_packing_gross_weight",
+            )
+        ]
+    return [
+        _simple_fact_comparison(
+            "bill_packing_bl_no",
+            bill,
+            None,
+            _first_fact_from_analysis(bill, "bl_no"),
+            packing,
+            None,
+            _first_fact_from_analysis(packing, "bl_no"),
+            missing_message="B/L 번호를 두 문서에서 모두 확인할 수 없습니다.",
+            pass_message="B/L 번호가 일치합니다.",
+            mismatch_message="B/L 번호가 일치하지 않습니다.",
+        ),
+        _simple_fact_comparison(
+            "bill_packing_container",
+            bill,
+            None,
+            _first_fact_from_analysis(bill, "container_numbers"),
+            packing,
+            None,
+            _first_fact_from_analysis(packing, "container_numbers"),
+            missing_message="컨테이너 번호를 두 문서에서 모두 확인할 수 없습니다.",
+            pass_message="컨테이너 번호가 일치합니다.",
+            mismatch_message="컨테이너 번호가 일치하지 않습니다.",
+        ),
+        _simple_fact_comparison(
+            "bill_packing_gross_weight",
+            bill,
+            None,
+            _first_fact_from_analysis(bill, "gross_weight_kg"),
+            packing,
+            None,
+            _first_fact_from_analysis(packing, "total_gross_weight_kg"),
+            missing_message="총중량을 두 문서에서 모두 확인할 수 없습니다.",
+            pass_message="B/L과 Packing List의 총중량이 일치합니다.",
+            mismatch_message="B/L과 Packing List의 총중량이 일치하지 않습니다.",
+        ),
+    ]
+
+
+def _simple_fact_comparison(
+    rule_code: str,
+    left_analysis: DocumentAnalysisV3,
+    left_item: LineItemV3 | None,
+    left_fact: FactV3 | None,
+    right_analysis: DocumentAnalysisV3,
+    right_item: LineItemV3 | None,
+    right_fact: FactV3 | None,
+    *,
+    missing_message: str,
+    pass_message: str,
+    mismatch_message: str,
+) -> ComparisonV3:
+    if left_fact is None or right_fact is None:
+        return _comparison(
+            rule_code=rule_code,
+            status="needs_review",
+            left=_operand_from_fact(left_analysis, left_item, left_fact),
+            right=_operand_from_fact(right_analysis, right_item, right_fact),
+            message=missing_message,
+        )
+    if left_fact.normalized_value is None or right_fact.normalized_value is None:
+        return _comparison(
+            rule_code=rule_code,
+            status="needs_review",
+            left=_operand_from_fact(left_analysis, left_item, left_fact),
+            right=_operand_from_fact(right_analysis, right_item, right_fact),
+            message="값을 코드로 비교할 수 있는 형식으로 정규화하지 못했습니다.",
+        )
+    if left_fact.unit != right_fact.unit:
+        return _comparison(
+            rule_code=rule_code,
+            status="needs_review",
+            left=_operand_from_fact(left_analysis, left_item, left_fact),
+            right=_operand_from_fact(right_analysis, right_item, right_fact),
+            expected_value=left_fact.normalized_value,
+            observed_value=right_fact.normalized_value,
+            unit=left_fact.unit or right_fact.unit,
+            message="단위가 없거나 서로 달라 자동으로 동등성을 판단하지 않았습니다.",
+        )
+    status = "pass" if left_fact.normalized_value == right_fact.normalized_value else "mismatch"
+    return _comparison(
+        rule_code=rule_code,
+        status=status,
+        left=_operand_from_fact(left_analysis, left_item, left_fact),
+        right=_operand_from_fact(right_analysis, right_item, right_fact),
+        expected_value=left_fact.normalized_value,
+        observed_value=right_fact.normalized_value,
+        unit=left_fact.unit,
+        message=pass_message if status == "pass" else mismatch_message,
+    )
+
+
+def _unique_pair(
+    analyses: list[DocumentAnalysisV3], left_type: str, right_type: str
+) -> tuple[DocumentAnalysisV3 | None, DocumentAnalysisV3 | None, ComparisonV3 | None]:
+    left = [analysis for analysis in analyses if analysis.document_type == left_type]
+    right = [analysis for analysis in analyses if analysis.document_type == right_type]
+    if len(left) <= 1 and len(right) <= 1:
+        return (left[0] if left else None, right[0] if right else None, None)
+    return (
+        None,
+        None,
+        _comparison(
+            rule_code="document_pair_selection",
+            status="needs_review",
+            left=_operand(document_id=left[0].document_id if left else None),
+            right=_operand(document_id=right[0].document_id if right else None),
+            message="같은 유형의 문서가 여러 건이라 자동 비교 대상을 하나로 정하지 않았습니다.",
+        ),
+    )
+
+
+def _item_match(left: LineItemV3, right: LineItemV3) -> bool:
+    left_hs = _first_fact(left.facts, "hs_code")
+    right_hs = _first_fact(right.facts, "hs_code")
+    if left_hs and right_hs and left_hs.normalized_value and right_hs.normalized_value:
+        return left_hs.normalized_value == right_hs.normalized_value
+    left_description = _first_fact(left.facts, *_DESCRIPTION_FIELDS)
+    right_description = _first_fact(right.facts, *_DESCRIPTION_FIELDS)
+    return bool(
+        left_description
+        and right_description
+        and left_description.normalized_value
+        and left_description.normalized_value == right_description.normalized_value
+    )
+
+
+def _findings_from_comparisons(comparisons: Iterable[ComparisonV3]) -> list[FindingV3]:
+    findings: list[FindingV3] = []
+    for comparison in comparisons:
+        if comparison.status not in {"mismatch", "needs_review"}:
+            continue
+        if comparison.rule_code == "document_type_classification":
+            code = "document_type_unknown"
+            severity = "medium"
+        elif comparison.rule_code == "hs_code_presence":
+            code = "hs_code_not_found"
+            severity = "medium"
+        elif comparison.rule_code == "required_field_presence":
+            code = "missing_required_field"
+            severity = "medium"
+        else:
+            suffix = "mismatch" if comparison.status == "mismatch" else "needs_review"
+            code = f"{comparison.rule_code}_{suffix}"[:128]
+            severity = "high" if comparison.status == "mismatch" else "medium"
+        document_ids = [
+            document_id
+            for document_id in (comparison.left.document_id, comparison.right.document_id)
+            if document_id is not None
+        ]
+        fact_ids = [*comparison.left.fact_ids, *comparison.right.fact_ids]
+        findings.append(
+            _finding(
+                code=code,
+                severity=severity,
+                message=comparison.message,
+                comparison_id=comparison.comparison_id,
+                document_ids=document_ids,
+                fact_ids=fact_ids,
+            )
+        )
+    return findings
+
+
+def _warning_findings(analyses: Iterable[DocumentAnalysisV3]) -> list[FindingV3]:
+    findings: list[FindingV3] = []
+    for analysis in analyses:
+        for warning in analysis.warnings:
+            findings.append(
+                _finding(
+                    code=warning.code,
+                    severity="medium",
+                    message=warning.message,
+                    document_ids=[analysis.document_id],
+                )
+            )
+    return findings
+
+
+def _finding(
+    *,
+    code: str,
+    severity: str,
+    message: str,
+    item_id: str | None = None,
+    evidence_ids: list[str] | None = None,
+    comparison_id: str | None = None,
+    document_ids: list[str] | None = None,
+    fact_ids: list[str] | None = None,
+) -> FindingV3:
+    evidence_ids = evidence_ids or []
+    document_ids = list(dict.fromkeys(document_ids or []))
+    fact_ids = list(dict.fromkeys(fact_ids or []))
+    identity = {
+        "code": code,
+        "comparison_id": comparison_id,
+        "document_ids": document_ids,
+        "fact_ids": fact_ids,
+        "item_id": item_id,
+        "evidence_ids": evidence_ids,
+    }
+    digest = hashlib.sha256(
+        json.dumps(identity, ensure_ascii=False, sort_keys=True, separators=(",", ":")).encode(
+            "utf-8"
+        )
+    ).hexdigest()[:24]
+    return FindingV3(
+        finding_id=f"finding-{digest}",
+        kind="regulatory_finding" if evidence_ids else "validation_issue",
+        code=code,
+        severity=severity,  # type: ignore[arg-type]
+        message=message,
+        item_id=item_id,
+        evidence_ids=evidence_ids,
+        comparison_id=comparison_id,
+        document_ids=document_ids,
+        fact_ids=fact_ids,
+    )
+
+
+def _dedupe_findings(findings: Iterable[FindingV3]) -> list[FindingV3]:
+    unique: dict[str, FindingV3] = {}
+    for finding in findings:
+        unique.setdefault(finding.finding_id, finding)
+    return list(unique.values())
+
+
+def _workflow_stages(
+    analyses: list[DocumentAnalysisV3],
+    comparisons: list[ComparisonV3],
+    reextractions: list[ReextractionV3],
+    *,
+    retry_unavailable: bool,
+) -> list[WorkflowStageV3]:
+    unknown_count = sum(analysis.document_type == "unknown" for analysis in analyses)
+    warning_count = sum(len(analysis.warnings) for analysis in analyses)
+    pair_exists = any(
+        analysis.document_type
+        in {"invoice", "packing_list", "bill_of_lading", "certificate_of_origin"}
+        for analysis in analyses
+    )
+    validation_needs_review = sum(
+        comparison.status in {"mismatch", "needs_review"} for comparison in comparisons
+    )
+    return [
+        WorkflowStageV3(
+            stage="classify_documents",
+            status="needs_review" if unknown_count else "completed",
+            attempt_count=len(analyses),
+            summary=(
+                f"문서 {len(analyses)}건을 분류했고 {unknown_count}건은 담당자 확인이 필요합니다."
+            ),
+        ),
+        WorkflowStageV3(
+            stage="extract_facts",
+            status="needs_review" if warning_count else "completed",
+            attempt_count=len(analyses) + len(reextractions),
+            summary=f"문서에서 구조화 사실을 추출했고 인용 경고는 {warning_count}건입니다.",
+        ),
+        WorkflowStageV3(
+            stage="normalize_facts",
+            status="completed",
+            attempt_count=1,
+            summary="수량·금액·식별자·원산지 값을 코드 비교용으로 정규화했습니다.",
+        ),
+        WorkflowStageV3(
+            stage="match_documents",
+            status="completed" if pair_exists else "skipped",
+            attempt_count=1 if pair_exists else 0,
+            summary=(
+                "문서와 품목의 비교 대상을 결정했습니다."
+                if pair_exists
+                else "비교 가능한 문서 쌍이 없습니다."
+            ),
+        ),
+        WorkflowStageV3(
+            stage="validate_documents",
+            status="needs_review" if validation_needs_review else "completed",
+            attempt_count=2 if reextractions else 1,
+            summary=f"코드 기반 정합성 비교 {len(comparisons)}건을 수행했습니다.",
+        ),
+        WorkflowStageV3(
+            stage="reextract_documents",
+            status=("needs_review" if retry_unavailable else "completed")
+            if reextractions
+            else "skipped",
+            attempt_count=len(reextractions),
+            summary=(
+                f"누락·모호한 값 보완을 위해 {len(reextractions)}개 문서를 최대 한 번씩 재추출했습니다."
+                if reextractions
+                else "재추출이 필요한 문서가 없습니다."
+            ),
+        ),
+        WorkflowStageV3(
+            stage="retrieve_evidence",
+            status="skipped",
+            attempt_count=0,
+            summary="Evidence 조회를 아직 기록하지 않았습니다.",
+        ),
+        WorkflowStageV3(
+            stage="generate_result",
+            status="skipped",
+            attempt_count=0,
+            summary="최종 결과 생성을 아직 기록하지 않았습니다.",
+        ),
+    ]
+
+
+def _evidence_summary(data_status: str) -> str:
+    return {
+        "ok": "Data Evidence를 한 번 조회했습니다.",
+        "partial": "Data Evidence 일부가 준비되지 않아 담당자 검토가 필요합니다.",
+        "failed": "Data Evidence 조회가 실패했습니다.",
+    }.get(data_status, "Data Evidence 응답 상태가 유효하지 않습니다.")
+
+
+def _reextraction_targets(
+    request: ServiceReviewRunRequestV3,
+    analyses: Mapping[str, DocumentAnalysis],
+) -> dict[str, list[str]]:
+    """Select only fields that unlock a defined comparison; each doc gets one retry."""
+
+    targets: dict[str, set[str]] = {document.document_id: set() for document in request.documents}
+    by_type: dict[str, list[Any]] = {}
+    for document in request.documents:
+        candidate = analyses[document.document_id].candidate
+        by_type.setdefault(candidate.document_type, []).append(document)
+        if candidate.document_type == "unknown":
+            targets[document.document_id].add("document_type")
+        available = _candidate_field_names(candidate)
+        for name in _base_required_fields(candidate.document_type):
+            if not _candidate_has(available, name):
+                targets[document.document_id].add(name)
+        targets[document.document_id].update(_ungrounded_candidate_fields(document, candidate))
+
+    invoices = by_type.get("invoice", [])
+    packings = by_type.get("packing_list", [])
+    certificates = by_type.get("certificate_of_origin", [])
+    bills = by_type.get("bill_of_lading", [])
+    if len(invoices) == 1 and len(packings) == 1:
+        _request_missing(
+            analyses,
+            invoices[0],
+            targets,
+            ("description", "quantity", "unit", "unit_price", "amount", "total_amount"),
+        )
+        _request_missing(
+            analyses,
+            packings[0],
+            targets,
+            (
+                "description",
+                "quantity",
+                "unit",
+                "bl_no",
+                "container_numbers",
+                "total_gross_weight_kg",
+            ),
+        )
+    if len(invoices) == 1 and len(certificates) == 1:
+        _request_missing(analyses, invoices[0], targets, ("country_of_origin", "origin_country"))
+        _request_missing(analyses, certificates[0], targets, ("origin_country",))
+    if len(bills) == 1 and len(packings) == 1:
+        _request_missing(
+            analyses, bills[0], targets, ("bl_no", "container_numbers", "gross_weight_kg")
+        )
+        _request_missing(
+            analyses, packings[0], targets, ("bl_no", "container_numbers", "total_gross_weight_kg")
+        )
+    return {document_id: sorted(values) for document_id, values in targets.items() if values}
+
+
+def _base_required_fields(document_type: str) -> tuple[str, ...]:
+    return {
+        "invoice": ("invoice_no", "total_amount", "hs_code"),
+        "packing_list": ("packing_no",),
+        "certificate_of_origin": ("certificate_no", "origin_country", "hs_code"),
+        "bill_of_lading": ("bl_no",),
+    }.get(document_type, ())
+
+
+def _request_missing(
+    analyses: Mapping[str, DocumentAnalysis],
+    document: Any,
+    targets: dict[str, set[str]],
+    names: tuple[str, ...],
+) -> None:
+    available = _candidate_field_names(analyses[document.document_id].candidate)
+    for name in names:
+        if not _candidate_has(available, name):
+            targets[document.document_id].add(name)
+
+
+def _candidate_field_names(candidate: ClaudeDocumentCandidate) -> set[str]:
+    return {field.name for field in candidate.fields} | {
+        field.name for item in candidate.line_items for field in item.fields
+    }
+
+
+def _ungrounded_candidate_fields(document: Any, candidate: ClaudeDocumentCandidate) -> set[str]:
+    """Retry only facts whose supplied source quote is unusable in this input."""
+
+    text = document.content_text
+    targets: set[str] = set()
+    if candidate.document_type != "unknown" and candidate.classification_source_quote not in text:
+        targets.add("document_type")
+    for field in candidate.fields:
+        if field.value not in field.source_quote or field.source_quote not in text:
+            targets.add(field.name)
+    for item in candidate.line_items:
+        if item.source_quote not in text:
+            targets.add("line_items")
+        for field in item.fields:
+            if (
+                field.value not in field.source_quote
+                or field.source_quote not in text
+                or field.source_quote not in item.source_quote
+            ):
+                targets.add(field.name)
+    return targets
+
+
+def _candidate_has(available: set[str], name: str) -> bool:
+    aliases = {
+        "hs_code": {"hs_code", "hs_codes"},
+        "origin_country": {"origin_country", "country_of_origin"},
+        "country_of_origin": {"origin_country", "country_of_origin"},
+    }
+    return bool(available & aliases.get(name, {name}))
+
+
+def _prefer_more_complete(current: DocumentAnalysis, retry: DocumentAnalysis) -> DocumentAnalysis:
+    def score(value: DocumentAnalysis) -> int:
+        candidate = value.candidate
+        return (
+            (10 if candidate.document_type in _KNOWN_TYPES else 0)
+            + len(candidate.fields)
+            + sum(len(item.fields) + 1 for item in candidate.line_items)
+        )
+
+    return retry if score(retry) >= score(current) else current
+
+
+def _first_fact_from_analysis(analysis: DocumentAnalysisV3, *names: str) -> FactV3 | None:
+    direct = _first_fact(analysis.facts, *names)
+    if direct is not None:
+        return direct
+    for item in analysis.line_items:
+        value = _first_fact(item.facts, *names)
+        if value is not None:
+            return value
+    return None
+
+
+def _first_fact(facts: Iterable[FactV3], *names: str) -> FactV3 | None:
+    expected = set(names)
+    return next((fact for fact in facts if fact.name in expected), None)
+
+
+def _effective_quantity_unit(item: LineItemV3, quantity: FactV3) -> str | None:
+    """Use an explicit extracted unit when the quantity token itself has none."""
+
+    if quantity.unit:
+        return quantity.unit
+    unit = _first_fact(item.facts, "unit")
+    if unit is None:
+        return None
+    value = unit.normalized_value or unit.raw_value
+    return re.sub(r"\s+", "", value).upper() or None
+
+
+def _operand(
+    *,
+    document_id: str | None = None,
+    item_id: str | None = None,
+    fact_ids: Iterable[str] = (),
+    display_value: str | None = None,
+) -> ComparisonOperandV3:
+    return ComparisonOperandV3(
+        document_id=document_id,
+        item_id=item_id,
+        fact_ids=list(fact_ids),
+        display_value=display_value,
+    )
+
+
+def _operand_from_fact(
+    analysis: DocumentAnalysisV3, item: LineItemV3 | None, fact: FactV3 | None
+) -> ComparisonOperandV3:
+    return _operand(
+        document_id=analysis.document_id,
+        item_id=item.item_id if item else None,
+        fact_ids=[fact.fact_id] if fact else [],
+        display_value=fact.raw_value if fact else None,
+    )
+
+
+def _operand_from_facts(
+    analysis: DocumentAnalysisV3,
+    item: LineItemV3 | None,
+    facts: Iterable[FactV3],
+    *,
+    display_value: str | None = None,
+) -> ComparisonOperandV3:
+    fact_list = list(facts)
+    return _operand(
+        document_id=analysis.document_id,
+        item_id=item.item_id if item else None,
+        fact_ids=[fact.fact_id for fact in fact_list],
+        display_value=display_value or ", ".join(fact.raw_value for fact in fact_list) or None,
+    )
+
+
+def _operand_from_item(analysis: DocumentAnalysisV3, item: LineItemV3) -> ComparisonOperandV3:
+    return _operand_from_facts(analysis, item, item.facts, display_value=item.source.quote)
+
+
+def _comparison(
+    *,
+    rule_code: str,
+    status: str,
+    left: ComparisonOperandV3,
+    right: ComparisonOperandV3,
+    message: str,
+    expected_value: str | None = None,
+    observed_value: str | None = None,
+    unit: str | None = None,
+) -> ComparisonV3:
+    identity = {
+        "rule_code": rule_code,
+        "left": left.model_dump(mode="json"),
+        "right": right.model_dump(mode="json"),
+        "expected_value": expected_value,
+        "observed_value": observed_value,
+        "unit": unit,
+    }
+    digest = hashlib.sha256(
+        json.dumps(identity, ensure_ascii=False, sort_keys=True, separators=(",", ":")).encode(
+            "utf-8"
+        )
+    ).hexdigest()[:24]
+    return ComparisonV3(
+        comparison_id=f"comparison-{digest}",
+        rule_code=rule_code,
+        status=status,  # type: ignore[arg-type]
+        left=left,
+        right=right,
+        expected_value=expected_value,
+        observed_value=observed_value,
+        unit=unit,
+        message=message,
+    )
+
+
+def _safe_name_value(value: str) -> str:
+    normalized = _SAFE_NAME.sub("_", value.strip().casefold()).strip("_")
+    return normalized[:48] or "field"
+
+
+__all__ = [
+    "BoundedWorkflowOutput",
+    "finding_for_evidence_requirement",
+    "retrieval_items_from_analyses",
+    "run_bounded_workflow",
+]

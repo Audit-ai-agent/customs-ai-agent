@@ -10,6 +10,7 @@ from pydantic import SecretStr
 
 from customs_ai_agent.service.app import create_app
 from customs_ai_agent.service.profiles import (
+    _DeterministicDocumentAnalyzer,
     ProfileEvidenceRetriever,
     ProfileRuntime,
     SERVICE_MODE_HEADER,
@@ -42,7 +43,36 @@ def test_default_profile_is_local_development() -> None:
         }
     )
     assert settings.service_mode == "local-development"
-    assert settings.port == 8090
+    assert settings.port == 18090
+
+
+def test_deterministic_classifier_keeps_a_packing_header_over_a_later_bl_reference() -> None:
+    analysis = _DeterministicDocumentAnalyzer().analyze(
+        {
+            "document_id": "packing",
+            "filename": "packing.txt",
+            "content_text": "PACKING LIST\nB/L No: BL-001",
+        }
+    )
+
+    assert analysis.candidate.document_type == "packing_list"
+
+
+def test_deterministic_extractor_does_not_treat_an_invoice_total_as_a_line_item() -> None:
+    analysis = _DeterministicDocumentAnalyzer().analyze(
+        {
+            "document_id": "invoice",
+            "filename": "invoice.txt",
+            "content_text": (
+                "COMMERCIAL INVOICE\n"
+                "Total Amount: USD 30\n"
+                "Description: Widget | HS Code: 123456 | Quantity: 3 PCS | "
+                "Unit Price: USD 10 | Amount: USD 30"
+            ),
+        }
+    )
+
+    assert len(analysis.candidate.line_items) == 1
 
 
 def test_backend_profile_loader_mode_is_accepted() -> None:
@@ -114,11 +144,22 @@ def test_review_uses_one_readiness_then_one_retrieve_and_stays_human_only(
             }
         ).encode()
     )
-    assert result.schema_version == "3.0"
+    assert result.schema_version == "3.1"
     assert result.status == "needs_review"
     assert result.requires_human_review is True
     assert result.engine is not None and result.engine.kind == "deterministic"
     assert any(action.action_code == "human_review_required" for action in result.required_actions)
+    assert [stage.stage for stage in result.workflow.stages] == [
+        "classify_documents",
+        "extract_facts",
+        "normalize_facts",
+        "match_documents",
+        "validate_documents",
+        "reextract_documents",
+        "retrieve_evidence",
+        "generate_result",
+    ]
+    assert result.document_analyses[0].document_id == "doc-profile-v3"
     assert calls == [
         ("GET", ProfileEvidenceRetriever.readiness_path),
         ("POST", ProfileEvidenceRetriever.retrieve_path),

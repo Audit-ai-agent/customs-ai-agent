@@ -153,7 +153,7 @@ if ($requiresFunctionalUatKey) {
     Import-FunctionalUatAnthropicKey -SecretFile $anthropicKeyFile
 }
 
-$env:CUSTOMS_AGENT_PORT = "8090"
+$env:CUSTOMS_AGENT_PORT = "18090"
 $env:EVIDENCE_SERVICE_BASE_URL = "http://127.0.0.1:$EvidencePort"
 $env:EVIDENCE_SERVICE_TOKEN = $evidenceToken
 $env:EVIDENCE_SERVICE_TOKEN_HEADER = "Authorization"

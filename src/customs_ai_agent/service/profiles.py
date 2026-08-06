@@ -7,7 +7,7 @@ import ipaddress
 import json
 import re
 from collections.abc import Mapping
-from typing import Any, Literal
+from typing import Any, Literal, cast
 from urllib.error import HTTPError, URLError
 from urllib.parse import urlsplit
 from urllib.request import HTTPRedirectHandler, Request, build_opener
@@ -27,6 +27,7 @@ from customs_ai_agent.schemas.llm import (
 )
 from customs_ai_agent.scenario_transcript import ScenarioTranscriptRoot, ScenarioTranscriptRun
 from customs_ai_agent.schemas.v3 import (
+    FindingV3,
     RequiredActionV1,
     ReviewRunResultV3,
     ServiceReviewRunRequestV3,
@@ -39,6 +40,10 @@ from customs_ai_agent.service.runtime_errors import (
     RuntimeInputError,
 )
 from customs_ai_agent.service.settings import ServiceSettings
+from customs_ai_agent.service.workflow import (
+    finding_for_evidence_requirement,
+    run_bounded_workflow,
+)
 
 
 ServiceMode = Literal["local-development", "functional-uat"]
@@ -285,88 +290,186 @@ class ProfileEvidenceRetriever:
 
 
 class _DeterministicDocumentAnalyzer:
-    """Stable no-key analyzer for the default profile."""
+    """Stable no-key text extractor used by the default profile.
+
+    It intentionally performs only deterministic extraction.  Normalisation,
+    matching, arithmetic, and findings are owned by ``workflow.py`` so the
+    development fixture exercises the same bounded workflow as Claude UAT.
+    """
 
     model_id = "development-fixture-deterministic"
 
     def analyze(
-        self, document: Mapping[str, Any], *, transcript: ScenarioTranscriptRun | None = None
+        self,
+        document: Mapping[str, Any],
+        *,
+        transcript: ScenarioTranscriptRun | None = None,
+        focus_fields: tuple[str, ...] = (),
     ) -> DocumentAnalysis:
-        del transcript
+        del transcript, focus_fields
         text = str(document.get("content_text") or "")
-        upper = text.upper()
-        document_type: Literal["invoice", "unknown"] = (
-            "invoice" if "INVOICE" in upper else "unknown"
-        )
+        document_type, classification_quote = _deterministic_document_type(text)
+        fields = _deterministic_document_fields(text, document_type)
         line_items: list[ClaudeLineItemCandidate] = []
-        match = re.search(r"\bHS(?:\s*CODE)?\s*[:#-]?\s*([0-9]{6,10})\b", text, re.I)
-        if match is not None:
-            quote = text[max(0, match.start() - 160) : min(len(text), match.end() + 160)]
-            line_items.append(
-                ClaudeLineItemCandidate(
-                    source_quote=quote,
-                    fields=[
-                        ClaudeFieldCandidate(
-                            name="hs_code", value=match.group(1), source_quote=quote
-                        )
-                    ],
+        for line in text.splitlines():
+            candidate = _deterministic_line_item(line)
+            if candidate is not None:
+                line_items.append(candidate)
+        if not line_items:
+            match = re.search(r"\bHS(?:\s*CODE)?\s*[:#-]?\s*([0-9]{6,10})\b", text, re.I)
+            if match is not None:
+                quote = text[max(0, match.start() - 160) : min(len(text), match.end() + 160)]
+                line_items.append(
+                    ClaudeLineItemCandidate(
+                        source_quote=quote,
+                        fields=[
+                            ClaudeFieldCandidate(
+                                name="hs_code", value=match.group(1), source_quote=quote
+                            )
+                        ],
+                    )
                 )
-            )
         return DocumentAnalysis(
             candidate=ClaudeDocumentCandidate(
                 document_type=document_type,
-                classification_source_quote="INVOICE" if document_type == "invoice" else "",
+                classification_source_quote=classification_quote,
+                fields=fields,
                 line_items=line_items,
             ),
             model_id=self.model_id,
         )
 
 
-def _origin_country(candidate: ClaudeDocumentCandidate) -> str | None:
-    for field in candidate.fields:
-        if field.name in {"origin_country", "country_of_origin"}:
-            value = field.value.strip().upper()
-            if re.fullmatch(r"[A-Z]{2}", value):
-                return value
-    return None
+def _deterministic_document_type(
+    text: str,
+) -> tuple[
+    Literal["invoice", "packing_list", "bill_of_lading", "certificate_of_origin", "unknown"], str
+]:
+    rules: tuple[tuple[str, str], ...] = (
+        ("bill_of_lading", r"\b(?:bill\s+of\s+lading|b\s*/\s*l)\b"),
+        ("packing_list", r"\b(?:packing\s+list|packing\s+note)\b"),
+        ("certificate_of_origin", r"\b(?:certificate\s+of\s+origin|c\s*/\s*o)\b"),
+        ("invoice", r"\b(?:commercial\s+invoice|invoice)\b"),
+    )
+    matches: list[tuple[int, int, str, str]] = []
+    for priority, (document_type, pattern) in enumerate(rules):
+        match = re.search(pattern, text, re.IGNORECASE)
+        if match is not None:
+            matches.append((match.start(), priority, document_type, match.group(0)))
+    if matches:
+        _position, _priority, document_type, quote = min(matches)
+        return cast(
+            Literal[
+                "invoice",
+                "packing_list",
+                "bill_of_lading",
+                "certificate_of_origin",
+                "unknown",
+            ],
+            document_type,
+        ), quote
+    return "unknown", ""
 
 
-def _retrieval_items(
-    request: ServiceReviewRunRequestV3,
-    analyses: list[DocumentAnalysis],
-) -> list[dict[str, Any]]:
-    items: list[dict[str, Any]] = []
-    for document, analysis in zip(request.documents, analyses, strict=True):
-        candidate = analysis.candidate
-        hs_candidates: list[tuple[str | None, str]] = [
-            (field.value, line.source_quote)
-            for line in candidate.line_items
-            for field in line.fields
-            if field.name == "hs_code" and re.fullmatch(r"[0-9]{6,10}", field.value)
-        ]
-        hs_candidates.extend(
-            (field.value, field.source_quote)
-            for field in candidate.fields
-            if field.name == "hs_code" and re.fullmatch(r"[0-9]{6,10}", field.value)
-        )
-        if not hs_candidates:
-            hs_candidates = [(None, document.content_text[:2000])]
-        for index, (hs_code, description) in enumerate(hs_candidates, start=1):
-            item_id = f"{document.document_id}-{index}"
-            items.append(
-                {
-                    "item_id": item_id[:128],
-                    "description": str(description).strip()[:2000] or "customs document",
-                    "hs_code": hs_code,
-                    "origin_country": _origin_country(candidate),
-                    "destination_country": "KR",
-                }
+def _deterministic_document_fields(text: str, document_type: str) -> list[ClaudeFieldCandidate]:
+    rules: dict[str, tuple[tuple[str, str], ...]] = {
+        "invoice": (
+            ("invoice_no", r"(?:invoice\s*(?:no|number)|inv\s*no)\s*[:#-]\s*([^\n|;]+)"),
+            (
+                "total_amount",
+                r"(?:invoice\s+total|total\s+amount|grand\s+total)\s*[:#-]\s*([^\n|;]+)",
+            ),
+            (
+                "country_of_origin",
+                r"(?:country\s+of\s+origin|origin\s+country)\s*[:#-]\s*([^\n|;]+)",
+            ),
+            ("hs_code", r"\bhs\s*(?:code)?\s*[:#-]\s*([0-9]{6,10})\b"),
+        ),
+        "packing_list": (
+            ("packing_no", r"(?:packing\s*(?:no|number)|pl\s*no)\s*[:#-]\s*([^\n|;]+)"),
+            ("invoice_no", r"(?:invoice\s*(?:no|number)|inv\s*no)\s*[:#-]\s*([^\n|;]+)"),
+            (
+                "bl_no",
+                r"(?:b\s*/\s*l\s*(?:no|number)?|bill\s+of\s+lading\s*(?:no|number)?)\s*[:#-]\s*([^\n|;]+)",
+            ),
+            ("container_numbers", r"(?:container\s*(?:no|number|numbers)?)\s*[:#-]\s*([^\n|;]+)"),
+            (
+                "total_gross_weight_kg",
+                r"(?:total\s+gross\s+weight|gross\s+weight)\s*[:#-]\s*([^\n|;]+)",
+            ),
+            (
+                "country_of_origin",
+                r"(?:country\s+of\s+origin|origin\s+country)\s*[:#-]\s*([^\n|;]+)",
+            ),
+        ),
+        "certificate_of_origin": (
+            (
+                "certificate_no",
+                r"(?:certificate\s*(?:no|number)|c\s*/\s*o\s*(?:no|number)?)\s*[:#-]\s*([^\n|;]+)",
+            ),
+            (
+                "origin_country",
+                r"(?:country\s+of\s+origin|origin\s+country|origin)\s*[:#-]\s*([^\n|;]+)",
+            ),
+            ("hs_code", r"\bhs\s*(?:code)?\s*[:#-]\s*([0-9]{6,10})\b"),
+        ),
+        "bill_of_lading": (
+            (
+                "bl_no",
+                r"(?:b\s*/\s*l\s*(?:no|number)?|bill\s+of\s+lading\s*(?:no|number)?)\s*[:#-]\s*([^\n|;]+)",
+            ),
+            ("container_numbers", r"(?:container\s*(?:no|number|numbers)?)\s*[:#-]\s*([^\n|;]+)"),
+            ("gross_weight_kg", r"(?:gross\s+weight|total\s+gross\s+weight)\s*[:#-]\s*([^\n|;]+)"),
+        ),
+    }
+    fields: list[ClaudeFieldCandidate] = []
+    for name, pattern in rules.get(document_type, ()):
+        match = re.search(pattern, text, re.IGNORECASE)
+        if match is None:
+            continue
+        line_start = text.rfind("\n", 0, match.start()) + 1
+        line_end = text.find("\n", match.end())
+        quote = text[line_start : len(text) if line_end < 0 else line_end].strip()
+        value = match.group(1).strip()
+        if value and value in quote:
+            fields.append(ClaudeFieldCandidate(name=name, value=value, source_quote=quote))
+    return fields
+
+
+def _deterministic_line_item(line: str) -> ClaudeLineItemCandidate | None:
+    quote = line.strip()
+    if not quote or not re.search(
+        r"\b(?:description|goods|item\s*\d+|qty|quantity|unit\s+price|hs\s*code)\b",
+        quote,
+        re.IGNORECASE,
+    ):
+        return None
+    field_rules: tuple[tuple[str, str], ...] = (
+        ("description", r"(?:description|goods|item\s*\d+)\s*[:#-]\s*([^|;]+)"),
+        ("hs_code", r"\bhs\s*(?:code)?\s*[:#-]\s*([0-9]{6,10})\b"),
+        ("quantity", r"(?:quantity|qty)\s*[:#-]\s*([^|;]+)"),
+        ("unit", r"\bunit\b(?!\s*price)\s*[:#-]\s*([^|;]+)"),
+        ("unit_price", r"(?:unit\s+price|price)\s*[:#-]\s*([^|;]+)"),
+        ("amount", r"(?:line\s+amount|amount)\s*[:#-]\s*([^|;]+)"),
+        ("origin_country", r"(?:origin\s+country|country\s+of\s+origin|origin)\s*[:#-]\s*([^|;]+)"),
+        ("gross_weight_kg", r"(?:gross\s+weight)\s*[:#-]\s*([^|;]+)"),
+    )
+    fields: list[ClaudeFieldCandidate] = []
+    for name, pattern in field_rules:
+        match = re.search(pattern, quote, re.IGNORECASE)
+        if match is not None and match.group(1).strip() in quote:
+            fields.append(
+                ClaudeFieldCandidate(
+                    name=name,
+                    value=match.group(1).strip(),
+                    source_quote=quote,
+                )
             )
-    return items[:100]
+    return ClaudeLineItemCandidate(source_quote=quote, fields=fields) if fields else None
 
 
 def _retrieve_request(
-    request: ServiceReviewRunRequestV3, analyses: list[DocumentAnalysis]
+    request: ServiceReviewRunRequestV3, items: list[dict[str, Any]]
 ) -> dict[str, Any]:
     request_id = "rag-" + hashlib.sha256(request.review_run_id.encode("utf-8")).hexdigest()[:32]
     return {
@@ -378,7 +481,7 @@ def _retrieve_request(
         "jurisdiction": request.jurisdiction,
         "trade_type": request.trade_type,
         "top_k": 10,
-        "items": _retrieval_items(request, analyses),
+        "items": items,
     }
 
 
@@ -424,65 +527,49 @@ def _evidence_from_data(response: Mapping[str, Any]) -> list[dict[str, Any]]:
     return evidence
 
 
-def _findings(
-    request: ServiceReviewRunRequestV3,
-    analyses: list[DocumentAnalysis],
-    evidence: list[dict[str, Any]],
-) -> list[dict[str, Any]]:
-    findings: list[dict[str, Any]] = []
-    for document, analysis in zip(request.documents, analyses, strict=True):
-        if analysis.candidate.document_type == "unknown":
-            findings.append(
-                {
-                    "kind": "validation_issue",
-                    "code": "document_type_unknown",
-                    "severity": "medium",
-                    "message": "문서 유형을 확인할 수 없어 담당자 검토가 필요합니다.",
-                    "item_id": document.document_id,
-                    "evidence_ids": [],
-                }
-            )
-        has_hs = any(
-            field.name == "hs_code"
-            for line in analysis.candidate.line_items
-            for field in line.fields
-        ) or any(field.name == "hs_code" for field in analysis.candidate.fields)
-        if not has_hs:
-            findings.append(
-                {
-                    "kind": "validation_issue",
-                    "code": "hs_code_not_found",
-                    "severity": "medium",
-                    "message": "HS 코드를 확인할 수 없어 담당자 검토가 필요합니다.",
-                    "item_id": document.document_id,
-                    "evidence_ids": [],
-                }
-            )
+def _findings_from_evidence(evidence: list[dict[str, Any]]) -> list[FindingV3]:
+    findings: list[FindingV3] = []
     for item in evidence:
-        if item.pop("eligibility") == "finding":
-            code = item.pop("required_document_code") or "data_requirement"
-            name = item.pop("required_document_name") or item["title"]
+        if item.get("eligibility") == "finding":
+            code = str(item.get("required_document_code") or "data_requirement")[:128]
+            name = str(item.get("required_document_name") or item["title"])
             findings.append(
-                {
-                    "kind": "regulatory_finding",
-                    "code": str(code)[:128],
-                    "severity": "medium",
-                    "message": f"필수 확인 항목: {name}",
-                    "item_id": item["item_id"],
-                    "evidence_ids": [item["evidence_id"]],
-                }
+                finding_for_evidence_requirement(
+                    code=code,
+                    message=f"필수 확인 항목: {name}",
+                    item_id=item["item_id"],
+                    evidence_id=item["evidence_id"],
+                )
             )
-        else:
-            item.pop("required_document_code")
-            item.pop("required_document_name")
     return findings
 
 
-def _actions(findings: list[dict[str, Any]]) -> list[RequiredActionV1]:
+def _public_evidence(evidence: list[dict[str, Any]]) -> list[dict[str, Any]]:
+    allowed = {
+        "evidence_id",
+        "item_id",
+        "title",
+        "text",
+        "source_uri",
+        "source_type",
+        "source_hash",
+        "law_id",
+        "law_name",
+    }
+    return [{key: value for key, value in item.items() if key in allowed} for item in evidence]
+
+
+def _actions(findings: list[FindingV3]) -> list[RequiredActionV1]:
     actions = [
         RequiredActionV1(
-            action_code="inspect_" + re.sub(r"[^a-z0-9_]+", "_", finding["code"].casefold())[:96],
-            message=finding["message"],
+            action_code=(
+                "inspect_"
+                + re.sub(r"[^a-z0-9_]+", "_", finding.code.casefold())[:84]
+                + "_"
+                + finding.finding_id[-12:]
+            )[:128],
+            message=finding.message,
+            finding_ids=[finding.finding_id],
         )
         for finding in findings
     ]
@@ -490,6 +577,7 @@ def _actions(findings: list[dict[str, Any]]) -> list[RequiredActionV1]:
         RequiredActionV1(
             action_code="human_review_required",
             message="자동완료하지 않습니다. 담당자가 문서와 법령 Evidence를 검토해야 합니다.",
+            finding_ids=[],
         )
     )
     return actions
@@ -549,15 +637,18 @@ class ProfileRuntime:
                 },
             )
         try:
-            analyses = [
-                self._analyzer.analyze(
-                    document.model_dump(mode="json", warnings=False), transcript=transcript
-                )
-                for document in request.documents
-            ]
-            data_response = self._retriever.retrieve(_retrieve_request(request, analyses))
-            evidence = _evidence_from_data(data_response)
-            findings = _findings(request, analyses, evidence)
+            workflow_output = run_bounded_workflow(
+                request,
+                self._analyzer,
+                transcript=transcript,
+            )
+            data_response = self._retriever.retrieve(
+                _retrieve_request(request, workflow_output.retrieval_items)
+            )
+            evidence_records = _evidence_from_data(data_response)
+            findings = [*workflow_output.findings, *_findings_from_evidence(evidence_records)]
+            evidence = _public_evidence(evidence_records)
+            workflow = workflow_output.with_evidence_status(str(data_response["status"])).workflow
         except RetrievalError:
             raise RuntimeExecutionError(
                 "evidence_dependency_unready",
@@ -582,7 +673,7 @@ class ProfileRuntime:
             else ("no_issue_detected" if data_status == "ok" else "indeterminate")
         )
         payload_result: dict[str, Any] = {
-            "schema_version": "3.0",
+            "schema_version": "3.1",
             "case_id": request.case_id,
             "review_run_id": request.review_run_id,
             "review_as_of": request.review_as_of,
@@ -595,9 +686,15 @@ class ProfileRuntime:
             "input_manifest_sha256": canonical_json_sha256(request),
             "report": {
                 "overall_status": status,
-                "summary": f"문서 {len(request.documents)}건, Evidence {len(evidence)}건, 확인 항목 {len(findings)}건입니다.",
+                "summary": (
+                    f"문서 {len(request.documents)}건을 제한된 Agentic 워크플로우로 분석했고, "
+                    f"Evidence {len(evidence)}건과 확인 항목 {len(findings)}건을 기록했습니다."
+                ),
                 "disclaimer": "이 결과는 기능 확인용이며 담당자의 최종 검토가 필요합니다.",
             },
+            "workflow": workflow,
+            "document_analyses": workflow_output.document_analyses,
+            "comparisons": workflow_output.comparisons,
             "evidence": evidence,
             "findings": findings,
             "required_actions": _actions(findings),

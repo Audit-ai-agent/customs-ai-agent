@@ -86,7 +86,11 @@ class DocumentAnalyzer(Protocol):
     model_id: str
 
     def analyze(
-        self, document: Mapping[str, Any], *, transcript: ScenarioTranscriptRun | None = None
+        self,
+        document: Mapping[str, Any],
+        *,
+        transcript: ScenarioTranscriptRun | None = None,
+        focus_fields: tuple[str, ...] = (),
     ) -> DocumentAnalysis: ...
 
 
@@ -119,7 +123,11 @@ class ClaudeDocumentAnalyzer:
         return cls(settings, client)
 
     def analyze(
-        self, document: Mapping[str, Any], *, transcript: ScenarioTranscriptRun | None = None
+        self,
+        document: Mapping[str, Any],
+        *,
+        transcript: ScenarioTranscriptRun | None = None,
+        focus_fields: tuple[str, ...] = (),
     ) -> DocumentAnalysis:
         document_id = document.get("document_id")
         filename = document.get("filename")
@@ -132,9 +140,16 @@ class ClaudeDocumentAnalyzer:
             raise LLMProviderError("The text document is invalid.")
         if not text.strip() or len(text) > 200_000:
             raise LLMProviderError("The text document exceeds the profile limit.")
+        focused_instruction = (
+            "\nPerform one focused re-check for only these missing or ambiguous extraction fields: "
+            + ", ".join(focus_fields)
+            + ". Keep all output source-grounded; do not infer a value that is absent."
+            if focus_fields
+            else ""
+        )
         user_message = (
             "Return only the requested JSON for this document.\n"
-            f"document_id: {document_id}\nfilename: {filename}\ntext:\n{text}"
+            f"document_id: {document_id}\nfilename: {filename}{focused_instruction}\ntext:\n{text}"
         )
         request_payload = {
             "provider": "anthropic",
