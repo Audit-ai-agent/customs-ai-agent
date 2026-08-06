@@ -8,6 +8,7 @@ import pytest
 from fastapi.testclient import TestClient
 from pydantic import SecretStr
 
+from customs_ai_agent.schemas.v3 import ServiceReviewRunRequestV3, canonical_json_sha256
 from customs_ai_agent.service.app import create_app
 from customs_ai_agent.service.profiles import (
     _DeterministicDocumentAnalyzer,
@@ -94,6 +95,48 @@ def test_profile_rejects_non_loopback_evidence() -> None:
     assert raised.value.code == "evidence_base_url_invalid"
 
 
+def test_review_input_manifest_hashes_the_exact_backend_wire_for_baseline_and_child_runs() -> None:
+    baseline_wire = {
+        "case_id": "case-input-manifest",
+        "review_run_id": "run-input-manifest",
+        "review_as_of": "2026-08-05",
+        "trade_type": "import",
+        "jurisdiction": "KR",
+        "documents": [
+            {
+                "document_id": "document-input-manifest",
+                "filename": "invoice.txt",
+                "content_text": "COMMERCIAL INVOICE\\nInvoice No: INV-001",
+            }
+        ],
+    }
+    baseline = ServiceReviewRunRequestV3.model_validate(baseline_wire)
+    assert baseline.input_manifest_wire() == baseline_wire
+    assert canonical_json_sha256(baseline.input_manifest_wire()) == canonical_json_sha256(
+        baseline_wire
+    )
+
+    child_wire = {
+        **baseline_wire,
+        "review_run_id": "run-input-manifest-child",
+        "parent_review_run_id": "run-input-manifest",
+        "applied_correction_proposal_ids": ["correction-input-manifest"],
+        "human_corrections": [
+            {
+                "correction_proposal_id": "correction-input-manifest",
+                "document_id": "document-input-manifest",
+                "field_name": "invoice_number",
+                "new_value": "INV-001-CORRECTED",
+                "reason": "Reviewer confirmed the text document.",
+                "source_kind": "human_provided",
+            }
+        ],
+    }
+    child = ServiceReviewRunRequestV3.model_validate(child_wire)
+    assert child.input_manifest_wire() == child_wire
+    assert canonical_json_sha256(child.input_manifest_wire()) == canonical_json_sha256(child_wire)
+
+
 def test_review_uses_one_readiness_then_one_retrieve_and_stays_human_only(
     monkeypatch: pytest.MonkeyPatch,
 ) -> None:
@@ -144,7 +187,7 @@ def test_review_uses_one_readiness_then_one_retrieve_and_stays_human_only(
             }
         ).encode()
     )
-    assert result.schema_version == "3.1"
+    assert result.schema_version == "3.2"
     assert result.status == "needs_review"
     assert result.requires_human_review is True
     assert result.engine is not None and result.engine.kind == "deterministic"
@@ -160,6 +203,18 @@ def test_review_uses_one_readiness_then_one_retrieve_and_stays_human_only(
         "generate_result",
     ]
     assert result.document_analyses[0].document_id == "doc-profile-v3"
+    assert result.workflow.planner.cycle_count <= 2
+    assert len(result.workflow.planner.actions) <= 6
+    assert {section.section for section in result.report.sections} == {
+        "conclusion",
+        "execution_process",
+        "document_comparison",
+        "issues_and_causes",
+        "legal_evidence",
+        "impact",
+        "next_actions",
+        "limitations",
+    }
     assert calls == [
         ("GET", ProfileEvidenceRetriever.readiness_path),
         ("POST", ProfileEvidenceRetriever.retrieve_path),
@@ -234,3 +289,61 @@ def test_http_review_keeps_human_only_v3_result(monkeypatch: pytest.MonkeyPatch)
     assert response.status_code == 200
     assert response.json()["status"] == "needs_review"
     assert response.json()["requires_human_review"] is True
+
+
+def test_http_review_accepts_bounded_child_correction_context(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    """A schema-valid child run must pass HTTP admission before the runtime."""
+
+    monkeypatch.setattr(
+        ProfileEvidenceRetriever,
+        "retrieve",
+        lambda _self, request: {
+            "schema_version": "3.0",
+            "request_id": request["request_id"],
+            "status": "ok",
+            "knowledge_snapshot_id": "dev-fixture",
+            "results": [],
+        },
+    )
+    app = create_app(_settings())
+    with TestClient(app, raise_server_exceptions=False) as client:
+        response = client.post(
+            "/internal/agent/v2/reviews",
+            headers={
+                "Authorization": f"Bearer {_TOKEN}",
+                SERVICE_MODE_HEADER: "local-development",
+            },
+            json={
+                "case_id": "case-profile-child",
+                "documents": [
+                    {
+                        "document_id": "invoice",
+                        "filename": "invoice.txt",
+                        "content_text": "COMMERCIAL INVOICE\nInvoice No: INV-005",
+                    }
+                ],
+                "review_run_id": "run-profile-child",
+                "review_as_of": "2026-08-05",
+                "trade_type": "import",
+                "jurisdiction": "KR",
+                "parent_review_run_id": "run-profile-parent",
+                "applied_correction_proposal_ids": ["proposal-origin"],
+                "human_corrections": [
+                    {
+                        "correction_proposal_id": "proposal-origin",
+                        "document_id": "invoice",
+                        "field_name": "origin_country",
+                        "new_value": "KR",
+                        "reason": "승인된 원산지 보완값입니다.",
+                        "source_kind": "human_provided",
+                    }
+                ],
+            },
+        )
+
+    assert response.status_code == 200
+    actions = response.json()["workflow"]["planner"]["actions"]
+    correction = next(action for action in actions if action["action"] == "apply_human_corrections")
+    assert correction["correction_proposal_ids"] == ["proposal-origin"]

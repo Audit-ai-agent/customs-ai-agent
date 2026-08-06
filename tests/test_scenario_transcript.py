@@ -14,6 +14,7 @@ import customs_ai_agent.service.profiles as profile_module
 import customs_ai_agent.scenario_transcript as transcript_module
 from customs_ai_agent.adapters.llm import (
     ClaudeDocumentAnalyzer,
+    ClaudeGroundedResponder,
     ClaudeSettings,
     LLMProviderError,
 )
@@ -134,6 +135,11 @@ def test_functional_runtime_automatically_redacts_all_live_secrets(
         ClaudeDocumentAnalyzer,
         "from_settings",
         classmethod(lambda cls, settings: profile_module._DeterministicDocumentAnalyzer()),
+    )
+    monkeypatch.setattr(
+        ClaudeGroundedResponder,
+        "from_settings",
+        classmethod(lambda cls, settings: None),
     )
 
     settings = _settings(
@@ -345,4 +351,42 @@ def test_claude_failure_records_safe_code_and_redacts_live_key(tmp_path: Path) -
         "model": analyzer.model_id,
         "provider": "anthropic",
     }
+    assert _TOKEN not in json.dumps(records)
+
+
+def test_grounded_responder_records_one_redacted_chat_exchange(tmp_path: Path) -> None:
+    root = ScenarioTranscriptRoot.from_environment({TRANSCRIPT_ROOT_ENV: str(_root(tmp_path))})
+    transcript = root.for_run("run-grounded-chat")
+    assert transcript is not None
+    output = json.dumps(
+        {
+            "answer_scope": "case_grounded",
+            "direct_answer": "근거를 확인했습니다.",
+            "citations": [{"kind": "comparison", "reference_id": "comparison-1"}],
+            "suggested_questions": [],
+            "correction_draft": None,
+        }
+    )
+
+    class Messages:
+        def create(self, **_kwargs: Any) -> object:
+            return SimpleNamespace(content=[SimpleNamespace(text=output)])
+
+    responder = ClaudeGroundedResponder(
+        ClaudeSettings(api_key=SecretStr(_TOKEN)), SimpleNamespace(messages=Messages())
+    )
+    assert (
+        responder.respond(
+            {"question": f"literal {_TOKEN}", "review_snapshot": {"case_id": "case-1"}},
+            transcript=transcript,
+            purpose="assistant_answer",
+        )["answer_scope"]
+        == "case_grounded"
+    )
+
+    records = _lines(_root(tmp_path) / "run-grounded-chat" / "claude.jsonl")
+    assert [record["event"] for record in records] == [
+        "assistant_answer_request_started",
+        "assistant_answer_response_received",
+    ]
     assert _TOKEN not in json.dumps(records)

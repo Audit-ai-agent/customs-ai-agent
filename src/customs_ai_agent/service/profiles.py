@@ -16,6 +16,7 @@ from pydantic import ValidationError
 
 from customs_ai_agent.adapters.llm import (
     ClaudeDocumentAnalyzer,
+    ClaudeGroundedResponder,
     ClaudeSettings,
     DocumentAnalysis,
 )
@@ -25,9 +26,16 @@ from customs_ai_agent.schemas.llm import (
     ClaudeFieldCandidate,
     ClaudeLineItemCandidate,
 )
+from customs_ai_agent.schemas.assistant import (
+    AssistantAnswerRequestV1,
+    AssistantAnswerResponseV1,
+)
 from customs_ai_agent.scenario_transcript import ScenarioTranscriptRoot, ScenarioTranscriptRun
 from customs_ai_agent.schemas.v3 import (
+    EngineV3,
+    EvidenceV3,
     FindingV3,
+    ReportSectionV3,
     RequiredActionV1,
     ReviewRunResultV3,
     ServiceReviewRunRequestV3,
@@ -40,6 +48,15 @@ from customs_ai_agent.service.runtime_errors import (
     RuntimeInputError,
 )
 from customs_ai_agent.service.settings import ServiceSettings
+from customs_ai_agent.service.assistant import (
+    deterministic_assistant_answer,
+    provider_snapshot,
+    response_from_provider_candidate,
+)
+from customs_ai_agent.service.report import (
+    build_grounded_report_sections,
+    validate_grounded_report_sections,
+)
 from customs_ai_agent.service.workflow import (
     finding_for_evidence_requirement,
     run_bounded_workflow,
@@ -592,6 +609,7 @@ class ProfileRuntime:
         self._transcript_root = _transcript_root(settings, transcript_root)
         if self.mode == "local-development":
             self._analyzer: Any = _DeterministicDocumentAnalyzer()
+            self._grounded_responder: ClaudeGroundedResponder | None = None
         else:
             try:
                 claude_settings = ClaudeSettings.from_environment()
@@ -599,6 +617,15 @@ class ProfileRuntime:
                     (claude_settings.api_key.get_secret_value(),)
                 )
                 self._analyzer = ClaudeDocumentAnalyzer.from_settings(claude_settings)
+                try:
+                    self._grounded_responder = ClaudeGroundedResponder.from_settings(
+                        claude_settings
+                    )
+                except Exception:
+                    # A review remains usable with its deterministic report
+                    # fallback if the optional bounded composition adapter is
+                    # unavailable after the required extraction adapter loads.
+                    self._grounded_responder = None
             except Exception:
                 raise RuntimeConfigurationError(
                     "functional_uat_claude_configuration_invalid",
@@ -621,6 +648,109 @@ class ProfileRuntime:
         if _SAFE_RUN_ID.fullmatch(parsed.review_run_id) is None:
             raise RuntimeInputError("review_request_invalid", "The Agent request is invalid.")
         return parsed
+
+    @staticmethod
+    def _decode_assistant(payload: bytes) -> AssistantAnswerRequestV1:
+        try:
+            parsed = AssistantAnswerRequestV1.model_validate(json.loads(payload.decode("utf-8")))
+        except (UnicodeDecodeError, ValidationError, ValueError):
+            raise RuntimeInputError(
+                "assistant_request_invalid",
+                "The assistant request does not satisfy the service contract.",
+            ) from None
+        if _SAFE_RUN_ID.fullmatch(parsed.review_run_id) is None:
+            raise RuntimeInputError(
+                "assistant_request_invalid", "The assistant request is invalid."
+            )
+        return parsed
+
+    def _engine(self) -> EngineV3:
+        return EngineV3(
+            kind="deterministic" if self.mode == "local-development" else "claude",
+            model_id=str(self._analyzer.model_id),
+        )
+
+    def _compose_functional_report(
+        self,
+        result: ReviewRunResultV3,
+        *,
+        transcript: ScenarioTranscriptRun | None,
+    ) -> list[ReportSectionV3]:
+        """Try one bounded Claude composition, then retain the deterministic report."""
+
+        fallback = result.report.sections
+        responder = self._grounded_responder
+        if self.mode != "functional-uat" or responder is None:
+            return fallback
+        try:
+            candidate = responder.respond(
+                {"review_snapshot": provider_snapshot(result)},
+                transcript=transcript,
+                purpose="review_report",
+            )
+            raw_sections = candidate.get("sections")
+            if not isinstance(raw_sections, list):
+                raise ValueError("report_sections_missing")
+            sections = [ReportSectionV3.model_validate(item) for item in raw_sections]
+            validate_grounded_report_sections(
+                sections,
+                analyses=result.document_analyses,
+                comparisons=result.comparisons,
+                evidence=result.evidence,
+            )
+            return sections
+        except Exception:
+            if transcript is not None:
+                transcript.write(
+                    "claude",
+                    "review_report_fallback",
+                    {"reason_code": "provider_report_unavailable_or_ungrounded"},
+                )
+            return fallback
+
+    def assistant_answer_json(self, payload: bytes) -> AssistantAnswerResponseV1:
+        """Answer once from an immutable review snapshot; never mutate Case state."""
+
+        self._assert_open()
+        request = self._decode_assistant(payload)
+        transcript = self._transcript_root.for_run(request.review_run_id)
+        fallback = deterministic_assistant_answer(request, engine=self._engine())
+        responder = self._grounded_responder
+        if self.mode == "functional-uat" and responder is not None:
+            try:
+                candidate = responder.respond(
+                    {
+                        "review_snapshot": provider_snapshot(request.review_result),
+                        "question": request.question,
+                        "recent_turns": [
+                            turn.model_dump(mode="json", warnings=False)
+                            for turn in request.recent_turns
+                        ],
+                    },
+                    transcript=transcript,
+                    purpose="assistant_answer",
+                )
+                answer = response_from_provider_candidate(candidate, request, engine=self._engine())
+            except Exception:
+                if transcript is not None:
+                    transcript.write(
+                        "claude",
+                        "assistant_answer_fallback",
+                        {"reason_code": "provider_answer_unavailable_or_ungrounded"},
+                    )
+                answer = fallback
+        else:
+            answer = fallback
+            if transcript is not None:
+                transcript.write(
+                    "claude",
+                    "assistant_answer_deterministic",
+                    {
+                        "answer_scope": answer.answer_scope,
+                        "citation_count": len(answer.citations),
+                    },
+                )
+        return answer
 
     def review_v3_json(self, payload: bytes) -> ReviewRunResultV3:
         self._assert_open()
@@ -647,8 +777,10 @@ class ProfileRuntime:
             )
             evidence_records = _evidence_from_data(data_response)
             findings = [*workflow_output.findings, *_findings_from_evidence(evidence_records)]
-            evidence = _public_evidence(evidence_records)
-            workflow = workflow_output.with_evidence_status(str(data_response["status"])).workflow
+            evidence = [
+                EvidenceV3.model_validate(item) for item in _public_evidence(evidence_records)
+            ]
+            workflow_output = workflow_output.with_evidence_status(str(data_response["status"]))
         except RetrievalError:
             raise RuntimeExecutionError(
                 "evidence_dependency_unready",
@@ -672,8 +804,17 @@ class ProfileRuntime:
             if findings
             else ("no_issue_detected" if data_status == "ok" else "indeterminate")
         )
+        actions = _actions(findings)
+        report_sections = build_grounded_report_sections(
+            analyses=workflow_output.document_analyses,
+            comparisons=workflow_output.comparisons,
+            evidence=evidence,
+            findings=findings,
+            actions=actions,
+        )
+        workflow = workflow_output.with_report_generated().workflow
         payload_result: dict[str, Any] = {
-            "schema_version": "3.1",
+            "schema_version": "3.2",
             "case_id": request.case_id,
             "review_run_id": request.review_run_id,
             "review_as_of": request.review_as_of,
@@ -683,7 +824,9 @@ class ProfileRuntime:
             "requires_human_review": True,
             "execution_status": execution_status,
             "assessment": assessment,
-            "input_manifest_sha256": canonical_json_sha256(request),
+            # Bind the result to the exact compact HTTP request, not to
+            # Pydantic's materialised defaults for absent child-run fields.
+            "input_manifest_sha256": canonical_json_sha256(request.input_manifest_wire()),
             "report": {
                 "overall_status": status,
                 "summary": (
@@ -691,13 +834,14 @@ class ProfileRuntime:
                     f"Evidence {len(evidence)}건과 확인 항목 {len(findings)}건을 기록했습니다."
                 ),
                 "disclaimer": "이 결과는 기능 확인용이며 담당자의 최종 검토가 필요합니다.",
+                "sections": report_sections,
             },
             "workflow": workflow,
             "document_analyses": workflow_output.document_analyses,
             "comparisons": workflow_output.comparisons,
             "evidence": evidence,
             "findings": findings,
-            "required_actions": _actions(findings),
+            "required_actions": actions,
             "engine": {
                 "kind": "deterministic" if self.mode == "local-development" else "claude",
                 "model_id": str(self._analyzer.model_id),
@@ -711,6 +855,30 @@ class ProfileRuntime:
             raise RuntimeExecutionError(
                 "profile_result_invalid", "The Agent result could not be validated."
             ) from None
+        functional_sections = self._compose_functional_report(result, transcript=transcript)
+        if functional_sections != result.report.sections:
+            recomposed = result.model_dump(mode="json", warnings=False)
+            recomposed["report"]["sections"] = [
+                section.model_dump(mode="json", warnings=False) for section in functional_sections
+            ]
+            recomposed["result_sha256"] = review_result_v3_sha256(recomposed)
+            try:
+                result = ReviewRunResultV3.model_validate(recomposed)
+            except ValidationError:
+                # A provider result which passes its local validation but not
+                # the complete public result is never exposed; use fallback.
+                result = ReviewRunResultV3.model_validate(payload_result)
+        if transcript is not None:
+            transcript.write(
+                "claude",
+                "review_report_generated",
+                {
+                    "section_count": len(result.report.sections),
+                    "source": "claude"
+                    if functional_sections != report_sections
+                    else "deterministic",
+                },
+            )
         return result
 
     def close(self) -> None:
@@ -718,6 +886,9 @@ class ProfileRuntime:
         close = getattr(self._analyzer, "close", None)
         if callable(close):
             close()
+        responder_close = getattr(self._grounded_responder, "close", None)
+        if callable(responder_close):
+            responder_close()
 
 
 def build_profile_runtime(settings: ServiceSettings) -> ProfileRuntime:

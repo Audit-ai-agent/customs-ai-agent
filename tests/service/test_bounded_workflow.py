@@ -13,6 +13,10 @@ from customs_ai_agent.schemas.llm import (
     ClaudeLineItemCandidate,
 )
 from customs_ai_agent.schemas.v3 import ServiceReviewRunRequestV3
+from customs_ai_agent.service.report import (
+    build_grounded_report_sections,
+    validate_grounded_report_sections,
+)
 from customs_ai_agent.service.workflow import run_bounded_workflow
 
 
@@ -234,6 +238,24 @@ def test_bounded_workflow_records_grounded_passes_and_links() -> None:
     assert invoice_fact.source.document_id == "invoice"
     assert invoice_fact.source.quote == "Invoice No: INV-001"
     assert output.findings == []
+    assert output.workflow.planner.cycle_count <= 2
+    assert len(output.workflow.planner.actions) <= 6
+    # The pre-Evidence output reports only actions that really ran.  It does
+    # not pretend that a correction, retry, retrieval, or report happened.
+    assert [entry.action for entry in output.workflow.planner.actions] == [
+        "analyze_documents",
+        "compare_documents",
+    ]
+    assert all(entry.status != "skipped" for entry in output.workflow.planner.actions)
+    with_evidence = output.with_evidence_status("ok")
+    complete = with_evidence.with_report_generated()
+    assert [entry.action for entry in complete.workflow.planner.actions] == [
+        "analyze_documents",
+        "compare_documents",
+        "retrieve_evidence",
+        "generate_report",
+    ]
+    assert complete.workflow.planner.cycle_count == 1
 
 
 def test_quantity_mismatch_produces_stable_finding_reference() -> None:
@@ -380,3 +402,121 @@ def test_reextracts_each_document_at_most_once_for_missing_targeted_fields() -> 
     assert output.workflow.reextractions[0].document_id == "invoice"
     assert output.workflow.reextractions[0].attempt_count == 1
     assert output.workflow.reextractions[0].status == "completed"
+    assert [entry.action for entry in output.workflow.planner.actions] == [
+        "analyze_documents",
+        "reextract_documents",
+        "compare_documents",
+    ]
+    assert output.workflow.planner.cycle_count == 2
+
+
+def test_approved_human_correction_preserves_original_fact_and_drives_comparison() -> None:
+    request, candidates = _scenario(invoice_quantity="3 PCS", packing_quantity="2 PCS")
+    payload = request.model_dump(mode="json")
+    payload.update(
+        {
+            "parent_review_run_id": "run-parent",
+            "applied_correction_proposal_ids": ["proposal-quantity"],
+            "human_corrections": [
+                {
+                    "correction_proposal_id": "proposal-quantity",
+                    "document_id": "invoice",
+                    "item_id": "invoice:item:1",
+                    "fact_id": None,
+                    "field_name": "quantity",
+                    "new_value": "2 PCS",
+                    "unit": "PCS",
+                    "reason": "수량 정정본을 담당자가 확인했습니다.",
+                    "source_kind": "human_provided",
+                }
+            ],
+        }
+    )
+    child_request = ServiceReviewRunRequestV3.model_validate(payload)
+
+    output = run_bounded_workflow(child_request, _SequenceAnalyzer(candidates))
+
+    comparison = next(
+        value for value in output.comparisons if value.rule_code == "invoice_packing_quantity_unit"
+    )
+    assert comparison.status == "pass"
+    invoice = next(value for value in output.document_analyses if value.document_id == "invoice")
+    item = next(value for value in invoice.line_items if value.item_id == "invoice:item:1")
+    assert any(
+        fact.source.source_kind == "human_provided" and fact.raw_value == "2 PCS"
+        for fact in item.facts
+    )
+    correction_action = next(
+        value
+        for value in output.workflow.planner.actions
+        if value.action == "apply_human_corrections"
+    )
+    assert correction_action.correction_proposal_ids == ["proposal-quantity"]
+    assert [value.action for value in output.workflow.planner.actions] == [
+        "analyze_documents",
+        "apply_human_corrections",
+        "compare_documents",
+    ]
+    sections = build_grounded_report_sections(
+        analyses=output.document_analyses,
+        comparisons=output.comparisons,
+        evidence=[],
+        findings=output.findings,
+        actions=[],
+    )
+    correction_claim = next(
+        claim
+        for section in sections
+        if section.section == "execution_process"
+        for claim in section.claims
+        if "proposal-quantity" in claim.text
+    )
+    assert correction_claim.fact_ids == ["human:proposal-quantity"]
+    validate_grounded_report_sections(
+        sections,
+        analyses=output.document_analyses,
+        comparisons=output.comparisons,
+        evidence=[],
+    )
+    missing_correction = [section.model_copy() for section in sections]
+    execution_index = next(
+        index
+        for index, section in enumerate(missing_correction)
+        if section.section == "execution_process"
+    )
+    missing_correction[execution_index] = missing_correction[execution_index].model_copy(
+        update={"claims": missing_correction[execution_index].claims[:1]}
+    )
+    with pytest.raises(ValueError, match="report_human_correction_claim_missing"):
+        validate_grounded_report_sections(
+            missing_correction,
+            analyses=output.document_analyses,
+            comparisons=output.comparisons,
+            evidence=[],
+        )
+
+
+def test_human_correction_with_another_document_item_fails_closed() -> None:
+    request, candidates = _scenario(invoice_quantity="3 PCS", packing_quantity="2 PCS")
+    payload = request.model_dump(mode="json")
+    payload.update(
+        {
+            "parent_review_run_id": "run-parent",
+            "applied_correction_proposal_ids": ["proposal-wrong-item"],
+            "human_corrections": [
+                {
+                    "correction_proposal_id": "proposal-wrong-item",
+                    "document_id": "invoice",
+                    "item_id": "packing:item:1",
+                    "field_name": "quantity",
+                    "new_value": "2 PCS",
+                    "reason": "잘못된 품목 대상은 적용할 수 없습니다.",
+                }
+            ],
+        }
+    )
+
+    with pytest.raises(ValueError, match="human_correction_item_target_not_found"):
+        run_bounded_workflow(
+            ServiceReviewRunRequestV3.model_validate(payload), _SequenceAnalyzer(candidates)
+        )

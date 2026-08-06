@@ -11,12 +11,25 @@ from typing import Any, Literal
 
 SchemaScope = Literal["backend", "evidence"]
 SchemaVersion = Literal["v3"]
-SchemaKind = Literal["review-request", "review-result", "rag-retrieval", "readiness"]
+SchemaKind = Literal[
+    "review-request",
+    "review-result",
+    "assistant-answer-request",
+    "assistant-answer-response",
+    "rag-retrieval",
+    "readiness",
+]
 SchemaKey = tuple[SchemaScope, SchemaVersion, SchemaKind]
 
 _RESOURCE_PATHS: dict[SchemaKey, str] = {
     ("backend", "v3", "review-request"): "schemas/backend/v3/review-request.schema.json",
     ("backend", "v3", "review-result"): "schemas/backend/v3/review-result.schema.json",
+    ("backend", "v3", "assistant-answer-request"): (
+        "schemas/backend/v3/assistant-answer-request.schema.json"
+    ),
+    ("backend", "v3", "assistant-answer-response"): (
+        "schemas/backend/v3/assistant-answer-response.schema.json"
+    ),
     ("evidence", "v3", "rag-retrieval"): "evidence/v3/rag_retrieval_v3.schema.json",
     ("evidence", "v3", "readiness"): "evidence/v3/readiness_v3.schema.json",
 }
@@ -62,7 +75,7 @@ def schema_sha256(scope: SchemaScope, version: SchemaVersion, kind: SchemaKind) 
 
 
 def verify_packaged_schemas() -> dict[SchemaKey, str]:
-    """Check that the four intentionally shipped JSON schema resources parse."""
+    """Check that each intentionally shipped JSON schema resource parses."""
 
     hashes: dict[SchemaKey, str] = {}
     for key in available_schemas():

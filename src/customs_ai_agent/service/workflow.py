@@ -12,7 +12,7 @@ import hashlib
 import json
 import re
 import unicodedata
-from dataclasses import dataclass, replace
+from dataclasses import dataclass, field as dataclass_field, replace
 from decimal import Decimal, InvalidOperation
 from typing import Any, Iterable, Literal, Mapping, Protocol
 
@@ -25,7 +25,10 @@ from customs_ai_agent.schemas.v3 import (
     ExtractionWarningV3,
     FactV3,
     FindingV3,
+    HumanProvidedSourceV3,
     LineItemV3,
+    PlannerActionV3,
+    PlannerTraceV3,
     ReextractionV3,
     ServiceReviewRunRequestV3,
     SourceV3,
@@ -83,6 +86,64 @@ class _Analyzer(Protocol):
     ) -> DocumentAnalysis: ...
 
 
+@dataclass
+class _BoundedPlanner:
+    """Small stateful planner for the only actions this workflow may execute.
+
+    This is intentionally not a general tool loop.  The workflow chooses an
+    action from a closed set when the preceding state makes it necessary, then
+    records that action *after* it has run.  A trace therefore never contains a
+    pre-filled skipped step that the Agent did not execute.
+    """
+
+    _actions: list[PlannerActionV3] = dataclass_field(default_factory=list)
+    _cycle: int = 1
+
+    def start_retry_cycle(self) -> None:
+        """Move to the one permitted follow-up cycle for focused re-extraction."""
+
+        if self._cycle != 1:
+            raise RuntimeError("bounded planner cannot start more than two cycles")
+        self._cycle = 2
+
+    def record(
+        self,
+        action: Literal[
+            "analyze_documents",
+            "apply_human_corrections",
+            "compare_documents",
+            "reextract_documents",
+            "retrieve_evidence",
+            "generate_report",
+        ],
+        *,
+        status: Literal["completed", "needs_review", "failed"],
+        summary: str,
+        correction_proposal_ids: list[str] | None = None,
+    ) -> None:
+        """Record one completed/attempted closed-surface action exactly once."""
+
+        if len(self._actions) >= 6:
+            raise RuntimeError("bounded planner action limit exceeded")
+        if any(entry.action == action for entry in self._actions):
+            raise RuntimeError(f"bounded planner action already recorded: {action}")
+        self._actions.append(
+            PlannerActionV3(
+                cycle=self._cycle,
+                action=action,
+                status=status,
+                summary=summary,
+                correction_proposal_ids=correction_proposal_ids or [],
+            )
+        )
+
+    def copy(self) -> "_BoundedPlanner":
+        return _BoundedPlanner(_actions=list(self._actions), _cycle=self._cycle)
+
+    def trace(self) -> PlannerTraceV3:
+        return PlannerTraceV3(cycle_count=self._cycle, actions=list(self._actions))
+
+
 @dataclass(frozen=True)
 class BoundedWorkflowOutput:
     """The deterministic work completed before the single Evidence call."""
@@ -92,15 +153,18 @@ class BoundedWorkflowOutput:
     findings: list[FindingV3]
     workflow: WorkflowV3
     retrieval_items: list[dict[str, Any]]
+    planner_state: _BoundedPlanner
 
     def with_evidence_status(self, data_status: str) -> "BoundedWorkflowOutput":
         """Record the one actual Evidence result without changing comparisons."""
 
-        retrieval_status = {
-            "ok": "completed",
-            "partial": "needs_review",
-            "failed": "failed",
-        }.get(data_status, "failed")
+        retrieval_status: Literal["completed", "needs_review", "failed"]
+        if data_status == "ok":
+            retrieval_status = "completed"
+        elif data_status == "partial":
+            retrieval_status = "needs_review"
+        else:
+            retrieval_status = "failed"
         stages = [
             stage.model_copy(
                 update={"status": retrieval_status, "summary": _evidence_summary(data_status)}
@@ -109,19 +173,12 @@ class BoundedWorkflowOutput:
             else stage
             for stage in self.workflow.stages
         ]
-        stages = [
-            stage.model_copy(
-                update={
-                    "status": (
-                        "completed" if data_status in {"ok", "partial", "failed"} else "failed"
-                    ),
-                    "summary": "제한된 심사 결과를 생성했습니다.",
-                }
-            )
-            if stage.stage == "generate_result"
-            else stage
-            for stage in stages
-        ]
+        planner = self.planner_state.copy()
+        planner.record(
+            "retrieve_evidence",
+            status=retrieval_status,
+            summary=_evidence_summary(data_status),
+        )
         workflow_status: Literal["completed", "partial", "failed"]
         if data_status == "failed":
             workflow_status = "failed"
@@ -135,7 +192,41 @@ class BoundedWorkflowOutput:
                 status=workflow_status,
                 stages=stages,
                 reextractions=self.workflow.reextractions,
+                planner=planner.trace(),
             ),
+            planner_state=planner,
+        )
+
+    def with_report_generated(self) -> "BoundedWorkflowOutput":
+        """Record report generation only after its grounded sections exist."""
+
+        stages = [
+            stage.model_copy(
+                update={
+                    "status": "completed",
+                    "attempt_count": 1,
+                    "summary": "근거가 연결된 8구역 검토 보고서를 생성했습니다.",
+                }
+            )
+            if stage.stage == "generate_result"
+            else stage
+            for stage in self.workflow.stages
+        ]
+        planner = self.planner_state.copy()
+        planner.record(
+            "generate_report",
+            status="completed",
+            summary="근거가 연결된 8구역 검토 보고서를 생성했습니다.",
+        )
+        return replace(
+            self,
+            workflow=WorkflowV3(
+                status=self.workflow.status,
+                stages=stages,
+                reextractions=self.workflow.reextractions,
+                planner=planner.trace(),
+            ),
+            planner_state=planner,
         )
 
 
@@ -147,16 +238,24 @@ def run_bounded_workflow(
 ) -> BoundedWorkflowOutput:
     """Extract once, make at most one focused retry per document, then compare."""
 
+    planner = _BoundedPlanner()
     initial: dict[str, DocumentAnalysis] = {}
     for document in request.documents:
         initial[document.document_id] = analyzer.analyze(
             document.model_dump(mode="json", warnings=False), transcript=transcript
         )
+    planner.record(
+        "analyze_documents",
+        status="completed",
+        summary="문서 유형과 원문 인용이 있는 사실만 추출·정규화했습니다.",
+    )
 
     retry_targets = _reextraction_targets(request, initial)
     analyses = dict(initial)
     reextractions: list[ReextractionV3] = []
     retry_unavailable = False
+    if retry_targets:
+        planner.start_retry_cycle()
     for document in request.documents:
         requested_fields = retry_targets.get(document.document_id)
         if not requested_fields:
@@ -187,11 +286,34 @@ def run_bounded_workflow(
                 status="completed",
             )
         )
+    if reextractions:
+        planner.record(
+            "reextract_documents",
+            status="needs_review" if retry_unavailable else "completed",
+            summary=(
+                "각 대상 문서를 최대 한 번 재추출했지만 일부 결과를 사용할 수 없어 사람 검토가 필요합니다."
+                if retry_unavailable
+                else "누락·모호한 비교 필드를 보완하기 위해 각 대상 문서를 최대 한 번 재추출했습니다."
+            ),
+        )
 
     rendered = [
         _render_analysis(document, analyses[document.document_id]) for document in request.documents
     ]
+    if request.human_corrections:
+        rendered = _apply_human_corrections(rendered, request)
+        planner.record(
+            "apply_human_corrections",
+            status="completed",
+            summary="승인된 사람 수정은 원문 사실을 보존한 별도 human-provided 사실로 반영했습니다.",
+            correction_proposal_ids=request.applied_correction_proposal_ids,
+        )
     comparisons = _comparisons(rendered)
+    planner.record(
+        "compare_documents",
+        status="completed",
+        summary="코드 기반 수량·금액·원산지·B/L 비교 규칙을 실행했습니다.",
+    )
     findings = _findings_from_comparisons(comparisons)
     findings.extend(_warning_findings(rendered))
     retrieval_items = retrieval_items_from_analyses(request, rendered)
@@ -212,8 +334,10 @@ def run_bounded_workflow(
             status=workflow_status,
             stages=stages,
             reextractions=reextractions,
+            planner=planner.trace(),
         ),
         retrieval_items=retrieval_items,
+        planner_state=planner,
     )
 
 
@@ -367,6 +491,107 @@ def _render_analysis(
         line_items=line_items,
         warnings=warnings,
     )
+
+
+def _apply_human_corrections(
+    analyses: list[DocumentAnalysisV3], request: ServiceReviewRunRequestV3
+) -> list[DocumentAnalysisV3]:
+    """Append approved human facts without replacing a document-derived fact.
+
+    A correction is deliberately a second fact with an explicit source kind.
+    This keeps the original quote auditable while allowing the deterministic
+    comparison helpers to preferentially use the approved correction.
+    """
+
+    if not request.human_corrections:
+        return analyses
+    by_document = {analysis.document_id: analysis for analysis in analyses}
+    for correction in request.human_corrections:
+        analysis = by_document[correction.document_id]
+        target_item = _correction_target_item(analysis, correction)
+        normalized_value, normalized_unit = _normalize_value(
+            correction.field_name, correction.new_value
+        )
+        fact = FactV3(
+            fact_id=f"human:{correction.correction_proposal_id}",
+            name=correction.field_name.strip().casefold(),
+            raw_value=correction.new_value,
+            normalized_value=normalized_value,
+            unit=correction.unit or normalized_unit,
+            source=HumanProvidedSourceV3(
+                document_id=correction.document_id,
+                correction_proposal_id=correction.correction_proposal_id,
+                reason=correction.reason,
+            ),
+        )
+        if target_item is None:
+            by_document[correction.document_id] = analysis.model_copy(
+                update={"facts": [*analysis.facts, fact]}
+            )
+            continue
+        replacement_items = [
+            item.model_copy(update={"facts": [*item.facts, fact]})
+            if item.item_id == target_item.item_id
+            else item
+            for item in analysis.line_items
+        ]
+        by_document[correction.document_id] = analysis.model_copy(
+            update={"line_items": replacement_items}
+        )
+    return [by_document[analysis.document_id] for analysis in analyses]
+
+
+def _correction_target_item(
+    analysis: DocumentAnalysisV3,
+    correction: Any,
+) -> LineItemV3 | None:
+    """Resolve a correction target without ever widening it to another location.
+
+    A supplied item/fact identifier is an ownership assertion from Backend.  If
+    it does not describe this exact document and item, appending a document-level
+    fact would make an invalid correction appear to have been applied.  Reject
+    the child run instead.
+    """
+
+    normalized_name = correction.field_name.strip().casefold()
+    item_by_id = {item.item_id: item for item in analysis.line_items}
+
+    if correction.item_id is not None:
+        target_item = item_by_id.get(correction.item_id)
+        if target_item is None:
+            raise ValueError("human_correction_item_target_not_found")
+        if correction.fact_id is not None:
+            target_fact = next(
+                (fact for fact in target_item.facts if fact.fact_id == correction.fact_id), None
+            )
+            if target_fact is None:
+                raise ValueError("human_correction_fact_not_owned_by_item")
+            if target_fact.name != normalized_name:
+                raise ValueError("human_correction_field_does_not_match_fact")
+        return target_item
+
+    if correction.fact_id is None:
+        # A document-level correction may introduce a clearly labelled new fact.
+        return None
+
+    direct_fact = next(
+        (fact for fact in analysis.facts if fact.fact_id == correction.fact_id), None
+    )
+    if direct_fact is not None:
+        if direct_fact.name != normalized_name:
+            raise ValueError("human_correction_field_does_not_match_fact")
+        return None
+
+    for item in analysis.line_items:
+        target_fact = next(
+            (fact for fact in item.facts if fact.fact_id == correction.fact_id), None
+        )
+        if target_fact is None:
+            continue
+        if target_fact.name != normalized_name:
+            raise ValueError("human_correction_field_does_not_match_fact")
+        return item
+    raise ValueError("human_correction_fact_target_not_found")
 
 
 def _source(
@@ -1280,7 +1505,11 @@ def _first_fact_from_analysis(analysis: DocumentAnalysisV3, *names: str) -> Fact
 
 def _first_fact(facts: Iterable[FactV3], *names: str) -> FactV3 | None:
     expected = set(names)
-    return next((fact for fact in facts if fact.name in expected), None)
+    candidates = [fact for fact in facts if fact.name in expected]
+    return next(
+        (fact for fact in reversed(candidates) if isinstance(fact.source, HumanProvidedSourceV3)),
+        next(iter(candidates), None),
+    )
 
 
 def _effective_quantity_unit(item: LineItemV3, quantity: FactV3) -> str | None:

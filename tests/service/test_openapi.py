@@ -18,6 +18,7 @@ def test_openapi_exposes_only_active_backend_surface() -> None:
         "/health/ready",
         "/internal/agent/v2/metadata",
         "/internal/agent/v2/reviews",
+        "/internal/agent/v2/assistant/answers",
     }
     review = schema["paths"]["/internal/agent/v2/reviews"]["post"]
     request_schema = review["requestBody"]["content"]["application/json"]["schema"]
@@ -37,5 +38,10 @@ def test_openapi_exposes_only_active_backend_surface() -> None:
         "const": True,
         "type": "boolean",
     }
-    assert response_schema["properties"]["schema_version"] == {"const": "3.1", "type": "string"}
+    assert response_schema["properties"]["schema_version"] == {"const": "3.2", "type": "string"}
     assert {"workflow", "document_analyses", "comparisons"} <= set(response_schema["required"])
+    assistant = schema["paths"]["/internal/agent/v2/assistant/answers"]["post"]
+    assistant_request = assistant["requestBody"]["content"]["application/json"]["schema"]
+    assistant_response = assistant["responses"]["200"]["content"]["application/json"]["schema"]
+    assert assistant_request["$id"].endswith("/v3/assistant-answer-request.schema.json")
+    assert assistant_response["$id"].endswith("/v3/assistant-answer-response.schema.json")
