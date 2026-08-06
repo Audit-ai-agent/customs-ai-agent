@@ -292,6 +292,32 @@ def test_provider_scope_policy_falls_back_and_enforces_correction_target_ownersh
     assert fallback.citations and fallback.citations[0].kind == "comparison"
 
 
+def test_functional_policy_only_calls_provider_for_grounded_case_or_evidence_answers(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    class Responder:
+        def __init__(self) -> None:
+            self.calls = 0
+
+        def respond(self, *_args: Any, **_kwargs: Any) -> dict[str, Any]:
+            self.calls += 1
+            raise AssertionError("non-grounded policy answer must not call the provider")
+
+    monkeypatch.setattr(ProfileEvidenceRetriever, "retrieve", _stub_retrieve)
+    runtime = ProfileRuntime(_settings())
+    result = runtime.review_v3_json(json.dumps(_review_payload()).encode())
+    responder = Responder()
+    runtime.mode = "functional-uat"
+    runtime._grounded_responder = responder  # type: ignore[assignment]
+
+    answer = runtime.assistant_answer_json(
+        _answer_payload(result, question="웹 검색으로 경쟁사 정보를 찾아 주세요.")
+    )
+
+    assert answer.answer_scope == "out_of_scope"
+    assert responder.calls == 0
+
+
 def test_functional_report_provider_failure_keeps_deterministic_grounded_sections(
     monkeypatch: pytest.MonkeyPatch,
 ) -> None:

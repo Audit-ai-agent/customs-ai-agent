@@ -221,6 +221,61 @@ def test_review_uses_one_readiness_then_one_retrieve_and_stays_human_only(
     ]
 
 
+def test_reextraction_failure_is_exposed_as_partial_execution(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    class Analyzer:
+        model_id = "test-reextract-failure"
+
+        def __init__(self) -> None:
+            self.calls = 0
+            self._fallback = _DeterministicDocumentAnalyzer()
+
+        def analyze(self, document: dict[str, Any], **_kwargs: Any) -> Any:
+            self.calls += 1
+            if self.calls > 1:
+                raise RuntimeError("controlled reextract failure")
+            return self._fallback.analyze(document)
+
+    monkeypatch.setattr(
+        ProfileEvidenceRetriever,
+        "retrieve",
+        lambda _self, request: {
+            "schema_version": "3.0",
+            "request_id": request["request_id"],
+            "status": "ok",
+            "knowledge_snapshot_id": "dev-fixture",
+            "results": [],
+        },
+    )
+    runtime = ProfileRuntime(_settings())
+    analyzer = Analyzer()
+    runtime._analyzer = analyzer  # type: ignore[assignment]
+
+    result = runtime.review_v3_json(
+        json.dumps(
+            {
+                "case_id": "case-reextract-failure",
+                "documents": [
+                    {
+                        "document_id": "doc-reextract-failure",
+                        "filename": "invoice.txt",
+                        "content_text": "COMMERCIAL INVOICE\nInvoice No: INV-RETRY",
+                    }
+                ],
+                "review_run_id": "run-reextract-failure",
+                "review_as_of": "2026-08-05",
+                "trade_type": "import",
+                "jurisdiction": "KR",
+            }
+        ).encode()
+    )
+
+    assert analyzer.calls == 2
+    assert result.workflow.status == "partial"
+    assert result.execution_status == "partial"
+
+
 def test_internal_api_requires_matching_mode_header() -> None:
     class Runtime:
         def review_v3_json(self, _payload: bytes) -> object:

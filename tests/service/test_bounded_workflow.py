@@ -258,6 +258,23 @@ def test_bounded_workflow_records_grounded_passes_and_links() -> None:
     assert complete.workflow.planner.cycle_count == 1
 
 
+def test_weight_field_schema_unit_normalizes_naked_model_number() -> None:
+    """A verified KG source may be returned by the model as only its number."""
+    request, candidates = _scenario()
+    bill = candidates["bill"][0]
+    bill.fields[2] = _field("gross_weight_kg", "100", "Gross Weight: 100 KG")
+
+    output = run_bounded_workflow(request, _SequenceAnalyzer(candidates))
+
+    comparison = next(
+        comparison
+        for comparison in output.comparisons
+        if comparison.rule_code == "bill_packing_gross_weight"
+    )
+    assert comparison.status == "pass"
+    assert comparison.unit == "KG"
+
+
 def test_quantity_mismatch_produces_stable_finding_reference() -> None:
     request, candidates = _scenario(invoice_quantity="3 PCS")
     output = run_bounded_workflow(request, _SequenceAnalyzer(candidates))

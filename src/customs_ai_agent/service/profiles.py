@@ -802,7 +802,8 @@ class ProfileRuntime:
         transcript = self._transcript_root.for_run(request.review_run_id)
         fallback = deterministic_assistant_answer(request, engine=self._engine())
         responder = self._grounded_responder
-        if self.mode == "functional-uat" and responder is not None:
+        provider_grounded_scope = fallback.answer_scope in {"case_grounded", "evidence_grounded"}
+        if self.mode == "functional-uat" and responder is not None and provider_grounded_scope:
             try:
                 candidate = responder.respond(
                     {
@@ -834,6 +835,11 @@ class ProfileRuntime:
                     {
                         "answer_scope": answer.answer_scope,
                         "citation_count": len(answer.citations),
+                        "reason_code": (
+                            "scope_policy_deterministic"
+                            if self.mode == "functional-uat"
+                            else "local_development_deterministic"
+                        ),
                     },
                 )
         return answer
@@ -883,12 +889,20 @@ class ProfileRuntime:
         execution_status = (
             "failed"
             if status == "blocked"
-            else ("partial" if data_status == "partial" else "succeeded")
+            else (
+                "partial"
+                if data_status == "partial" or workflow_output.workflow.status == "partial"
+                else "succeeded"
+            )
         )
         assessment = (
             "issues_detected"
             if findings
-            else ("no_issue_detected" if data_status == "ok" else "indeterminate")
+            else (
+                "no_issue_detected"
+                if data_status == "ok" and workflow_output.workflow.status == "completed"
+                else "indeterminate"
+            )
         )
         actions = _actions(findings)
         report_sections = build_grounded_report_sections(

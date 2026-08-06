@@ -674,7 +674,7 @@ def _render_fact(
     )
     if source is None:
         return None
-    normalized_value, unit = _normalize_value(name, value)
+    normalized_value, unit = _normalize_value(name, value, unit_context=quote)
     return FactV3(
         fact_id=fact_id,
         name=name.strip().casefold(),
@@ -685,7 +685,12 @@ def _render_fact(
     )
 
 
-def _normalize_value(name: str, raw: str) -> tuple[str | None, str | None]:
+def _normalize_value(
+    name: str,
+    raw: str,
+    *,
+    unit_context: str | None = None,
+) -> tuple[str | None, str | None]:
     name = name.strip().casefold()
     text = unicodedata.normalize("NFKC", raw).strip()
     if not text:
@@ -712,7 +717,10 @@ def _normalize_value(name: str, raw: str) -> tuple[str | None, str | None]:
             number = Decimal(match.group(0).replace(",", ""))
         except InvalidOperation:
             return None, _unit_for_numeric(name, text)
-        return _decimal_text(number), _unit_for_numeric(name, text)
+        unit = _unit_for_numeric(name, text)
+        if unit is None and unit_context is not None:
+            unit = _unit_for_numeric(name, unit_context)
+        return _decimal_text(number), unit
     return re.sub(r"\s+", " ", text).casefold(), None
 
 
