@@ -32,7 +32,9 @@ Return this JSON shape only:
   "correction_draft":null
 }
 
-If the user states a concrete replacement value and reason, correction_draft
-may instead be {"document_id":"...","item_id":null,"fact_id":null,
-"field_name":"...","new_value":"...","unit":null,"reason":"..."}.
-It is a draft only; it never changes the review result.
+When the question uses this exact template,
+`document=<known id>; field=<known field>; value=<replacement>; reason=<reason>`,
+you MUST return a non-null correction_draft. Copy the four template values
+exactly into document_id, field_name, new_value, and reason; optional item_id,
+fact_id, and unit may be null. It is a draft only; it never changes the review
+result.

@@ -71,7 +71,12 @@ function Import-FunctionalUatAnthropicKey {
         if ($line -notmatch "^(?<key>[A-Za-z_][A-Za-z0-9_]*)\s*=\s*(?<value>.*)$") {
             throw "agent_profile_anthropic_secret_invalid"
         }
-        if ($Matches["key"] -cne "ANTHROPIC_API_KEY" -or $null -ne $apiKey) {
+        # This is a shared local secret file.  Validate and import only the
+        # Claude key; never project unrelated values into the Agent process.
+        if ($Matches["key"] -cne "ANTHROPIC_API_KEY") {
+            continue
+        }
+        if ($null -ne $apiKey) {
             throw "agent_profile_anthropic_secret_invalid"
         }
 

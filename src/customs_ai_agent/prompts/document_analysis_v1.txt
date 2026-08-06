@@ -46,3 +46,23 @@ measurement_cbm
 
 For a known document type, classification_source_quote must be a verbatim heading or identifying
 span. For unknown, classification_source_quote must be an empty string.
+
+Return one JSON object only. Do not wrap it in Markdown, and do not include document_id, filename,
+explanations, or keys other than the following shape:
+{
+  "schema_version": "1.0",
+  "document_type": "invoice | packing_list | bill_of_lading | certificate_of_origin | unknown",
+  "classification_source_quote": "verbatim document span or empty string",
+  "fields": [
+    {"name": "allowed_field_name", "value": "verbatim value", "source_quote": "verbatim span"}
+  ],
+  "line_items": [
+    {
+      "source_quote": "verbatim line-item span",
+      "fields": [
+        {"name": "allowed_line_item_field", "value": "verbatim value", "source_quote": "verbatim span"}
+      ]
+    }
+  ]
+}
+Always make fields and line_items JSON arrays, including when they are empty.

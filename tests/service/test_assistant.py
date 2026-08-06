@@ -159,6 +159,19 @@ def test_assistant_draft_is_non_mutating_and_endpoint_is_profile_protected(
     assert answer.correction_draft.new_value == "2 PCS"
     assert result.result_sha256 == original_hash
 
+    english_template = runtime.assistant_answer_json(
+        _answer_payload(
+            result,
+            question=(
+                "document=invoice; field=quantity; value=2 PCS; "
+                "reason=Invoice and Packing List require a reviewed correction"
+            ),
+        )
+    )
+    assert english_template.answer_scope == "case_grounded"
+    assert english_template.correction_draft is not None
+    assert english_template.correction_draft.document_id == "invoice"
+
     app = create_app(_settings())
     with TestClient(app, raise_server_exceptions=False) as client:
         review = client.post(
@@ -228,8 +241,28 @@ def test_provider_scope_policy_falls_back_and_enforces_correction_target_ownersh
         "suggested_questions": [],
         "correction_draft": None,
     }
-    with pytest.raises(ValueError, match="assistant_provider_scope_policy_violation"):
+    with pytest.raises(ValueError, match="assistant_provider_output_invalid"):
         response_from_provider_candidate(invalid_general, request, engine=result.engine)
+
+    draft_request = AssistantAnswerRequestV1.model_validate(
+        json.loads(
+            _answer_payload(
+                result,
+                question=("document=invoice; field=quantity; value=2 PCS; reason=담당자 정정 확인"),
+            )
+        )
+    )
+    missing_required_draft = {
+        "answer_scope": "case_grounded",
+        "direct_answer": "문서 비교 항목을 확인해야 합니다.",
+        "citations": [{"kind": "comparison", "reference_id": result.comparisons[0].comparison_id}],
+        "suggested_questions": [],
+        "correction_draft": None,
+    }
+    with pytest.raises(ValueError, match="assistant_provider_correction_draft_required"):
+        response_from_provider_candidate(
+            missing_required_draft, draft_request, engine=result.engine
+        )
 
     item = result.document_analyses[0].line_items[0]
     document_fact = result.document_analyses[0].facts[0]
@@ -257,6 +290,32 @@ def test_provider_scope_policy_falls_back_and_enforces_correction_target_ownersh
     )
     assert fallback.answer_scope == "case_grounded"
     assert fallback.citations and fallback.citations[0].kind == "comparison"
+
+
+def test_functional_policy_only_calls_provider_for_grounded_case_or_evidence_answers(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    class Responder:
+        def __init__(self) -> None:
+            self.calls = 0
+
+        def respond(self, *_args: Any, **_kwargs: Any) -> dict[str, Any]:
+            self.calls += 1
+            raise AssertionError("non-grounded policy answer must not call the provider")
+
+    monkeypatch.setattr(ProfileEvidenceRetriever, "retrieve", _stub_retrieve)
+    runtime = ProfileRuntime(_settings())
+    result = runtime.review_v3_json(json.dumps(_review_payload()).encode())
+    responder = Responder()
+    runtime.mode = "functional-uat"
+    runtime._grounded_responder = responder  # type: ignore[assignment]
+
+    answer = runtime.assistant_answer_json(
+        _answer_payload(result, question="웹 검색으로 경쟁사 정보를 찾아 주세요.")
+    )
+
+    assert answer.answer_scope == "out_of_scope"
+    assert responder.calls == 0
 
 
 def test_functional_report_provider_failure_keeps_deterministic_grounded_sections(
@@ -313,7 +372,14 @@ def test_functional_report_uses_one_valid_provider_composition(
                             "fact_ids": [],
                             "comparison_ids": [comparison_id],
                             "evidence_ids": [],
-                        }
+                        },
+                        {
+                            "claim_id": f"ungrounded:{name}",
+                            "text": "근거 없이 추가된 문장은 공개 결과에 포함되면 안 됩니다.",
+                            "fact_ids": [],
+                            "comparison_ids": [],
+                            "evidence_ids": [],
+                        },
                     ],
                 }
                 for name, title in (
@@ -327,6 +393,8 @@ def test_functional_report_uses_one_valid_provider_composition(
                     ("limitations", "한계"),
                 )
             ]
+            impact = next(section for section in sections if section["section"] == "impact")
+            impact["claims"] = [impact["claims"][1]]
             return {"sections": sections}
 
         def close(self) -> None:
@@ -342,4 +410,6 @@ def test_functional_report_uses_one_valid_provider_composition(
 
     assert responder.calls == 1
     assert result.report.sections[0].claims[0].claim_id == "provider:conclusion"
+    assert all(len(section.claims) == 1 for section in result.report.sections)
+    assert result.report.sections[5].claims[0].claim_id.startswith("report:impact:")
     assert result.result_sha256

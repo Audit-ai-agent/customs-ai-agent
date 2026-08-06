@@ -174,14 +174,17 @@ def response_from_provider_candidate(
 ) -> AssistantAnswerResponseV1:
     """Validate a single Claude candidate against the fixed public envelope."""
 
+    expected_scope = _classify_question(request.question.strip(), request.review_result).scope
     payload = {
         "schema_version": "1.0",
         "case_id": request.case_id,
         "review_run_id": request.review_run_id,
         "conversation_id": request.conversation_id,
-        "answer_scope": candidate.get("answer_scope"),
+        # Scope is a deterministic boundary, not a model-controlled label.
+        # Claude still supplies the answer text, citations, and optional draft.
+        "answer_scope": expected_scope,
         "direct_answer": candidate.get("direct_answer"),
-        "citations": candidate.get("citations", []),
+        "citations": _known_provider_citations(candidate, request.review_result),
         "suggested_questions": candidate.get("suggested_questions", []),
         "correction_draft": candidate.get("correction_draft"),
         "engine": engine,
@@ -192,7 +195,68 @@ def response_from_provider_candidate(
         raise ValueError("assistant_provider_output_invalid") from None
     _validate_scope_policy(answer, request)
     _validate_references(answer, request.review_result)
+    _validate_scope_requirements(answer)
+    expected_draft = _draft_from_question(request.question, request.review_result)
+    if expected_draft is not None:
+        draft = answer.correction_draft
+        if (
+            draft is None
+            or draft.document_id != expected_draft.document_id
+            or draft.field_name != expected_draft.field_name
+            or draft.new_value != expected_draft.new_value
+            or draft.reason != expected_draft.reason
+        ):
+            raise ValueError("assistant_provider_correction_draft_required")
     return answer
+
+
+def _known_provider_citations(
+    candidate: Mapping[str, Any], result: ReviewRunResultV3
+) -> list[dict[str, str]]:
+    """Keep only typed citations that refer to the immutable review snapshot."""
+
+    facts = {
+        fact.fact_id
+        for analysis in result.document_analyses
+        for fact in [
+            *analysis.facts,
+            *(fact for item in analysis.line_items for fact in item.facts),
+        ]
+    }
+    comparisons = {item.comparison_id for item in result.comparisons}
+    evidence = {item.evidence_id for item in result.evidence}
+    known = {"fact": facts, "comparison": comparisons, "evidence": evidence}
+    raw = candidate.get("citations", [])
+    if not isinstance(raw, list):
+        return []
+    return [
+        {"kind": kind, "reference_id": reference_id}
+        for item in raw
+        if isinstance(item, Mapping)
+        and isinstance((kind := item.get("kind")), str)
+        and kind in known
+        and isinstance((reference_id := item.get("reference_id")), str)
+        and reference_id in known[kind]
+    ]
+
+
+def _validate_scope_requirements(answer: AssistantAnswerResponseV1) -> None:
+    """Apply the same citation and non-case boundaries after provider cleanup."""
+
+    if answer.answer_scope == "case_grounded" and not answer.citations:
+        raise ValueError("assistant_provider_case_citations_required")
+    if answer.answer_scope == "evidence_grounded":
+        if not any(citation.kind == "evidence" for citation in answer.citations):
+            raise ValueError("assistant_provider_evidence_citation_required")
+    if answer.answer_scope == "general_customs_guidance":
+        if answer.citations or answer.correction_draft is not None:
+            raise ValueError("assistant_provider_general_boundary_invalid")
+        if GENERAL_GUIDANCE_DISCLAIMER not in answer.direct_answer:
+            raise ValueError("assistant_provider_general_disclaimer_missing")
+    if answer.answer_scope == "out_of_scope" and (
+        answer.citations or answer.correction_draft is not None
+    ):
+        raise ValueError("assistant_provider_out_of_scope_boundary_invalid")
 
 
 def provider_snapshot(result: ReviewRunResultV3) -> dict[str, Any]:
@@ -334,7 +398,13 @@ def _primary_comparison(result: ReviewRunResultV3):
 
 
 def _mentions_case_reference(question: str) -> bool:
-    return bool(re.search(r"(?:이\s*사건|현재\s*사건|문서|심사|finding|비교)", question, re.I))
+    return bool(
+        re.search(
+            r"(?:이\s*사건|현재\s*사건|문서|심사|finding|비교|document|case|review)",
+            question,
+            re.I,
+        )
+    )
 
 
 def _classify_question(question: str, result: ReviewRunResultV3) -> _QuestionPolicy:

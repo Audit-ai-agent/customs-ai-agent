@@ -9,6 +9,13 @@ Return exactly eight sections, once each and in this order:
 conclusion, execution_process, document_comparison, issues_and_causes,
 legal_evidence, impact, next_actions, limitations.
 
+Keep this response compact: emit exactly one concise claim in every section.
+The sole exception is execution_process, which may add one concise claim for
+each supplied human-provided correction. Do not repeat document text, lists of
+all findings, or the supplied snapshot. A title must be short and a claim text
+must be a single short sentence. Do not emit Markdown, prose before or after
+the object, or a code fence. The final character of the response must be `}`.
+
 Return this JSON shape only:
 {
   "sections":[
@@ -19,8 +26,8 @@ Return this JSON shape only:
   ]
 }
 
-All section values must be present. A claim cannot have all three reference
-lists empty. Do not use IDs not present in the supplied result.
+All eight section values must be present. A claim cannot have all three
+reference lists empty. Do not use IDs not present in the supplied result.
 
 If a supplied fact has source_kind "human_provided", execution_process must
 include a claim for every such correction: state its correction_proposal_id in

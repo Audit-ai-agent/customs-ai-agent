@@ -566,7 +566,7 @@ def _correction_target_item(
             )
             if target_fact is None:
                 raise ValueError("human_correction_fact_not_owned_by_item")
-            if target_fact.name != normalized_name:
+            if not _correction_field_matches(target_fact.name, normalized_name):
                 raise ValueError("human_correction_field_does_not_match_fact")
         return target_item
 
@@ -578,9 +578,24 @@ def _correction_target_item(
         (fact for fact in analysis.facts if fact.fact_id == correction.fact_id), None
     )
     if direct_fact is not None:
-        if direct_fact.name != normalized_name:
+        if not _correction_field_matches(direct_fact.name, normalized_name):
             raise ValueError("human_correction_field_does_not_match_fact")
         return None
+
+    # Claude can return the same document-level fields in a different order on
+    # a child run.  Fact IDs intentionally include that order, so an exact
+    # parent ID is not a stable cross-call locator.  A correction remains safe
+    # to apply only when the original document has exactly one document-level
+    # fact with the declared field name.  Never broaden this fallback to a
+    # line item or to multiple candidates: either case needs another human
+    # review instead of silently moving a correction.
+    same_name_facts = [
+        fact for fact in analysis.facts if _correction_field_matches(fact.name, normalized_name)
+    ]
+    if len(same_name_facts) == 1:
+        return None
+    if len(same_name_facts) > 1:
+        raise ValueError("human_correction_fact_target_ambiguous")
 
     for item in analysis.line_items:
         target_fact = next(
@@ -588,10 +603,18 @@ def _correction_target_item(
         )
         if target_fact is None:
             continue
-        if target_fact.name != normalized_name:
+        if not _correction_field_matches(target_fact.name, normalized_name):
             raise ValueError("human_correction_field_does_not_match_fact")
         return item
     raise ValueError("human_correction_fact_target_not_found")
+
+
+def _correction_field_matches(actual: str, requested: str) -> bool:
+    """Match a correction field to one extraction field without broadening scope."""
+
+    if actual == requested:
+        return True
+    return actual in _ORIGIN_FIELDS and requested in _ORIGIN_FIELDS
 
 
 def _source(
@@ -651,7 +674,7 @@ def _render_fact(
     )
     if source is None:
         return None
-    normalized_value, unit = _normalize_value(name, value)
+    normalized_value, unit = _normalize_value(name, value, unit_context=quote)
     return FactV3(
         fact_id=fact_id,
         name=name.strip().casefold(),
@@ -662,7 +685,12 @@ def _render_fact(
     )
 
 
-def _normalize_value(name: str, raw: str) -> tuple[str | None, str | None]:
+def _normalize_value(
+    name: str,
+    raw: str,
+    *,
+    unit_context: str | None = None,
+) -> tuple[str | None, str | None]:
     name = name.strip().casefold()
     text = unicodedata.normalize("NFKC", raw).strip()
     if not text:
@@ -689,7 +717,10 @@ def _normalize_value(name: str, raw: str) -> tuple[str | None, str | None]:
             number = Decimal(match.group(0).replace(",", ""))
         except InvalidOperation:
             return None, _unit_for_numeric(name, text)
-        return _decimal_text(number), _unit_for_numeric(name, text)
+        unit = _unit_for_numeric(name, text)
+        if unit is None and unit_context is not None:
+            unit = _unit_for_numeric(name, unit_context)
+        return _decimal_text(number), unit
     return re.sub(r"\s+", " ", text).casefold(), None
 
 

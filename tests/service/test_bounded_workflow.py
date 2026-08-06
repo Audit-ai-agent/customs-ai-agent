@@ -258,6 +258,23 @@ def test_bounded_workflow_records_grounded_passes_and_links() -> None:
     assert complete.workflow.planner.cycle_count == 1
 
 
+def test_weight_field_schema_unit_normalizes_naked_model_number() -> None:
+    """A verified KG source may be returned by the model as only its number."""
+    request, candidates = _scenario()
+    bill = candidates["bill"][0]
+    bill.fields[2] = _field("gross_weight_kg", "100", "Gross Weight: 100 KG")
+
+    output = run_bounded_workflow(request, _SequenceAnalyzer(candidates))
+
+    comparison = next(
+        comparison
+        for comparison in output.comparisons
+        if comparison.rule_code == "bill_packing_gross_weight"
+    )
+    assert comparison.status == "pass"
+    assert comparison.unit == "KG"
+
+
 def test_quantity_mismatch_produces_stable_finding_reference() -> None:
     request, candidates = _scenario(invoice_quantity="3 PCS")
     output = run_bounded_workflow(request, _SequenceAnalyzer(candidates))
@@ -493,6 +510,93 @@ def test_approved_human_correction_preserves_original_fact_and_drives_comparison
             analyses=output.document_analyses,
             comparisons=output.comparisons,
             evidence=[],
+        )
+
+
+def test_document_level_correction_survives_claude_field_reordering() -> None:
+    """A child run may reorder extraction fields without moving the target."""
+
+    request, candidates = _scenario()
+    original_invoice = candidates["invoice"][0]
+    parent_origin_field = original_invoice.fields[2].model_copy(update={"name": "origin_country"})
+    parent_invoice_candidate = original_invoice.model_copy(
+        update={"fields": [*original_invoice.fields[:2], parent_origin_field]}
+    )
+    parent = run_bounded_workflow(
+        request,
+        _SequenceAnalyzer({**candidates, "invoice": [parent_invoice_candidate]}),
+    )
+    parent_invoice = next(
+        item for item in parent.document_analyses if item.document_id == "invoice"
+    )
+    parent_origin = next(item for item in parent_invoice.facts if item.name == "origin_country")
+
+    child_origin_field = parent_origin_field.model_copy(update={"name": "country_of_origin"})
+    reordered_candidate = parent_invoice_candidate.model_copy(
+        update={"fields": [child_origin_field, *parent_invoice_candidate.fields[:2]]}
+    )
+    child_candidates = {**candidates, "invoice": [reordered_candidate]}
+    child_payload = request.model_dump(mode="json")
+    child_payload.update(
+        {
+            "parent_review_run_id": "run-parent",
+            "applied_correction_proposal_ids": ["proposal-origin"],
+            "human_corrections": [
+                {
+                    "correction_proposal_id": "proposal-origin",
+                    "document_id": "invoice",
+                    "fact_id": parent_origin.fact_id,
+                    "field_name": "origin_country",
+                    "new_value": "KR",
+                    "reason": "승인된 원산지 보완값입니다.",
+                    "source_kind": "human_provided",
+                }
+            ],
+        }
+    )
+
+    output = run_bounded_workflow(
+        ServiceReviewRunRequestV3.model_validate(child_payload),
+        _SequenceAnalyzer(child_candidates),
+    )
+
+    invoice = next(item for item in output.document_analyses if item.document_id == "invoice")
+    assert any(
+        fact.fact_id == "human:proposal-origin" and fact.source.source_kind == "human_provided"
+        for fact in invoice.facts
+    )
+
+
+def test_document_level_correction_does_not_choose_an_ambiguous_reordered_fact() -> None:
+    request, candidates = _scenario()
+    invoice_candidate = candidates["invoice"][0]
+    duplicate_origin = _field("country_of_origin", "KR", "Country of Origin: KR")
+    ambiguous_candidate = invoice_candidate.model_copy(
+        update={"fields": [*invoice_candidate.fields, duplicate_origin]}
+    )
+    payload = request.model_dump(mode="json")
+    payload.update(
+        {
+            "parent_review_run_id": "run-parent",
+            "applied_correction_proposal_ids": ["proposal-ambiguous"],
+            "human_corrections": [
+                {
+                    "correction_proposal_id": "proposal-ambiguous",
+                    "document_id": "invoice",
+                    "fact_id": "invoice:field:origin_country:99",
+                    "field_name": "country_of_origin",
+                    "new_value": "KR",
+                    "reason": "모호한 대상은 적용할 수 없습니다.",
+                    "source_kind": "human_provided",
+                }
+            ],
+        }
+    )
+
+    with pytest.raises(ValueError, match="human_correction_fact_target_ambiguous"):
+        run_bounded_workflow(
+            ServiceReviewRunRequestV3.model_validate(payload),
+            _SequenceAnalyzer({**candidates, "invoice": [ambiguous_candidate]}),
         )
 
 
