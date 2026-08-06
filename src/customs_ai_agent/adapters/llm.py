@@ -20,9 +20,10 @@ from customs_ai_agent.scenario_transcript import ScenarioTranscriptRun
 from customs_ai_agent.schemas.llm import ClaudeDocumentCandidate
 
 
-# Use a current, generally available Sonnet revision.  Operators may still
-# select another permitted Claude model through the local-only profile value.
-DEFAULT_CLAUDE_MODEL = "claude-sonnet-4-6"
+# Use a current, generally available Haiku revision for the default local
+# Functional-UAT path. Operators may still select another permitted Claude
+# model through the local-only profile value.
+DEFAULT_CLAUDE_MODEL = "claude-haiku-4-5-20251001"
 _SAFE_MODEL = re.compile(r"^claude-[A-Za-z0-9._-]{2,120}$")
 _SINGLE_JSON_FENCE = re.compile(
     r"\A```(?:json)?[ \t]*\r?\n(?P<body>\{.*\})\r?\n?```[ \t]*\Z",
