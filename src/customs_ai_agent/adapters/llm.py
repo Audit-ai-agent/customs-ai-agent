@@ -24,6 +24,10 @@ from customs_ai_agent.schemas.llm import ClaudeDocumentCandidate
 # select another permitted Claude model through the local-only profile value.
 DEFAULT_CLAUDE_MODEL = "claude-sonnet-4-6"
 _SAFE_MODEL = re.compile(r"^claude-[A-Za-z0-9._-]{2,120}$")
+_SINGLE_JSON_FENCE = re.compile(
+    r"\A```(?:json)?[ \t]*\r?\n(?P<body>\{.*\})\r?\n?```[ \t]*\Z",
+    re.IGNORECASE | re.DOTALL,
+)
 
 
 class LLMError(RuntimeError):
@@ -40,6 +44,14 @@ class LLMProviderError(LLMError):
 
 class LLMOutputValidationError(LLMError):
     pass
+
+
+def _json_text_from_model_output(output: str) -> str:
+    """Accept one complete JSON code fence without accepting surrounding prose."""
+
+    normalized = output.strip()
+    match = _SINGLE_JSON_FENCE.fullmatch(normalized)
+    return match.group("body").strip() if match is not None else normalized
 
 
 class ClaudeSettings(BaseModel):
@@ -222,7 +234,9 @@ class ClaudeDocumentAnalyzer:
                 },
             )
         try:
-            candidate = ClaudeDocumentCandidate.model_validate_json(output)
+            candidate = ClaudeDocumentCandidate.model_validate_json(
+                _json_text_from_model_output(output)
+            )
         except (ValidationError, ValueError):
             if transcript is not None:
                 transcript.write(
@@ -352,7 +366,7 @@ class ClaudeGroundedResponder:
                 {"provider": "anthropic", "model": self.model_id, "output_text": output},
             )
         try:
-            parsed = json.loads(output)
+            parsed = json.loads(_json_text_from_model_output(output))
         except (TypeError, ValueError):
             if transcript is not None:
                 transcript.write(

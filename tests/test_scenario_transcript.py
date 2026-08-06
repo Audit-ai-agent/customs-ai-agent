@@ -284,14 +284,18 @@ def test_claude_trace_contains_actual_prompt_and_full_text_response(tmp_path: Pa
     root = ScenarioTranscriptRoot.from_environment({TRANSCRIPT_ROOT_ENV: str(_root(tmp_path))})
     transcript = root.for_run("run-claude-trace")
     assert transcript is not None
-    output = json.dumps(
-        {
-            "schema_version": "1.0",
-            "document_type": "invoice",
-            "classification_source_quote": "COMMERCIAL INVOICE",
-            "fields": [],
-            "line_items": [],
-        }
+    output = (
+        "```json\n"
+        + json.dumps(
+            {
+                "schema_version": "1.0",
+                "document_type": "invoice",
+                "classification_source_quote": "COMMERCIAL INVOICE",
+                "fields": [],
+                "line_items": [],
+            }
+        )
+        + "\n```"
     )
 
     class Messages:
@@ -358,14 +362,18 @@ def test_grounded_responder_records_one_redacted_chat_exchange(tmp_path: Path) -
     root = ScenarioTranscriptRoot.from_environment({TRANSCRIPT_ROOT_ENV: str(_root(tmp_path))})
     transcript = root.for_run("run-grounded-chat")
     assert transcript is not None
-    output = json.dumps(
-        {
-            "answer_scope": "case_grounded",
-            "direct_answer": "근거를 확인했습니다.",
-            "citations": [{"kind": "comparison", "reference_id": "comparison-1"}],
-            "suggested_questions": [],
-            "correction_draft": None,
-        }
+    output = (
+        "```JSON\n"
+        + json.dumps(
+            {
+                "answer_scope": "case_grounded",
+                "direct_answer": "근거를 확인했습니다.",
+                "citations": [{"kind": "comparison", "reference_id": "comparison-1"}],
+                "suggested_questions": [],
+                "correction_draft": None,
+            }
+        )
+        + "\n```"
     )
 
     class Messages:
