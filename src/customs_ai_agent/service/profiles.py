@@ -600,6 +600,30 @@ def _actions(findings: list[FindingV3]) -> list[RequiredActionV1]:
     return actions
 
 
+def _provider_report_claim_is_grounded(
+    claim: Mapping[str, Any],
+    *,
+    fact_ids: set[str],
+    comparison_ids: set[str],
+    evidence_ids: set[str],
+) -> bool:
+    """Accept only a claim whose every cited ID belongs to this review."""
+
+    references = (
+        (claim.get("fact_ids", []), fact_ids),
+        (claim.get("comparison_ids", []), comparison_ids),
+        (claim.get("evidence_ids", []), evidence_ids),
+    )
+    has_reference = False
+    for values, known_ids in references:
+        if not isinstance(values, list):
+            return False
+        if any(not isinstance(value, str) or value not in known_ids for value in values):
+            return False
+        has_reference = has_reference or bool(values)
+    return has_reference
+
+
 class ProfileRuntime:
     def __init__(
         self, settings: ServiceSettings, *, transcript_root: ScenarioTranscriptRoot | None = None
@@ -692,27 +716,67 @@ class ProfileRuntime:
             if not isinstance(raw_sections, list):
                 raise ValueError("report_sections_missing")
             # A provider can add narrative claims despite the prompt.  Never
-            # let an ungrounded claim cross the public boundary: remove only
-            # entries with no reference at all, then validate every remaining
-            # field and reference normally.  A section with no grounded claim
-            # still fails closed and uses the deterministic report.
-            normalized_sections: list[dict[str, Any]] = []
+            # let an ungrounded or unknown-reference claim cross the public
+            # boundary. Preserve grounded provider sections, but fill a
+            # missing safe section from the deterministic report instead of
+            # discarding all useful Claude composition.
+            known_facts = {
+                fact.fact_id
+                for analysis in result.document_analyses
+                for fact in [
+                    *analysis.facts,
+                    *(fact for item in analysis.line_items for fact in item.facts),
+                ]
+            }
+            known_comparisons = {item.comparison_id for item in result.comparisons}
+            known_evidence = {item.evidence_id for item in result.evidence}
+            fallback_by_section = {section.section: section for section in fallback}
+            has_human_correction = any(
+                getattr(fact.source, "source_kind", None) == "human_provided"
+                for analysis in result.document_analyses
+                for fact in [
+                    *analysis.facts,
+                    *(fact for item in analysis.line_items for fact in item.facts),
+                ]
+            )
+            provider_sections: dict[str, dict[str, Any]] = {}
             for raw_section in raw_sections:
                 if not isinstance(raw_section, Mapping):
-                    raise ValueError("report_section_invalid")
+                    continue
+                section_name = raw_section.get("section")
+                if (
+                    not isinstance(section_name, str)
+                    or section_name not in fallback_by_section
+                    or section_name in provider_sections
+                    or (section_name == "execution_process" and has_human_correction)
+                ):
+                    continue
                 raw_claims = raw_section.get("claims")
                 if not isinstance(raw_claims, list):
-                    raise ValueError("report_claims_invalid")
+                    continue
                 grounded_claims = [
                     claim
                     for claim in raw_claims
                     if isinstance(claim, Mapping)
-                    and any(
-                        bool(claim.get(reference_name))
-                        for reference_name in ("fact_ids", "comparison_ids", "evidence_ids")
+                    and _provider_report_claim_is_grounded(
+                        claim,
+                        fact_ids=known_facts,
+                        comparison_ids=known_comparisons,
+                        evidence_ids=known_evidence,
                     )
                 ]
-                normalized_sections.append({**raw_section, "claims": grounded_claims})
+                if grounded_claims:
+                    provider_sections[section_name] = {
+                        **dict(raw_section),
+                        "claims": grounded_claims,
+                    }
+            normalized_sections = [
+                provider_sections.get(
+                    fallback_section.section,
+                    fallback_section.model_dump(mode="json", warnings=False),
+                )
+                for fallback_section in fallback
+            ]
             sections = [ReportSectionV3.model_validate(item) for item in normalized_sections]
             validate_grounded_report_sections(
                 sections,

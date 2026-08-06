@@ -367,6 +367,8 @@ def test_functional_report_uses_one_valid_provider_composition(
                     ("limitations", "한계"),
                 )
             ]
+            impact = next(section for section in sections if section["section"] == "impact")
+            impact["claims"] = [impact["claims"][1]]
             return {"sections": sections}
 
         def close(self) -> None:
@@ -383,4 +385,5 @@ def test_functional_report_uses_one_valid_provider_composition(
     assert responder.calls == 1
     assert result.report.sections[0].claims[0].claim_id == "provider:conclusion"
     assert all(len(section.claims) == 1 for section in result.report.sections)
+    assert result.report.sections[5].claims[0].claim_id.startswith("report:impact:")
     assert result.result_sha256
