@@ -118,6 +118,19 @@ def test_functional_uat_imports_only_the_canonical_local_key(tmp_path: Path) -> 
     assert _STALE_VALUE not in result.stdout + result.stderr
 
 
+def test_functional_uat_ignores_unrelated_well_formed_local_env_keys(tmp_path: Path) -> None:
+    workspace = _write_workspace(
+        tmp_path,
+        secret_contents=(f"UNRELATED_KEY={_STALE_VALUE}\n" + _anthropic_assignment(_TEST_VALUE)),
+    )
+    result = _run_importer(workspace, expected_key=_TEST_VALUE)
+
+    assert result.returncode == 0
+    assert result.stdout == "KEY_PRESENT"
+    assert _TEST_VALUE not in result.stdout + result.stderr
+    assert _STALE_VALUE not in result.stdout + result.stderr
+
+
 def test_functional_uat_allows_a_valid_inherited_key_only_when_file_is_absent(
     tmp_path: Path,
 ) -> None:
@@ -164,7 +177,6 @@ def test_functional_uat_rejects_a_non_regular_canonical_secret_path(tmp_path: Pa
 @pytest.mark.parametrize(
     ("secret_contents", "expected_code"),
     [
-        (f"UNRELATED_KEY={_TEST_VALUE}\n", "agent_profile_anthropic_secret_invalid"),
         (
             _anthropic_assignment(_TEST_VALUE) + _anthropic_assignment(_STALE_VALUE),
             "agent_profile_anthropic_secret_invalid",
