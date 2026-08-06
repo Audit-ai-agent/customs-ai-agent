@@ -333,7 +333,14 @@ def test_functional_report_uses_one_valid_provider_composition(
                             "fact_ids": [],
                             "comparison_ids": [comparison_id],
                             "evidence_ids": [],
-                        }
+                        },
+                        {
+                            "claim_id": f"ungrounded:{name}",
+                            "text": "근거 없이 추가된 문장은 공개 결과에 포함되면 안 됩니다.",
+                            "fact_ids": [],
+                            "comparison_ids": [],
+                            "evidence_ids": [],
+                        },
                     ],
                 }
                 for name, title in (
@@ -362,4 +369,5 @@ def test_functional_report_uses_one_valid_provider_composition(
 
     assert responder.calls == 1
     assert result.report.sections[0].claims[0].claim_id == "provider:conclusion"
+    assert all(len(section.claims) == 1 for section in result.report.sections)
     assert result.result_sha256

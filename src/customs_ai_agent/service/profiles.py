@@ -691,7 +691,29 @@ class ProfileRuntime:
             raw_sections = candidate.get("sections")
             if not isinstance(raw_sections, list):
                 raise ValueError("report_sections_missing")
-            sections = [ReportSectionV3.model_validate(item) for item in raw_sections]
+            # A provider can add narrative claims despite the prompt.  Never
+            # let an ungrounded claim cross the public boundary: remove only
+            # entries with no reference at all, then validate every remaining
+            # field and reference normally.  A section with no grounded claim
+            # still fails closed and uses the deterministic report.
+            normalized_sections: list[dict[str, Any]] = []
+            for raw_section in raw_sections:
+                if not isinstance(raw_section, Mapping):
+                    raise ValueError("report_section_invalid")
+                raw_claims = raw_section.get("claims")
+                if not isinstance(raw_claims, list):
+                    raise ValueError("report_claims_invalid")
+                grounded_claims = [
+                    claim
+                    for claim in raw_claims
+                    if isinstance(claim, Mapping)
+                    and any(
+                        bool(claim.get(reference_name))
+                        for reference_name in ("fact_ids", "comparison_ids", "evidence_ids")
+                    )
+                ]
+                normalized_sections.append({**raw_section, "claims": grounded_claims})
+            sections = [ReportSectionV3.model_validate(item) for item in normalized_sections]
             validate_grounded_report_sections(
                 sections,
                 analyses=result.document_analyses,
