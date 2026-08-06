@@ -192,6 +192,17 @@ def response_from_provider_candidate(
         raise ValueError("assistant_provider_output_invalid") from None
     _validate_scope_policy(answer, request)
     _validate_references(answer, request.review_result)
+    expected_draft = _draft_from_question(request.question, request.review_result)
+    if expected_draft is not None:
+        draft = answer.correction_draft
+        if (
+            draft is None
+            or draft.document_id != expected_draft.document_id
+            or draft.field_name != expected_draft.field_name
+            or draft.new_value != expected_draft.new_value
+            or draft.reason != expected_draft.reason
+        ):
+            raise ValueError("assistant_provider_correction_draft_required")
     return answer
 
 

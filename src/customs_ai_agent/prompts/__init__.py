@@ -8,7 +8,7 @@ from importlib.resources import files
 DOCUMENT_ANALYSIS_PROMPT_ID = "customs_document_analysis"
 DOCUMENT_ANALYSIS_PROMPT_VERSION = "1.3.1"
 ASSISTANT_PROMPT_ID = "customs_grounded_assistant"
-ASSISTANT_PROMPT_VERSION = "1.0.1"
+ASSISTANT_PROMPT_VERSION = "1.0.2"
 REPORT_PROMPT_ID = "customs_grounded_review_report"
 REPORT_PROMPT_VERSION = "1.0.2"
 

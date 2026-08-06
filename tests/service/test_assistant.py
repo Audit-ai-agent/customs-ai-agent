@@ -231,6 +231,26 @@ def test_provider_scope_policy_falls_back_and_enforces_correction_target_ownersh
     with pytest.raises(ValueError, match="assistant_provider_scope_policy_violation"):
         response_from_provider_candidate(invalid_general, request, engine=result.engine)
 
+    draft_request = AssistantAnswerRequestV1.model_validate(
+        json.loads(
+            _answer_payload(
+                result,
+                question=("document=invoice; field=quantity; value=2 PCS; reason=담당자 정정 확인"),
+            )
+        )
+    )
+    missing_required_draft = {
+        "answer_scope": "case_grounded",
+        "direct_answer": "문서 비교 항목을 확인해야 합니다.",
+        "citations": [{"kind": "comparison", "reference_id": result.comparisons[0].comparison_id}],
+        "suggested_questions": [],
+        "correction_draft": None,
+    }
+    with pytest.raises(ValueError, match="assistant_provider_correction_draft_required"):
+        response_from_provider_candidate(
+            missing_required_draft, draft_request, engine=result.engine
+        )
+
     item = result.document_analyses[0].line_items[0]
     document_fact = result.document_analyses[0].facts[0]
     ownership_mismatch = {
