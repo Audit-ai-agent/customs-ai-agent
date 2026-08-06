@@ -73,6 +73,22 @@ class ServiceReviewRunRequestV3(V3WireModel):
             raise ValueError("human correction document_id must refer to an input document")
         return self
 
+    def input_manifest_wire(self) -> dict[str, Any]:
+        """Return exactly the compact request shape sent by the Backend.
+
+        Pydantic materialises the optional child-run fields after decoding a
+        baseline request.  They were absent on the HTTP wire, so including
+        their ``None``/empty defaults in the result binding hash would make a
+        valid Backend request fail closed.  Only a child run carries those
+        three fields; nested optional correction values are likewise omitted.
+        """
+
+        wire = self.model_dump(mode="json", exclude_none=True, warnings=False)
+        if self.parent_review_run_id is None:
+            wire.pop("applied_correction_proposal_ids", None)
+            wire.pop("human_corrections", None)
+        return wire
+
 
 class ReviewReportV3(V3WireModel):
     overall_status: Literal["needs_review", "blocked"]

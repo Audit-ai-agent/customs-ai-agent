@@ -8,6 +8,7 @@ import pytest
 from fastapi.testclient import TestClient
 from pydantic import SecretStr
 
+from customs_ai_agent.schemas.v3 import ServiceReviewRunRequestV3, canonical_json_sha256
 from customs_ai_agent.service.app import create_app
 from customs_ai_agent.service.profiles import (
     _DeterministicDocumentAnalyzer,
@@ -92,6 +93,48 @@ def test_profile_rejects_non_loopback_evidence() -> None:
     with pytest.raises(RuntimeConfigurationError) as raised:
         ProfileEvidenceRetriever(replace(_settings(), evidence_base_url="https://example.invalid"))
     assert raised.value.code == "evidence_base_url_invalid"
+
+
+def test_review_input_manifest_hashes_the_exact_backend_wire_for_baseline_and_child_runs() -> None:
+    baseline_wire = {
+        "case_id": "case-input-manifest",
+        "review_run_id": "run-input-manifest",
+        "review_as_of": "2026-08-05",
+        "trade_type": "import",
+        "jurisdiction": "KR",
+        "documents": [
+            {
+                "document_id": "document-input-manifest",
+                "filename": "invoice.txt",
+                "content_text": "COMMERCIAL INVOICE\\nInvoice No: INV-001",
+            }
+        ],
+    }
+    baseline = ServiceReviewRunRequestV3.model_validate(baseline_wire)
+    assert baseline.input_manifest_wire() == baseline_wire
+    assert canonical_json_sha256(baseline.input_manifest_wire()) == canonical_json_sha256(
+        baseline_wire
+    )
+
+    child_wire = {
+        **baseline_wire,
+        "review_run_id": "run-input-manifest-child",
+        "parent_review_run_id": "run-input-manifest",
+        "applied_correction_proposal_ids": ["correction-input-manifest"],
+        "human_corrections": [
+            {
+                "correction_proposal_id": "correction-input-manifest",
+                "document_id": "document-input-manifest",
+                "field_name": "invoice_number",
+                "new_value": "INV-001-CORRECTED",
+                "reason": "Reviewer confirmed the text document.",
+                "source_kind": "human_provided",
+            }
+        ],
+    }
+    child = ServiceReviewRunRequestV3.model_validate(child_wire)
+    assert child.input_manifest_wire() == child_wire
+    assert canonical_json_sha256(child.input_manifest_wire()) == canonical_json_sha256(child_wire)
 
 
 def test_review_uses_one_readiness_then_one_retrieve_and_stays_human_only(

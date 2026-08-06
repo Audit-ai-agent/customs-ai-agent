@@ -824,7 +824,9 @@ class ProfileRuntime:
             "requires_human_review": True,
             "execution_status": execution_status,
             "assessment": assessment,
-            "input_manifest_sha256": canonical_json_sha256(request),
+            # Bind the result to the exact compact HTTP request, not to
+            # Pydantic's materialised defaults for absent child-run fields.
+            "input_manifest_sha256": canonical_json_sha256(request.input_manifest_wire()),
             "report": {
                 "overall_status": status,
                 "summary": (
