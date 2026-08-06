@@ -241,7 +241,7 @@ def test_provider_scope_policy_falls_back_and_enforces_correction_target_ownersh
         "suggested_questions": [],
         "correction_draft": None,
     }
-    with pytest.raises(ValueError, match="assistant_provider_scope_policy_violation"):
+    with pytest.raises(ValueError, match="assistant_provider_output_invalid"):
         response_from_provider_candidate(invalid_general, request, engine=result.engine)
 
     draft_request = AssistantAnswerRequestV1.model_validate(
