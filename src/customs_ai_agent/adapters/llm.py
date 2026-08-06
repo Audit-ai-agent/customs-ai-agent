@@ -20,7 +20,9 @@ from customs_ai_agent.scenario_transcript import ScenarioTranscriptRun
 from customs_ai_agent.schemas.llm import ClaudeDocumentCandidate
 
 
-DEFAULT_CLAUDE_MODEL = "claude-sonnet-4-20250514"
+# Use a current, generally available Sonnet revision.  Operators may still
+# select another permitted Claude model through the local-only profile value.
+DEFAULT_CLAUDE_MODEL = "claude-sonnet-4-6"
 _SAFE_MODEL = re.compile(r"^claude-[A-Za-z0-9._-]{2,120}$")
 
 
