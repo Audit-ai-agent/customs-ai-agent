@@ -49,7 +49,9 @@ _INTERNAL_VALUE_KEY = re.compile(
 # keep original document quotations separately, so a generated sentence never
 # needs to repeat an English filename or an implementation-shaped label.  A
 # small set of trade abbreviations remains useful and is safe to show.
-_RAW_FILENAME = re.compile(r"(?<![A-Za-z0-9_])[A-Za-z0-9][A-Za-z0-9._-]*\.(?:txt|pdf|docx|xlsx|csv)(?![A-Za-z0-9_])", re.I)
+_RAW_FILENAME = re.compile(
+    r"(?<![A-Za-z0-9_])[A-Za-z0-9][A-Za-z0-9._-]*\.(?:txt|pdf|docx|xlsx|csv)(?![A-Za-z0-9_])", re.I
+)
 _ENGLISH_WORD = re.compile(r"(?<![A-Za-z])([A-Za-z]{3,})(?![A-Za-z])")
 _ALLOWED_REVIEWER_ABBREVIATIONS = frozenset(
     {

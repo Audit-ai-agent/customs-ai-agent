@@ -438,7 +438,9 @@ def retrieval_plan_from_analyses(
             document_candidates.append(
                 {
                     "document_id": document.document_id,
-                    "description": (description.raw_value if description else item.source.quote)[:2000],
+                    "description": (description.raw_value if description else item.source.quote)[
+                        :2000
+                    ],
                     "hs_code": hs.normalized_value or hs.raw_value,
                     "origin_country": origin.normalized_value if origin else None,
                 }
@@ -494,11 +496,14 @@ def retrieval_plan_from_analyses(
             "origin_country": origin_country,
             "destination_country": "KR",
         }
-        item_id = "commodity-" + hashlib.sha256(
-            json.dumps(identity, ensure_ascii=False, sort_keys=True, separators=(",", ":")).encode(
-                "utf-8"
-            )
-        ).hexdigest()[:24]
+        item_id = (
+            "commodity-"
+            + hashlib.sha256(
+                json.dumps(
+                    identity, ensure_ascii=False, sort_keys=True, separators=(",", ":")
+                ).encode("utf-8")
+            ).hexdigest()[:24]
+        )
         items.append(
             {
                 "item_id": item_id,
@@ -993,7 +998,7 @@ def _match_invoice_packing_items(
                 status="needs_review",
                 left=_operand(document_id=invoice.document_id),
                 right=_operand_from_item(packing, packing.line_items[index]),
-                    message="포장명세서 품목에 대응하는 상업송장 품목을 하나로 정할 수 없습니다.",
+                message="포장명세서 품목에 대응하는 상업송장 품목을 하나로 정할 수 없습니다.",
             )
         )
     return comparisons

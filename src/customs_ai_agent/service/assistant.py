@@ -417,9 +417,7 @@ def _answer(
 ) -> AssistantAnswerResponseV1:
     markers = review_result_markers(request.review_result)
     filenames = tuple(analysis.filename for analysis in request.review_result.document_analyses)
-    safe_text = _reviewer_text_or_fallback(
-        text, scope=scope, markers=markers, filenames=filenames
-    )
+    safe_text = _reviewer_text_or_fallback(text, scope=scope, markers=markers, filenames=filenames)
     safe_suggestions = _reviewer_suggestions_or_fallback(
         suggestions, markers=markers, filenames=filenames
     )

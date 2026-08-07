@@ -21,7 +21,10 @@ from customs_ai_agent.service.profiles import (
 )
 from customs_ai_agent.service.runtime_errors import RuntimeInputError
 from customs_ai_agent.service.settings import ServiceSettings
-from customs_ai_agent.service.user_text import contains_internal_result_marker, reviewer_text_is_safe
+from customs_ai_agent.service.user_text import (
+    contains_internal_result_marker,
+    reviewer_text_is_safe,
+)
 
 
 _TOKEN = "Abcdefghijklmnopqrstuvwxyz0123456789ABCDEFGHIJK"

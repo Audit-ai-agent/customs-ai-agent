@@ -885,10 +885,10 @@ class ProfileRuntime:
         transcript = self._transcript_root.for_run(request.review_run_id)
         fallback = deterministic_assistant_answer(request, engine=self._engine())
         responder = self._grounded_responder
-        provider_grounded_scope = (
-            fallback.answer_scope in {"case_grounded", "evidence_grounded"}
-            and provider_answer_allowed(request)
-        )
+        provider_grounded_scope = fallback.answer_scope in {
+            "case_grounded",
+            "evidence_grounded",
+        } and provider_answer_allowed(request)
         if self.mode == "functional-uat" and responder is not None and provider_grounded_scope:
             try:
                 candidate = responder.respond(
