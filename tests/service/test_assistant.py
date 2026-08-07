@@ -175,6 +175,20 @@ def test_deterministic_assistant_scopes_citations_and_turn_limit(
         for claim in section.claims
     )
 
+    case_evidence_answer = runtime.assistant_answer_json(
+        _answer_payload(result, question="현재 사건의 법령 근거를 보여 주세요.")
+    )
+    assert case_evidence_answer.answer_scope == "evidence_grounded"
+    assert len(case_evidence_answer.citations) == 1
+    assert case_evidence_answer.citations[0].kind == "evidence"
+    assert case_evidence_answer.citations[0].reference_id == "evidence-article-1"
+
+    general_evidence_concept = runtime.assistant_answer_json(
+        _answer_payload(result, question="일반적인 법령 근거의 개념을 설명해 주세요.")
+    )
+    assert general_evidence_concept.answer_scope == "out_of_scope"
+    assert general_evidence_concept.citations == []
+
     general_answer = runtime.assistant_answer_json(
         _answer_payload(result, question="일반 통관 절차를 안내해 주세요.")
     )
