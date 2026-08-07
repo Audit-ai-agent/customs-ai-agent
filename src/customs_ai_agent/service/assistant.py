@@ -546,6 +546,12 @@ def _classify_question(
         return _QuestionPolicy("out_of_scope")
     if len(question) < 3 or question in {"?", "무엇", "확인"}:
         return _QuestionPolicy("clarification_needed")
+    # A request for the review's legal basis remains evidence-grounded even
+    # when the user explicitly says "this case".  Checking case references
+    # first would otherwise route it to a comparison answer and hide the
+    # linked Evidence from the assistant response.
+    if _EVIDENCE_WORDS.search(question) and not _GENERAL_INTENT.search(question):
+        return _QuestionPolicy("evidence_grounded" if result.evidence else "insufficient_evidence")
     case_reference = _question_matches_current_case(question, result, recent_turns=recent_turns)
     if case_reference and not _GENERAL_INTENT.search(question):
         if _SUBMISSION_STATUS_QUESTION.search(question) and not _has_submission_fact(result):
@@ -563,8 +569,6 @@ def _classify_question(
         # The assistant may provide only the small general-guidance allowlist;
         # other generic customs questions should not be presented as case advice.
         return _QuestionPolicy("out_of_scope")
-    if _EVIDENCE_WORDS.search(question):
-        return _QuestionPolicy("evidence_grounded" if result.evidence else "insufficient_evidence")
     has_case_support = bool(result.comparisons) or any(
         analysis.facts or analysis.line_items for analysis in result.document_analyses
     )
