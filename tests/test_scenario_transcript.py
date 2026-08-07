@@ -159,6 +159,75 @@ def test_functional_runtime_automatically_redacts_all_live_secrets(
     assert record["payload"]["content_text"] == "[REDACTED] [REDACTED] [REDACTED]"
 
 
+def test_functional_uat_records_safe_data_skip_without_calling_data(
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    """An empty bounded retrieval plan still owns the required Data stream."""
+
+    root = ScenarioTranscriptRoot.from_environment({TRANSCRIPT_ROOT_ENV: str(_root(tmp_path))})
+    monkeypatch.setattr(
+        ClaudeSettings,
+        "from_environment",
+        classmethod(lambda cls: ClaudeSettings(api_key=SecretStr(_CLAUDE_KEY))),
+    )
+    monkeypatch.setattr(
+        ClaudeDocumentAnalyzer,
+        "from_settings",
+        classmethod(lambda cls, settings: profile_module._DeterministicDocumentAnalyzer()),
+    )
+    monkeypatch.setattr(
+        ClaudeGroundedResponder,
+        "from_settings",
+        classmethod(lambda cls, settings: None),
+    )
+    calls: list[dict[str, Any]] = []
+
+    def unexpected_retrieve(
+        _self: ProfileEvidenceRetriever, request: dict[str, Any]
+    ) -> dict[str, Any]:
+        calls.append(request)
+        raise AssertionError("empty retrieval plans must not call Data")
+
+    monkeypatch.setattr(ProfileEvidenceRetriever, "retrieve", unexpected_retrieve)
+    runtime = ProfileRuntime(
+        _settings(service_mode="functional-uat"),
+        transcript_root=root,
+    )
+    result = runtime.review_v3_json(
+        json.dumps(
+            {
+                "case_id": "case-functional-skip",
+                "documents": [
+                    {
+                        "document_id": "document-functional-skip",
+                        "filename": "invoice.txt",
+                        "content_text": "COMMERCIAL INVOICE\\nInvoice No: INV-SKIP",
+                    }
+                ],
+                "review_run_id": "run-functional-skip",
+                "review_as_of": "2026-08-05",
+                "trade_type": "import",
+                "jurisdiction": "KR",
+            }
+        ).encode()
+    )
+
+    assert calls == []
+    retrieval = next(
+        stage for stage in result.workflow.stages if stage.stage == "retrieve_evidence"
+    )
+    assert retrieval.status == "skipped"
+    records = _lines(_root(tmp_path) / "run-functional-skip" / "agent-data.jsonl")
+    assert len(records) == 1
+    assert records[0]["event"] == "retrieve_skipped"
+    assert records[0]["payload"] == {
+        "reason_code": "no_hs_qualified_commodity",
+        "retrieve_called": False,
+    }
+    assert _TOKEN not in json.dumps(records)
+    assert _CLAUDE_KEY not in json.dumps(records)
+
+
 def test_retriever_records_actual_data_request_and_response(
     tmp_path: Path, monkeypatch: pytest.MonkeyPatch
 ) -> None:
