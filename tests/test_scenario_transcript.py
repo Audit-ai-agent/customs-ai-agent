@@ -16,6 +16,7 @@ from customs_ai_agent.adapters.llm import (
     ClaudeDocumentAnalyzer,
     ClaudeGroundedResponder,
     ClaudeSettings,
+    LLMOutputValidationError,
     LLMProviderError,
 )
 from customs_ai_agent.adapters.retrieval import RetrievalError
@@ -466,4 +467,40 @@ def test_grounded_responder_records_one_redacted_chat_exchange(tmp_path: Path) -
         "assistant_answer_request_started",
         "assistant_answer_response_received",
     ]
+    assert _TOKEN not in json.dumps(records)
+
+
+def test_grounded_responder_records_safe_invalid_event_for_non_object_json(tmp_path: Path) -> None:
+    root = ScenarioTranscriptRoot.from_environment({TRANSCRIPT_ROOT_ENV: str(_root(tmp_path))})
+    transcript = root.for_run("run-grounded-non-object")
+    assert transcript is not None
+    output = json.dumps([f"untrusted provider output {_TOKEN}"])
+
+    class Messages:
+        def create(self, **_kwargs: Any) -> object:
+            return SimpleNamespace(content=[SimpleNamespace(text=output)])
+
+    responder = ClaudeGroundedResponder(
+        ClaudeSettings(api_key=SecretStr(_TOKEN)), SimpleNamespace(messages=Messages())
+    )
+    with pytest.raises(LLMOutputValidationError, match="invalid JSON object"):
+        responder.respond(
+            {"question": "현재 사건의 법령 근거를 알려 주세요.", "review_snapshot": {}},
+            transcript=transcript,
+            purpose="assistant_answer",
+        )
+
+    records = _lines(_root(tmp_path) / "run-grounded-non-object" / "claude.jsonl")
+    assert [record["event"] for record in records] == [
+        "assistant_answer_request_started",
+        "assistant_answer_response_received",
+        "assistant_answer_response_invalid",
+    ]
+    assert records[-1]["payload"] == {
+        "error_code": "provider_output_invalid",
+        "model": responder.model_id,
+        "provider": "anthropic",
+    }
+    assert "output_text" not in records[-1]["payload"]
+    assert output not in json.dumps(records[-1])
     assert _TOKEN not in json.dumps(records)

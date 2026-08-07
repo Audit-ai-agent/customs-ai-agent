@@ -381,6 +381,16 @@ class ClaudeGroundedResponder:
                 )
             raise LLMOutputValidationError("Claude returned invalid JSON.") from None
         if not isinstance(parsed, dict):
+            if transcript is not None:
+                transcript.write(
+                    "claude",
+                    f"{purpose}_response_invalid",
+                    {
+                        "provider": "anthropic",
+                        "model": self.model_id,
+                        "error_code": "provider_output_invalid",
+                    },
+                )
             raise LLMOutputValidationError("Claude returned an invalid JSON object.")
         return parsed
 
