@@ -307,6 +307,29 @@ class ProfileEvidenceRetriever:
             raise RetrievalError("Data service response does not satisfy the shared contract")
         return response
 
+    def record_retrieve_skipped(self, *, review_run_id: str) -> None:
+        """Record an input-side skip without making a Data request.
+
+        Functional-UAT transcripts require an Agent-to-Data stream for every
+        review.  An empty commodity plan is deliberately not sent to Data,
+        because the shared retrieve contract rejects it.  This event keeps
+        that distinction visible without treating the Data service as
+        unavailable or retaining document values.
+        """
+
+        if self.mode != "functional-uat":
+            return
+        transcript = self._transcript_root.for_run(review_run_id)
+        if transcript is not None:
+            transcript.write(
+                "agent-data",
+                "retrieve_skipped",
+                {
+                    "reason_code": "no_hs_qualified_commodity",
+                    "retrieve_called": False,
+                },
+            )
+
 
 class _DeterministicDocumentAnalyzer:
     """Stable no-key text extractor used by the default profile.
@@ -961,6 +984,7 @@ class ProfileRuntime:
                 # an input limitation, not an unhealthy or partial Data store.
                 data_response = {"status": "ok", "results": []}
                 evidence_records = []
+                self._retriever.record_retrieve_skipped(review_run_id=request.review_run_id)
                 workflow_output = workflow_output.with_evidence_skipped()
             findings = _dedupe_findings(
                 [
