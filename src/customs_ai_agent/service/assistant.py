@@ -17,6 +17,11 @@ from customs_ai_agent.schemas.assistant import (
     GENERAL_GUIDANCE_DISCLAIMER,
 )
 from customs_ai_agent.schemas.v3 import EngineV3, ReviewRunResultV3
+from customs_ai_agent.service.user_text import (
+    contains_internal_result_marker,
+    localize_deterministic_reviewer_prose,
+    review_result_markers,
+)
 
 
 _OUT_OF_SCOPE = re.compile(
@@ -64,6 +69,25 @@ class _QuestionPolicy:
     scope: _AnswerScope
 
 
+_SAFE_DIRECT_ANSWER = {
+    "case_grounded": (
+        "현재 사건의 문서와 비교 결과를 함께 확인해 주세요. "
+        "이 결과는 담당자 검토를 돕기 위한 안내입니다."
+    ),
+    "evidence_grounded": (
+        "현재 심사에 연결된 법령 근거를 확인해 주세요. 이 근거만으로 자동 판단할 수 없습니다."
+    ),
+    "general_customs_guidance": (
+        f"일반적인 통관 절차와 필요한 서류를 확인해 주세요. {GENERAL_GUIDANCE_DISCLAIMER}"
+    ),
+    "clarification_needed": "확인하려는 문서나 비교 항목을 조금 더 구체적으로 알려 주세요.",
+    "insufficient_evidence": "현재 심사 결과만으로는 이 질문에 답할 근거가 충분하지 않습니다.",
+    "out_of_scope": "이 도우미는 현재 심사 결과와 연결된 법령 근거 범위에서만 도와드릴 수 있습니다.",
+}
+
+_SAFE_SUGGESTION = "현재 문서 비교에서 확인이 필요한 항목은 무엇인가요?"
+
+
 def deterministic_assistant_answer(
     request: AssistantAnswerRequestV1, *, engine: EngineV3
 ) -> AssistantAnswerResponseV1:
@@ -78,7 +102,7 @@ def deterministic_assistant_answer(
             engine=engine,
             scope="out_of_scope",
             text=(
-                "이 도우미는 현재 심사 결과와 연결된 Evidence 범위에서만 답변합니다. "
+                "이 도우미는 현재 심사 결과와 연결된 법령 근거 범위에서만 답변합니다. "
                 "웹 검색, 시스템 명령, 비밀값 또는 외부 데이터 접근 요청은 처리하지 않습니다."
             ),
             citations=[],
@@ -93,7 +117,7 @@ def deterministic_assistant_answer(
             citations=[],
             suggestions=[
                 "수량 비교 결과를 설명해 주세요.",
-                "연결된 법령 Evidence를 보여 주세요.",
+                "연결된 법령 근거를 보여 주세요.",
             ],
         )
     if policy.scope == "general_customs_guidance":
@@ -113,7 +137,7 @@ def deterministic_assistant_answer(
             request,
             engine=engine,
             scope="insufficient_evidence",
-            text="현재 Review Run에는 이 질문을 뒷받침할 충분한 문서 비교 또는 법령 Evidence가 없습니다.",
+            text="현재 심사 결과에는 이 질문을 뒷받침할 충분한 문서 비교 또는 법령 근거가 없습니다.",
             citations=[],
             suggestions=["문서를 보완한 뒤 새 심사를 실행해 주세요."],
         )
@@ -124,7 +148,7 @@ def deterministic_assistant_answer(
                 request,
                 engine=engine,
                 scope="insufficient_evidence",
-                text="현재 Review Run에는 이 질문을 뒷받침할 연결된 법령 Evidence가 없습니다.",
+                text="현재 심사 결과에는 이 질문을 뒷받침할 연결된 법령 근거가 없습니다.",
                 citations=[],
                 suggestions=["문서 비교 결과에서 사람이 확인해야 할 항목은 무엇인가요?"],
             )
@@ -133,11 +157,11 @@ def deterministic_assistant_answer(
             engine=engine,
             scope="evidence_grounded",
             text=(
-                f"현재 심사에는 ‘{evidence.title}’ Evidence가 연결되어 있습니다. "
+                "현재 심사에는 연결된 법령 근거가 있습니다. "
                 "이 근거는 담당자가 원문과 함께 확인해야 하며, 자동 승인 근거로 사용되지 않습니다."
             ),
             citations=[AssistantCitationV1(kind="evidence", reference_id=evidence.evidence_id)],
-            suggestions=["이 Evidence가 어떤 finding과 연결되는지 설명해 주세요."],
+            suggestions=["이 법령 근거가 어떤 확인 항목과 연결되는지 설명해 주세요."],
         )
     comparison = _primary_comparison(result)
     if comparison is None:
@@ -145,7 +169,7 @@ def deterministic_assistant_answer(
             request,
             engine=engine,
             scope="insufficient_evidence",
-            text="현재 Review Run에는 질문을 설명할 수 있는 문서 비교 결과가 없습니다.",
+            text="현재 심사 결과에는 질문을 설명할 수 있는 문서 비교 결과가 없습니다.",
             citations=[],
             suggestions=["문서를 보완한 뒤 새 심사를 실행해 주세요."],
         )
@@ -194,6 +218,8 @@ def response_from_provider_candidate(
     except ValidationError:
         raise ValueError("assistant_provider_output_invalid") from None
     _validate_scope_policy(answer, request)
+    if not _provider_reviewer_text_is_safe(answer, result=request.review_result):
+        raise ValueError("assistant_provider_user_text_unsafe")
     _validate_references(answer, request.review_result)
     _validate_scope_requirements(answer)
     expected_draft = _draft_from_question(request.question, request.review_result)
@@ -335,19 +361,47 @@ def _answer(
     suggestions: list[str],
     correction_draft: AssistantCorrectionDraftV1 | None = None,
 ) -> AssistantAnswerResponseV1:
+    markers = review_result_markers(request.review_result)
+    safe_text = _reviewer_text_or_fallback(text, scope=scope, markers=markers)
+    safe_suggestions = _reviewer_suggestions_or_fallback(suggestions, markers=markers)
     answer = AssistantAnswerResponseV1(
         case_id=request.case_id,
         review_run_id=request.review_run_id,
         conversation_id=request.conversation_id,
         answer_scope=scope,  # type: ignore[arg-type]
-        direct_answer=text,
+        direct_answer=safe_text,
         citations=citations,
-        suggested_questions=suggestions,
+        suggested_questions=safe_suggestions,
         correction_draft=correction_draft,
         engine=engine,
     )
     _validate_references(answer, request.review_result)
     return answer
+
+
+def _provider_reviewer_text_is_safe(
+    answer: AssistantAnswerResponseV1, *, result: ReviewRunResultV3
+) -> bool:
+    """Provider prose may not expose result IDs; citations carry them structurally."""
+
+    return not any(
+        contains_internal_result_marker(value, markers=review_result_markers(result))
+        for value in (answer.direct_answer, *answer.suggested_questions)
+    )
+
+
+def _reviewer_text_or_fallback(value: str, *, scope: str, markers: frozenset[str]) -> str:
+    """Keep deterministic fallback prose free of implementation-only markers."""
+
+    if contains_internal_result_marker(value, markers=markers):
+        return _SAFE_DIRECT_ANSWER.get(scope, _SAFE_DIRECT_ANSWER["insufficient_evidence"])
+    return localize_deterministic_reviewer_prose(value)
+
+
+def _reviewer_suggestions_or_fallback(values: list[str], *, markers: frozenset[str]) -> list[str]:
+    if any(contains_internal_result_marker(value, markers=markers) for value in values):
+        return [_SAFE_SUGGESTION]
+    return values
 
 
 def _validate_references(answer: AssistantAnswerResponseV1, result: ReviewRunResultV3) -> None:

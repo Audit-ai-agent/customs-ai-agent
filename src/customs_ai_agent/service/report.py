@@ -22,6 +22,11 @@ from customs_ai_agent.schemas.v3 import (
     ReportSectionV3,
     RequiredActionV1,
 )
+from customs_ai_agent.service.user_text import (
+    contains_internal_result_marker,
+    localize_deterministic_reviewer_prose,
+    review_result_markers,
+)
 
 
 def build_grounded_report_sections(
@@ -34,6 +39,15 @@ def build_grounded_report_sections(
 ) -> list[ReportSectionV3]:
     """Build all required sections using only identifiers already in the result."""
 
+    markers = review_result_markers(
+        {
+            "document_analyses": [analysis.model_dump(mode="json") for analysis in analyses],
+            "comparisons": [comparison.model_dump(mode="json") for comparison in comparisons],
+            "evidence": [item.model_dump(mode="json") for item in evidence],
+            "findings": [finding.model_dump(mode="json") for finding in findings],
+            "required_actions": [action.model_dump(mode="json") for action in actions],
+        }
+    )
     fact_ids = [fact.fact_id for analysis in analyses for fact in _facts(analysis)]
     primary_comparison = _choose_comparison(comparisons)
     support = _support(
@@ -69,22 +83,26 @@ def build_grounded_report_sections(
         evidence_id=(finding.evidence_ids[0] if finding and finding.evidence_ids else None),
         fallback=issue_support,
     )
-    comparison_text = (
-        issue_comparison.message
-        if issue_comparison is not None
-        else "비교 결과를 만들지 못했습니다."
+    comparison_text = _reviewer_sentence(
+        issue_comparison.message if issue_comparison is not None else None,
+        "문서 사이의 비교 결과를 확인해야 합니다.",
+        markers=markers,
     )
     evidence_text = (
-        f"연결된 법령 Evidence는 {len(evidence)}건입니다."
+        f"연결된 법령 근거는 {len(evidence)}건입니다."
         if evidence
-        else "연결 가능한 법령 Evidence가 없어 담당자 확인이 필요합니다."
+        else "연결 가능한 법령 근거가 없어 담당자 확인이 필요합니다."
     )
-    finding_text = (
-        finding.message
-        if finding is not None
-        else "자동 탐지 finding은 없지만 사람 검토는 계속 필요합니다."
+    finding_text = _reviewer_sentence(
+        finding.message if finding is not None else None,
+        "자동으로 확정할 수 없는 항목이 있어 담당자 검토가 필요합니다.",
+        markers=markers,
     )
-    action_text = actions[0].message if actions else "문서와 근거를 담당자가 직접 확인해야 합니다."
+    action_text = _reviewer_sentence(
+        actions[0].message if actions else None,
+        "문서와 법령 근거를 담당자가 직접 확인해 주세요.",
+        markers=markers,
+    )
     sections = [
         _section(
             "conclusion",
@@ -111,7 +129,7 @@ def build_grounded_report_sections(
         _section(
             "limitations",
             "한계",
-            "이 결과는 텍스트 문서와 연결된 Evidence만 사용한 검토 보조 결과이며 최종 통관 판단이 아닙니다.",
+            "이 결과는 텍스트 문서와 연결된 법령 근거만 사용한 검토 보조 결과이며 최종 통관 판단이 아닙니다.",
             issue_support,
         ),
     ]
@@ -136,11 +154,7 @@ def build_grounded_report_sections(
                         "report:execution_process:human-corrections:" + ",".join(correction_ids)
                     )[:256],
                     text=(
-                        "승인된 수정 제안 "
-                        + ", ".join(correction_ids)
-                        + "를 child Run에 반영했습니다. human-provided 사실 "
-                        + ", ".join(correction_fact_ids)
-                        + "은 원문 인용을 대체하지 않습니다."
+                        "승인된 수정 내용을 새 심사에 반영했으며, 원문 인용은 그대로 보존했습니다."
                     ),
                     fact_ids=correction_fact_ids,
                     comparison_ids=[],
@@ -184,17 +198,20 @@ def validate_grounded_report_sections(
                 raise ValueError("report_claim_comparison_invalid")
             if not set(claim.evidence_ids) <= evidence_ids:
                 raise ValueError("report_claim_evidence_invalid")
-    expected_corrections: dict[str, str] = {}
+    expected_corrections: set[str] = set()
     for analysis in analyses:
         for fact in _facts(analysis):
             if isinstance(fact.source, HumanProvidedSourceV3):
-                expected_corrections[fact.source.correction_proposal_id] = fact.fact_id
+                expected_corrections.add(fact.fact_id)
     if not expected_corrections:
         return
     execution = next(section for section in sections if section.section == "execution_process")
-    for correction_id, fact_id in expected_corrections.items():
+    for fact_id in expected_corrections:
         if not any(
-            correction_id in claim.text and fact_id in claim.fact_ids for claim in execution.claims
+            fact_id in claim.fact_ids
+            and "원문 인용" in claim.text
+            and not contains_internal_result_marker(claim.text)
+            for claim in execution.claims
         ):
             raise ValueError("report_human_correction_claim_missing")
 
@@ -210,6 +227,14 @@ def _choose_comparison(comparisons: list[ComparisonV3]) -> ComparisonV3 | None:
         (item for item in comparisons if item.status in {"mismatch", "needs_review"}),
         comparisons[0] if comparisons else None,
     )
+
+
+def _reviewer_sentence(value: str | None, fallback: str, *, markers: frozenset[str]) -> str:
+    """Do not render result IDs, action codes, or hashes as reviewer prose."""
+
+    if not value or contains_internal_result_marker(value, markers=markers):
+        return fallback
+    return localize_deterministic_reviewer_prose(value)
 
 
 def _support(
