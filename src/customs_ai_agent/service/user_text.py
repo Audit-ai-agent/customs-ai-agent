@@ -45,6 +45,37 @@ _INTERNAL_VALUE_KEY = re.compile(
     re.IGNORECASE,
 )
 
+# Reviewer-facing prose is deliberately Korean-first.  Structured citations
+# keep original document quotations separately, so a generated sentence never
+# needs to repeat an English filename or an implementation-shaped label.  A
+# small set of trade abbreviations remains useful and is safe to show.
+_RAW_FILENAME = re.compile(
+    r"(?<![A-Za-z0-9_])[A-Za-z0-9][A-Za-z0-9._-]*\.(?:txt|pdf|docx|xlsx|csv)(?![A-Za-z0-9_])", re.I
+)
+_ENGLISH_WORD = re.compile(r"(?<![A-Za-z])([A-Za-z]{3,})(?![A-Za-z])")
+_ALLOWED_REVIEWER_ABBREVIATIONS = frozenset(
+    {
+        "AI",
+        "API",
+        "B",
+        "CBM",
+        "CNY",
+        "EA",
+        "EUR",
+        "GBP",
+        "HS",
+        "JPY",
+        "KG",
+        "KRW",
+        "LLM",
+        "OCR",
+        "PCS",
+        "PDF",
+        "TEU",
+        "USD",
+    }
+)
+
 _DETERMINISTIC_TERM_REPLACEMENTS = (
     ("Packing List", "포장명세서"),
     ("Commercial Invoice", "상업송장"),
@@ -67,13 +98,33 @@ def contains_internal_result_marker(value: str, *, markers: Iterable[str] = ()) 
     return any(marker and marker in value for marker in markers)
 
 
-def reviewer_text_is_safe(values: Iterable[str], *, markers: Iterable[str] = ()) -> bool:
-    """Keep only prose that can be shown without exposing internal codes."""
+def reviewer_text_is_safe(
+    values: Iterable[str],
+    *,
+    markers: Iterable[str] = (),
+    filenames: Iterable[str] = (),
+) -> bool:
+    """Keep reviewer prose Korean-first and free of technical source labels.
+
+    Original quotations stay in ``SourceV3`` and are intentionally not passed
+    through this boundary.  The optional filename list catches a nonstandard
+    extension as well as the ordinary ``.txt`` forms covered by the regex.
+    """
 
     marker_values = tuple(markers)
-    return all(
-        not contains_internal_result_marker(value, markers=marker_values) for value in values
-    )
+    filename_values = tuple(value.casefold() for value in filenames if value)
+    for value in values:
+        if contains_internal_result_marker(value, markers=marker_values):
+            return False
+        lowered = value.casefold()
+        if _RAW_FILENAME.search(value) or any(filename in lowered for filename in filename_values):
+            return False
+        if any(
+            word.group(1).upper() not in _ALLOWED_REVIEWER_ABBREVIATIONS
+            for word in _ENGLISH_WORD.finditer(value)
+        ):
+            return False
+    return True
 
 
 def localize_deterministic_reviewer_prose(value: str) -> str:

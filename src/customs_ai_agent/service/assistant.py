@@ -16,11 +16,11 @@ from customs_ai_agent.schemas.assistant import (
     AssistantCorrectionDraftV1,
     GENERAL_GUIDANCE_DISCLAIMER,
 )
-from customs_ai_agent.schemas.v3 import EngineV3, ReviewRunResultV3
+from customs_ai_agent.schemas.v3 import EngineV3, FactV3, ReviewRunResultV3
 from customs_ai_agent.service.user_text import (
-    contains_internal_result_marker,
     localize_deterministic_reviewer_prose,
     review_result_markers,
+    reviewer_text_is_safe,
 )
 
 
@@ -51,6 +51,20 @@ _CORRECTION_DRAFT = re.compile(
     r"(?:사유|reason)\s*[:=]\s*(?P<reason>[^;\n]+)",
     re.IGNORECASE | re.DOTALL,
 )
+_SUBMISSION_STATUS_QUESTION = re.compile(r"(?:제출|예정|접수|신고\s*(?:여부|완료))")
+_CERTIFICATE_HS_QUESTION = re.compile(r"원산지\s*증명서.*(?:hs\s*코드|품목\s*분류)", re.I)
+_MULTI_DOCUMENT_HS_QUESTION = re.compile(
+    r"(?:동일\s*품목|같은\s*품목|일치).*?(?:hs\s*코드|품목\s*분류)|"
+    r"(?:hs\s*코드|품목\s*분류).*?(?:동일|일치|같은)",
+    re.I,
+)
+_GENERAL_INTENT = re.compile(r"(?:역할|차이|기본|일반|란|이란|절차|방법|개념)", re.I)
+_DOCUMENT_ALIASES = {
+    "invoice": ("상업송장", "인보이스", "invoice", "commercial invoice"),
+    "packing_list": ("포장명세서", "packing list", "packing"),
+    "bill_of_lading": ("선하증권", "bill of lading", "b/l", "bl 번호"),
+    "certificate_of_origin": ("원산지증명서", "certificate of origin", "c/o"),
+}
 
 _AnswerScope = Literal[
     "case_grounded",
@@ -67,6 +81,9 @@ class _QuestionPolicy:
     """The one allowed answer class for a question before Claude is called."""
 
     scope: _AnswerScope
+    target: Literal["comparison", "certificate_hs", "multi_document_hs", "submission"] = (
+        "comparison"
+    )
 
 
 _SAFE_DIRECT_ANSWER = {
@@ -95,7 +112,7 @@ def deterministic_assistant_answer(
 
     question = request.question.strip()
     result = request.review_result
-    policy = _classify_question(question, result)
+    policy = _classify_question(question, result, recent_turns=request.recent_turns)
     if policy.scope == "out_of_scope":
         return _answer(
             request,
@@ -133,11 +150,17 @@ def deterministic_assistant_answer(
             suggestions=["현재 사건의 문서 비교 결과를 설명해 주세요."],
         )
     if policy.scope == "insufficient_evidence":
+        text = (
+            "현재 심사 결과에는 수입신고확인증의 제출 또는 제출 예정 여부를 확인할 사실이 "
+            "포함되어 있지 않습니다. 관련 증빙을 보완한 뒤 다시 확인해 주세요."
+            if policy.target == "submission"
+            else "현재 심사 결과에는 이 질문을 뒷받침할 충분한 문서 비교 또는 법령 근거가 없습니다."
+        )
         return _answer(
             request,
             engine=engine,
             scope="insufficient_evidence",
-            text="현재 심사 결과에는 이 질문을 뒷받침할 충분한 문서 비교 또는 법령 근거가 없습니다.",
+            text=text,
             citations=[],
             suggestions=["문서를 보완한 뒤 새 심사를 실행해 주세요."],
         )
@@ -162,6 +185,20 @@ def deterministic_assistant_answer(
             ),
             citations=[AssistantCitationV1(kind="evidence", reference_id=evidence.evidence_id)],
             suggestions=["이 법령 근거가 어떤 확인 항목과 연결되는지 설명해 주세요."],
+        )
+    case_text, case_citations = _targeted_case_answer(policy, result)
+    if case_text is not None:
+        return _answer(
+            request,
+            engine=engine,
+            scope="case_grounded",
+            text=case_text,
+            citations=case_citations,
+            suggestions=[
+                "이 비교에 사용한 문서 사실을 보여 주세요.",
+                "연결된 법령 근거가 있나요?",
+            ],
+            correction_draft=_draft_from_question(question, result),
         )
     comparison = _primary_comparison(result)
     if comparison is None:
@@ -198,7 +235,9 @@ def response_from_provider_candidate(
 ) -> AssistantAnswerResponseV1:
     """Validate a single Claude candidate against the fixed public envelope."""
 
-    expected_scope = _classify_question(request.question.strip(), request.review_result).scope
+    expected_scope = _classify_question(
+        request.question.strip(), request.review_result, recent_turns=request.recent_turns
+    ).scope
     payload = {
         "schema_version": "1.0",
         "case_id": request.case_id,
@@ -234,6 +273,21 @@ def response_from_provider_candidate(
         ):
             raise ValueError("assistant_provider_correction_draft_required")
     return answer
+
+
+def provider_answer_allowed(request: AssistantAnswerRequestV1) -> bool:
+    """Keep exact snapshot fact answers deterministic instead of model-written.
+
+    Claude may still compose bounded explanations for ordinary case and legal
+    evidence questions.  Questions that ask for a specific extracted HS fact
+    or a cross-document HS match have a complete code-owned answer already,
+    so sending them to the provider would only add ambiguity and cost.
+    """
+
+    policy = _classify_question(
+        request.question.strip(), request.review_result, recent_turns=request.recent_turns
+    )
+    return policy.scope in {"case_grounded", "evidence_grounded"} and policy.target == "comparison"
 
 
 def _known_provider_citations(
@@ -362,8 +416,11 @@ def _answer(
     correction_draft: AssistantCorrectionDraftV1 | None = None,
 ) -> AssistantAnswerResponseV1:
     markers = review_result_markers(request.review_result)
-    safe_text = _reviewer_text_or_fallback(text, scope=scope, markers=markers)
-    safe_suggestions = _reviewer_suggestions_or_fallback(suggestions, markers=markers)
+    filenames = tuple(analysis.filename for analysis in request.review_result.document_analyses)
+    safe_text = _reviewer_text_or_fallback(text, scope=scope, markers=markers, filenames=filenames)
+    safe_suggestions = _reviewer_suggestions_or_fallback(
+        suggestions, markers=markers, filenames=filenames
+    )
     answer = AssistantAnswerResponseV1(
         case_id=request.case_id,
         review_run_id=request.review_run_id,
@@ -384,24 +441,35 @@ def _provider_reviewer_text_is_safe(
 ) -> bool:
     """Provider prose may not expose result IDs; citations carry them structurally."""
 
-    return not any(
-        contains_internal_result_marker(value, markers=review_result_markers(result))
-        for value in (answer.direct_answer, *answer.suggested_questions)
+    return reviewer_text_is_safe(
+        (answer.direct_answer, *answer.suggested_questions),
+        markers=review_result_markers(result),
+        filenames=(analysis.filename for analysis in result.document_analyses),
     )
 
 
-def _reviewer_text_or_fallback(value: str, *, scope: str, markers: frozenset[str]) -> str:
-    """Keep deterministic fallback prose free of implementation-only markers."""
+def _reviewer_text_or_fallback(
+    value: str,
+    *,
+    scope: str,
+    markers: frozenset[str],
+    filenames: tuple[str, ...],
+) -> str:
+    """Keep deterministic reviewer prose Korean-first and implementation-free."""
 
-    if contains_internal_result_marker(value, markers=markers):
+    localized = localize_deterministic_reviewer_prose(value)
+    if not reviewer_text_is_safe([localized], markers=markers, filenames=filenames):
         return _SAFE_DIRECT_ANSWER.get(scope, _SAFE_DIRECT_ANSWER["insufficient_evidence"])
-    return localize_deterministic_reviewer_prose(value)
+    return localized
 
 
-def _reviewer_suggestions_or_fallback(values: list[str], *, markers: frozenset[str]) -> list[str]:
-    if any(contains_internal_result_marker(value, markers=markers) for value in values):
+def _reviewer_suggestions_or_fallback(
+    values: list[str], *, markers: frozenset[str], filenames: tuple[str, ...]
+) -> list[str]:
+    localized = [localize_deterministic_reviewer_prose(value) for value in values]
+    if not reviewer_text_is_safe(localized, markers=markers, filenames=filenames):
         return [_SAFE_SUGGESTION]
-    return values
+    return localized
 
 
 def _validate_references(answer: AssistantAnswerResponseV1, result: ReviewRunResultV3) -> None:
@@ -461,7 +529,12 @@ def _mentions_case_reference(question: str) -> bool:
     )
 
 
-def _classify_question(question: str, result: ReviewRunResultV3) -> _QuestionPolicy:
+def _classify_question(
+    question: str,
+    result: ReviewRunResultV3,
+    *,
+    recent_turns: list[Any] | tuple[Any, ...] = (),
+) -> _QuestionPolicy:
     """Classify a turn before a provider can choose an answer scope.
 
     The classifier is deliberately small and deterministic.  Claude may write a
@@ -473,6 +546,15 @@ def _classify_question(question: str, result: ReviewRunResultV3) -> _QuestionPol
         return _QuestionPolicy("out_of_scope")
     if len(question) < 3 or question in {"?", "무엇", "확인"}:
         return _QuestionPolicy("clarification_needed")
+    case_reference = _question_matches_current_case(question, result, recent_turns=recent_turns)
+    if case_reference and not _GENERAL_INTENT.search(question):
+        if _SUBMISSION_STATUS_QUESTION.search(question) and not _has_submission_fact(result):
+            return _QuestionPolicy("insufficient_evidence", "submission")
+        if _MULTI_DOCUMENT_HS_QUESTION.search(question):
+            return _QuestionPolicy("case_grounded", "multi_document_hs")
+        if _CERTIFICATE_HS_QUESTION.search(question):
+            return _QuestionPolicy("case_grounded", "certificate_hs")
+        return _QuestionPolicy("case_grounded")
     if not _mentions_case_reference(question) and any(
         pattern.search(question) for pattern in _GENERAL_TOPIC_ALLOWLIST
     ):
@@ -489,10 +571,185 @@ def _classify_question(question: str, result: ReviewRunResultV3) -> _QuestionPol
     return _QuestionPolicy("case_grounded" if has_case_support else "insufficient_evidence")
 
 
+def _question_matches_current_case(
+    question: str,
+    result: ReviewRunResultV3,
+    *,
+    recent_turns: list[Any] | tuple[Any, ...],
+) -> bool:
+    """Resolve a question against the immutable snapshot before general routing."""
+
+    normalized_question = _normalized_question(question)
+    if _mentions_case_reference(question):
+        return True
+    for analysis in result.document_analyses:
+        if any(
+            _normalized_question(alias) in normalized_question
+            for alias in _DOCUMENT_ALIASES.get(analysis.document_type, ())
+        ):
+            return True
+        filename = _normalized_question(analysis.filename)
+        if filename and filename in normalized_question:
+            return True
+        stem = _normalized_question(analysis.filename.rsplit(".", 1)[0])
+        if len(stem) >= 4 and stem in normalized_question:
+            return True
+        for fact in _analysis_facts(analysis):
+            value = fact.normalized_value or fact.raw_value
+            if _is_hs_value(value) and str(value) in question:
+                return True
+    for finding in result.findings:
+        phrase = _normalized_question(finding.message.removeprefix("필수 확인 항목:"))
+        if len(phrase) >= 4 and phrase in normalized_question:
+            return True
+    for action in result.required_actions:
+        phrase = _normalized_question(action.message.removeprefix("필수 확인 항목:"))
+        if len(phrase) >= 4 and phrase in normalized_question:
+            return True
+    for turn in recent_turns:
+        if getattr(turn, "role", None) != "assistant":
+            continue
+        content = getattr(turn, "content", "")
+        if isinstance(content, str):
+            normalized_content = _normalized_question(content)
+            if normalized_question in normalized_content:
+                return True
+            if re.search(r"(?:그|이|해당)\s*(?:항목|내용|문서|결과|근거|사항)", question):
+                if any(
+                    _normalized_question(alias) in normalized_content
+                    for aliases in _DOCUMENT_ALIASES.values()
+                    for alias in aliases
+                ):
+                    return True
+    return False
+
+
+def _normalized_question(value: str) -> str:
+    return re.sub(r"\s+", " ", value.casefold()).strip()
+
+
+def _is_hs_value(value: str | None) -> bool:
+    return bool(value and re.fullmatch(r"\d{6,10}", value))
+
+
+def _analysis_facts(analysis: Any) -> list[FactV3]:
+    return [
+        *analysis.facts,
+        *(fact for item in analysis.line_items for fact in item.facts),
+    ]
+
+
+def _has_submission_fact(result: ReviewRunResultV3) -> bool:
+    return any(
+        re.search(r"(?:submit|submission|filing|declaration|제출|접수|신고)", fact.name, re.I)
+        for analysis in result.document_analyses
+        for fact in _analysis_facts(analysis)
+    )
+
+
+def _targeted_case_answer(
+    policy: _QuestionPolicy,
+    result: ReviewRunResultV3,
+) -> tuple[str | None, list[AssistantCitationV1]]:
+    if policy.target == "certificate_hs":
+        return _certificate_hs_answer(result)
+    if policy.target == "multi_document_hs":
+        return _multi_document_hs_answer(result)
+    return None, []
+
+
+def _certificate_hs_answer(
+    result: ReviewRunResultV3,
+) -> tuple[str | None, list[AssistantCitationV1]]:
+    certificate = next(
+        (
+            analysis
+            for analysis in result.document_analyses
+            if analysis.document_type == "certificate_of_origin"
+        ),
+        None,
+    )
+    if certificate is None:
+        return None, []
+    facts = [fact for fact in _analysis_facts(certificate) if fact.name in {"hs_code", "hs_codes"}]
+    if facts:
+        fact = facts[0]
+        value = fact.normalized_value or fact.raw_value
+        return (
+            f"현재 심사 결과에서는 원산지증명서에 HS 코드 {value}가 추출되어 있습니다. "
+            "담당자가 원문 인용과 함께 기재 내용을 최종 확인해 주세요.",
+            [AssistantCitationV1(kind="fact", reference_id=fact.fact_id)],
+        )
+    comparison = next(
+        (
+            item
+            for item in result.comparisons
+            if item.rule_code == "hs_code_presence"
+            and item.left.document_id == certificate.document_id
+        ),
+        None,
+    )
+    if comparison is None:
+        return None, []
+    return (
+        "현재 심사 결과에서는 원산지증명서의 HS 코드를 확인하지 못했습니다. "
+        "원문에 기재되어 있는지 담당자가 직접 확인해 주세요.",
+        [AssistantCitationV1(kind="comparison", reference_id=comparison.comparison_id)],
+    )
+
+
+def _multi_document_hs_answer(
+    result: ReviewRunResultV3,
+) -> tuple[str | None, list[AssistantCitationV1]]:
+    target_types = ("invoice", "packing_list", "certificate_of_origin")
+    facts_by_type: dict[str, list[FactV3]] = {}
+    for document_type in target_types:
+        analysis = next(
+            (entry for entry in result.document_analyses if entry.document_type == document_type),
+            None,
+        )
+        if analysis is None:
+            continue
+        facts_by_type[document_type] = [
+            fact for fact in _analysis_facts(analysis) if fact.name in {"hs_code", "hs_codes"}
+        ]
+    if len(facts_by_type) == len(target_types) and all(facts_by_type.values()):
+        values = {
+            fact.normalized_value or fact.raw_value
+            for facts in facts_by_type.values()
+            for fact in facts
+        }
+        if len(values) == 1:
+            citations = [
+                AssistantCitationV1(kind="fact", reference_id=facts[0].fact_id)
+                for facts in facts_by_type.values()
+            ]
+            return (
+                f"현재 심사 결과에서는 상업송장, 포장명세서, 원산지증명서에서 HS 코드 "
+                f"{next(iter(values))}가 동일하게 추출되었습니다. "
+                "다만 동일 품목 대응은 담당자가 문서 원문과 함께 최종 확인해 주세요.",
+                citations,
+            )
+    citations = [
+        AssistantCitationV1(kind="fact", reference_id=fact.fact_id)
+        for facts in facts_by_type.values()
+        for fact in facts[:1]
+    ]
+    if citations:
+        return (
+            "현재 심사 결과만으로는 세 문서의 HS 코드가 같은 품목을 뜻하는지 충분히 확인할 수 없습니다. "
+            "문서별 품목 설명과 원문 인용을 함께 검토해 주세요.",
+            citations,
+        )
+    return None, []
+
+
 def _validate_scope_policy(
     answer: AssistantAnswerResponseV1, request: AssistantAnswerRequestV1
 ) -> None:
-    expected = _classify_question(request.question.strip(), request.review_result)
+    expected = _classify_question(
+        request.question.strip(), request.review_result, recent_turns=request.recent_turns
+    )
     if answer.answer_scope != expected.scope:
         raise ValueError("assistant_provider_scope_policy_violation")
 
@@ -517,6 +774,7 @@ def _draft_from_question(
 
 __all__ = [
     "deterministic_assistant_answer",
+    "provider_answer_allowed",
     "provider_snapshot",
     "response_from_provider_candidate",
 ]
