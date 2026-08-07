@@ -57,6 +57,7 @@ from customs_ai_agent.service.report import (
     build_grounded_report_sections,
     validate_grounded_report_sections,
 )
+from customs_ai_agent.service.user_text import review_result_markers, reviewer_text_is_safe
 from customs_ai_agent.service.workflow import (
     finding_for_evidence_requirement,
     run_bounded_workflow,
@@ -778,6 +779,13 @@ class ProfileRuntime:
                 for fallback_section in fallback
             ]
             sections = [ReportSectionV3.model_validate(item) for item in normalized_sections]
+            reviewer_text = (
+                value
+                for section in sections
+                for value in (section.title, *(claim.text for claim in section.claims))
+            )
+            if not reviewer_text_is_safe(reviewer_text, markers=review_result_markers(result)):
+                raise ValueError("provider_report_user_text_unsafe")
             validate_grounded_report_sections(
                 sections,
                 analyses=result.document_analyses,

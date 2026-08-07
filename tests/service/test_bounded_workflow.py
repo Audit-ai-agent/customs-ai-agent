@@ -486,9 +486,11 @@ def test_approved_human_correction_preserves_original_fact_and_drives_comparison
         for section in sections
         if section.section == "execution_process"
         for claim in section.claims
-        if "proposal-quantity" in claim.text
+        if "원문 인용" in claim.text
     )
     assert correction_claim.fact_ids == ["human:proposal-quantity"]
+    assert "proposal-quantity" not in correction_claim.text
+    assert "human:proposal-quantity" not in correction_claim.text
     validate_grounded_report_sections(
         sections,
         analyses=output.document_analyses,

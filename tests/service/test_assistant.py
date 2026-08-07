@@ -21,6 +21,7 @@ from customs_ai_agent.service.profiles import (
 )
 from customs_ai_agent.service.runtime_errors import RuntimeInputError
 from customs_ai_agent.service.settings import ServiceSettings
+from customs_ai_agent.service.user_text import contains_internal_result_marker
 
 
 _TOKEN = "Abcdefghijklmnopqrstuvwxyz0123456789ABCDEFGHIJK"
@@ -117,6 +118,11 @@ def test_deterministic_assistant_scopes_citations_and_turn_limit(
     )
     assert evidence_answer.answer_scope == "evidence_grounded"
     assert evidence_answer.citations[0].reference_id == "evidence-article-1"
+    assert all(
+        "Evidence" not in claim.text and "Review Run" not in claim.text
+        for section in result.report.sections
+        for claim in section.claims
+    )
 
     general_answer = runtime.assistant_answer_json(
         _answer_payload(result, question="일반 통관 절차를 안내해 주세요.")
@@ -140,6 +146,32 @@ def test_deterministic_assistant_scopes_citations_and_turn_limit(
         runtime.assistant_answer_json(
             _answer_payload(result, question="현재 비교를 설명해 주세요.", recent_turns=too_many)
         )
+
+
+def test_deterministic_evidence_answer_keeps_raw_provider_title_in_citation_only(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    def raw_title_retrieve(
+        self: ProfileEvidenceRetriever, request: dict[str, Any]
+    ) -> dict[str, Any]:
+        response = _stub_retrieve(self, request)
+        response["results"][0]["evidence"][0]["title"] = "customs_requireHSK_2026_release"
+        return response
+
+    monkeypatch.setattr(ProfileEvidenceRetriever, "retrieve", raw_title_retrieve)
+    runtime = ProfileRuntime(_settings())
+    result = runtime.review_v3_json(json.dumps(_review_payload()).encode())
+
+    answer = runtime.assistant_answer_json(
+        _answer_payload(result, question="연결된 법령 근거는 무엇인가요?")
+    )
+
+    assert answer.answer_scope == "evidence_grounded"
+    assert len(answer.citations) == 1
+    assert answer.citations[0].kind == "evidence"
+    assert answer.citations[0].reference_id == "evidence-article-1"
+    assert "customs_requireHSK_2026_release" not in answer.direct_answer
+    assert answer.direct_answer.startswith("현재 심사에는 연결된 법령 근거가 있습니다.")
 
 
 def test_assistant_draft_is_non_mutating_and_endpoint_is_profile_protected(
@@ -413,3 +445,105 @@ def test_functional_report_uses_one_valid_provider_composition(
     assert all(len(section.claims) == 1 for section in result.report.sections)
     assert result.report.sections[5].claims[0].claim_id.startswith("report:impact:")
     assert result.result_sha256
+
+
+def test_functional_assistant_falls_back_when_provider_exposes_internal_codes(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    class LeakyResponder:
+        def __init__(self) -> None:
+            self.calls = 0
+
+        def respond(self, payload: dict[str, Any], **_kwargs: Any) -> dict[str, Any]:
+            self.calls += 1
+            comparison_id = payload["review_snapshot"]["comparisons"][0]["comparison_id"]
+            return {
+                "direct_answer": f"확인 결과는 {comparison_id}입니다.",
+                "citations": [{"kind": "comparison", "reference_id": comparison_id}],
+                "suggested_questions": ["inspect_document_consistency를 실행해 주세요."],
+                "correction_draft": None,
+            }
+
+        def close(self) -> None:
+            return None
+
+    monkeypatch.setattr(ProfileEvidenceRetriever, "retrieve", _stub_retrieve)
+    runtime = ProfileRuntime(_settings())
+    result = runtime.review_v3_json(json.dumps(_review_payload()).encode())
+    responder = LeakyResponder()
+    runtime.mode = "functional-uat"
+    runtime._grounded_responder = responder  # type: ignore[assignment]
+
+    answer = runtime.assistant_answer_json(
+        _answer_payload(result, question="현재 문서 비교 결과를 설명해 주세요.")
+    )
+
+    assert responder.calls == 1
+    assert answer.answer_scope == "case_grounded"
+    assert len(answer.citations) == 1
+    assert answer.citations[0].kind == "comparison"
+    assert answer.citations[0].reference_id == result.comparisons[0].comparison_id
+    assert not contains_internal_result_marker(answer.direct_answer)
+    assert not any(contains_internal_result_marker(value) for value in answer.suggested_questions)
+    assert "현재 사건의 문서와 비교 결과" in answer.direct_answer
+
+
+def test_functional_report_falls_back_when_provider_exposes_internal_codes(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    class LeakyReportResponder:
+        def __init__(self) -> None:
+            self.calls = 0
+
+        def respond(self, payload: dict[str, Any], **_kwargs: Any) -> dict[str, Any]:
+            self.calls += 1
+            comparison_id = payload["review_snapshot"]["comparisons"][0]["comparison_id"]
+            return {
+                "sections": [
+                    {
+                        "section": name,
+                        "title": title,
+                        "claims": [
+                            {
+                                "claim_id": f"provider:{name}",
+                                "text": f"{comparison_id}와 needs_review를 확인했습니다.",
+                                "fact_ids": [],
+                                "comparison_ids": [comparison_id],
+                                "evidence_ids": [],
+                            }
+                        ],
+                    }
+                    for name, title in (
+                        ("conclusion", "결론"),
+                        ("execution_process", "실행 과정"),
+                        ("document_comparison", "문서 비교"),
+                        ("issues_and_causes", "문제와 원인"),
+                        ("legal_evidence", "법령 근거"),
+                        ("impact", "영향"),
+                        ("next_actions", "다음 조치"),
+                        ("limitations", "한계"),
+                    )
+                ]
+            }
+
+        def close(self) -> None:
+            return None
+
+    monkeypatch.setattr(ProfileEvidenceRetriever, "retrieve", _stub_retrieve)
+    runtime = ProfileRuntime(_settings())
+    responder = LeakyReportResponder()
+    runtime.mode = "functional-uat"
+    runtime._grounded_responder = responder  # type: ignore[assignment]
+
+    result = runtime.review_v3_json(json.dumps(_review_payload()).encode())
+
+    assert responder.calls == 1
+    assert result.report.sections[0].claims[0].claim_id.startswith("report:conclusion:")
+    assert all(
+        not contains_internal_result_marker(value)
+        for section in result.report.sections
+        for value in (section.title, *(claim.text for claim in section.claims))
+    )
+    assert any(
+        claim.comparison_ids for section in result.report.sections for claim in section.claims
+    )
