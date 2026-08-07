@@ -14,7 +14,7 @@ import re
 import unicodedata
 from dataclasses import dataclass, field as dataclass_field, replace
 from decimal import Decimal, InvalidOperation
-from typing import Any, Iterable, Literal, Mapping, Protocol
+from typing import Any, Iterable, Literal, Mapping, Protocol, cast
 
 from customs_ai_agent.adapters.llm import DocumentAnalysis
 from customs_ai_agent.schemas.llm import ClaudeDocumentCandidate
@@ -68,6 +68,24 @@ _IDENTIFIER_FIELDS = {
 }
 _ORIGIN_FIELDS = {"origin_country", "country_of_origin"}
 _DESCRIPTION_FIELDS = {"description", "goods_description"}
+_HS_FIELDS = {"hs_code", "hs_codes"}
+_DOCUMENT_LABELS = {
+    "invoice": "상업송장",
+    "packing_list": "포장명세서",
+    "bill_of_lading": "선하증권",
+    "certificate_of_origin": "원산지증명서",
+    "unknown": "문서",
+}
+_FIELD_LABELS = {
+    "invoice_no": "상업송장 번호",
+    "packing_no": "포장명세서 번호",
+    "bl_no": "B/L 번호",
+    "certificate_no": "원산지증명서 번호",
+    "origin_country": "원산지",
+    "country_of_origin": "원산지",
+    "hs_code": "HS 코드",
+    "total_amount": "총액",
+}
 _CURRENCY_RE = re.compile(r"\b(KRW|USD|EUR|JPY|CNY|GBP)\b", re.IGNORECASE)
 _NUMBER_RE = re.compile(r"[-+]?\d[\d,]*(?:\.\d+)?")
 _CONTAINER_RE = re.compile(r"\b[A-Z]{4}\d{7}\b")
@@ -153,6 +171,8 @@ class BoundedWorkflowOutput:
     findings: list[FindingV3]
     workflow: WorkflowV3
     retrieval_items: list[dict[str, Any]]
+    retrieval_document_ids: dict[str, list[str]]
+    retrieval_excluded_document_ids: list[str]
     planner_state: _BoundedPlanner
 
     def with_evidence_status(self, data_status: str) -> "BoundedWorkflowOutput":
@@ -167,7 +187,13 @@ class BoundedWorkflowOutput:
             retrieval_status = "failed"
         stages = [
             stage.model_copy(
-                update={"status": retrieval_status, "summary": _evidence_summary(data_status)}
+                update={
+                    "status": retrieval_status,
+                    "summary": _evidence_summary(
+                        data_status,
+                        excluded_document_count=len(self.retrieval_excluded_document_ids),
+                    ),
+                }
             )
             if stage.stage == "retrieve_evidence"
             else stage
@@ -177,7 +203,10 @@ class BoundedWorkflowOutput:
         planner.record(
             "retrieve_evidence",
             status=retrieval_status,
-            summary=_evidence_summary(data_status),
+            summary=_evidence_summary(
+                data_status,
+                excluded_document_count=len(self.retrieval_excluded_document_ids),
+            ),
         )
         workflow_status: Literal["completed", "partial", "failed"]
         if data_status == "failed":
@@ -195,6 +224,35 @@ class BoundedWorkflowOutput:
                 planner=planner.trace(),
             ),
             planner_state=planner,
+        )
+
+    def with_evidence_skipped(self) -> "BoundedWorkflowOutput":
+        """Record that no HS-qualified commodity exists for a Data request.
+
+        The shared Data contract requires at least one item.  Skipping an
+        otherwise invalid request is an input limitation, not a Data partial
+        failure, and does not pretend that a retrieval action ran.
+        """
+
+        stages = [
+            stage.model_copy(
+                update={
+                    "status": "skipped",
+                    "summary": "HS 코드가 확인된 품목이 없어 법령 근거 조회를 실행하지 않았습니다.",
+                }
+            )
+            if stage.stage == "retrieve_evidence"
+            else stage
+            for stage in self.workflow.stages
+        ]
+        return replace(
+            self,
+            workflow=WorkflowV3(
+                status=self.workflow.status,
+                stages=stages,
+                reextractions=self.workflow.reextractions,
+                planner=self.planner_state.trace(),
+            ),
         )
 
     def with_report_generated(self) -> "BoundedWorkflowOutput":
@@ -316,7 +374,9 @@ def run_bounded_workflow(
     )
     findings = _findings_from_comparisons(comparisons)
     findings.extend(_warning_findings(rendered))
-    retrieval_items = retrieval_items_from_analyses(request, rendered)
+    retrieval_items, retrieval_document_ids, retrieval_excluded_document_ids = (
+        retrieval_plan_from_analyses(request, rendered)
+    )
     stages = _workflow_stages(
         rendered,
         comparisons,
@@ -337,6 +397,8 @@ def run_bounded_workflow(
             planner=planner.trace(),
         ),
         retrieval_items=retrieval_items,
+        retrieval_document_ids=retrieval_document_ids,
+        retrieval_excluded_document_ids=retrieval_excluded_document_ids,
         planner_state=planner,
     )
 
@@ -345,61 +407,109 @@ def retrieval_items_from_analyses(
     request: ServiceReviewRunRequestV3,
     analyses: list[DocumentAnalysisV3],
 ) -> list[dict[str, Any]]:
-    """Build the one shared Data request from extracted, source-grounded facts."""
+    """Return only the public Data request items from the internal plan."""
 
-    items: list[dict[str, Any]] = []
+    return retrieval_plan_from_analyses(request, analyses)[0]
+
+
+def retrieval_plan_from_analyses(
+    request: ServiceReviewRunRequestV3,
+    analyses: list[DocumentAnalysisV3],
+) -> tuple[list[dict[str, Any]], dict[str, list[str]], list[str]]:
+    """Group source-grounded facts into one Data item per commodity.
+
+    A law requirement applies to a commodity, not independently to every
+    source document that repeats the same HS code.  The private mapping keeps
+    all linked document IDs available for findings without extending the Data
+    HTTP contract.  Documents without an HS code, including ordinary B/L
+    documents, are not sent as malformed retrieval fallback items.
+    """
+
+    candidates: list[dict[str, Any]] = []
+    excluded_document_ids: list[str] = []
     for document, analysis in zip(request.documents, analyses, strict=True):
-        item_candidates = list(analysis.line_items)
-        has_item_hs = False
-        for position, item in enumerate(item_candidates, start=1):
+        document_candidates: list[dict[str, Any]] = []
+        for item in analysis.line_items:
             hs = _first_fact(item.facts, "hs_code")
+            if hs is None or not (hs.normalized_value or hs.raw_value):
+                continue
             description = _first_fact(item.facts, *_DESCRIPTION_FIELDS)
             origin = _first_fact(item.facts, *_ORIGIN_FIELDS)
-            if hs is None:
-                continue
-            has_item_hs = True
-            items.append(
+            document_candidates.append(
                 {
-                    "item_id": f"{document.document_id}-{position}"[:128],
-                    "description": (description.raw_value if description else item.source.quote)[
-                        :2000
-                    ],
+                    "document_id": document.document_id,
+                    "description": (description.raw_value if description else item.source.quote)[:2000],
                     "hs_code": hs.normalized_value or hs.raw_value,
-                    "origin_country": (origin.normalized_value if origin else None),
-                    "destination_country": "KR",
+                    "origin_country": origin.normalized_value if origin else None,
                 }
             )
-        document_hs = _first_fact(analysis.facts, "hs_code", "hs_codes")
-        # The deterministic extractor can find the same HS code both in a
-        # document-level field and in its only line item.  The line item is
-        # the more precise retrieval target, so querying the document copy as
-        # well would duplicate Evidence and its downstream finding.
-        if document_hs is not None and not has_item_hs:
-            description = _first_fact(analysis.facts, *_DESCRIPTION_FIELDS)
-            origin = _first_fact(analysis.facts, *_ORIGIN_FIELDS)
-            items.append(
-                {
-                    "item_id": f"{document.document_id}-document"[:128],
-                    "description": (
-                        description.raw_value if description else document.content_text[:2000]
-                    )[:2000],
-                    "hs_code": document_hs.normalized_value or document_hs.raw_value,
-                    "origin_country": (origin.normalized_value if origin else None),
-                    "destination_country": "KR",
-                }
+        if not document_candidates:
+            document_hs = _first_fact(analysis.facts, "hs_code")
+            if document_hs is not None and (document_hs.normalized_value or document_hs.raw_value):
+                description = _first_fact(analysis.facts, *_DESCRIPTION_FIELDS)
+                origin = _first_fact(analysis.facts, *_ORIGIN_FIELDS)
+                document_candidates.append(
+                    {
+                        "document_id": document.document_id,
+                        "description": (
+                            description.raw_value if description else document.content_text[:2000]
+                        )[:2000],
+                        "hs_code": document_hs.normalized_value or document_hs.raw_value,
+                        "origin_country": origin.normalized_value if origin else None,
+                    }
+                )
+        if not document_candidates and analysis.document_type != "bill_of_lading":
+            excluded_document_ids.append(document.document_id)
+        candidates.extend(document_candidates)
+
+    origins_by_hs: dict[str, set[str]] = {}
+    for candidate in candidates:
+        hs_code = str(candidate["hs_code"])
+        origin = candidate["origin_country"]
+        if isinstance(origin, str) and origin:
+            origins_by_hs.setdefault(hs_code, set()).add(origin)
+    for candidate in candidates:
+        if candidate["origin_country"] is None:
+            origins = origins_by_hs.get(str(candidate["hs_code"]), set())
+            if len(origins) == 1:
+                candidate["origin_country"] = next(iter(origins))
+
+    groups: dict[tuple[str, str | None], dict[str, Any]] = {}
+    for candidate in candidates:
+        key = (str(candidate["hs_code"]), cast(str | None, candidate["origin_country"]))
+        group = groups.setdefault(
+            key,
+            {
+                "description": candidate["description"],
+                "document_ids": set(),
+            },
+        )
+        group["document_ids"].add(candidate["document_id"])
+
+    items: list[dict[str, Any]] = []
+    document_ids_by_item: dict[str, list[str]] = {}
+    for (hs_code, origin_country), group in sorted(groups.items()):
+        identity = {
+            "hs_code": hs_code,
+            "origin_country": origin_country,
+            "destination_country": "KR",
+        }
+        item_id = "commodity-" + hashlib.sha256(
+            json.dumps(identity, ensure_ascii=False, sort_keys=True, separators=(",", ":")).encode(
+                "utf-8"
             )
-        if not any(item["item_id"].startswith(f"{document.document_id}-") for item in items):
-            origin = _first_fact(analysis.facts, *_ORIGIN_FIELDS)
-            items.append(
-                {
-                    "item_id": f"{document.document_id}-document"[:128],
-                    "description": document.content_text[:2000].strip() or "customs document",
-                    "hs_code": None,
-                    "origin_country": (origin.normalized_value if origin else None),
-                    "destination_country": "KR",
-                }
-            )
-    return items[:100]
+        ).hexdigest()[:24]
+        items.append(
+            {
+                "item_id": item_id,
+                "description": str(group["description"])[:2000],
+                "hs_code": hs_code,
+                "origin_country": origin_country,
+                "destination_country": "KR",
+            }
+        )
+        document_ids_by_item[item_id] = sorted(group["document_ids"])
+    return items[:100], document_ids_by_item, sorted(set(excluded_document_ids))
 
 
 def finding_for_evidence_requirement(
@@ -407,7 +517,8 @@ def finding_for_evidence_requirement(
     code: str,
     message: str,
     item_id: str,
-    evidence_id: str,
+    evidence_ids: list[str],
+    document_ids: list[str],
 ) -> FindingV3:
     """Create a stable finding for a Data-required document check."""
 
@@ -416,8 +527,8 @@ def finding_for_evidence_requirement(
         severity="medium",
         message=message,
         item_id=item_id,
-        evidence_ids=[evidence_id],
-        document_ids=[item_id.rsplit("-", 1)[0]] if "-" in item_id else [],
+        evidence_ids=list(dict.fromkeys(evidence_ids)),
+        document_ids=list(dict.fromkeys(document_ids)),
     )
 
 
@@ -612,9 +723,9 @@ def _correction_target_item(
 def _correction_field_matches(actual: str, requested: str) -> bool:
     """Match a correction field to one extraction field without broadening scope."""
 
-    if actual == requested:
+    if _canonical_fact_name(actual) == _canonical_fact_name(requested):
         return True
-    return actual in _ORIGIN_FIELDS and requested in _ORIGIN_FIELDS
+    return False
 
 
 def _source(
@@ -674,10 +785,11 @@ def _render_fact(
     )
     if source is None:
         return None
-    normalized_value, unit = _normalize_value(name, value, unit_context=quote)
+    canonical_name = _canonical_fact_name(name)
+    normalized_value, unit = _normalize_value(canonical_name, value, unit_context=quote)
     return FactV3(
         fact_id=fact_id,
-        name=name.strip().casefold(),
+        name=canonical_name,
         raw_value=value,
         normalized_value=normalized_value,
         unit=unit,
@@ -722,6 +834,21 @@ def _normalize_value(
             unit = _unit_for_numeric(name, unit_context)
         return _decimal_text(number), unit
     return re.sub(r"\s+", " ", text).casefold(), None
+
+
+def _canonical_fact_name(name: str) -> str:
+    """Keep equivalent extracted field aliases on one comparison path."""
+
+    normalized = name.strip().casefold()
+    if normalized in _HS_FIELDS:
+        return "hs_code"
+    if normalized in _ORIGIN_FIELDS:
+        return "origin_country"
+    return normalized
+
+
+def _document_label(analysis: DocumentAnalysisV3) -> str:
+    return _DOCUMENT_LABELS.get(analysis.document_type, _DOCUMENT_LABELS["unknown"])
 
 
 def _unit_for_numeric(name: str, text: str) -> str | None:
@@ -785,6 +912,7 @@ def _classification_and_required_field_checks(
         for name in requirements.get(analysis.document_type, ()):
             fact = _first_fact_from_analysis(analysis, name)
             code = "hs_code_presence" if name == "hs_code" else "required_field_presence"
+            field_label = _FIELD_LABELS.get(name, name)
             comparisons.append(
                 _comparison(
                     rule_code=code,
@@ -795,9 +923,9 @@ def _classification_and_required_field_checks(
                     observed_value=fact.raw_value if fact else None,
                     unit=fact.unit if fact else None,
                     message=(
-                        f"{analysis.filename}에서 필수 {name} 값을 확인했습니다."
+                        f"{_document_label(analysis)}에서 필수 {field_label}을 확인했습니다."
                         if fact is not None
-                        else f"{analysis.filename}에서 필수 {name} 값을 확인할 수 없습니다."
+                        else f"{_document_label(analysis)}에서 필수 {field_label}을 확인할 수 없습니다."
                     ),
                 )
             )
@@ -815,7 +943,7 @@ def _invoice_packing_checks(analyses: list[DocumentAnalysisV3]) -> list[Comparis
                 status="skip",
                 left=_operand(document_id=invoice.document_id if invoice else None),
                 right=_operand(document_id=packing.document_id if packing else None),
-                message="Invoice와 Packing List가 모두 있을 때 수량과 단위를 대조합니다.",
+                message="상업송장과 포장명세서가 모두 있을 때 수량과 단위를 대조합니다.",
             ),
             _invoice_total_comparison(invoice),
         ]
@@ -834,7 +962,7 @@ def _match_invoice_packing_items(
                 status="needs_review",
                 left=_operand(document_id=invoice.document_id),
                 right=_operand(document_id=packing.document_id),
-                message="Invoice 또는 Packing List에서 비교 가능한 품목을 추출하지 못했습니다.",
+                message="상업송장 또는 포장명세서에서 비교 가능한 품목을 추출하지 못했습니다.",
             )
         ]
     comparisons: list[ComparisonV3] = []
@@ -850,7 +978,7 @@ def _match_invoice_packing_items(
                     status="needs_review",
                     left=_operand_from_item(invoice, invoice_item),
                     right=_operand(document_id=packing.document_id),
-                    message="Invoice 품목에 대응하는 Packing List 품목을 하나로 정할 수 없습니다.",
+                    message="상업송장 품목에 대응하는 포장명세서 품목을 하나로 정할 수 없습니다.",
                 )
             )
             continue
@@ -865,7 +993,7 @@ def _match_invoice_packing_items(
                 status="needs_review",
                 left=_operand(document_id=invoice.document_id),
                 right=_operand_from_item(packing, packing.line_items[index]),
-                message="Packing List 품목에 대응하는 Invoice 품목을 하나로 정할 수 없습니다.",
+                    message="포장명세서 품목에 대응하는 상업송장 품목을 하나로 정할 수 없습니다.",
             )
         )
     return comparisons
@@ -885,7 +1013,7 @@ def _quantity_unit_comparison(
             status="needs_review",
             left=_operand_from_fact(invoice, invoice_item, invoice_qty),
             right=_operand_from_fact(packing, packing_item, packing_qty),
-            message="Invoice와 Packing List의 수량 또는 단위를 모두 확인할 수 없습니다.",
+            message="상업송장과 포장명세서의 수량 또는 단위를 모두 확인할 수 없습니다.",
         )
     if invoice_qty.normalized_value is None or packing_qty.normalized_value is None:
         return _comparison(
@@ -918,9 +1046,9 @@ def _quantity_unit_comparison(
         observed_value=packing_qty.normalized_value,
         unit=invoice_unit,
         message=(
-            "Invoice와 Packing List의 수량·단위가 일치합니다."
+            "상업송장과 포장명세서의 수량·단위가 일치합니다."
             if status == "pass"
-            else "Invoice와 Packing List의 수량이 일치하지 않습니다."
+            else "상업송장과 포장명세서의 수량이 일치하지 않습니다."
         ),
     )
 
@@ -936,7 +1064,7 @@ def _invoice_amount_comparison(invoice: DocumentAnalysisV3, item: LineItemV3) ->
             status="needs_review",
             left=_operand_from_facts(invoice, item, facts),
             right=_operand_from_fact(invoice, item, amount),
-            message="Invoice 품목의 수량·단가·금액을 모두 확인할 수 없습니다.",
+            message="상업송장 품목의 수량·단가·금액을 모두 확인할 수 없습니다.",
         )
     if (
         quantity.normalized_value is None
@@ -950,7 +1078,7 @@ def _invoice_amount_comparison(invoice: DocumentAnalysisV3, item: LineItemV3) ->
             status="needs_review",
             left=_operand_from_facts(invoice, item, facts),
             right=_operand_from_fact(invoice, item, amount),
-            message="Invoice 품목 금액을 같은 통화와 숫자 형식으로 계산할 수 없습니다.",
+            message="상업송장 품목 금액을 같은 통화와 숫자 형식으로 계산할 수 없습니다.",
         )
     expected = Decimal(quantity.normalized_value) * Decimal(unit_price.normalized_value)
     expected_text = _decimal_text(expected)
@@ -969,9 +1097,9 @@ def _invoice_amount_comparison(invoice: DocumentAnalysisV3, item: LineItemV3) ->
         observed_value=amount.normalized_value,
         unit=amount.unit,
         message=(
-            "Invoice 품목의 수량×단가와 금액이 일치합니다."
+            "상업송장 품목의 수량×단가와 금액이 일치합니다."
             if status == "pass"
-            else "Invoice 품목의 수량×단가와 기재 금액이 일치하지 않습니다."
+            else "상업송장 품목의 수량×단가와 기재 금액이 일치하지 않습니다."
         ),
     )
 
@@ -983,7 +1111,7 @@ def _invoice_total_comparison(invoice: DocumentAnalysisV3 | None) -> ComparisonV
             status="skip",
             left=_operand(),
             right=_operand(),
-            message="Invoice가 있을 때 품목 금액 합계와 총액을 대조합니다.",
+            message="상업송장이 있을 때 품목 금액 합계와 총액을 대조합니다.",
         )
     total = _first_fact(invoice.facts, "total_amount")
     amount_facts = [
@@ -995,7 +1123,7 @@ def _invoice_total_comparison(invoice: DocumentAnalysisV3 | None) -> ComparisonV
             status="needs_review",
             left=_operand_from_facts(invoice, None, amount_facts),
             right=_operand_from_fact(invoice, None, total),
-            message="Invoice 품목 금액과 총액을 모두 확인할 수 없습니다.",
+            message="상업송장 품목 금액과 총액을 모두 확인할 수 없습니다.",
         )
     if (
         total.normalized_value is None
@@ -1007,7 +1135,7 @@ def _invoice_total_comparison(invoice: DocumentAnalysisV3 | None) -> ComparisonV
             status="needs_review",
             left=_operand_from_facts(invoice, None, amount_facts),
             right=_operand_from_fact(invoice, None, total),
-            message="Invoice 품목 금액과 총액의 통화 또는 숫자 형식을 통일할 수 없습니다.",
+            message="상업송장 품목 금액과 총액의 통화 또는 숫자 형식을 통일할 수 없습니다.",
         )
     expected = sum((Decimal(fact.normalized_value or "0") for fact in amount_facts), Decimal("0"))
     expected_text = _decimal_text(expected)
@@ -1021,9 +1149,9 @@ def _invoice_total_comparison(invoice: DocumentAnalysisV3 | None) -> ComparisonV
         observed_value=total.normalized_value,
         unit=total.unit,
         message=(
-            "Invoice 품목 금액 합계와 총액이 일치합니다."
+            "상업송장 품목 금액 합계와 총액이 일치합니다."
             if status == "pass"
-            else "Invoice 품목 금액 합계와 총액이 일치하지 않습니다."
+            else "상업송장 품목 금액 합계와 총액이 일치하지 않습니다."
         ),
     )
 
@@ -1039,7 +1167,7 @@ def _invoice_origin_checks(analyses: list[DocumentAnalysisV3]) -> list[Compariso
                 status="skip",
                 left=_operand(document_id=invoice.document_id if invoice else None),
                 right=_operand(document_id=certificate.document_id if certificate else None),
-                message="Invoice와 원산지증명서가 모두 있을 때 원산지를 대조합니다.",
+                message="상업송장과 원산지증명서가 모두 있을 때 원산지를 대조합니다.",
             )
         ]
     invoice_origin = _first_fact_from_analysis(invoice, *_ORIGIN_FIELDS)
@@ -1053,9 +1181,9 @@ def _invoice_origin_checks(analyses: list[DocumentAnalysisV3]) -> list[Compariso
             certificate,
             None,
             certificate_origin,
-            missing_message="Invoice와 원산지증명서의 원산지를 모두 확인할 수 없습니다.",
-            pass_message="Invoice와 원산지증명서의 원산지가 일치합니다.",
-            mismatch_message="Invoice와 원산지증명서의 원산지가 일치하지 않습니다.",
+            missing_message="상업송장과 원산지증명서의 원산지를 모두 확인할 수 없습니다.",
+            pass_message="상업송장과 원산지증명서의 원산지가 일치합니다.",
+            mismatch_message="상업송장과 원산지증명서의 원산지가 일치하지 않습니다.",
         )
     ]
 
@@ -1071,7 +1199,7 @@ def _bill_packing_checks(analyses: list[DocumentAnalysisV3]) -> list[ComparisonV
                 status="skip",
                 left=_operand(document_id=bill.document_id if bill else None),
                 right=_operand(document_id=packing.document_id if packing else None),
-                message="B/L과 Packing List가 모두 있을 때 대조합니다.",
+                message="B/L과 포장명세서가 모두 있을 때 대조합니다.",
             )
             for rule in (
                 "bill_packing_bl_no",
@@ -1113,8 +1241,8 @@ def _bill_packing_checks(analyses: list[DocumentAnalysisV3]) -> list[ComparisonV
             None,
             _first_fact_from_analysis(packing, "total_gross_weight_kg"),
             missing_message="총중량을 두 문서에서 모두 확인할 수 없습니다.",
-            pass_message="B/L과 Packing List의 총중량이 일치합니다.",
-            mismatch_message="B/L과 Packing List의 총중량이 일치하지 않습니다.",
+            pass_message="B/L과 포장명세서의 총중량이 일치합니다.",
+            mismatch_message="B/L과 포장명세서의 총중량이 일치하지 않습니다.",
         ),
     ]
 
@@ -1377,7 +1505,7 @@ def _workflow_stages(
             stage="retrieve_evidence",
             status="skipped",
             attempt_count=0,
-            summary="Evidence 조회를 아직 기록하지 않았습니다.",
+            summary="법령 근거 조회를 아직 기록하지 않았습니다.",
         ),
         WorkflowStageV3(
             stage="generate_result",
@@ -1388,12 +1516,15 @@ def _workflow_stages(
     ]
 
 
-def _evidence_summary(data_status: str) -> str:
-    return {
-        "ok": "Data Evidence를 한 번 조회했습니다.",
-        "partial": "Data Evidence 일부가 준비되지 않아 담당자 검토가 필요합니다.",
-        "failed": "Data Evidence 조회가 실패했습니다.",
-    }.get(data_status, "Data Evidence 응답 상태가 유효하지 않습니다.")
+def _evidence_summary(data_status: str, *, excluded_document_count: int = 0) -> str:
+    summary = {
+        "ok": "품목 기준으로 법령 근거를 한 번 조회했습니다.",
+        "partial": "일부 법령 근거 조회 결과를 확인하지 못해 담당자 검토가 필요합니다.",
+        "failed": "법령 근거 조회에 실패했습니다.",
+    }.get(data_status, "법령 근거 조회 상태를 확인할 수 없습니다.")
+    if excluded_document_count:
+        return summary + " HS 코드가 없는 문서는 법령 근거 조회 대상에서 제외했습니다."
+    return summary
 
 
 def _reextraction_targets(
@@ -1503,12 +1634,8 @@ def _ungrounded_candidate_fields(document: Any, candidate: ClaudeDocumentCandida
 
 
 def _candidate_has(available: set[str], name: str) -> bool:
-    aliases = {
-        "hs_code": {"hs_code", "hs_codes"},
-        "origin_country": {"origin_country", "country_of_origin"},
-        "country_of_origin": {"origin_country", "country_of_origin"},
-    }
-    return bool(available & aliases.get(name, {name}))
+    requested = _canonical_fact_name(name)
+    return any(_canonical_fact_name(candidate) == requested for candidate in available)
 
 
 def _prefer_more_complete(current: DocumentAnalysis, retry: DocumentAnalysis) -> DocumentAnalysis:
@@ -1535,8 +1662,8 @@ def _first_fact_from_analysis(analysis: DocumentAnalysisV3, *names: str) -> Fact
 
 
 def _first_fact(facts: Iterable[FactV3], *names: str) -> FactV3 | None:
-    expected = set(names)
-    candidates = [fact for fact in facts if fact.name in expected]
+    expected = {_canonical_fact_name(name) for name in names}
+    candidates = [fact for fact in facts if _canonical_fact_name(fact.name) in expected]
     return next(
         (fact for fact in reversed(candidates) if isinstance(fact.source, HumanProvidedSourceV3)),
         next(iter(candidates), None),

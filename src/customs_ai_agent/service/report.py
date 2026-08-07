@@ -26,6 +26,7 @@ from customs_ai_agent.service.user_text import (
     contains_internal_result_marker,
     localize_deterministic_reviewer_prose,
     review_result_markers,
+    reviewer_text_is_safe,
 )
 
 
@@ -36,6 +37,7 @@ def build_grounded_report_sections(
     evidence: list[EvidenceV3],
     findings: list[FindingV3],
     actions: list[RequiredActionV1],
+    evidence_retrieval_skipped: bool = False,
 ) -> list[ReportSectionV3]:
     """Build all required sections using only identifiers already in the result."""
 
@@ -48,6 +50,7 @@ def build_grounded_report_sections(
             "required_actions": [action.model_dump(mode="json") for action in actions],
         }
     )
+    filenames = tuple(analysis.filename for analysis in analyses)
     fact_ids = [fact.fact_id for analysis in analyses for fact in _facts(analysis)]
     primary_comparison = _choose_comparison(comparisons)
     support = _support(
@@ -87,21 +90,29 @@ def build_grounded_report_sections(
         issue_comparison.message if issue_comparison is not None else None,
         "문서 사이의 비교 결과를 확인해야 합니다.",
         markers=markers,
+        filenames=filenames,
     )
     evidence_text = (
         f"연결된 법령 근거는 {len(evidence)}건입니다."
         if evidence
-        else "연결 가능한 법령 근거가 없어 담당자 확인이 필요합니다."
+        else (
+            "HS 코드가 확인된 품목이 없어 법령 근거 조회를 실행하지 않았습니다. "
+            "해당 문서의 HS 코드를 보완해 주세요."
+            if evidence_retrieval_skipped
+            else "연결 가능한 법령 근거가 없어 담당자 확인이 필요합니다."
+        )
     )
     finding_text = _reviewer_sentence(
         finding.message if finding is not None else None,
         "자동으로 확정할 수 없는 항목이 있어 담당자 검토가 필요합니다.",
         markers=markers,
+        filenames=filenames,
     )
     action_text = _reviewer_sentence(
         actions[0].message if actions else None,
         "문서와 법령 근거를 담당자가 직접 확인해 주세요.",
         markers=markers,
+        filenames=filenames,
     )
     sections = [
         _section(
@@ -229,12 +240,21 @@ def _choose_comparison(comparisons: list[ComparisonV3]) -> ComparisonV3 | None:
     )
 
 
-def _reviewer_sentence(value: str | None, fallback: str, *, markers: frozenset[str]) -> str:
-    """Do not render result IDs, action codes, or hashes as reviewer prose."""
+def _reviewer_sentence(
+    value: str | None,
+    fallback: str,
+    *,
+    markers: frozenset[str],
+    filenames: tuple[str, ...],
+) -> str:
+    """Render only Korean-first reviewer prose outside structured citations."""
 
     if not value or contains_internal_result_marker(value, markers=markers):
         return fallback
-    return localize_deterministic_reviewer_prose(value)
+    localized = localize_deterministic_reviewer_prose(value)
+    if not reviewer_text_is_safe([localized], markers=markers, filenames=filenames):
+        return fallback
+    return localized
 
 
 def _support(

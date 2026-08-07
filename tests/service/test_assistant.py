@@ -21,7 +21,7 @@ from customs_ai_agent.service.profiles import (
 )
 from customs_ai_agent.service.runtime_errors import RuntimeInputError
 from customs_ai_agent.service.settings import ServiceSettings
-from customs_ai_agent.service.user_text import contains_internal_result_marker
+from customs_ai_agent.service.user_text import contains_internal_result_marker, reviewer_text_is_safe
 
 
 _TOKEN = "Abcdefghijklmnopqrstuvwxyz0123456789ABCDEFGHIJK"
@@ -80,6 +80,54 @@ def _review_payload() -> dict[str, Any]:
                     "Quantity: 1 PCS | Unit Price: USD 10 | Amount: USD 10"
                 ),
             }
+        ],
+    }
+
+
+def _matching_review_payload() -> dict[str, Any]:
+    return {
+        "case_id": "case-matching",
+        "review_run_id": "run-matching",
+        "review_as_of": "2026-08-05",
+        "trade_type": "import",
+        "jurisdiction": "KR",
+        "documents": [
+            {
+                "document_id": "invoice",
+                "filename": "matching-invoice.txt",
+                "content_text": (
+                    "COMMERCIAL INVOICE\nInvoice No: INV-MATCH-001\n"
+                    "Total Amount: USD 20\nCountry of Origin: KR\n"
+                    "Description: Frozen Mackerel | HS Code: 0303540000 | Quantity: 2 PCS | "
+                    "Unit Price: USD 10 | Amount: USD 20"
+                ),
+            },
+            {
+                "document_id": "packing",
+                "filename": "matching-packing.txt",
+                "content_text": (
+                    "PACKING LIST\nPacking No: PL-MATCH-001\nB/L No: BL-MATCH-001\n"
+                    "Container No: ABCD1234567\nTotal Gross Weight: 100 KG\n"
+                    "Description: Frozen Mackerel | HS Code: 0303540000 | Quantity: 2 PCS | "
+                    "Unit: PCS | Gross Weight: 100 KG"
+                ),
+            },
+            {
+                "document_id": "certificate",
+                "filename": "matching-origin.txt",
+                "content_text": (
+                    "CERTIFICATE OF ORIGIN\nCertificate No: COO-MATCH-001\n"
+                    "Origin Country: KR\nHS Code: 0303540000"
+                ),
+            },
+            {
+                "document_id": "bill",
+                "filename": "matching-bill.txt",
+                "content_text": (
+                    "BILL OF LADING\nB/L No: BL-MATCH-001\nContainer No: ABCD1234567\n"
+                    "Gross Weight: 100 KG"
+                ),
+            },
         ],
     }
 
@@ -146,6 +194,144 @@ def test_deterministic_assistant_scopes_citations_and_turn_limit(
         runtime.assistant_answer_json(
             _answer_payload(result, question="현재 비교를 설명해 주세요.", recent_turns=too_many)
         )
+
+
+def test_case_specific_follow_up_questions_do_not_fall_back_to_general_guidance(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    def regulatory_retrieve(
+        _self: ProfileEvidenceRetriever, request: dict[str, Any]
+    ) -> dict[str, Any]:
+        item_id = request["items"][0]["item_id"]
+        return {
+            "schema_version": "3.0",
+            "request_id": request["request_id"],
+            "status": "ok",
+            "knowledge_snapshot_id": "dev-fixture",
+            "results": [
+                {
+                    "item_id": item_id,
+                    "evidence": [
+                        {
+                            "evidence_id": "evidence-food-confirmation",
+                            "item_id": item_id,
+                            "title": "수입식품등 수입신고확인증 확인",
+                            "text": "수입식품등 수입신고확인증을 확인해야 합니다.",
+                            "source_uri": "https://law.example.invalid/food",
+                            "source_type": "law",
+                            "version_hash": "b" * 64,
+                            "law_id": "food-law",
+                            "law_name": "수입식품안전관리 특별법",
+                            "eligibility": "finding",
+                            "required_document_code": "FOOD_IMPORT_CONFIRMATION",
+                            "required_document_name": "수입식품등 수입신고확인증",
+                        }
+                    ],
+                }
+            ],
+        }
+
+    monkeypatch.setattr(ProfileEvidenceRetriever, "retrieve", regulatory_retrieve)
+    runtime = ProfileRuntime(_settings())
+    result = runtime.review_v3_json(json.dumps(_matching_review_payload()).encode())
+    retrieval_stage = next(
+        stage for stage in result.workflow.stages if stage.stage == "retrieve_evidence"
+    )
+    regulatory_findings = [finding for finding in result.findings if finding.evidence_ids]
+    regulatory_actions = [action for action in result.required_actions if action.finding_ids]
+    assert retrieval_stage.status == "completed"
+    assert result.execution_status == "succeeded"
+    assert len(regulatory_findings) == 1
+    assert regulatory_findings[0].document_ids == ["certificate", "invoice", "packing"]
+    assert len(regulatory_actions) == 1
+    assert regulatory_actions[0].finding_ids == [regulatory_findings[0].finding_id]
+
+    q1 = runtime.assistant_answer_json(
+        _answer_payload(
+            result,
+            question="원산지증명서(matching-origin.txt)의 원문에 HS 코드가 기재되어 있는지 확인할 수 있습니까?",
+        )
+    )
+    assert q1.answer_scope == "case_grounded"
+    assert any(citation.kind == "fact" for citation in q1.citations)
+
+    q2 = runtime.assistant_answer_json(
+        _answer_payload(
+            result,
+            question="수입식품등 수입신고확인증이 제출되었거나 제출 예정인지 확인할 수 있습니까?",
+        )
+    )
+    assert q2.answer_scope == "insufficient_evidence"
+    assert q2.citations == []
+    assert "제출" in q2.direct_answer and "예정" in q2.direct_answer
+
+    q3 = runtime.assistant_answer_json(
+        _answer_payload(
+            result,
+            question="원산지증명서와 포장명세서, 인보이스 간 HS 코드 0303540000이 동일 품목을 나타내는지 확인되었습니까?",
+        )
+    )
+    assert q3.answer_scope == "case_grounded"
+    assert len(q3.citations) == 3
+
+    for answer in (q1, q2, q3):
+        assert reviewer_text_is_safe(
+            [answer.direct_answer, *answer.suggested_questions],
+            filenames=[analysis.filename for analysis in result.document_analyses],
+        )
+
+
+def test_functional_exact_hs_answer_uses_snapshot_not_an_extra_provider_call(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    class Responder:
+        def __init__(self) -> None:
+            self.calls = 0
+
+        def respond(self, *_args: Any, **_kwargs: Any) -> dict[str, Any]:
+            self.calls += 1
+            raise AssertionError("exact HS snapshot answer must not call the provider")
+
+    monkeypatch.setattr(ProfileEvidenceRetriever, "retrieve", _stub_retrieve)
+    runtime = ProfileRuntime(_settings())
+    result = runtime.review_v3_json(json.dumps(_matching_review_payload()).encode())
+    responder = Responder()
+    runtime.mode = "functional-uat"
+    runtime._grounded_responder = responder  # type: ignore[assignment]
+
+    answer = runtime.assistant_answer_json(
+        _answer_payload(
+            result,
+            question="원산지증명서의 원문에 HS 코드가 기재되어 있는지 확인할 수 있습니까?",
+        )
+    )
+
+    assert answer.answer_scope == "case_grounded"
+    assert responder.calls == 0
+
+
+def test_recent_case_context_keeps_a_short_follow_up_grounded(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    monkeypatch.setattr(ProfileEvidenceRetriever, "retrieve", _stub_retrieve)
+    runtime = ProfileRuntime(_settings())
+    result = runtime.review_v3_json(json.dumps(_matching_review_payload()).encode())
+
+    answer = runtime.assistant_answer_json(
+        _answer_payload(
+            result,
+            question="그 항목은 확인됐나요?",
+            recent_turns=[
+                {
+                    "role": "assistant",
+                    "content": "원산지증명서의 HS 코드 확인이 필요합니다.",
+                }
+            ],
+        )
+    )
+
+    assert answer.answer_scope == "case_grounded"
+    assert answer.citations
 
 
 def test_deterministic_evidence_answer_keeps_raw_provider_title_in_citation_only(
@@ -485,7 +671,33 @@ def test_functional_assistant_falls_back_when_provider_exposes_internal_codes(
     assert answer.citations[0].reference_id == result.comparisons[0].comparison_id
     assert not contains_internal_result_marker(answer.direct_answer)
     assert not any(contains_internal_result_marker(value) for value in answer.suggested_questions)
-    assert "현재 사건의 문서와 비교 결과" in answer.direct_answer
+    assert "현재 사건의 관련 비교 결과" in answer.direct_answer
+
+
+def test_provider_assistant_rejects_english_reviewer_prose(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    monkeypatch.setattr(ProfileEvidenceRetriever, "retrieve", _stub_retrieve)
+    runtime = ProfileRuntime(_settings())
+    result = runtime.review_v3_json(json.dumps(_review_payload()).encode())
+    assert result.engine is not None
+    request = AssistantAnswerRequestV1.model_validate(
+        json.loads(_answer_payload(result, question="현재 문서 비교 결과를 설명해 주세요."))
+    )
+
+    with pytest.raises(ValueError, match="assistant_provider_user_text_unsafe"):
+        response_from_provider_candidate(
+            {
+                "direct_answer": "Document validation is incomplete.",
+                "citations": [
+                    {"kind": "comparison", "reference_id": result.comparisons[0].comparison_id}
+                ],
+                "suggested_questions": [],
+                "correction_draft": None,
+            },
+            request,
+            engine=result.engine,
+        )
 
 
 def test_functional_report_falls_back_when_provider_exposes_internal_codes(

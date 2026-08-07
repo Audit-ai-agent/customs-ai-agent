@@ -50,6 +50,7 @@ from customs_ai_agent.service.runtime_errors import (
 from customs_ai_agent.service.settings import ServiceSettings
 from customs_ai_agent.service.assistant import (
     deterministic_assistant_answer,
+    provider_answer_allowed,
     provider_snapshot,
     response_from_provider_candidate,
 )
@@ -542,23 +543,84 @@ def _evidence_from_data(response: Mapping[str, Any]) -> list[dict[str, Any]]:
                     "required_document_name": item.get("required_document_name"),
                 }
             )
-    return evidence
+    return _dedupe_evidence_records(evidence)
 
 
-def _findings_from_evidence(evidence: list[dict[str, Any]]) -> list[FindingV3]:
-    findings: list[FindingV3] = []
+def _requirement_identity(item: Mapping[str, Any]) -> tuple[str, str, str]:
+    """Identify one regulatory requirement without using document-local IDs."""
+
+    law_id = str(item.get("law_id") or "").casefold()
+    code = str(item.get("required_document_code") or "").casefold()
+    name = str(item.get("required_document_name") or item.get("title") or "").casefold()
+    return law_id, code or name, "requirement" if code or name else "evidence"
+
+
+def _dedupe_evidence_records(evidence: list[dict[str, Any]]) -> list[dict[str, Any]]:
+    """Keep one public Evidence record for a repeated regulatory requirement."""
+
+    unique: dict[tuple[str, str, str], dict[str, Any]] = {}
     for item in evidence:
-        if item.get("eligibility") == "finding":
-            code = str(item.get("required_document_code") or "data_requirement")[:128]
-            name = str(item.get("required_document_name") or item["title"])
-            findings.append(
-                finding_for_evidence_requirement(
-                    code=code,
-                    message=f"필수 확인 항목: {name}",
-                    item_id=item["item_id"],
-                    evidence_id=item["evidence_id"],
-                )
+        identity = (
+            _requirement_identity(item)
+            if item.get("eligibility") == "finding"
+            else ("", str(item["evidence_id"]), "evidence")
+        )
+        current = unique.get(identity)
+        if current is None:
+            item["_linked_item_ids"] = [str(item["item_id"])]
+            unique[identity] = item
+            continue
+        linked_item_ids = current.setdefault("_linked_item_ids", [str(current["item_id"])])
+        if isinstance(linked_item_ids, list) and str(item["item_id"]) not in linked_item_ids:
+            linked_item_ids.append(str(item["item_id"]))
+    return list(unique.values())
+
+
+def _findings_from_evidence(
+    evidence: list[dict[str, Any]],
+    *,
+    document_ids_by_item: Mapping[str, list[str]],
+) -> list[FindingV3]:
+    """Create one finding per requirement and retain every linked document."""
+
+    grouped: dict[tuple[str, str, str], dict[str, Any]] = {}
+    for item in evidence:
+        if item.get("eligibility") != "finding":
+            continue
+        identity = _requirement_identity(item)
+        group = grouped.setdefault(
+            identity,
+            {
+                "code": str(item.get("required_document_code") or "data_requirement")[:128],
+                "name": str(item.get("required_document_name") or item["title"]),
+                "item_ids": set(),
+                "evidence_ids": set(),
+                "document_ids": set(),
+            },
+        )
+        item_id = str(item["item_id"])
+        linked_item_ids = item.get("_linked_item_ids", [item_id])
+        if not isinstance(linked_item_ids, list) or not all(
+            isinstance(value, str) and value for value in linked_item_ids
+        ):
+            linked_item_ids = [item_id]
+        group["item_ids"].update(linked_item_ids)
+        group["evidence_ids"].add(str(item["evidence_id"]))
+        for linked_item_id in linked_item_ids:
+            group["document_ids"].update(document_ids_by_item.get(linked_item_id, []))
+
+    findings: list[FindingV3] = []
+    for group in grouped.values():
+        item_ids = sorted(group["item_ids"])
+        findings.append(
+            finding_for_evidence_requirement(
+                code=group["code"],
+                message=f"필수 확인 항목: {group['name']}",
+                item_id=item_ids[0],
+                evidence_ids=sorted(group["evidence_ids"]),
+                document_ids=sorted(group["document_ids"]),
             )
+        )
     return findings
 
 
@@ -594,11 +656,20 @@ def _actions(findings: list[FindingV3]) -> list[RequiredActionV1]:
     actions.append(
         RequiredActionV1(
             action_code="human_review_required",
-            message="자동완료하지 않습니다. 담당자가 문서와 법령 Evidence를 검토해야 합니다.",
+            message="자동완료하지 않습니다. 담당자가 문서와 법령 근거를 검토해야 합니다.",
             finding_ids=[],
         )
     )
     return actions
+
+
+def _dedupe_findings(findings: list[FindingV3]) -> list[FindingV3]:
+    """Keep the public result stable when sources converge on one finding."""
+
+    unique: dict[str, FindingV3] = {}
+    for finding in findings:
+        unique.setdefault(finding.finding_id, finding)
+    return list(unique.values())
 
 
 def _provider_report_claim_is_grounded(
@@ -784,7 +855,11 @@ class ProfileRuntime:
                 for section in sections
                 for value in (section.title, *(claim.text for claim in section.claims))
             )
-            if not reviewer_text_is_safe(reviewer_text, markers=review_result_markers(result)):
+            if not reviewer_text_is_safe(
+                reviewer_text,
+                markers=review_result_markers(result),
+                filenames=(analysis.filename for analysis in result.document_analyses),
+            ):
                 raise ValueError("provider_report_user_text_unsafe")
             validate_grounded_report_sections(
                 sections,
@@ -810,7 +885,10 @@ class ProfileRuntime:
         transcript = self._transcript_root.for_run(request.review_run_id)
         fallback = deterministic_assistant_answer(request, engine=self._engine())
         responder = self._grounded_responder
-        provider_grounded_scope = fallback.answer_scope in {"case_grounded", "evidence_grounded"}
+        provider_grounded_scope = (
+            fallback.answer_scope in {"case_grounded", "evidence_grounded"}
+            and provider_answer_allowed(request)
+        )
         if self.mode == "functional-uat" and responder is not None and provider_grounded_scope:
             try:
                 candidate = responder.respond(
@@ -872,15 +950,30 @@ class ProfileRuntime:
                 self._analyzer,
                 transcript=transcript,
             )
-            data_response = self._retriever.retrieve(
-                _retrieve_request(request, workflow_output.retrieval_items)
+            if workflow_output.retrieval_items:
+                data_response = self._retriever.retrieve(
+                    _retrieve_request(request, workflow_output.retrieval_items)
+                )
+                evidence_records = _evidence_from_data(data_response)
+                workflow_output = workflow_output.with_evidence_status(str(data_response["status"]))
+            else:
+                # Data rejects an empty retrieval request by contract.  This is
+                # an input limitation, not an unhealthy or partial Data store.
+                data_response = {"status": "ok", "results": []}
+                evidence_records = []
+                workflow_output = workflow_output.with_evidence_skipped()
+            findings = _dedupe_findings(
+                [
+                    *workflow_output.findings,
+                    *_findings_from_evidence(
+                        evidence_records,
+                        document_ids_by_item=workflow_output.retrieval_document_ids,
+                    ),
+                ]
             )
-            evidence_records = _evidence_from_data(data_response)
-            findings = [*workflow_output.findings, *_findings_from_evidence(evidence_records)]
             evidence = [
                 EvidenceV3.model_validate(item) for item in _public_evidence(evidence_records)
             ]
-            workflow_output = workflow_output.with_evidence_status(str(data_response["status"]))
         except RetrievalError:
             raise RuntimeExecutionError(
                 "evidence_dependency_unready",
@@ -919,6 +1012,7 @@ class ProfileRuntime:
             evidence=evidence,
             findings=findings,
             actions=actions,
+            evidence_retrieval_skipped=not workflow_output.retrieval_items,
         )
         workflow = workflow_output.with_report_generated().workflow
         payload_result: dict[str, Any] = {
@@ -939,7 +1033,7 @@ class ProfileRuntime:
                 "overall_status": status,
                 "summary": (
                     f"문서 {len(request.documents)}건을 제한된 Agentic 워크플로우로 분석했고, "
-                    f"Evidence {len(evidence)}건과 확인 항목 {len(findings)}건을 기록했습니다."
+                    f"법령 근거 {len(evidence)}건과 확인 항목 {len(findings)}건을 기록했습니다."
                 ),
                 "disclaimer": "이 결과는 기능 확인용이며 담당자의 최종 검토가 필요합니다.",
                 "sections": report_sections,

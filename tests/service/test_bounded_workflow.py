@@ -304,13 +304,38 @@ def test_quantity_comparison_uses_explicit_unit_fact_when_quantity_has_no_suffix
     assert comparison.unit == "PCS"
 
 
-def test_retrieval_does_not_duplicate_a_document_hs_already_linked_to_a_line_item() -> None:
+def test_retrieval_groups_one_commodity_and_excludes_no_hs_bill_of_lading() -> None:
     request, candidates = _scenario()
     output = run_bounded_workflow(request, _SequenceAnalyzer(candidates))
 
-    item_ids = [item["item_id"] for item in output.retrieval_items]
-    assert "invoice-1" in item_ids
-    assert "invoice-document" not in item_ids
+    assert len(output.retrieval_items) == 1
+    item = output.retrieval_items[0]
+    assert item["item_id"].startswith("commodity-")
+    assert item["hs_code"] == "123456"
+    assert output.retrieval_document_ids[item["item_id"]] == ["certificate", "invoice", "packing"]
+    # A B/L normally has no HS code.  It is not a law-retrieval target and it
+    # must not become a visible missing-HS condition.
+    assert output.retrieval_excluded_document_ids == []
+
+
+def test_hs_code_alias_is_canonical_for_required_field_checks() -> None:
+    request, candidates = _scenario()
+    certificate = candidates["certificate"][0]
+    certificate.fields[-1] = _field("hs_codes", "123456", "HS Code: 123456")
+
+    output = run_bounded_workflow(request, _SequenceAnalyzer(candidates))
+
+    certificate_hs = next(
+        comparison
+        for comparison in output.comparisons
+        if comparison.rule_code == "hs_code_presence"
+        and comparison.left.document_id == "certificate"
+    )
+    assert certificate_hs.status == "pass"
+    assert not any(
+        finding.code == "hs_code_not_found" and "certificate" in finding.document_ids
+        for finding in output.findings
+    )
 
 
 @pytest.mark.parametrize(

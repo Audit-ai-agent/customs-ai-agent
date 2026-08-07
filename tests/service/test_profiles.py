@@ -12,6 +12,9 @@ from customs_ai_agent.schemas.v3 import ServiceReviewRunRequestV3, canonical_jso
 from customs_ai_agent.service.app import create_app
 from customs_ai_agent.service.profiles import (
     _DeterministicDocumentAnalyzer,
+    _actions,
+    _dedupe_evidence_records,
+    _findings_from_evidence,
     ProfileEvidenceRetriever,
     ProfileRuntime,
     SERVICE_MODE_HEADER,
@@ -45,6 +48,47 @@ def test_default_profile_is_local_development() -> None:
     )
     assert settings.service_mode == "local-development"
     assert settings.port == 18090
+
+
+def test_regulatory_requirement_is_one_finding_and_action_across_linked_documents() -> None:
+    evidence = [
+        {
+            "evidence_id": "evidence-food-1",
+            "item_id": "commodity-one",
+            "title": "수입식품등 수입신고확인증",
+            "eligibility": "finding",
+            "law_id": "food-law",
+            "required_document_code": "FOOD_IMPORT_CONFIRMATION",
+            "required_document_name": "수입식품등 수입신고확인증",
+        },
+        {
+            "evidence_id": "evidence-food-2",
+            "item_id": "commodity-two",
+            "title": "수입식품등 수입신고확인증",
+            "eligibility": "finding",
+            "law_id": "food-law",
+            "required_document_code": "FOOD_IMPORT_CONFIRMATION",
+            "required_document_name": "수입식품등 수입신고확인증",
+        },
+    ]
+
+    deduped = _dedupe_evidence_records(evidence)
+    findings = _findings_from_evidence(
+        deduped,
+        document_ids_by_item={
+            "commodity-one": ["invoice", "packing"],
+            "commodity-two": ["certificate"],
+        },
+    )
+    actions = _actions(findings)
+
+    assert len(deduped) == 1
+    assert len(findings) == 1
+    assert findings[0].document_ids == ["certificate", "invoice", "packing"]
+    assert findings[0].evidence_ids == ["evidence-food-1"]
+    regulatory_actions = [action for action in actions if action.finding_ids]
+    assert len(regulatory_actions) == 1
+    assert regulatory_actions[0].finding_ids == [findings[0].finding_id]
 
 
 def test_deterministic_classifier_keeps_a_packing_header_over_a_later_bl_reference() -> None:
@@ -215,10 +259,19 @@ def test_review_uses_one_readiness_then_one_retrieve_and_stays_human_only(
         "next_actions",
         "limitations",
     }
-    assert calls == [
-        ("GET", ProfileEvidenceRetriever.readiness_path),
-        ("POST", ProfileEvidenceRetriever.retrieve_path),
-    ]
+    # No HS-qualified commodity exists in this deliberately incomplete
+    # invoice.  Sending an empty or no-HS fallback to Data would manufacture a
+    # partial Data status, so the bounded workflow records an input-side skip.
+    assert calls == []
+    retrieval = next(
+        stage for stage in result.workflow.stages if stage.stage == "retrieve_evidence"
+    )
+    assert retrieval.status == "skipped"
+    legal_evidence = next(
+        section for section in result.report.sections if section.section == "legal_evidence"
+    )
+    assert "HS 코드가 확인된 품목이 없어" in legal_evidence.claims[0].text
+    assert "Data" not in legal_evidence.claims[0].text
 
 
 def test_reextraction_failure_is_exposed_as_partial_execution(

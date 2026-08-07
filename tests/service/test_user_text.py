@@ -30,16 +30,27 @@ def test_reviewer_text_blocks_internal_result_markers(value: str, markers: tuple
     assert contains_internal_result_marker(value, markers=markers)
 
 
-def test_reviewer_text_keeps_document_citations_and_official_law_names() -> None:
+def test_reviewer_text_keeps_korean_business_prose_and_official_law_names() -> None:
     values = (
-        "상업송장 번호 INV-001의 수량을 포장명세서와 함께 확인해 주세요.",
-        "Invoice No: INV_001은 원문에 적힌 문서번호입니다.",
+        "상업송장과 포장명세서의 수량을 함께 확인해 주세요.",
         "수입식품안전관리 특별법에 따른 확인 항목을 검토해 주세요.",
-        "선하증권 B/L No. BL-002와 컨테이너 번호 ABCD1234567을 확인했습니다.",
+        "선하증권 B/L 번호와 컨테이너 번호를 확인했습니다.",
     )
 
     assert reviewer_text_is_safe(values)
     assert not any(contains_internal_result_marker(value) for value in values)
+
+
+@pytest.mark.parametrize(
+    "value",
+    (
+        "Invoice No: INV_001은 원문에 적힌 문서번호입니다.",
+        "matching-origin.txt의 HS 코드를 확인해 주세요.",
+        "Document validation is incomplete.",
+    ),
+)
+def test_reviewer_text_rejects_english_prose_and_raw_filenames(value: str) -> None:
+    assert not reviewer_text_is_safe([value], filenames=["matching-origin.txt"])
 
 
 def test_deterministic_prose_uses_korean_terms_without_mutating_structured_citations() -> None:
@@ -79,7 +90,11 @@ def test_grounded_prompts_require_korean_reviewer_prose_and_structured_reference
 
     assert "자연스러운 한국어" in assistant_prompt
     assert "comparison-/finding-" in assistant_prompt
+    assert "원본 파일명" in assistant_prompt
+    assert "영문 문장" in assistant_prompt
     assert "원문을 바꾸지 말고 보존" in assistant_prompt
     assert "자연스러운 한국어" in report_prompt
     assert "fact_ids, comparison_ids, evidence_ids" in report_prompt
+    assert "원본 파일명" in report_prompt
+    assert "영문 문장" in report_prompt
     assert "원문을 바꾸지 말고 보존" in report_prompt
