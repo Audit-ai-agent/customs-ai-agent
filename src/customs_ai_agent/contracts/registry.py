@@ -16,7 +16,10 @@ SchemaKind = Literal[
     "review-result",
     "assistant-answer-request",
     "assistant-answer-response",
+    "knowledge-answer-request",
+    "knowledge-answer-response",
     "rag-retrieval",
+    "guidance-query",
     "readiness",
 ]
 SchemaKey = tuple[SchemaScope, SchemaVersion, SchemaKind]
@@ -30,7 +33,14 @@ _RESOURCE_PATHS: dict[SchemaKey, str] = {
     ("backend", "v3", "assistant-answer-response"): (
         "schemas/backend/v3/assistant-answer-response.schema.json"
     ),
+    ("backend", "v3", "knowledge-answer-request"): (
+        "schemas/backend/v3/knowledge-answer-request.schema.json"
+    ),
+    ("backend", "v3", "knowledge-answer-response"): (
+        "schemas/backend/v3/knowledge-answer-response.schema.json"
+    ),
     ("evidence", "v3", "rag-retrieval"): "evidence/v3/rag_retrieval_v3.schema.json",
+    ("evidence", "v3", "guidance-query"): "evidence/v3/guidance_query_v3.schema.json",
     ("evidence", "v3", "readiness"): "evidence/v3/readiness_v3.schema.json",
 }
 

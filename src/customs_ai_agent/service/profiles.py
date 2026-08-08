@@ -29,8 +29,16 @@ from customs_ai_agent.schemas.llm import (
 from customs_ai_agent.schemas.assistant import (
     AssistantAnswerRequestV1,
     AssistantAnswerResponseV1,
+    KnowledgeAnswerRequestV1,
+    KnowledgeAnswerResponseV1,
 )
-from customs_ai_agent.scenario_transcript import ScenarioTranscriptRoot, ScenarioTranscriptRun
+from customs_ai_agent.scenario_transcript import (
+    KnowledgeTranscriptRoot,
+    KnowledgeTranscriptTurn,
+    ScenarioTranscriptError,
+    ScenarioTranscriptRoot,
+    ScenarioTranscriptRun,
+)
 from customs_ai_agent.schemas.v3 import (
     EngineV3,
     EvidenceV3,
@@ -47,11 +55,24 @@ from customs_ai_agent.service.runtime_errors import (
     RuntimeExecutionError,
     RuntimeInputError,
 )
+from customs_ai_agent.service.knowledge_input import (
+    KnowledgeInputBoundaryError,
+    assert_knowledge_input_is_safe,
+    compact_knowledge_turn_text,
+)
 from customs_ai_agent.service.settings import ServiceSettings
 from customs_ai_agent.service.assistant import (
+    GuidanceContext,
+    assistant_question_policy,
+    combine_case_and_guidance,
     deterministic_assistant_answer,
+    deterministic_knowledge_answer,
+    guidance_answer_for_case,
+    guidance_context_from_data,
+    knowledge_question_policy,
     provider_answer_allowed,
     provider_snapshot,
+    response_from_knowledge_provider_candidate,
     response_from_provider_candidate,
 )
 from customs_ai_agent.service.report import (
@@ -66,10 +87,44 @@ from customs_ai_agent.service.workflow import (
 
 
 ServiceMode = Literal["local-development", "functional-uat"]
+DataPeer = Literal["evidence", "guidance"]
 SERVICE_MODE_HEADER = "X-Customs-Service-Mode"
 _MAX_RESPONSE_BYTES = 2 * 1024 * 1024
 _SAFE_RUN_ID = re.compile(r"^[A-Za-z0-9][A-Za-z0-9._:-]{0,127}$")
 _HASH = re.compile(r"^[a-f0-9]{64}$")
+_AWB_NUMBER_LABEL_PATTERN = (
+    r"(?:a\s*/\s*w\s*b\s*(?:no|number)?|(?<![A-Za-z0-9-])awb(?![A-Za-z0-9-])"
+    r"\s*(?:no\.?|number)?|"
+    r"air\s*waybill\s*(?:no|number)?)"
+)
+_GUIDANCE_TOPIC_HINTS = frozenset(
+    {
+        "customs_clearance",
+        "customs_declaration",
+        "customs_duty",
+        "hs_classification",
+        "origin_verification",
+        "trade_documents",
+        "import_requirements",
+        "export_requirements",
+        "transport_documents",
+        "fta_procedure",
+        "trade_terms",
+    }
+)
+_GUIDANCE_SAFE_QUERY = {
+    "customs_clearance": "대한민국 수출입 통관 절차 공식 안내",
+    "customs_declaration": "대한민국 수출입 신고 절차 공식 안내",
+    "customs_duty": "대한민국 과세가격과 관세 기초 공식 안내",
+    "hs_classification": "대한민국 HS 품목분류 공식 안내",
+    "origin_verification": "대한민국 원산지 확인 공식 안내",
+    "trade_documents": "대한민국 수출입 무역 서류 공식 안내",
+    "import_requirements": "대한민국 수입 요건 공식 안내",
+    "export_requirements": "대한민국 수출 요건 공식 안내",
+    "transport_documents": "대한민국 수출입 운송 서류 공식 안내",
+    "fta_procedure": "대한민국 FTA 원산지와 특혜 절차 공식 안내",
+    "trade_terms": "대한민국 무역 거래조건 공식 안내",
+}
 
 
 class _NoRedirect(HTTPRedirectHandler):
@@ -86,13 +141,16 @@ def service_mode(settings: ServiceSettings) -> ServiceMode:
     raise RuntimeConfigurationError("service_mode_invalid", "The Agent profile mode is invalid.")
 
 
-def _service_secret_values(settings: ServiceSettings) -> tuple[str, str]:
+def _service_secret_values(settings: ServiceSettings) -> tuple[str, ...]:
     """Values held by this process that must never survive in a transcript."""
 
-    return (
+    values = [
         settings.bearer_token.get_secret_value(),
         settings.evidence_service_token.get_secret_value(),
-    )
+    ]
+    if settings.guidance_service_token is not None:
+        values.append(settings.guidance_service_token.get_secret_value())
+    return tuple(values)
 
 
 def _transcript_root(
@@ -102,6 +160,23 @@ def _transcript_root(
 
     mode = service_mode(settings)
     root = supplied or ScenarioTranscriptRoot.for_service_mode(
+        mode, sensitive_values=_service_secret_values(settings)
+    )
+    return root.with_sensitive_values(_service_secret_values(settings))
+
+
+def _knowledge_transcript_root(
+    settings: ServiceSettings, supplied: KnowledgeTranscriptRoot | None = None
+) -> KnowledgeTranscriptRoot:
+    """Select the isolated standalone-guidance transcript boundary.
+
+    It intentionally has a distinct environment switch and destination from
+    review scenarios: a knowledge conversation must never become a Case or
+    document transcript merely because review recording was enabled.
+    """
+
+    mode = service_mode(settings)
+    root = supplied or KnowledgeTranscriptRoot.for_service_mode(
         mode, sensitive_values=_service_secret_values(settings)
     )
     return root.with_sensitive_values(_service_secret_values(settings))
@@ -117,10 +192,18 @@ def _one_header(response: Any, name: str) -> str | None:
 
 
 class ProfileEvidenceRetriever:
-    """Minimal Data HTTP client: readiness, one retrieve call, and mode matching."""
+    """Minimal Data HTTP client with closed review and guidance operations.
+
+    Document-review readiness and retrieval always use the Evidence peer.
+    Guidance uses its own pair only when the complete optional guidance peer
+    is configured; otherwise it intentionally uses the existing Evidence
+    origin and token.  Both peers are independently loopback-validated and
+    must return the Agent's exact service-mode header.
+    """
 
     readiness_path = "/internal/rag/v3/health/ready"
     retrieve_path = "/internal/rag/v3/retrieve"
+    guidance_query_path = "/internal/rag/v3/guidance/query"
 
     def __init__(
         self, settings: ServiceSettings, *, transcript_root: ScenarioTranscriptRoot | None = None
@@ -128,26 +211,47 @@ class ProfileEvidenceRetriever:
         self.mode = service_mode(settings)
         self._timeout = settings.readiness_timeout_seconds
         self._transcript_root = _transcript_root(settings, transcript_root)
-        token = settings.evidence_service_token
-        if token is None:
-            raise RuntimeConfigurationError(
-                "evidence_service_token_missing", "The Data service token is missing."
-            )
+        evidence_token = settings.evidence_service_token
+        guidance_token = settings.guidance_service_token or evidence_token
+        guidance_base_url = settings.guidance_base_url or settings.evidence_base_url
+        self._evidence_base_url = self._validated_peer_url(
+            settings.evidence_base_url, peer="evidence"
+        )
+        self._guidance_base_url = self._validated_peer_url(guidance_base_url, peer="guidance")
+        self._evidence_token = evidence_token.get_secret_value()
+        self._guidance_token = guidance_token.get_secret_value()
+
+    @staticmethod
+    def _validated_peer_url(base_url: str, *, peer: DataPeer) -> str:
         try:
-            self._base_url = validate_evidence_destination(settings.evidence_base_url)
-            host = urlsplit(self._base_url).hostname
+            normalized = validate_evidence_destination(base_url)
+            host = urlsplit(normalized).hostname
             if host is None or not ipaddress.ip_address(host).is_loopback:
                 raise ValueError
         except (TypeError, ValueError):
             raise RuntimeConfigurationError(
-                "evidence_base_url_invalid", "The Data service address is invalid."
+                f"{peer}_base_url_invalid", "The Data service address is invalid."
             ) from None
-        self._token = token.get_secret_value()
+        return normalized
 
-    def _headers(self, *, json_body: bool, request_id: str | None = None) -> dict[str, str]:
+    def _peer_credentials(self, peer: DataPeer) -> tuple[str, str]:
+        if peer == "evidence":
+            return self._evidence_base_url, self._evidence_token
+        if peer == "guidance":
+            return self._guidance_base_url, self._guidance_token
+        raise RetrievalError("Data service peer is invalid")
+
+    @staticmethod
+    def _failure_code(peer: DataPeer, condition: str) -> str:
+        return f"{'data' if peer == 'evidence' else 'guidance'}_{condition}"
+
+    def _headers(
+        self, *, peer: DataPeer, json_body: bool, request_id: str | None = None
+    ) -> dict[str, str]:
+        _base_url, token = self._peer_credentials(peer)
         headers = {
             "Accept": "application/json",
-            "Authorization": f"Bearer {self._token}",
+            "Authorization": f"Bearer {token}",
             SERVICE_MODE_HEADER: self.mode,
         }
         if json_body:
@@ -163,7 +267,12 @@ class ProfileEvidenceRetriever:
         method: Literal["GET", "POST"],
         payload: dict[str, Any] | None = None,
         review_run_id: str | None = None,
+        transcript: ScenarioTranscriptRun | None = None,
+        peer: DataPeer = "evidence",
     ) -> dict[str, Any]:
+        if review_run_id is not None and transcript is not None:
+            raise RetrievalError("Data transcript binding is invalid")
+        base_url, _token = self._peer_credentials(peer)
         encoded = (
             json.dumps(
                 payload,
@@ -176,9 +285,10 @@ class ProfileEvidenceRetriever:
             else None
         )
         request = Request(  # noqa: S310 - the base URL is verified loopback
-            f"{self._base_url}{path}",
+            f"{base_url}{path}",
             data=encoded,
             headers=self._headers(
+                peer=peer,
                 json_body=encoded is not None,
                 request_id=(payload or {}).get("request_id"),
             ),
@@ -188,7 +298,11 @@ class ProfileEvidenceRetriever:
             with _HTTP.open(request, timeout=self._timeout) as response:
                 if _one_header(response, SERVICE_MODE_HEADER) != self.mode:
                     self._record_failure(
-                        review_run_id, method=method, path=path, error_code="data_mode_mismatch"
+                        review_run_id,
+                        transcript=transcript,
+                        method=method,
+                        path=path,
+                        error_code=self._failure_code(peer, "mode_mismatch"),
                     )
                     raise RetrievalError("Data service mode mismatch")
                 raw = response.read(_MAX_RESPONSE_BYTES + 1)
@@ -196,28 +310,45 @@ class ProfileEvidenceRetriever:
             raise
         except (HTTPError, URLError, TimeoutError, OSError):
             self._record_failure(
-                review_run_id, method=method, path=path, error_code="data_request_failed"
+                review_run_id,
+                transcript=transcript,
+                method=method,
+                path=path,
+                error_code=self._failure_code(peer, "request_failed"),
             )
             raise RetrievalError("Data service request failed") from None
         if not isinstance(raw, bytes) or len(raw) > _MAX_RESPONSE_BYTES:
             self._record_failure(
-                review_run_id, method=method, path=path, error_code="data_response_invalid"
+                review_run_id,
+                transcript=transcript,
+                method=method,
+                path=path,
+                error_code=self._failure_code(peer, "response_invalid"),
             )
             raise RetrievalError("Data service response is invalid")
         try:
             decoded = json.loads(raw.decode("utf-8"))
         except (UnicodeDecodeError, ValueError):
             self._record_failure(
-                review_run_id, method=method, path=path, error_code="data_response_invalid"
+                review_run_id,
+                transcript=transcript,
+                method=method,
+                path=path,
+                error_code=self._failure_code(peer, "response_invalid"),
             )
             raise RetrievalError("Data service response is invalid") from None
         if not isinstance(decoded, dict):
             self._record_failure(
-                review_run_id, method=method, path=path, error_code="data_response_invalid"
+                review_run_id,
+                transcript=transcript,
+                method=method,
+                path=path,
+                error_code=self._failure_code(peer, "response_invalid"),
             )
             raise RetrievalError("Data service response is invalid")
         self._record_exchange(
             review_run_id,
+            transcript=transcript,
             method=method,
             path=path,
             request_body=payload,
@@ -229,16 +360,17 @@ class ProfileEvidenceRetriever:
         self,
         review_run_id: str | None,
         *,
+        transcript: ScenarioTranscriptRun | None = None,
         method: Literal["GET", "POST"],
         path: str,
         request_body: dict[str, Any] | None,
         response_body: dict[str, Any],
     ) -> None:
-        if review_run_id is None:
-            return
-        transcript = self._transcript_root.for_run(review_run_id)
-        if transcript is not None:
-            transcript.write(
+        active_transcript = transcript
+        if active_transcript is None and review_run_id is not None:
+            active_transcript = self._transcript_root.for_run(review_run_id)
+        if active_transcript is not None:
+            active_transcript.write(
                 "agent-data",
                 "http_exchange",
                 {
@@ -253,17 +385,18 @@ class ProfileEvidenceRetriever:
         self,
         review_run_id: str | None,
         *,
+        transcript: ScenarioTranscriptRun | None = None,
         method: Literal["GET", "POST"],
         path: str,
         error_code: str,
     ) -> None:
-        if review_run_id is None:
-            return
-        transcript = self._transcript_root.for_run(review_run_id)
-        if transcript is not None:
+        active_transcript = transcript
+        if active_transcript is None and review_run_id is not None:
+            active_transcript = self._transcript_root.for_run(review_run_id)
+        if active_transcript is not None:
             # Do not retain a provider error body or the original request on a
             # failed exchange.  The safe code is enough to diagnose the edge.
-            transcript.write(
+            active_transcript.write(
                 "agent-data",
                 "http_failed",
                 {"method": method, "path": path, "error_code": error_code},
@@ -307,25 +440,82 @@ class ProfileEvidenceRetriever:
             raise RetrievalError("Data service response does not satisfy the shared contract")
         return response
 
-    def record_retrieve_skipped(self, *, review_run_id: str) -> None:
-        """Record an input-side skip without making a Data request.
+    def guidance_query(
+        self,
+        request: dict[str, Any],
+        *,
+        review_run_id: str | None = None,
+        transcript: ScenarioTranscriptRun | None = None,
+    ) -> dict[str, Any]:
+        """Make the one permitted official-guidance query for an assistant turn.
 
-        Functional-UAT transcripts require an Agent-to-Data stream for every
-        review.  An empty commodity plan is deliberately not sent to Data,
-        because the shared retrieve contract rejects it.  This event keeps
-        that distinction visible without treating the Data service as
-        unavailable or retaining document values.
+        It deliberately does not call the item/HS review endpoint and does not
+        add a readiness request.  The Data endpoint owns its snapshot health
+        check, so this method represents exactly one bounded HTTP operation.
         """
 
-        if self.mode != "functional-uat":
-            return
+        if (
+            request.get("schema_version") != "3.0"
+            or not isinstance(request.get("request_id"), str)
+            or not isinstance(request.get("query"), str)
+            or not 1 <= len(request["query"]) <= 1_200
+            or request.get("trade_direction") not in {"import", "export", "both"}
+            or request.get("topic_hint") not in _GUIDANCE_TOPIC_HINTS
+            or not isinstance(request.get("as_of"), str)
+            or request.get("top_k") not in {1, 2, 3}
+        ):
+            raise RetrievalError("Data guidance request is invalid")
+        response = self._request(
+            self.guidance_query_path,
+            method="POST",
+            payload=request,
+            review_run_id=review_run_id,
+            transcript=transcript,
+            peer="guidance",
+        )
+        if (
+            response.get("schema_version") != "3.0"
+            or response.get("request_id") != request["request_id"]
+            or response.get("status") not in {"covered", "no_coverage", "partial", "failed"}
+            or response.get("coverage") not in {"covered", "no_coverage", "partial", "unavailable"}
+            or not isinstance(response.get("results"), list)
+        ):
+            self._record_failure(
+                review_run_id,
+                transcript=transcript,
+                method="POST",
+                path=self.guidance_query_path,
+                error_code="guidance_contract_invalid",
+            )
+            raise RetrievalError("Data guidance response does not satisfy the shared contract")
+        return response
+
+    def record_retrieve_skipped(
+        self,
+        *,
+        review_run_id: str,
+        reason_code: Literal[
+            "no_hs_qualified_commodity", "export_destination_country_missing"
+        ] = "no_hs_qualified_commodity",
+    ) -> None:
+        """Record an input-side skip without making a Data request.
+
+        Functional-UAT transcripts, and an explicitly enabled development
+        scenario transcript, require an Agent-to-Data stream for every review.
+        An empty commodity plan is deliberately not sent to Data because the
+        shared retrieve contract rejects it. This event keeps that distinction
+        visible without treating the Data service as unavailable or retaining
+        document values. Ordinary development has no transcript root, so this
+        remains a no-op there.
+        """
+
         transcript = self._transcript_root.for_run(review_run_id)
         if transcript is not None:
             transcript.write(
                 "agent-data",
                 "retrieve_skipped",
                 {
-                    "reason_code": "no_hs_qualified_commodity",
+                    "reason_code": reason_code,
                     "retrieve_called": False,
                 },
             )
@@ -385,13 +575,44 @@ class _DeterministicDocumentAnalyzer:
 def _deterministic_document_type(
     text: str,
 ) -> tuple[
-    Literal["invoice", "packing_list", "bill_of_lading", "certificate_of_origin", "unknown"], str
+    Literal[
+        "invoice",
+        "packing_list",
+        "bill_of_lading",
+        "air_waybill",
+        "certificate_of_origin",
+        "export_declaration",
+        "supporting_evidence",
+        "unknown",
+    ],
+    str,
 ]:
     rules: tuple[tuple[str, str], ...] = (
-        ("bill_of_lading", r"\b(?:bill\s+of\s+lading|b\s*/\s*l)\b"),
-        ("packing_list", r"\b(?:packing\s+list|packing\s+note)\b"),
-        ("certificate_of_origin", r"\b(?:certificate\s+of\s+origin|c\s*/\s*o)\b"),
-        ("invoice", r"\b(?:commercial\s+invoice|invoice)\b"),
+        (
+            "air_waybill",
+            r"(?:\b(?:air\s*waybill|airway\s*bill|a\s*/\s*w\s*b)\b|항공\s*화물\s*운송장)",
+        ),
+        (
+            "bill_of_lading",
+            r"(?:\b(?:bill\s+of\s+lading|b\s*/\s*l)\b|선하\s*증권)",
+        ),
+        (
+            "packing_list",
+            r"(?:\b(?:packing\s+list|packing\s+note)\b|포장\s*명세서)",
+        ),
+        (
+            "certificate_of_origin",
+            r"(?:\b(?:certificate\s+of\s+origin|c\s*/\s*o)\b|원산지\s*증명서)",
+        ),
+        (
+            "export_declaration",
+            r"(?:\b(?:export\s+declaration|export\s+clearance|export\s+declaration\s+certificate)\b|수출\s*신고(?:필증|증|서)?)",
+        ),
+        (
+            "supporting_evidence",
+            r"(?:\b(?:supporting\s+(?:evidence|document)|submission\s+(?:receipt|evidence)|filing\s+(?:receipt|evidence))\b|(?:보완|제출)\s*(?:증빙|서류|확인서))",
+        ),
+        ("invoice", r"(?:\b(?:commercial\s+invoice|invoice)\b|상업\s*송장|인보이스)"),
     )
     matches: list[tuple[int, int, str, str]] = []
     for priority, (document_type, pattern) in enumerate(rules):
@@ -405,7 +626,10 @@ def _deterministic_document_type(
                 "invoice",
                 "packing_list",
                 "bill_of_lading",
+                "air_waybill",
                 "certificate_of_origin",
+                "export_declaration",
+                "supporting_evidence",
                 "unknown",
             ],
             document_type,
@@ -416,23 +640,36 @@ def _deterministic_document_type(
 def _deterministic_document_fields(text: str, document_type: str) -> list[ClaudeFieldCandidate]:
     rules: dict[str, tuple[tuple[str, str], ...]] = {
         "invoice": (
-            ("invoice_no", r"(?:invoice\s*(?:no|number)|inv\s*no)\s*[:#-]\s*([^\n|;]+)"),
+            (
+                "invoice_no",
+                r"(?:invoice\s*(?:no|number)|inv\s*no|(?:상업\s*)?송장\s*번호|인보이스\s*번호)\s*[:#-]\s*([^\n|;]+)",
+            ),
             (
                 "total_amount",
-                r"(?:invoice\s+total|total\s+amount|grand\s+total)\s*[:#-]\s*([^\n|;]+)",
+                r"(?:invoice\s+total|total\s+amount|grand\s+total|총액|합계\s*금액)\s*[:#-]\s*([^\n|;]+)",
             ),
             (
                 "country_of_origin",
-                r"(?:country\s+of\s+origin|origin\s+country)\s*[:#-]\s*([^\n|;]+)",
+                r"(?:country\s+of\s+origin|origin\s+country|원산지)\s*[:#-]\s*([^\n|;]+)",
             ),
             ("hs_code", r"\bhs\s*(?:code)?\s*[:#-]\s*([0-9]{6,10})\b"),
         ),
         "packing_list": (
-            ("packing_no", r"(?:packing\s*(?:no|number)|pl\s*no)\s*[:#-]\s*([^\n|;]+)"),
-            ("invoice_no", r"(?:invoice\s*(?:no|number)|inv\s*no)\s*[:#-]\s*([^\n|;]+)"),
+            (
+                "packing_no",
+                r"(?:packing\s*(?:no|number)|pl\s*no|포장\s*명세서\s*번호)\s*[:#-]\s*([^\n|;]+)",
+            ),
+            (
+                "invoice_no",
+                r"(?:invoice\s*(?:no|number)|inv\s*no|(?:상업\s*)?송장\s*번호|인보이스\s*번호)\s*[:#-]\s*([^\n|;]+)",
+            ),
             (
                 "bl_no",
                 r"(?:b\s*/\s*l\s*(?:no|number)?|bill\s+of\s+lading\s*(?:no|number)?)\s*[:#-]\s*([^\n|;]+)",
+            ),
+            (
+                "awb_no",
+                _AWB_NUMBER_LABEL_PATTERN + r"\s*[:#-]\s*([^\n|;]+)",
             ),
             ("container_numbers", r"(?:container\s*(?:no|number|numbers)?)\s*[:#-]\s*([^\n|;]+)"),
             (
@@ -441,17 +678,17 @@ def _deterministic_document_fields(text: str, document_type: str) -> list[Claude
             ),
             (
                 "country_of_origin",
-                r"(?:country\s+of\s+origin|origin\s+country)\s*[:#-]\s*([^\n|;]+)",
+                r"(?:country\s+of\s+origin|origin\s+country|원산지)\s*[:#-]\s*([^\n|;]+)",
             ),
         ),
         "certificate_of_origin": (
             (
                 "certificate_no",
-                r"(?:certificate\s*(?:no|number)|c\s*/\s*o\s*(?:no|number)?)\s*[:#-]\s*([^\n|;]+)",
+                r"(?:certificate\s*(?:no|number)|c\s*/\s*o\s*(?:no|number)?|원산지\s*증명서\s*번호)\s*[:#-]\s*([^\n|;]+)",
             ),
             (
                 "origin_country",
-                r"(?:country\s+of\s+origin|origin\s+country|origin)\s*[:#-]\s*([^\n|;]+)",
+                r"(?:country\s+of\s+origin|origin\s+country|origin|원산지)\s*[:#-]\s*([^\n|;]+)",
             ),
             ("hs_code", r"\bhs\s*(?:code)?\s*[:#-]\s*([0-9]{6,10})\b"),
         ),
@@ -462,6 +699,58 @@ def _deterministic_document_fields(text: str, document_type: str) -> list[Claude
             ),
             ("container_numbers", r"(?:container\s*(?:no|number|numbers)?)\s*[:#-]\s*([^\n|;]+)"),
             ("gross_weight_kg", r"(?:gross\s+weight|total\s+gross\s+weight)\s*[:#-]\s*([^\n|;]+)"),
+        ),
+        "air_waybill": (
+            (
+                "awb_no",
+                _AWB_NUMBER_LABEL_PATTERN + r"\s*[:#-]\s*([^\n|;]+)",
+            ),
+            ("gross_weight_kg", r"(?:gross\s+weight|total\s+gross\s+weight)\s*[:#-]\s*([^\n|;]+)"),
+        ),
+        "export_declaration": (
+            (
+                "export_declaration_no",
+                r"(?:export\s+declaration\s*(?:no|number)?|declaration\s*(?:no|number)?|수출\s*신고(?:필증)?\s*번호)\s*[:#-]\s*([^\n|;]+)",
+            ),
+            (
+                "filing_date",
+                r"(?:filing\s+date|declaration\s+date|submitted\s+on|신고\s*일(?:자)?|제출\s*일(?:자)?)\s*[:#-]\s*([^\n|;]+)",
+            ),
+            (
+                "submission_status",
+                r"(?:submission\s+status|declaration\s+status|acceptance\s+status|처리\s*상태|수리\s*상태)\s*[:#-]\s*([^\n|;]+)",
+            ),
+            (
+                "invoice_no",
+                r"(?:invoice\s*(?:no|number)|inv\s*no|(?:상업\s*)?송장\s*번호|인보이스\s*번호)\s*[:#-]\s*([^\n|;]+)",
+            ),
+            (
+                "total_amount",
+                r"(?:total\s+amount|declared\s+amount|invoice\s+total|총액|신고\s*금액)\s*[:#-]\s*([^\n|;]+)",
+            ),
+            (
+                "origin_country",
+                r"(?:country\s+of\s+origin|origin\s+country|origin|원산지)\s*[:#-]\s*([^\n|;]+)",
+            ),
+            (
+                "destination_country",
+                r"(?:destination\s+country|country\s+of\s+destination|destination|목적\s*국(?:가)?)\s*[:#-]\s*([^\n|;]+)",
+            ),
+            ("hs_code", r"\bhs\s*(?:code)?\s*[:#-]\s*([0-9]{6,10})\b"),
+        ),
+        "supporting_evidence": (
+            (
+                "submission_receipt_no",
+                r"(?:receipt\s*(?:no|number)?|filing\s*(?:no|number)?|submission\s*(?:no|number)?|접수\s*번호|제출\s*번호)\s*[:#-]\s*([^\n|;]+)",
+            ),
+            (
+                "filing_date",
+                r"(?:filing\s+date|submission\s+date|submitted\s+on|제출\s*일(?:자)?|접수\s*일(?:자)?)\s*[:#-]\s*([^\n|;]+)",
+            ),
+            (
+                "submission_status",
+                r"(?:submission\s+status|acceptance\s+status|decision\s+status|처리\s*상태|수리\s*상태)\s*[:#-]\s*([^\n|;]+)",
+            ),
         ),
     }
     fields: list[ClaudeFieldCandidate] = []
@@ -481,20 +770,23 @@ def _deterministic_document_fields(text: str, document_type: str) -> list[Claude
 def _deterministic_line_item(line: str) -> ClaudeLineItemCandidate | None:
     quote = line.strip()
     if not quote or not re.search(
-        r"\b(?:description|goods|item\s*\d+|qty|quantity|unit\s+price|hs\s*code)\b",
+        r"(?:\b(?:description|goods|item\s*\d+|qty|quantity|unit\s+price|hs\s*code)\b|품명|수량|단가|금액|HS\s*코드)",
         quote,
         re.IGNORECASE,
     ):
         return None
     field_rules: tuple[tuple[str, str], ...] = (
-        ("description", r"(?:description|goods|item\s*\d+)\s*[:#-]\s*([^|;]+)"),
+        ("description", r"(?:description|goods|item\s*\d+|품명)\s*[:#-]\s*([^|;]+)"),
         ("hs_code", r"\bhs\s*(?:code)?\s*[:#-]\s*([0-9]{6,10})\b"),
-        ("quantity", r"(?:quantity|qty)\s*[:#-]\s*([^|;]+)"),
-        ("unit", r"\bunit\b(?!\s*price)\s*[:#-]\s*([^|;]+)"),
-        ("unit_price", r"(?:unit\s+price|price)\s*[:#-]\s*([^|;]+)"),
-        ("amount", r"(?:line\s+amount|amount)\s*[:#-]\s*([^|;]+)"),
-        ("origin_country", r"(?:origin\s+country|country\s+of\s+origin|origin)\s*[:#-]\s*([^|;]+)"),
-        ("gross_weight_kg", r"(?:gross\s+weight)\s*[:#-]\s*([^|;]+)"),
+        ("quantity", r"(?:quantity|qty|수량)\s*[:#-]\s*([^|;]+)"),
+        ("unit", r"(?:\bunit\b(?!\s*price)|단위)\s*[:#-]\s*([^|;]+)"),
+        ("unit_price", r"(?:unit\s+price|price|단가)\s*[:#-]\s*([^|;]+)"),
+        ("amount", r"(?:line\s+amount|amount|금액)\s*[:#-]\s*([^|;]+)"),
+        (
+            "origin_country",
+            r"(?:origin\s+country|country\s+of\s+origin|origin|원산지)\s*[:#-]\s*([^|;]+)",
+        ),
+        ("gross_weight_kg", r"(?:gross\s+weight|총중량)\s*[:#-]\s*([^|;]+)"),
     )
     fields: list[ClaudeFieldCandidate] = []
     for name, pattern in field_rules:
@@ -524,6 +816,76 @@ def _retrieve_request(
         "trade_type": request.trade_type,
         "top_k": 10,
         "items": items,
+    }
+
+
+def _guidance_query_request(
+    *, conversation_id: str, trade_type: str, as_of: str, topic_hint: str
+) -> dict[str, Any]:
+    """Create one topic-owned guidance lookup without forwarding user prose.
+
+    Data's versioned registry already receives the bounded ``topic_hint``.
+    The required query field is therefore a fixed Korean retrieval label, not
+    a second copy of a user's question or conversation history.  This keeps
+    normal user prose out of the Agent→Data transcript while preserving the
+    shared Data wire contract and deterministic request identity.
+    """
+
+    safe_query = _GUIDANCE_SAFE_QUERY.get(topic_hint)
+    if topic_hint not in _GUIDANCE_TOPIC_HINTS or safe_query is None:
+        raise RuntimeInputError("guidance_topic_invalid", "guidance topic is invalid")
+    trade_direction = trade_type
+    if trade_type == "both" and topic_hint == "import_requirements":
+        trade_direction = "import"
+    elif trade_type == "both" and topic_hint == "export_requirements":
+        trade_direction = "export"
+    digest = hashlib.sha256(
+        f"{conversation_id}\n{safe_query}\n{trade_direction}\n{topic_hint}\n{as_of}".encode("utf-8")
+    ).hexdigest()[:32]
+    return {
+        "schema_version": "3.0",
+        "request_id": f"guide-{digest}",
+        "query": safe_query,
+        "trade_direction": trade_direction,
+        "topic_hint": topic_hint,
+        "as_of": as_of,
+        "top_k": 3,
+    }
+
+
+def _guidance_provider_snapshot(
+    context: GuidanceContext,
+    *,
+    trade_direction: str,
+) -> dict[str, Any]:
+    """Pass only bounded presentation data to the standalone Claude adapter.
+
+    In particular this payload deliberately has no user question or recent
+    conversation text.  Claude may select a display enum and an order among
+    the Agent-assigned public-source slots; Agent code owns every visible
+    Korean sentence, citation, and suggested question.
+    """
+
+    return {
+        "topic": context.topic,
+        "trade_direction": trade_direction,
+        "snapshot_id": context.snapshot_id,
+        "as_of": context.as_of.isoformat(),
+        "coverage": context.coverage,
+        "allowed_presentation_styles": ["overview", "checklist", "source_focus"],
+        "allowed_suggestion_topics": sorted(_GUIDANCE_TOPIC_HINTS),
+        "source_slots": [
+            {
+                "slot": index,
+                "title": item.title,
+                "topic": item.topic,
+                "direction": item.direction,
+                "excerpt": item.excerpt,
+                "law_name": item.law_name,
+                "article_no": item.article_no,
+            }
+            for index, item in enumerate(context.evidence)
+        ],
     }
 
 
@@ -721,11 +1083,18 @@ def _provider_report_claim_is_grounded(
 
 class ProfileRuntime:
     def __init__(
-        self, settings: ServiceSettings, *, transcript_root: ScenarioTranscriptRoot | None = None
+        self,
+        settings: ServiceSettings,
+        *,
+        transcript_root: ScenarioTranscriptRoot | None = None,
+        knowledge_transcript_root: KnowledgeTranscriptRoot | None = None,
     ) -> None:
         self.mode = service_mode(settings)
         self._closed = False
         self._transcript_root = _transcript_root(settings, transcript_root)
+        self._knowledge_transcript_root = _knowledge_transcript_root(
+            settings, knowledge_transcript_root
+        )
         if self.mode == "local-development":
             self._analyzer: Any = _DeterministicDocumentAnalyzer()
             self._grounded_responder: ClaudeGroundedResponder | None = None
@@ -734,6 +1103,11 @@ class ProfileRuntime:
                 claude_settings = ClaudeSettings.from_environment()
                 self._transcript_root = self._transcript_root.with_sensitive_values(
                     (claude_settings.api_key.get_secret_value(),)
+                )
+                self._knowledge_transcript_root = (
+                    self._knowledge_transcript_root.with_sensitive_values(
+                        (claude_settings.api_key.get_secret_value(),)
+                    )
                 )
                 self._analyzer = ClaudeDocumentAnalyzer.from_settings(claude_settings)
                 try:
@@ -782,6 +1156,39 @@ class ProfileRuntime:
                 "assistant_request_invalid", "The assistant request is invalid."
             )
         return parsed
+
+    @staticmethod
+    def _decode_knowledge(payload: bytes) -> KnowledgeAnswerRequestV1:
+        try:
+            parsed = KnowledgeAnswerRequestV1.model_validate(json.loads(payload.decode("utf-8")))
+        except (UnicodeDecodeError, ValidationError, ValueError):
+            raise RuntimeInputError(
+                "knowledge_request_invalid",
+                "The knowledge assistant request does not satisfy the service contract.",
+            ) from None
+        try:
+            assert_knowledge_input_is_safe(parsed.question, parsed.recent_turns)
+        except KnowledgeInputBoundaryError:
+            # This guard also protects direct runtime callers that do not use
+            # the HTTP admission layer.  It runs before a transcript is
+            # allocated or either Data/Claude capability is considered.
+            raise RuntimeInputError(
+                "knowledge_input_boundary",
+                "The knowledge request crosses the standalone assistant boundary.",
+            ) from None
+        if _SAFE_RUN_ID.fullmatch(parsed.conversation_id) is None:
+            raise RuntimeInputError(
+                "knowledge_request_invalid", "The knowledge assistant request is invalid."
+            )
+        return parsed.model_copy(
+            update={
+                "question": parsed.question.strip(),
+                "recent_turns": [
+                    turn.model_copy(update={"content": compact_knowledge_turn_text(turn.content)})
+                    for turn in parsed.recent_turns
+                ],
+            }
+        )
 
     def _engine(self) -> EngineV3:
         return EngineV3(
@@ -900,12 +1307,141 @@ class ProfileRuntime:
                 )
             return fallback
 
+    def _knowledge_answer(
+        self,
+        request: KnowledgeAnswerRequestV1,
+        *,
+        context: Any,
+        transcript: ScenarioTranscriptRun | None = None,
+    ) -> KnowledgeAnswerResponseV1:
+        """Compose one source-bounded guidance answer, with a safe fallback."""
+
+        fallback = deterministic_knowledge_answer(request, engine=self._engine(), context=context)
+        responder = self._grounded_responder
+        provider_allowed = (
+            fallback.answer_scope == "general_customs_guidance"
+            and context is not None
+            and bool(context.evidence)
+        )
+        if self.mode != "functional-uat" or responder is None or not provider_allowed:
+            # The standalone Functional-UAT verifier requires the two
+            # Agent-owned streams even when coverage is unavailable or the
+            # optional wording adapter cannot run.  Record a safe non-call
+            # event instead of leaving an ambiguous missing ``claude`` file.
+            if transcript is not None and self.mode == "functional-uat":
+                transcript.write(
+                    "claude",
+                    "knowledge_answer_not_called",
+                    {
+                        "provider": "claude",
+                        "called": False,
+                        "reason_code": (
+                            "official_guidance_coverage_unavailable"
+                            if not provider_allowed
+                            else "claude_responder_unavailable"
+                        ),
+                    },
+                )
+            return fallback
+        try:
+            candidate = responder.respond(
+                {
+                    "guidance_presentation": _guidance_provider_snapshot(
+                        context,
+                        trade_direction=request.trade_type,
+                    ),
+                },
+                transcript=transcript,
+                purpose="knowledge_answer",
+            )
+            return response_from_knowledge_provider_candidate(
+                candidate, request, engine=self._engine(), context=context
+            )
+        except ScenarioTranscriptError:
+            # Functional-UAT transcript writing is part of the evidence
+            # boundary.  A rejected or unwritable local record cannot quietly
+            # downgrade to a successful answer.
+            raise
+        except Exception:
+            if transcript is not None:
+                transcript.write(
+                    "claude",
+                    "knowledge_answer_fallback",
+                    {"reason_code": "provider_answer_unavailable_or_ungrounded"},
+                )
+            return fallback
+
     def assistant_answer_json(self, payload: bytes) -> AssistantAnswerResponseV1:
         """Answer once from an immutable review snapshot; never mutate Case state."""
 
         self._assert_open()
         request = self._decode_assistant(payload)
         transcript = self._transcript_root.for_run(request.review_run_id)
+        policy = assistant_question_policy(request)
+        guidance_context = None
+        if policy.general_topic is not None:
+            try:
+                data_response = self._retriever.guidance_query(
+                    _guidance_query_request(
+                        conversation_id=request.conversation_id,
+                        trade_type=request.review_result.trade_type,
+                        as_of=request.review_result.review_as_of.isoformat(),
+                        topic_hint=policy.general_topic,
+                    ),
+                    review_run_id=request.review_run_id,
+                )
+                guidance_context = guidance_context_from_data(
+                    data_response,
+                    profile_mode=self.mode,
+                    expected_as_of=request.review_result.review_as_of,
+                    expected_trade_direction=request.review_result.trade_type,
+                    expected_topic=policy.general_topic,
+                )
+            except (RetrievalError, ValueError):
+                # A guidance lookup may not turn an otherwise usable Case
+                # conversation into a dependency error.  The answer below
+                # explicitly reports unavailable coverage without guessing.
+                guidance_context = None
+        if policy.scope == "general_customs_guidance":
+            knowledge_request = KnowledgeAnswerRequestV1(
+                conversation_id=request.conversation_id,
+                question=request.question,
+                trade_type=request.review_result.trade_type,
+                as_of=request.review_result.review_as_of,
+                recent_turns=request.recent_turns,
+            )
+            knowledge_answer = self._knowledge_answer(
+                knowledge_request, context=guidance_context, transcript=transcript
+            )
+            answer = guidance_answer_for_case(
+                request,
+                engine=self._engine(),
+                context=guidance_context,
+                standalone_answer=knowledge_answer,
+            )
+            if transcript is not None:
+                transcript.write(
+                    "claude",
+                    "assistant_answer_deterministic",
+                    {
+                        "answer_scope": answer.answer_scope,
+                        "citation_count": len(answer.citations),
+                        "guidance_evidence_count": sum(
+                            getattr(citation, "kind", None) == "guidance_evidence"
+                            for citation in answer.citations
+                        ),
+                        "reason_code": (
+                            "official_guidance_provider"
+                            if knowledge_answer.engine.kind == "claude"
+                            and knowledge_answer.direct_answer
+                            != deterministic_knowledge_answer(
+                                knowledge_request, engine=self._engine(), context=guidance_context
+                            ).direct_answer
+                            else "official_guidance_deterministic"
+                        ),
+                    },
+                )
+            return answer
         fallback = deterministic_assistant_answer(request, engine=self._engine())
         responder = self._grounded_responder
         provider_grounded_scope = fallback.answer_scope in {
@@ -951,7 +1487,52 @@ class ProfileRuntime:
                         ),
                     },
                 )
+        if policy.mixed:
+            answer = combine_case_and_guidance(
+                answer, context=guidance_context, topic=policy.general_topic
+            )
         return answer
+
+    def knowledge_answer_json(self, payload: bytes) -> KnowledgeAnswerResponseV1:
+        """Answer one standalone, official-source-grounded knowledge question.
+
+        No Case, Review Run, document text, Evidence IDs, or human-correction
+        state crosses this method's boundary.  The Data call is optional only
+        for a classified official topic and occurs at most once per turn.
+        """
+
+        self._assert_open()
+        request = self._decode_knowledge(payload)
+        policy = knowledge_question_policy(request.question.strip())
+        guidance_context = None
+        # A standalone transcript is allocated only for a permitted general
+        # guidance lookup.  Ordinary development leaves this root disabled;
+        # Functional-UAT uses the reserved scenario-runs/knowledge namespace;
+        # an explicit dev-fixture may use that safe namespace or preserved
+        # legacy knowledge-runs history, never a review's Case/Review tree.
+        transcript: KnowledgeTranscriptTurn | None = None
+        if policy.general_topic is not None:
+            transcript = self._knowledge_transcript_root.start_turn(request.conversation_id)
+            try:
+                data_response = self._retriever.guidance_query(
+                    _guidance_query_request(
+                        conversation_id=request.conversation_id,
+                        trade_type=request.trade_type,
+                        as_of=request.as_of.isoformat(),
+                        topic_hint=policy.general_topic,
+                    ),
+                    transcript=transcript,
+                )
+                guidance_context = guidance_context_from_data(
+                    data_response,
+                    profile_mode=self.mode,
+                    expected_as_of=request.as_of,
+                    expected_trade_direction=request.trade_type,
+                    expected_topic=policy.general_topic,
+                )
+            except (RetrievalError, ValueError):
+                guidance_context = None
+        return self._knowledge_answer(request, context=guidance_context, transcript=transcript)
 
     def review_v3_json(self, payload: bytes) -> ReviewRunResultV3:
         self._assert_open()
@@ -984,7 +1565,12 @@ class ProfileRuntime:
                 # an input limitation, not an unhealthy or partial Data store.
                 data_response = {"status": "ok", "results": []}
                 evidence_records = []
-                self._retriever.record_retrieve_skipped(review_run_id=request.review_run_id)
+                self._retriever.record_retrieve_skipped(
+                    review_run_id=request.review_run_id,
+                    reason_code=(
+                        workflow_output.retrieval_skip_reason or "no_hs_qualified_commodity"
+                    ),
+                )
                 workflow_output = workflow_output.with_evidence_skipped()
             findings = _dedupe_findings(
                 [
@@ -1036,7 +1622,7 @@ class ProfileRuntime:
             evidence=evidence,
             findings=findings,
             actions=actions,
-            evidence_retrieval_skipped=not workflow_output.retrieval_items,
+            evidence_retrieval_skip_reason=workflow_output.retrieval_skip_reason,
         )
         workflow = workflow_output.with_report_generated().workflow
         payload_result: dict[str, Any] = {

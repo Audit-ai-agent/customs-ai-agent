@@ -33,6 +33,7 @@ def build_metadata(settings: ServiceSettings) -> dict[str, Any]:
             "evidence_http",
             "bounded_planner",
             "grounded_assistant",
+            "official_trade_guidance",
             "profile_mode_handshake",
         ],
         "limits": {
@@ -50,7 +51,14 @@ def build_metadata(settings: ServiceSettings) -> dict[str, Any]:
             "assistant_answer_response_v1_sha256": schema_sha256(
                 "backend", "v3", "assistant-answer-response"
             ),
+            "knowledge_answer_request_v1_sha256": schema_sha256(
+                "backend", "v3", "knowledge-answer-request"
+            ),
+            "knowledge_answer_response_v1_sha256": schema_sha256(
+                "backend", "v3", "knowledge-answer-response"
+            ),
             "evidence_retrieval_v3_sha256": schema_sha256("evidence", "v3", "rag-retrieval"),
+            "evidence_guidance_query_v3_sha256": schema_sha256("evidence", "v3", "guidance-query"),
             "evidence_readiness_v3_sha256": schema_sha256("evidence", "v3", "readiness"),
         },
     }

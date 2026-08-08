@@ -19,6 +19,7 @@ def test_openapi_exposes_only_active_backend_surface() -> None:
         "/internal/agent/v2/metadata",
         "/internal/agent/v2/reviews",
         "/internal/agent/v2/assistant/answers",
+        "/internal/agent/v2/knowledge/answers",
     }
     review = schema["paths"]["/internal/agent/v2/reviews"]["post"]
     request_schema = review["requestBody"]["content"]["application/json"]["schema"]
@@ -45,3 +46,8 @@ def test_openapi_exposes_only_active_backend_surface() -> None:
     assistant_response = assistant["responses"]["200"]["content"]["application/json"]["schema"]
     assert assistant_request["$id"].endswith("/v3/assistant-answer-request.schema.json")
     assert assistant_response["$id"].endswith("/v3/assistant-answer-response.schema.json")
+    knowledge = schema["paths"]["/internal/agent/v2/knowledge/answers"]["post"]
+    knowledge_request = knowledge["requestBody"]["content"]["application/json"]["schema"]
+    knowledge_response = knowledge["responses"]["200"]["content"]["application/json"]["schema"]
+    assert knowledge_request["$id"].endswith("/v3/knowledge-answer-request.schema.json")
+    assert knowledge_response["$id"].endswith("/v3/knowledge-answer-response.schema.json")

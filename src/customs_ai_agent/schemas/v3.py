@@ -185,7 +185,10 @@ class DocumentAnalysisV3(V3WireModel):
         "invoice",
         "packing_list",
         "bill_of_lading",
+        "air_waybill",
         "certificate_of_origin",
+        "export_declaration",
+        "supporting_evidence",
         "unknown",
     ]
     classification_source: SourceV3 | None = None

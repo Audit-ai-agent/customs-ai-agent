@@ -11,6 +11,8 @@ ASSISTANT_PROMPT_ID = "customs_grounded_assistant"
 ASSISTANT_PROMPT_VERSION = "1.0.3"
 REPORT_PROMPT_ID = "customs_grounded_review_report"
 REPORT_PROMPT_VERSION = "1.0.3"
+KNOWLEDGE_PROMPT_ID = "customs_official_trade_guidance"
+KNOWLEDGE_PROMPT_VERSION = "1.1.0"
 
 
 def load_document_analysis_system_prompt() -> str:
@@ -37,6 +39,14 @@ def load_grounded_report_system_prompt() -> str:
     )
 
 
+def load_official_guidance_system_prompt() -> str:
+    return (
+        files("customs_ai_agent.prompts")
+        .joinpath("official_guidance_v1.txt")
+        .read_text(encoding="utf-8")
+    )
+
+
 __all__ = [
     "DOCUMENT_ANALYSIS_PROMPT_ID",
     "DOCUMENT_ANALYSIS_PROMPT_VERSION",
@@ -44,7 +54,10 @@ __all__ = [
     "ASSISTANT_PROMPT_VERSION",
     "REPORT_PROMPT_ID",
     "REPORT_PROMPT_VERSION",
+    "KNOWLEDGE_PROMPT_ID",
+    "KNOWLEDGE_PROMPT_VERSION",
     "load_document_analysis_system_prompt",
     "load_grounded_assistant_system_prompt",
     "load_grounded_report_system_prompt",
+    "load_official_guidance_system_prompt",
 ]

@@ -13,6 +13,10 @@ from typing import Any
 from starlette.requests import ClientDisconnect, Request
 
 from customs_ai_agent.service.errors import ServiceHttpError
+from customs_ai_agent.service.knowledge_input import (
+    KnowledgeInputBoundaryError,
+    assert_knowledge_input_is_safe,
+)
 from customs_ai_agent.service.settings import ServiceSettings
 
 
@@ -54,6 +58,15 @@ _ASSISTANT_REQUIRED_FIELDS = {
     "recent_turns",
 }
 _ASSISTANT_ALLOWED_FIELDS = _ASSISTANT_REQUIRED_FIELDS
+_KNOWLEDGE_REQUIRED_FIELDS = {
+    "schema_version",
+    "conversation_id",
+    "question",
+    "trade_type",
+    "as_of",
+    "recent_turns",
+}
+_KNOWLEDGE_ALLOWED_FIELDS = _KNOWLEDGE_REQUIRED_FIELDS
 
 ERROR_RESPONSE_SCHEMA: dict[str, Any] = {
     "type": "object",
@@ -173,6 +186,11 @@ class InspectedRequest:
 @dataclass(frozen=True, slots=True)
 class InspectedAssistantRequest:
     review_run_id: str
+
+
+@dataclass(frozen=True, slots=True)
+class InspectedKnowledgeRequest:
+    conversation_id: str
 
 
 def _bounded_string(value: object, *, minimum: int, maximum: int) -> bool:
@@ -321,11 +339,69 @@ def inspect_assistant_request(payload: bytes) -> InspectedAssistantRequest:
     return InspectedAssistantRequest(review_run_id=review_run_id)
 
 
+def inspect_knowledge_request(payload: bytes) -> InspectedKnowledgeRequest:
+    """Admit one general knowledge turn without Case or document material."""
+
+    try:
+        decoded = json.loads(
+            payload.decode("utf-8"),
+            object_pairs_hook=_object_without_duplicates,
+            parse_constant=_reject_constant,
+        )
+    except (UnicodeDecodeError, ValueError, RecursionError):
+        raise ServiceHttpError("request_invalid", 422) from None
+    if not isinstance(decoded, dict) or set(decoded) - _KNOWLEDGE_ALLOWED_FIELDS:
+        raise ServiceHttpError("request_invalid", 422)
+    if not _KNOWLEDGE_REQUIRED_FIELDS.issubset(decoded):
+        raise ServiceHttpError("required_field_missing", 422)
+    if decoded.get("schema_version") != "1.0":
+        raise ServiceHttpError("request_invalid", 422)
+    conversation_id = decoded.get("conversation_id")
+    if not isinstance(conversation_id, str) or _RUN_ID.fullmatch(conversation_id) is None:
+        raise ServiceHttpError("request_invalid", 422)
+    question = decoded.get("question")
+    if not isinstance(question, str) or not 1 <= len(question) <= 4_000:
+        raise ServiceHttpError("request_invalid", 422)
+    if decoded.get("trade_type") not in {"import", "export", "both"}:
+        raise ServiceHttpError("request_invalid", 422)
+    raw_as_of = decoded.get("as_of")
+    if not isinstance(raw_as_of, str):
+        raise ServiceHttpError("request_invalid", 422)
+    try:
+        parsed_as_of = date.fromisoformat(raw_as_of)
+    except ValueError:
+        raise ServiceHttpError("request_invalid", 422) from None
+    if parsed_as_of.isoformat() != raw_as_of:
+        raise ServiceHttpError("request_invalid", 422)
+    turns = decoded.get("recent_turns")
+    if not isinstance(turns, list) or len(turns) > 8:
+        raise ServiceHttpError("request_invalid", 422)
+    if not all(
+        isinstance(turn, dict)
+        and set(turn) == {"role", "content"}
+        and turn.get("role") in {"user", "assistant"}
+        and isinstance(turn.get("content"), str)
+        and 1 <= len(turn["content"]) <= 4_000
+        for turn in turns
+    ):
+        raise ServiceHttpError("request_invalid", 422)
+    try:
+        assert_knowledge_input_is_safe(question, turns)
+    except KnowledgeInputBoundaryError:
+        # Do not return, log, hash, or enqueue the rejected question.  The
+        # static code is sufficient for Backend to keep it out of the global
+        # conversation store as well.
+        raise ServiceHttpError("knowledge_input_boundary", 422) from None
+    return InspectedKnowledgeRequest(conversation_id=conversation_id)
+
+
 __all__ = [
     "ERROR_RESPONSE_SCHEMA",
     "InspectedRequest",
     "InspectedAssistantRequest",
+    "InspectedKnowledgeRequest",
     "inspect_assistant_request",
+    "inspect_knowledge_request",
     "inspect_text_request",
     "raw_header_values",
     "read_bounded_json_body",

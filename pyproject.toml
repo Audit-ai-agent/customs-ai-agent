@@ -31,6 +31,7 @@ customs-ai-agent = "customs_ai_agent.service.__main__:main"
 customs-ai-agent-serve = "customs_ai_agent.service.__main__:main"
 customs-ai-agent-dev-serve = "customs_ai_agent.service.__main__:dev_main"
 customs-ai-agent-functional-uat-serve = "customs_ai_agent.service.__main__:functional_uat_main"
+customs-ai-agent-verify-knowledge-transcript = "customs_ai_agent.knowledge_transcript_verifier:main"
 
 [tool.setuptools.packages.find]
 where = ["src"]

@@ -12,6 +12,10 @@ _MESSAGES = {
     "dependency_unready": "A required service dependency is not ready.",
     "idempotency_conflict": "The review run identifier is already bound to another request.",
     "internal_error": "The request could not be processed.",
+    "knowledge_input_boundary": (
+        "통관 지식 도우미에는 사건·심사·문서 원문을 입력할 수 없습니다. "
+        "일반적인 통관 지식 질문을 한 문장으로 입력해 주세요."
+    ),
     "request_invalid": "The review request is invalid.",
     "request_body_timeout": "The review request body exceeded the receive deadline.",
     "request_too_large": "The review request exceeds the service limit.",

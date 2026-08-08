@@ -25,6 +25,8 @@ class ServiceRuntime(Protocol):
 
     def assistant_answer_json(self, payload: bytes) -> Any: ...
 
+    def knowledge_answer_json(self, payload: bytes) -> Any: ...
+
     def close(self) -> None: ...
 
 
@@ -116,7 +118,7 @@ class AgentServiceController:
     async def execute(self, *, payload: bytes, runtime_method_name: str) -> ServiceOutcome:
         """Run one non-idempotent internal capability under the same bound."""
 
-        if runtime_method_name != "assistant_answer_json":
+        if runtime_method_name not in {"assistant_answer_json", "knowledge_answer_json"}:
             raise ServiceHttpError("capability_unavailable", 503, retryable=True)
         if self._closing:
             raise ServiceHttpError("service_draining", 503, retryable=True)
