@@ -33,7 +33,10 @@ class ClaudeDocumentCandidate(_Candidate):
         "invoice",
         "packing_list",
         "bill_of_lading",
+        "air_waybill",
         "certificate_of_origin",
+        "export_declaration",
+        "supporting_evidence",
         "unknown",
     ]
     classification_source_quote: str = Field(default="", max_length=4000)

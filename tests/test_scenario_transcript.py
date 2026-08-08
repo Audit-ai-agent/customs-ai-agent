@@ -31,6 +31,7 @@ from customs_ai_agent.service.settings import ServiceSettings
 
 _TOKEN = "Abcdefghijklmnopqrstuvwxyz" + "0123456789ABCDEFGHIJK"
 _SECOND_TOKEN = "Zyxwvutsrqponmlkjihgfedcba" + "9876543210ABCDEFGHIJK"
+_GUIDANCE_TOKEN = "Mnbvcxzlkjhgfdsapoiuytrewq0987654321ABCDEFGHIJK"
 _CLAUDE_KEY = "sk" + "-ant-" + "functional-uat-live-key-abcdefghijklmnop"
 
 
@@ -83,6 +84,14 @@ def test_transcript_requires_local_root_and_redacts_secret_values(tmp_path: Path
 
     with pytest.raises(ScenarioTranscriptError, match="root_invalid"):
         ScenarioTranscriptRoot.from_environment({TRANSCRIPT_ROOT_ENV: str(tmp_path / "outside")})
+
+
+def test_review_transcript_cannot_claim_reserved_knowledge_namespace(tmp_path: Path) -> None:
+    root = ScenarioTranscriptRoot.from_environment({TRANSCRIPT_ROOT_ENV: str(_root(tmp_path))})
+
+    with pytest.raises(ScenarioTranscriptError, match="run_reserved"):
+        root.for_run("knowledge")
+    assert not (_root(tmp_path) / "knowledge").exists()
 
 
 def test_functional_uat_uses_only_the_fixed_workspace_root(
@@ -146,6 +155,8 @@ def test_functional_runtime_automatically_redacts_all_live_secrets(
     settings = _settings(
         service_mode="functional-uat",
         evidence_service_token=SecretStr(_SECOND_TOKEN),
+        guidance_base_url="http://127.0.0.1:18093",
+        guidance_service_token=SecretStr(_GUIDANCE_TOKEN),
     )
     runtime = ProfileRuntime(settings)
     assert calls == ["functional-uat"]
@@ -154,10 +165,10 @@ def test_functional_runtime_automatically_redacts_all_live_secrets(
     transcript.write(
         "claude",
         "test_event",
-        {"content_text": f"{_TOKEN} {_SECOND_TOKEN} {_CLAUDE_KEY}"},
+        {"content_text": f"{_TOKEN} {_SECOND_TOKEN} {_GUIDANCE_TOKEN} {_CLAUDE_KEY}"},
     )
     record = _lines(transcript.directory / "claude.jsonl")[0]
-    assert record["payload"]["content_text"] == "[REDACTED] [REDACTED] [REDACTED]"
+    assert record["payload"]["content_text"] == "[REDACTED] [REDACTED] [REDACTED] [REDACTED]"
 
 
 def test_functional_uat_records_safe_data_skip_without_calling_data(
@@ -227,6 +238,57 @@ def test_functional_uat_records_safe_data_skip_without_calling_data(
     }
     assert _TOKEN not in json.dumps(records)
     assert _CLAUDE_KEY not in json.dumps(records)
+
+
+def test_explicit_development_transcript_records_safe_data_skip_without_calling_data(
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    """A recorded fixture run has the required stream without a fake Data call."""
+
+    root = ScenarioTranscriptRoot.from_environment({TRANSCRIPT_ROOT_ENV: str(_root(tmp_path))})
+    calls: list[dict[str, Any]] = []
+
+    def unexpected_retrieve(
+        _self: ProfileEvidenceRetriever, request: dict[str, Any]
+    ) -> dict[str, Any]:
+        calls.append(request)
+        raise AssertionError("empty retrieval plans must not call Data")
+
+    monkeypatch.setattr(ProfileEvidenceRetriever, "retrieve", unexpected_retrieve)
+    runtime = ProfileRuntime(_settings(), transcript_root=root)
+    result = runtime.review_v3_json(
+        json.dumps(
+            {
+                "case_id": "case-development-skip",
+                "documents": [
+                    {
+                        "document_id": "document-development-skip",
+                        "filename": "invoice.txt",
+                        "content_text": "COMMERCIAL INVOICE\\nInvoice No: INV-SKIP",
+                    }
+                ],
+                "review_run_id": "run-development-skip",
+                "review_as_of": "2026-08-05",
+                "trade_type": "import",
+                "jurisdiction": "KR",
+            }
+        ).encode()
+    )
+
+    assert calls == []
+    retrieval = next(
+        stage for stage in result.workflow.stages if stage.stage == "retrieve_evidence"
+    )
+    assert retrieval.status == "skipped"
+    records = _lines(_root(tmp_path) / "run-development-skip" / "agent-data.jsonl")
+    assert len(records) == 1
+    assert records[0]["schema_version"] == "scenario-transcript/v1"
+    assert records[0]["event"] == "retrieve_skipped"
+    assert records[0]["payload"] == {
+        "reason_code": "no_hs_qualified_commodity",
+        "retrieve_called": False,
+    }
+    assert _TOKEN not in json.dumps(records)
 
 
 def test_retriever_records_actual_data_request_and_response(

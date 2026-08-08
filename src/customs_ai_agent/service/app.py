@@ -23,6 +23,7 @@ from customs_ai_agent.service.errors import ServiceHttpError
 from customs_ai_agent.service.input import (
     ERROR_RESPONSE_SCHEMA,
     inspect_assistant_request,
+    inspect_knowledge_request,
     inspect_text_request,
     raw_header_values,
     read_bounded_json_body,
@@ -65,6 +66,12 @@ class _UnavailableRuntime:
         )
 
     def assistant_answer_json(self, _payload: bytes) -> object:
+        raise RuntimeConfigurationError(
+            "runtime_dependency_unready",
+            "The Agent profile dependency is not ready.",
+        )
+
+    def knowledge_answer_json(self, _payload: bytes) -> object:
         raise RuntimeConfigurationError(
             "runtime_dependency_unready",
             "The Agent profile dependency is not ready.",
@@ -138,6 +145,8 @@ def create_app(
     review_result_schema = get_schema("backend", "v3", "review-result")
     assistant_request_schema = get_schema("backend", "v3", "assistant-answer-request")
     assistant_response_schema = get_schema("backend", "v3", "assistant-answer-response")
+    knowledge_request_schema = get_schema("backend", "v3", "knowledge-answer-request")
+    knowledge_response_schema = get_schema("backend", "v3", "knowledge-answer-response")
     make_runtime = runtime_factory or _profile_runtime
     make_readiness_probe = readiness_probe_factory or _profile_readiness_probe
 
@@ -340,6 +349,46 @@ def create_app(
         outcome = await controller.execute(
             payload=payload,
             runtime_method_name="assistant_answer_json",
+        )
+        if outcome.result is None:
+            raise ServiceHttpError(
+                outcome.error_code or "internal_error",
+                outcome.status_code,
+                retryable=outcome.retryable,
+                retry_after_seconds=outcome.retry_after_seconds,
+            )
+        return JSONResponse(status_code=200, headers=_NO_STORE_HEADERS, content=outcome.result)
+
+    @app.post(
+        "/internal/agent/v2/knowledge/answers",
+        summary="Answer one official-source grounded customs knowledge question",
+        openapi_extra={
+            "security": _BEARER_SECURITY,
+            "requestBody": {
+                "required": True,
+                "content": {"application/json": {"schema": knowledge_request_schema}},
+            },
+        },
+        responses={
+            200: {"content": {"application/json": {"schema": knowledge_response_schema}}},
+            401: {"content": {"application/json": {"schema": ERROR_RESPONSE_SCHEMA}}},
+            403: {"content": {"application/json": {"schema": ERROR_RESPONSE_SCHEMA}}},
+            413: {"content": {"application/json": {"schema": ERROR_RESPONSE_SCHEMA}}},
+            415: {"content": {"application/json": {"schema": ERROR_RESPONSE_SCHEMA}}},
+            422: {"content": {"application/json": {"schema": ERROR_RESPONSE_SCHEMA}}},
+            502: {"content": {"application/json": {"schema": ERROR_RESPONSE_SCHEMA}}},
+            503: _PRE_EXECUTION_503_RESPONSE,
+            504: {"content": {"application/json": {"schema": ERROR_RESPONSE_SCHEMA}}},
+        },
+    )
+    async def knowledge_answer(request: Request) -> JSONResponse:
+        _authorize(request, active_settings)
+        payload = await admitted_body(request)
+        inspect_knowledge_request(payload)
+        controller: AgentServiceController = request.app.state.controller
+        outcome = await controller.execute(
+            payload=payload,
+            runtime_method_name="knowledge_answer_json",
         )
         if outcome.result is None:
             raise ServiceHttpError(

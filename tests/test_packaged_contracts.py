@@ -9,8 +9,11 @@ def test_only_live_http_schema_bytes_are_packaged() -> None:
     assert available_schemas() == (
         ("backend", "v3", "assistant-answer-request"),
         ("backend", "v3", "assistant-answer-response"),
+        ("backend", "v3", "knowledge-answer-request"),
+        ("backend", "v3", "knowledge-answer-response"),
         ("backend", "v3", "review-request"),
         ("backend", "v3", "review-result"),
+        ("evidence", "v3", "guidance-query"),
         ("evidence", "v3", "rag-retrieval"),
         ("evidence", "v3", "readiness"),
     )
@@ -20,11 +23,22 @@ def test_only_live_http_schema_bytes_are_packaged() -> None:
 def test_optional_correction_targets_are_omittable_or_null_in_models_and_schema() -> None:
     request_schema = get_schema("backend", "v3", "review-request")
     response_schema = get_schema("backend", "v3", "assistant-answer-response")
+    knowledge_response_schema = get_schema("backend", "v3", "knowledge-answer-response")
     request_required = request_schema["$defs"]["HumanCorrection"]["required"]
     response_required = response_schema["$defs"]["CorrectionDraft"]["required"]
     assert {"item_id", "fact_id", "unit"}.isdisjoint(request_required)
     assert {"item_id", "fact_id", "unit"}.isdisjoint(response_required)
     assert "parent_review_run_id" not in request_schema["required"]
+    assert knowledge_response_schema["$defs"]["GuidanceCitation"]["properties"]["source_kind"][
+        "enum"
+    ] == [
+        "official_law",
+        "official_law_catalog",
+        "official_agency_guidance",
+        "official_requirement_reference",
+        "official_public_guidance",
+        "development_fixture",
+    ]
 
     request = ServiceReviewRunRequestV3.model_validate(
         {

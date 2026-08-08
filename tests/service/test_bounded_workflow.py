@@ -222,6 +222,208 @@ def _scenario(
     return request, candidates
 
 
+def _export_scenario(
+    *,
+    declaration_hs: str = "123456",
+    declaration_quantity: str = "2 PCS",
+    declaration_amount: str = "USD 20",
+    destination_country: str = "US",
+    include_declaration: bool = True,
+) -> tuple[ServiceReviewRunRequestV3, dict[str, list[ClaudeDocumentCandidate]]]:
+    """A source-grounded air-export document set for bounded workflow tests."""
+
+    invoice_line = (
+        "Description: Widget | HS Code: 123456 | Quantity: 2 PCS | Unit: PCS | "
+        "Unit Price: USD 10 | Amount: USD 20"
+    )
+    declaration_line = (
+        f"Description: Widget | HS Code: {declaration_hs} | Quantity: {declaration_quantity} | "
+        f"Unit: PCS | Amount: {declaration_amount}"
+    )
+    documents = [
+        {
+            "document_id": "invoice",
+            "filename": "invoice.txt",
+            "content_text": "\n".join(
+                (
+                    "COMMERCIAL INVOICE",
+                    "Invoice No: INV-EXPORT-001",
+                    "Total Amount: USD 20",
+                    "Country of Origin: KR",
+                    invoice_line,
+                )
+            ),
+        },
+        {
+            "document_id": "packing",
+            "filename": "packing.txt",
+            "content_text": "\n".join(
+                (
+                    "PACKING LIST",
+                    "Packing No: PL-EXPORT-001",
+                    "AWB No: AWB-EXPORT-001",
+                    "Total Gross Weight: 100 KG",
+                    "Description: Widget | HS Code: 123456 | Quantity: 2 PCS | Unit: PCS",
+                )
+            ),
+        },
+        {
+            "document_id": "certificate",
+            "filename": "certificate.txt",
+            "content_text": "\n".join(
+                (
+                    "CERTIFICATE OF ORIGIN",
+                    "Certificate No: COO-EXPORT-001",
+                    "Origin Country: KR",
+                    "HS Code: 123456",
+                )
+            ),
+        },
+        {
+            "document_id": "awb",
+            "filename": "awb.txt",
+            "content_text": "\n".join(
+                (
+                    "AIR WAYBILL",
+                    "AWB No: AWB-EXPORT-001",
+                    "Gross Weight: 100 KG",
+                )
+            ),
+        },
+    ]
+    candidates: dict[str, list[ClaudeDocumentCandidate]] = {
+        "invoice": [
+            ClaudeDocumentCandidate(
+                document_type="invoice",
+                classification_source_quote="COMMERCIAL INVOICE",
+                fields=[
+                    _field("invoice_no", "INV-EXPORT-001", "Invoice No: INV-EXPORT-001"),
+                    _field("total_amount", "USD 20", "Total Amount: USD 20"),
+                    _field("country_of_origin", "KR", "Country of Origin: KR"),
+                ],
+                line_items=[
+                    _line(
+                        invoice_line,
+                        ("description", "Widget"),
+                        ("hs_code", "123456"),
+                        ("quantity", "2 PCS"),
+                        ("unit", "PCS"),
+                        ("unit_price", "USD 10"),
+                        ("amount", "USD 20"),
+                    )
+                ],
+            )
+        ],
+        "packing": [
+            ClaudeDocumentCandidate(
+                document_type="packing_list",
+                classification_source_quote="PACKING LIST",
+                fields=[
+                    _field("packing_no", "PL-EXPORT-001", "Packing No: PL-EXPORT-001"),
+                    _field("awb_no", "AWB-EXPORT-001", "AWB No: AWB-EXPORT-001"),
+                    _field("total_gross_weight_kg", "100 KG", "Total Gross Weight: 100 KG"),
+                ],
+                line_items=[
+                    _line(
+                        "Description: Widget | HS Code: 123456 | Quantity: 2 PCS | Unit: PCS",
+                        ("description", "Widget"),
+                        ("hs_code", "123456"),
+                        ("quantity", "2 PCS"),
+                        ("unit", "PCS"),
+                    )
+                ],
+            )
+        ],
+        "certificate": [
+            ClaudeDocumentCandidate(
+                document_type="certificate_of_origin",
+                classification_source_quote="CERTIFICATE OF ORIGIN",
+                fields=[
+                    _field("certificate_no", "COO-EXPORT-001", "Certificate No: COO-EXPORT-001"),
+                    _field("origin_country", "KR", "Origin Country: KR"),
+                    _field("hs_code", "123456", "HS Code: 123456"),
+                ],
+            )
+        ],
+        "awb": [
+            ClaudeDocumentCandidate(
+                document_type="air_waybill",
+                classification_source_quote="AIR WAYBILL",
+                fields=[
+                    _field("awb_no", "AWB-EXPORT-001", "AWB No: AWB-EXPORT-001"),
+                    _field("gross_weight_kg", "100 KG", "Gross Weight: 100 KG"),
+                ],
+            )
+        ],
+    }
+    if include_declaration:
+        documents.append(
+            {
+                "document_id": "declaration",
+                "filename": "declaration.txt",
+                "content_text": "\n".join(
+                    (
+                        "EXPORT DECLARATION",
+                        "Export Declaration No: ED-EXPORT-001",
+                        "Filing Date: 2026-08-05",
+                        "Submission Status: Accepted",
+                        "Invoice No: INV-EXPORT-001",
+                        f"Total Amount: {declaration_amount}",
+                        "Origin Country: KR",
+                        f"Destination Country: {destination_country}",
+                        declaration_line,
+                    )
+                ),
+            }
+        )
+        candidates["declaration"] = [
+            ClaudeDocumentCandidate(
+                document_type="export_declaration",
+                classification_source_quote="EXPORT DECLARATION",
+                fields=[
+                    _field(
+                        "export_declaration_no",
+                        "ED-EXPORT-001",
+                        "Export Declaration No: ED-EXPORT-001",
+                    ),
+                    _field("filing_date", "2026-08-05", "Filing Date: 2026-08-05"),
+                    _field("submission_status", "Accepted", "Submission Status: Accepted"),
+                    _field("invoice_no", "INV-EXPORT-001", "Invoice No: INV-EXPORT-001"),
+                    _field(
+                        "total_amount", declaration_amount, f"Total Amount: {declaration_amount}"
+                    ),
+                    _field("origin_country", "KR", "Origin Country: KR"),
+                    _field(
+                        "destination_country",
+                        destination_country,
+                        f"Destination Country: {destination_country}",
+                    ),
+                ],
+                line_items=[
+                    _line(
+                        declaration_line,
+                        ("description", "Widget"),
+                        ("hs_code", declaration_hs),
+                        ("quantity", declaration_quantity),
+                        ("unit", "PCS"),
+                        ("amount", declaration_amount),
+                    )
+                ],
+            )
+        ]
+    request = ServiceReviewRunRequestV3.model_validate(
+        {
+            "case_id": "case-export-workflow",
+            "review_run_id": "run-export-workflow",
+            "review_as_of": "2026-08-05",
+            "trade_type": "export",
+            "jurisdiction": "KR",
+            "documents": documents,
+        }
+    )
+    return request, candidates
+
+
 def test_bounded_workflow_records_grounded_passes_and_links() -> None:
     request, candidates = _scenario()
     output = run_bounded_workflow(request, _SequenceAnalyzer(candidates))
@@ -256,6 +458,65 @@ def test_bounded_workflow_records_grounded_passes_and_links() -> None:
         "generate_report",
     ]
     assert complete.workflow.planner.cycle_count == 1
+
+
+def test_export_workflow_compares_declaration_and_awb_with_export_destination() -> None:
+    request, candidates = _export_scenario()
+
+    output = run_bounded_workflow(request, _SequenceAnalyzer(candidates))
+
+    statuses = {item.rule_code: item.status for item in output.comparisons}
+    assert statuses["awb_packing_awb_no"] == "pass"
+    assert statuses["awb_packing_gross_weight"] == "pass"
+    assert statuses["export_declaration_destination_country"] == "pass"
+    assert statuses["invoice_export_declaration_invoice_no"] == "pass"
+    assert statuses["invoice_export_declaration_total_amount"] == "pass"
+    assert statuses["invoice_export_declaration_origin"] == "pass"
+    assert statuses["invoice_export_declaration_hs_code"] == "pass"
+    assert statuses["invoice_export_declaration_quantity_unit"] == "pass"
+    assert statuses["invoice_export_declaration_amount"] == "pass"
+    assert output.retrieval_skip_reason is None
+    assert len(output.retrieval_items) == 1
+    assert output.retrieval_items[0]["destination_country"] == "US"
+
+
+def test_export_workflow_reports_declared_item_mismatch_without_guessing_destination() -> None:
+    request, candidates = _export_scenario(
+        declaration_hs="654321", declaration_quantity="3 PCS", declaration_amount="USD 30"
+    )
+
+    output = run_bounded_workflow(request, _SequenceAnalyzer(candidates))
+
+    statuses = {item.rule_code: item.status for item in output.comparisons}
+    assert statuses["invoice_export_declaration_hs_code"] == "mismatch"
+    assert statuses["invoice_export_declaration_quantity_unit"] == "mismatch"
+    assert statuses["invoice_export_declaration_amount"] == "mismatch"
+    assert output.retrieval_items[0]["destination_country"] == "US"
+
+
+def test_export_workflow_skips_evidence_when_destination_is_not_a_two_letter_code() -> None:
+    request, candidates = _export_scenario(destination_country="United States")
+
+    output = run_bounded_workflow(request, _SequenceAnalyzer(candidates))
+
+    statuses = {item.rule_code: item.status for item in output.comparisons}
+    assert statuses["export_declaration_destination_country"] == "needs_review"
+    assert output.retrieval_items == []
+    assert output.retrieval_skip_reason == "export_destination_country_missing"
+    assert output.with_evidence_skipped().workflow.stages[-2].summary == (
+        "수출 목적국 코드가 문서에서 확인되지 않아 법령 근거 조회를 실행하지 않았습니다."
+    )
+
+
+def test_export_workflow_requires_an_export_declaration() -> None:
+    request, candidates = _export_scenario(include_declaration=False)
+
+    output = run_bounded_workflow(request, _SequenceAnalyzer(candidates))
+
+    presence = next(
+        item for item in output.comparisons if item.rule_code == "export_declaration_presence"
+    )
+    assert presence.status == "needs_review"
 
 
 def test_weight_field_schema_unit_normalizes_naked_model_number() -> None:

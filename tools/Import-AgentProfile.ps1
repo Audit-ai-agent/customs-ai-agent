@@ -4,21 +4,24 @@ Loads only the local values needed by the Agent into the current PowerShell sess
 
 .DESCRIPTION
 Dot-source this script.  It invokes Backend's agent-scoped local importer for
-the Agent bearer token and mode, then reads the Evidence bearer token generated
-by Data.  It never writes or prints a secret.  For functional UAT only, it
-also reads exactly one personal Claude key from the ignored workspace-local
-``_local\secrets\.env`` file.  The value is placed only in the current
-PowerShell process; the legacy ``_local\secrets\uat\agent.env`` file is never
-read.
+the Agent bearer token and mode, then reads Data tokens for document Evidence
+and, only in the composed Korean-trade profile, separate general guidance. It
+never writes or prints a secret.  For functional UAT only, it also reads exactly
+one personal Claude key from the ignored workspace-local ``_local\secrets\.env``
+file.  The value is placed only in the current PowerShell process; the legacy
+``_local\secrets\uat\agent.env`` file is never read.
 #>
 [CmdletBinding()]
 param(
     [Parameter(Mandatory)]
-    [ValidateSet("dev-fixture", "functional-uat-3law")]
+    [ValidateSet("dev-fixture", "functional-uat-3law", "functional-uat-kr-trade")]
     [string]$Profile,
 
     [ValidateRange(1, 65535)]
-    [int]$EvidencePort = 18083
+    [int]$EvidencePort = 18083,
+
+    [ValidateRange(1, 65535)]
+    [int]$GuidancePort = 18093
 )
 
 Set-StrictMode -Version Latest
@@ -118,12 +121,33 @@ switch ($Profile) {
         # Backend owns the service profile name; Data owns the three-law input profile name.
         $backendProfile = "functional-uat"
         $evidenceProfile = "functional-uat-3law"
+        $guidanceProfile = $null
+        $expectedMode = "functional-uat"
+    }
+    "functional-uat-kr-trade" {
+        # The broader official guidance snapshot deliberately complements, not
+        # replaces, the verified three-law Evidence store used by document review.
+        $backendProfile = "functional-uat"
+        $evidenceProfile = "functional-uat-3law"
+        $guidanceProfile = "functional-uat-kr-trade"
         $expectedMode = "functional-uat"
     }
 }
-$requiresFunctionalUatKey = $Profile -eq "functional-uat-3law"
+$requiresFunctionalUatKey = $Profile -ne "dev-fixture"
+
+if ($Profile -eq "dev-fixture") {
+    $guidanceProfile = $null
+}
+if ($null -ne $guidanceProfile -and $GuidancePort -eq $EvidencePort) {
+    throw "agent_profile_guidance_port_conflict"
+}
 
 $evidenceTokenFile = Join-Path (Join-Path $localProfilesRoot $evidenceProfile) "evidence-service-token"
+$guidanceTokenFile = if ($null -ne $guidanceProfile) {
+    Join-Path (Join-Path $localProfilesRoot $guidanceProfile) "evidence-service-token"
+} else {
+    $null
+}
 $backendImporter = Join-Path $workspaceRoot "customs-backend\tools\Import-LocalProfile.ps1"
 $backendEnvironment = Join-Path (Join-Path $localProfilesRoot $backendProfile) "backend.env"
 
@@ -133,6 +157,9 @@ if (-not (Test-Path -LiteralPath $backendEnvironment -PathType Leaf)) {
 if (-not (Test-Path -LiteralPath $evidenceTokenFile -PathType Leaf)) {
     throw "agent_profile_input_missing:evidence-service-token"
 }
+if ($null -ne $guidanceTokenFile -and -not (Test-Path -LiteralPath $guidanceTokenFile -PathType Leaf)) {
+    throw "agent_profile_input_missing:guidance-service-token"
+}
 if (-not (Test-Path -LiteralPath $backendImporter -PathType Leaf)) {
     throw "agent_profile_input_missing:Import-LocalProfile.ps1"
 }
@@ -140,6 +167,13 @@ if (-not (Test-Path -LiteralPath $backendImporter -PathType Leaf)) {
 $evidenceToken = [System.IO.File]::ReadAllText($evidenceTokenFile).Trim()
 if ($evidenceToken -notmatch "^[A-Za-z0-9\-._~+/]{43,504}={0,8}$") {
     throw "agent_profile_evidence_token_invalid"
+}
+$guidanceToken = $null
+if ($null -ne $guidanceTokenFile) {
+    $guidanceToken = [System.IO.File]::ReadAllText($guidanceTokenFile).Trim()
+    if ($guidanceToken -notmatch "^[A-Za-z0-9\-._~+/]{43,504}={0,8}$") {
+        throw "agent_profile_guidance_token_invalid"
+    }
 }
 
 # Scope=agent is intentional: Backend/DB/Compose credentials never enter this
@@ -162,3 +196,15 @@ $env:CUSTOMS_AGENT_PORT = "18090"
 $env:EVIDENCE_SERVICE_BASE_URL = "http://127.0.0.1:$EvidencePort"
 $env:EVIDENCE_SERVICE_TOKEN = $evidenceToken
 $env:EVIDENCE_SERVICE_TOKEN_HEADER = "Authorization"
+if ($null -eq $guidanceProfile) {
+    # A shell can switch from the composed profile back to an existing one.
+    # Remove stale overrides so its bounded guidance query falls back to the
+    # same Evidence peer exactly as it did before this profile existed.
+    Remove-Item -LiteralPath "Env:GUIDANCE_SERVICE_BASE_URL" -ErrorAction SilentlyContinue
+    Remove-Item -LiteralPath "Env:GUIDANCE_SERVICE_TOKEN" -ErrorAction SilentlyContinue
+    Remove-Item -LiteralPath "Env:GUIDANCE_SERVICE_TOKEN_HEADER" -ErrorAction SilentlyContinue
+} else {
+    $env:GUIDANCE_SERVICE_BASE_URL = "http://127.0.0.1:$GuidancePort"
+    $env:GUIDANCE_SERVICE_TOKEN = $guidanceToken
+    $env:GUIDANCE_SERVICE_TOKEN_HEADER = "Authorization"
+}

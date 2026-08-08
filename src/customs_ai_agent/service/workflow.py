@@ -42,7 +42,10 @@ _KNOWN_TYPES = {
     "invoice",
     "packing_list",
     "bill_of_lading",
+    "air_waybill",
     "certificate_of_origin",
+    "export_declaration",
+    "supporting_evidence",
 }
 _NUMERIC_FIELDS = {
     "quantity",
@@ -62,25 +65,37 @@ _IDENTIFIER_FIELDS = {
     "invoice_no",
     "packing_no",
     "bl_no",
+    "awb_no",
     "certificate_no",
+    "export_declaration_no",
+    "submission_receipt_no",
     "shipment_id",
     "container_numbers",
 }
 _ORIGIN_FIELDS = {"origin_country", "country_of_origin"}
+_DESTINATION_FIELDS = {"destination_country", "country_of_destination"}
 _DESCRIPTION_FIELDS = {"description", "goods_description"}
 _HS_FIELDS = {"hs_code", "hs_codes"}
 _DOCUMENT_LABELS = {
     "invoice": "상업송장",
     "packing_list": "포장명세서",
     "bill_of_lading": "선하증권",
+    "air_waybill": "항공화물운송장",
     "certificate_of_origin": "원산지증명서",
+    "export_declaration": "수출신고증",
+    "supporting_evidence": "보완·제출 증빙",
     "unknown": "문서",
 }
 _FIELD_LABELS = {
     "invoice_no": "상업송장 번호",
     "packing_no": "포장명세서 번호",
     "bl_no": "B/L 번호",
+    "awb_no": "AWB 번호",
     "certificate_no": "원산지증명서 번호",
+    "export_declaration_no": "수출신고 번호",
+    "submission_receipt_no": "접수·제출 번호",
+    "filing_date": "신고·제출일",
+    "submission_status": "기관 처리 상태",
     "origin_country": "원산지",
     "country_of_origin": "원산지",
     "hs_code": "HS 코드",
@@ -173,6 +188,9 @@ class BoundedWorkflowOutput:
     retrieval_items: list[dict[str, Any]]
     retrieval_document_ids: dict[str, list[str]]
     retrieval_excluded_document_ids: list[str]
+    retrieval_skip_reason: (
+        Literal["no_hs_qualified_commodity", "export_destination_country_missing"] | None
+    )
     planner_state: _BoundedPlanner
 
     def with_evidence_status(self, data_status: str) -> "BoundedWorkflowOutput":
@@ -227,18 +245,27 @@ class BoundedWorkflowOutput:
         )
 
     def with_evidence_skipped(self) -> "BoundedWorkflowOutput":
-        """Record that no HS-qualified commodity exists for a Data request.
+        """Record why the bounded Data request was not created.
 
         The shared Data contract requires at least one item.  Skipping an
         otherwise invalid request is an input limitation, not a Data partial
         failure, and does not pretend that a retrieval action ran.
         """
 
+        summaries = {
+            "no_hs_qualified_commodity": (
+                "HS 코드가 확인된 품목이 없어 법령 근거 조회를 실행하지 않았습니다."
+            ),
+            "export_destination_country_missing": (
+                "수출 목적국 코드가 문서에서 확인되지 않아 법령 근거 조회를 실행하지 않았습니다."
+            ),
+        }
+        reason = self.retrieval_skip_reason or "no_hs_qualified_commodity"
         stages = [
             stage.model_copy(
                 update={
                     "status": "skipped",
-                    "summary": "HS 코드가 확인된 품목이 없어 법령 근거 조회를 실행하지 않았습니다.",
+                    "summary": summaries[reason],
                 }
             )
             if stage.stage == "retrieve_evidence"
@@ -366,7 +393,7 @@ def run_bounded_workflow(
             summary="승인된 사람 수정은 원문 사실을 보존한 별도 human-provided 사실로 반영했습니다.",
             correction_proposal_ids=request.applied_correction_proposal_ids,
         )
-    comparisons = _comparisons(rendered)
+    comparisons = _comparisons(rendered, trade_type=request.trade_type)
     planner.record(
         "compare_documents",
         status="completed",
@@ -374,9 +401,12 @@ def run_bounded_workflow(
     )
     findings = _findings_from_comparisons(comparisons)
     findings.extend(_warning_findings(rendered))
-    retrieval_items, retrieval_document_ids, retrieval_excluded_document_ids = (
-        retrieval_plan_from_analyses(request, rendered)
-    )
+    (
+        retrieval_items,
+        retrieval_document_ids,
+        retrieval_excluded_document_ids,
+        retrieval_skip_reason,
+    ) = retrieval_plan_from_analyses(request, rendered)
     stages = _workflow_stages(
         rendered,
         comparisons,
@@ -399,6 +429,7 @@ def run_bounded_workflow(
         retrieval_items=retrieval_items,
         retrieval_document_ids=retrieval_document_ids,
         retrieval_excluded_document_ids=retrieval_excluded_document_ids,
+        retrieval_skip_reason=retrieval_skip_reason,
         planner_state=planner,
     )
 
@@ -415,7 +446,12 @@ def retrieval_items_from_analyses(
 def retrieval_plan_from_analyses(
     request: ServiceReviewRunRequestV3,
     analyses: list[DocumentAnalysisV3],
-) -> tuple[list[dict[str, Any]], dict[str, list[str]], list[str]]:
+) -> tuple[
+    list[dict[str, Any]],
+    dict[str, list[str]],
+    list[str],
+    Literal["no_hs_qualified_commodity", "export_destination_country_missing"] | None,
+]:
     """Group source-grounded facts into one Data item per commodity.
 
     A law requirement applies to a commodity, not independently to every
@@ -460,7 +496,10 @@ def retrieval_plan_from_analyses(
                         "origin_country": origin.normalized_value if origin else None,
                     }
                 )
-        if not document_candidates and analysis.document_type != "bill_of_lading":
+        if not document_candidates and analysis.document_type not in {
+            "bill_of_lading",
+            "air_waybill",
+        }:
             excluded_document_ids.append(document.document_id)
         candidates.extend(document_candidates)
 
@@ -475,6 +514,23 @@ def retrieval_plan_from_analyses(
             origins = origins_by_hs.get(str(candidate["hs_code"]), set())
             if len(origins) == 1:
                 candidate["origin_country"] = next(iter(origins))
+
+    if not candidates:
+        return [], {}, sorted(set(excluded_document_ids)), "no_hs_qualified_commodity"
+
+    destination_country = "KR"
+    if request.trade_type == "export":
+        destination_country = _export_destination_country(analyses) or ""
+        if not destination_country:
+            # The Evidence API requires a jurisdictional destination.  Do not
+            # silently reinterpret an export as a Korean import when that fact
+            # is not grounded in the supplied export documentation.
+            return (
+                [],
+                {},
+                sorted(set(excluded_document_ids)),
+                "export_destination_country_missing",
+            )
 
     groups: dict[tuple[str, str | None], dict[str, Any]] = {}
     for candidate in candidates:
@@ -494,7 +550,7 @@ def retrieval_plan_from_analyses(
         identity = {
             "hs_code": hs_code,
             "origin_country": origin_country,
-            "destination_country": "KR",
+            "destination_country": destination_country,
         }
         item_id = (
             "commodity-"
@@ -510,11 +566,11 @@ def retrieval_plan_from_analyses(
                 "description": str(group["description"])[:2000],
                 "hs_code": hs_code,
                 "origin_country": origin_country,
-                "destination_country": "KR",
+                "destination_country": destination_country,
             }
         )
         document_ids_by_item[item_id] = sorted(group["document_ids"])
-    return items[:100], document_ids_by_item, sorted(set(excluded_document_ids))
+    return items[:100], document_ids_by_item, sorted(set(excluded_document_ids)), None
 
 
 def finding_for_evidence_requirement(
@@ -815,7 +871,7 @@ def _normalize_value(
     if name in {"hs_code", "hs_codes"}:
         digits = re.sub(r"\D", "", text)
         return (digits, None) if re.fullmatch(r"\d{6,10}", digits) else (None, None)
-    if name in _ORIGIN_FIELDS:
+    if name in _ORIGIN_FIELDS | _DESTINATION_FIELDS:
         return re.sub(r"\s+", " ", text).upper(), None
     if name in _DESCRIPTION_FIELDS:
         return re.sub(r"\s+", " ", text).casefold(), None
@@ -883,12 +939,16 @@ def _decimal_text(value: Decimal) -> str:
     return text.rstrip("0").rstrip(".") if "." in text else text
 
 
-def _comparisons(analyses: list[DocumentAnalysisV3]) -> list[ComparisonV3]:
+def _comparisons(
+    analyses: list[DocumentAnalysisV3], *, trade_type: Literal["import", "export"]
+) -> list[ComparisonV3]:
     comparisons: list[ComparisonV3] = []
     comparisons.extend(_classification_and_required_field_checks(analyses))
     comparisons.extend(_invoice_packing_checks(analyses))
     comparisons.extend(_invoice_origin_checks(analyses))
-    comparisons.extend(_bill_packing_checks(analyses))
+    comparisons.extend(_transport_packing_checks(analyses, "bill_of_lading"))
+    comparisons.extend(_transport_packing_checks(analyses, "air_waybill"))
+    comparisons.extend(_invoice_export_declaration_checks(analyses, trade_type=trade_type))
     return comparisons
 
 
@@ -901,6 +961,9 @@ def _classification_and_required_field_checks(
         "packing_list": ("packing_no",),
         "certificate_of_origin": ("certificate_no", "origin_country", "hs_code"),
         "bill_of_lading": ("bl_no",),
+        "air_waybill": ("awb_no",),
+        "export_declaration": ("export_declaration_no",),
+        "supporting_evidence": ("submission_receipt_no",),
     }
     for analysis in analyses:
         if analysis.document_type == "unknown":
@@ -1058,6 +1121,65 @@ def _quantity_unit_comparison(
     )
 
 
+def _cross_document_quantity_unit_comparison(
+    left: DocumentAnalysisV3,
+    left_item: LineItemV3,
+    right: DocumentAnalysisV3,
+    right_item: LineItemV3,
+    *,
+    rule_code: str,
+    right_label: str,
+) -> ComparisonV3:
+    left_quantity = _first_fact(left_item.facts, "quantity")
+    right_quantity = _first_fact(right_item.facts, "quantity")
+    if left_quantity is None or right_quantity is None:
+        return _comparison(
+            rule_code=rule_code,
+            status="needs_review",
+            left=_operand_from_fact(left, left_item, left_quantity),
+            right=_operand_from_fact(right, right_item, right_quantity),
+            message=f"상업송장과 {right_label}의 수량 또는 단위를 모두 확인할 수 없습니다.",
+        )
+    if left_quantity.normalized_value is None or right_quantity.normalized_value is None:
+        return _comparison(
+            rule_code=rule_code,
+            status="needs_review",
+            left=_operand_from_fact(left, left_item, left_quantity),
+            right=_operand_from_fact(right, right_item, right_quantity),
+            message="수량을 코드로 비교할 수 있는 형식으로 정규화하지 못했습니다.",
+        )
+    left_unit = _effective_quantity_unit(left_item, left_quantity)
+    right_unit = _effective_quantity_unit(right_item, right_quantity)
+    if not left_unit or not right_unit or left_unit != right_unit:
+        return _comparison(
+            rule_code=rule_code,
+            status="needs_review",
+            left=_operand_from_fact(left, left_item, left_quantity),
+            right=_operand_from_fact(right, right_item, right_quantity),
+            expected_value=left_quantity.normalized_value,
+            observed_value=right_quantity.normalized_value,
+            unit=left_unit or right_unit,
+            message="수량 단위가 없거나 서로 달라 자동으로 동등성을 판단하지 않았습니다.",
+        )
+    status = (
+        "pass" if left_quantity.normalized_value == right_quantity.normalized_value else "mismatch"
+    )
+    return _comparison(
+        rule_code=rule_code,
+        status=status,
+        left=_operand_from_fact(left, left_item, left_quantity),
+        right=_operand_from_fact(right, right_item, right_quantity),
+        expected_value=left_quantity.normalized_value,
+        observed_value=right_quantity.normalized_value,
+        unit=left_unit,
+        message=(
+            f"상업송장과 {right_label}의 수량·단위가 일치합니다."
+            if status == "pass"
+            else f"상업송장과 {right_label}의 수량이 일치하지 않습니다."
+        ),
+    )
+
+
 def _invoice_amount_comparison(invoice: DocumentAnalysisV3, item: LineItemV3) -> ComparisonV3:
     quantity = _first_fact(item.facts, "quantity")
     unit_price = _first_fact(item.facts, "unit_price")
@@ -1193,43 +1315,274 @@ def _invoice_origin_checks(analyses: list[DocumentAnalysisV3]) -> list[Compariso
     ]
 
 
-def _bill_packing_checks(analyses: list[DocumentAnalysisV3]) -> list[ComparisonV3]:
-    bill, packing, ambiguity = _unique_pair(analyses, "bill_of_lading", "packing_list")
+def _invoice_export_declaration_checks(
+    analyses: list[DocumentAnalysisV3], *, trade_type: Literal["import", "export"]
+) -> list[ComparisonV3]:
+    """Compare the source-grounded export declaration with commercial documents.
+
+    The declaration is not treated as a second invoice.  It only supplies
+    corroborating declaration facts, and ambiguous item correspondence remains
+    a human-review result rather than a silent match.
+    """
+
+    invoice, declaration, ambiguity = _unique_pair(analyses, "invoice", "export_declaration")
     if ambiguity is not None:
         return [ambiguity]
-    if bill is None or packing is None:
+    if declaration is None:
+        if trade_type != "export":
+            return []
+        return [
+            _comparison(
+                rule_code="export_declaration_presence",
+                status="needs_review",
+                left=_operand(document_id=invoice.document_id if invoice else None),
+                right=_operand(),
+                message="수출 사건에 필요한 수출신고증을 확인할 수 없습니다.",
+            )
+        ]
+
+    destination = _first_fact_from_analysis(declaration, "destination_country")
+    comparisons: list[ComparisonV3] = [
+        _comparison(
+            rule_code="export_declaration_destination_country",
+            status="pass"
+            if destination is not None
+            and destination.normalized_value is not None
+            and _is_country_code(destination.normalized_value)
+            else "needs_review",
+            left=_operand_from_fact(declaration, None, destination),
+            right=_operand(),
+            expected_value="destination_country",
+            observed_value=destination.raw_value if destination else None,
+            message=(
+                "수출신고증에서 목적국 코드를 확인했습니다."
+                if destination is not None
+                and destination.normalized_value is not None
+                and _is_country_code(destination.normalized_value)
+                else "수출신고증에서 두 자리 목적국 코드를 확인할 수 없습니다."
+            ),
+        )
+    ]
+    if invoice is None:
+        comparisons.extend(
+            [
+                _comparison(
+                    rule_code=rule_code,
+                    status="skip",
+                    left=_operand(),
+                    right=_operand(document_id=declaration.document_id),
+                    message="상업송장과 수출신고증이 모두 있을 때 대조합니다.",
+                )
+                for rule_code in (
+                    "invoice_export_declaration_invoice_no",
+                    "invoice_export_declaration_total_amount",
+                    "invoice_export_declaration_origin",
+                    "invoice_export_declaration_item_match",
+                )
+            ]
+        )
+        return comparisons
+
+    comparisons.extend(
+        [
+            _simple_fact_comparison(
+                "invoice_export_declaration_invoice_no",
+                invoice,
+                None,
+                _first_fact_from_analysis(invoice, "invoice_no"),
+                declaration,
+                None,
+                _first_fact_from_analysis(declaration, "invoice_no"),
+                missing_message="상업송장과 수출신고증의 상업송장 번호를 모두 확인할 수 없습니다.",
+                pass_message="상업송장과 수출신고증의 상업송장 번호가 일치합니다.",
+                mismatch_message="상업송장과 수출신고증의 상업송장 번호가 일치하지 않습니다.",
+            ),
+            _simple_fact_comparison(
+                "invoice_export_declaration_total_amount",
+                invoice,
+                None,
+                _first_fact_from_analysis(invoice, "total_amount"),
+                declaration,
+                None,
+                _first_fact_from_analysis(declaration, "total_amount"),
+                missing_message="상업송장과 수출신고증의 총액을 모두 확인할 수 없습니다.",
+                pass_message="상업송장과 수출신고증의 총액이 일치합니다.",
+                mismatch_message="상업송장과 수출신고증의 총액이 일치하지 않습니다.",
+            ),
+            _simple_fact_comparison(
+                "invoice_export_declaration_origin",
+                invoice,
+                None,
+                _first_fact_from_analysis(invoice, *_ORIGIN_FIELDS),
+                declaration,
+                None,
+                _first_fact_from_analysis(declaration, *_ORIGIN_FIELDS),
+                missing_message="상업송장과 수출신고증의 원산지를 모두 확인할 수 없습니다.",
+                pass_message="상업송장과 수출신고증의 원산지가 일치합니다.",
+                mismatch_message="상업송장과 수출신고증의 원산지가 일치하지 않습니다.",
+            ),
+        ]
+    )
+    comparisons.extend(_match_invoice_export_declaration_items(invoice, declaration))
+    return comparisons
+
+
+def _match_invoice_export_declaration_items(
+    invoice: DocumentAnalysisV3, declaration: DocumentAnalysisV3
+) -> list[ComparisonV3]:
+    if not invoice.line_items or not declaration.line_items:
+        return [
+            _comparison(
+                rule_code="invoice_export_declaration_item_match",
+                status="needs_review",
+                left=_operand(document_id=invoice.document_id),
+                right=_operand(document_id=declaration.document_id),
+                message="상업송장 또는 수출신고증에서 비교 가능한 품목을 추출하지 못했습니다.",
+            )
+        ]
+    comparisons: list[ComparisonV3] = []
+    unmatched = set(range(len(declaration.line_items)))
+    for invoice_item in invoice.line_items:
+        matches = [
+            index
+            for index in unmatched
+            if _cross_document_item_match(invoice_item, declaration.line_items[index])
+        ]
+        if len(matches) != 1:
+            comparisons.append(
+                _comparison(
+                    rule_code="invoice_export_declaration_item_match",
+                    status="needs_review",
+                    left=_operand_from_item(invoice, invoice_item),
+                    right=_operand(document_id=declaration.document_id),
+                    message="상업송장 품목에 대응하는 수출신고증 품목을 하나로 정할 수 없습니다.",
+                )
+            )
+            continue
+        declaration_item = declaration.line_items[matches[0]]
+        unmatched.remove(matches[0])
+        comparisons.extend(
+            [
+                _simple_fact_comparison(
+                    "invoice_export_declaration_hs_code",
+                    invoice,
+                    invoice_item,
+                    _first_fact(invoice_item.facts, "hs_code"),
+                    declaration,
+                    declaration_item,
+                    _first_fact(declaration_item.facts, "hs_code"),
+                    missing_message="상업송장과 수출신고증 품목의 HS 코드를 모두 확인할 수 없습니다.",
+                    pass_message="상업송장과 수출신고증 품목의 HS 코드가 일치합니다.",
+                    mismatch_message="상업송장과 수출신고증 품목의 HS 코드가 일치하지 않습니다.",
+                ),
+                _cross_document_quantity_unit_comparison(
+                    invoice,
+                    invoice_item,
+                    declaration,
+                    declaration_item,
+                    rule_code="invoice_export_declaration_quantity_unit",
+                    right_label="수출신고증",
+                ),
+                _simple_fact_comparison(
+                    "invoice_export_declaration_amount",
+                    invoice,
+                    invoice_item,
+                    _first_fact(invoice_item.facts, "amount"),
+                    declaration,
+                    declaration_item,
+                    _first_fact(declaration_item.facts, "amount"),
+                    missing_message="상업송장과 수출신고증 품목의 금액을 모두 확인할 수 없습니다.",
+                    pass_message="상업송장과 수출신고증 품목의 금액이 일치합니다.",
+                    mismatch_message="상업송장과 수출신고증 품목의 금액이 일치하지 않습니다.",
+                ),
+            ]
+        )
+    for index in sorted(unmatched):
+        comparisons.append(
+            _comparison(
+                rule_code="invoice_export_declaration_item_match",
+                status="needs_review",
+                left=_operand(document_id=invoice.document_id),
+                right=_operand_from_item(declaration, declaration.line_items[index]),
+                message="수출신고증 품목에 대응하는 상업송장 품목을 하나로 정할 수 없습니다.",
+            )
+        )
+    return comparisons
+
+
+def _transport_packing_checks(
+    analyses: list[DocumentAnalysisV3], transport_type: Literal["bill_of_lading", "air_waybill"]
+) -> list[ComparisonV3]:
+    """Compare one transport document with its packing list without assuming sea freight.
+
+    B/L and AWB have different transport identifiers.  Container numbers are
+    a sea-freight field and therefore intentionally skipped for AWB instead of
+    being treated as a missing AWB fact.
+    """
+
+    transport, packing, ambiguity = _unique_pair(analyses, transport_type, "packing_list")
+    if ambiguity is not None:
+        return [ambiguity]
+    is_bill = transport_type == "bill_of_lading"
+    identifier_name = "bl_no" if is_bill else "awb_no"
+    identifier_label = "B/L" if is_bill else "AWB"
+    prefix = "bill" if is_bill else "awb"
+    # An AWB is an alternative transport document, not an extra mandatory
+    # document beside a B/L.  Do not add meaningless skipped AWB rows to a
+    # sea-freight review that contains no AWB at all.
+    if not is_bill and transport is None:
+        return []
+    if transport is None or packing is None:
+        rules = [f"{prefix}_packing_{identifier_name}", f"{prefix}_packing_gross_weight"]
+        if is_bill:
+            rules.insert(1, "bill_packing_container")
         return [
             _comparison(
                 rule_code=rule,
                 status="skip",
-                left=_operand(document_id=bill.document_id if bill else None),
+                left=_operand(document_id=transport.document_id if transport else None),
                 right=_operand(document_id=packing.document_id if packing else None),
-                message="B/L과 포장명세서가 모두 있을 때 대조합니다.",
+                message=f"{identifier_label}과 포장명세서가 모두 있을 때 대조합니다.",
             )
-            for rule in (
-                "bill_packing_bl_no",
-                "bill_packing_container",
-                "bill_packing_gross_weight",
-            )
+            for rule in rules
         ]
-    return [
+    checks = [
         _simple_fact_comparison(
-            "bill_packing_bl_no",
-            bill,
+            f"{prefix}_packing_{identifier_name}",
+            transport,
             None,
-            _first_fact_from_analysis(bill, "bl_no"),
+            _first_fact_from_analysis(transport, identifier_name),
             packing,
             None,
-            _first_fact_from_analysis(packing, "bl_no"),
-            missing_message="B/L 번호를 두 문서에서 모두 확인할 수 없습니다.",
-            pass_message="B/L 번호가 일치합니다.",
-            mismatch_message="B/L 번호가 일치하지 않습니다.",
+            # Packing lists frequently carry a B/L reference but not an AWB.
+            # We only compare an AWB when the packing list explicitly has it.
+            _first_fact_from_analysis(packing, identifier_name),
+            missing_message=f"{identifier_label} 번호를 두 문서에서 모두 확인할 수 없습니다.",
+            pass_message=f"{identifier_label} 번호가 일치합니다.",
+            mismatch_message=f"{identifier_label} 번호가 일치하지 않습니다.",
         ),
         _simple_fact_comparison(
-            "bill_packing_container",
-            bill,
+            f"{prefix}_packing_gross_weight",
+            transport,
             None,
-            _first_fact_from_analysis(bill, "container_numbers"),
+            _first_fact_from_analysis(transport, "gross_weight_kg"),
+            packing,
+            None,
+            _first_fact_from_analysis(packing, "total_gross_weight_kg"),
+            missing_message="총중량을 두 문서에서 모두 확인할 수 없습니다.",
+            pass_message=f"{identifier_label}과 포장명세서의 총중량이 일치합니다.",
+            mismatch_message=f"{identifier_label}과 포장명세서의 총중량이 일치하지 않습니다.",
+        ),
+    ]
+    if not is_bill:
+        return checks
+    checks.insert(
+        1,
+        _simple_fact_comparison(
+            "bill_packing_container",
+            transport,
+            None,
+            _first_fact_from_analysis(transport, "container_numbers"),
             packing,
             None,
             _first_fact_from_analysis(packing, "container_numbers"),
@@ -1237,19 +1590,8 @@ def _bill_packing_checks(analyses: list[DocumentAnalysisV3]) -> list[ComparisonV
             pass_message="컨테이너 번호가 일치합니다.",
             mismatch_message="컨테이너 번호가 일치하지 않습니다.",
         ),
-        _simple_fact_comparison(
-            "bill_packing_gross_weight",
-            bill,
-            None,
-            _first_fact_from_analysis(bill, "gross_weight_kg"),
-            packing,
-            None,
-            _first_fact_from_analysis(packing, "total_gross_weight_kg"),
-            missing_message="총중량을 두 문서에서 모두 확인할 수 없습니다.",
-            pass_message="B/L과 포장명세서의 총중량이 일치합니다.",
-            mismatch_message="B/L과 포장명세서의 총중량이 일치하지 않습니다.",
-        ),
-    ]
+    )
+    return checks
 
 
 def _simple_fact_comparison(
@@ -1337,6 +1679,33 @@ def _item_match(left: LineItemV3, right: LineItemV3) -> bool:
         and right_description
         and left_description.normalized_value
         and left_description.normalized_value == right_description.normalized_value
+    )
+
+
+def _cross_document_item_match(left: LineItemV3, right: LineItemV3) -> bool:
+    """Match a declared export item conservatively before comparing its fields.
+
+    A matching description is enough to reveal a HS-code mismatch.  If neither
+    the description nor the HS code identifies one counterpart, the caller
+    leaves the relation as ``needs_review``.
+    """
+
+    left_description = _first_fact(left.facts, *_DESCRIPTION_FIELDS)
+    right_description = _first_fact(right.facts, *_DESCRIPTION_FIELDS)
+    if (
+        left_description
+        and right_description
+        and left_description.normalized_value
+        and left_description.normalized_value == right_description.normalized_value
+    ):
+        return True
+    left_hs = _first_fact(left.facts, "hs_code")
+    right_hs = _first_fact(right.facts, "hs_code")
+    return bool(
+        left_hs
+        and right_hs
+        and left_hs.normalized_value
+        and left_hs.normalized_value == right_hs.normalized_value
     )
 
 
@@ -1451,7 +1820,15 @@ def _workflow_stages(
     warning_count = sum(len(analysis.warnings) for analysis in analyses)
     pair_exists = any(
         analysis.document_type
-        in {"invoice", "packing_list", "bill_of_lading", "certificate_of_origin"}
+        in {
+            "invoice",
+            "packing_list",
+            "bill_of_lading",
+            "air_waybill",
+            "certificate_of_origin",
+            "export_declaration",
+            "supporting_evidence",
+        }
         for analysis in analyses
     )
     validation_needs_review = sum(
@@ -1532,6 +1909,30 @@ def _evidence_summary(data_status: str, *, excluded_document_count: int = 0) -> 
     return summary
 
 
+def _export_destination_country(analyses: Iterable[DocumentAnalysisV3]) -> str | None:
+    """Return one source-grounded alpha-2 destination for an export request.
+
+    The Data item contract needs a country code.  Country names, conflicting
+    values, and values absent from an export declaration are intentionally not
+    guessed or mapped here; the document must be clarified first.
+    """
+
+    values = {
+        fact.normalized_value
+        for analysis in analyses
+        if analysis.document_type == "export_declaration"
+        for fact in analysis.facts
+        if fact.name in _DESTINATION_FIELDS
+        and fact.normalized_value is not None
+        and _is_country_code(fact.normalized_value)
+    }
+    return next(iter(values)) if len(values) == 1 else None
+
+
+def _is_country_code(value: str) -> bool:
+    return bool(re.fullmatch(r"[A-Z]{2}", value))
+
+
 def _reextraction_targets(
     request: ServiceReviewRunRequestV3,
     analyses: Mapping[str, DocumentAnalysis],
@@ -1555,6 +1956,8 @@ def _reextraction_targets(
     packings = by_type.get("packing_list", [])
     certificates = by_type.get("certificate_of_origin", [])
     bills = by_type.get("bill_of_lading", [])
+    awbs = by_type.get("air_waybill", [])
+    declarations = by_type.get("export_declaration", [])
     if len(invoices) == 1 and len(packings) == 1:
         _request_missing(
             analyses,
@@ -1585,6 +1988,51 @@ def _reextraction_targets(
         _request_missing(
             analyses, packings[0], targets, ("bl_no", "container_numbers", "total_gross_weight_kg")
         )
+    if len(awbs) == 1 and len(packings) == 1:
+        _request_missing(analyses, awbs[0], targets, ("awb_no", "gross_weight_kg"))
+        _request_missing(analyses, packings[0], targets, ("awb_no", "total_gross_weight_kg"))
+    if request.trade_type == "export":
+        if len(declarations) != 1:
+            # A missing or ambiguous declaration is represented by the bounded
+            # comparison path.  Retrying an unrelated document cannot create
+            # a source-grounded declaration.
+            return {
+                document_id: sorted(values) for document_id, values in targets.items() if values
+            }
+        declaration = declarations[0]
+        _request_missing(
+            analyses,
+            declaration,
+            targets,
+            (
+                "export_declaration_no",
+                "invoice_no",
+                "total_amount",
+                "origin_country",
+                "destination_country",
+                "description",
+                "hs_code",
+                "quantity",
+                "unit",
+                "amount",
+            ),
+        )
+        if len(invoices) == 1:
+            _request_missing(
+                analyses,
+                invoices[0],
+                targets,
+                (
+                    "invoice_no",
+                    "total_amount",
+                    "origin_country",
+                    "description",
+                    "hs_code",
+                    "quantity",
+                    "unit",
+                    "amount",
+                ),
+            )
     return {document_id: sorted(values) for document_id, values in targets.items() if values}
 
 
@@ -1594,6 +2042,9 @@ def _base_required_fields(document_type: str) -> tuple[str, ...]:
         "packing_list": ("packing_no",),
         "certificate_of_origin": ("certificate_no", "origin_country", "hs_code"),
         "bill_of_lading": ("bl_no",),
+        "air_waybill": ("awb_no",),
+        "export_declaration": ("export_declaration_no",),
+        "supporting_evidence": ("submission_receipt_no",),
     }.get(document_type, ())
 
 

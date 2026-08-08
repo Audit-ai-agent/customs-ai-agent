@@ -57,11 +57,19 @@ def _number(
 
 @dataclass(frozen=True, slots=True)
 class ServiceSettings:
-    """All service traffic stays on loopback and uses one peer-mode handshake."""
+    """All service traffic stays on loopback and uses one peer-mode handshake.
+
+    ``evidence_*`` always belongs to document-review retrieval.  A guidance
+    peer is opt-in as a complete URL/token pair.  When absent, the bounded
+    guidance query deliberately reuses the Evidence peer so the established
+    development and three-law UAT profiles keep their one-peer topology.
+    """
 
     bearer_token: SecretStr
     evidence_base_url: str
     evidence_service_token: SecretStr
+    guidance_base_url: str | None = None
+    guidance_service_token: SecretStr | None = None
     service_mode: ServiceMode = "local-development"
     host: str = "127.0.0.1"
     # Backend owns 18081 and Data fixture owns 18083.  18090 avoids the
@@ -83,10 +91,24 @@ class ServiceSettings:
     def __post_init__(self) -> None:
         service_token = self.bearer_token.get_secret_value()
         evidence_token = self.evidence_service_token.get_secret_value()
+        has_guidance_base_url = self.guidance_base_url is not None
+        has_guidance_token = self.guidance_service_token is not None
         if _TOKEN.fullmatch(service_token) is None or len(set(service_token)) < 12:
             raise ServiceConfigurationError("service_bearer_token_weak")
         if _B64_TOKEN.fullmatch(evidence_token) is None or len(set(evidence_token)) < 12:
             raise ServiceConfigurationError("evidence_service_token_weak")
+        if has_guidance_base_url != has_guidance_token:
+            raise ServiceConfigurationError("guidance_service_peer_incomplete")
+        if has_guidance_base_url:
+            assert self.guidance_base_url is not None
+            assert self.guidance_service_token is not None
+            guidance_token = self.guidance_service_token.get_secret_value()
+            if not self.guidance_base_url.strip() or any(
+                char.isspace() for char in self.guidance_base_url
+            ):
+                raise ServiceConfigurationError("guidance_service_base_url_invalid")
+            if _B64_TOKEN.fullmatch(guidance_token) is None or len(set(guidance_token)) < 12:
+                raise ServiceConfigurationError("guidance_service_token_weak")
         if self.service_mode not in {"local-development", "functional-uat"}:
             raise ServiceConfigurationError("customs_agent_service_mode_invalid")
         if self.host != "127.0.0.1":
@@ -141,10 +163,26 @@ class ServiceSettings:
             != "authorization"
         ):
             raise ServiceConfigurationError("local_profile_evidence_bearer_required")
+        if (
+            source.get("GUIDANCE_SERVICE_TOKEN_HEADER", "Authorization").strip().casefold()
+            != "authorization"
+        ):
+            raise ServiceConfigurationError("local_profile_guidance_bearer_required")
+        has_guidance_base_url = "GUIDANCE_SERVICE_BASE_URL" in source
+        has_guidance_token = "GUIDANCE_SERVICE_TOKEN" in source
+        if has_guidance_base_url != has_guidance_token:
+            raise ServiceConfigurationError("guidance_service_peer_incomplete")
+        guidance_base_url: str | None = None
+        guidance_service_token: SecretStr | None = None
+        if has_guidance_base_url:
+            guidance_base_url = _required(source, "GUIDANCE_SERVICE_BASE_URL")
+            guidance_service_token = SecretStr(_required(source, "GUIDANCE_SERVICE_TOKEN"))
         return cls(
             bearer_token=SecretStr(_required(source, "CUSTOMS_AGENT_SERVICE_BEARER_TOKEN")),
             evidence_base_url=_required(source, "EVIDENCE_SERVICE_BASE_URL"),
             evidence_service_token=SecretStr(_required(source, "EVIDENCE_SERVICE_TOKEN")),
+            guidance_base_url=guidance_base_url,
+            guidance_service_token=guidance_service_token,
             service_mode=cast(ServiceMode, configured_mode),
             host=source.get("CUSTOMS_AGENT_HOST", "127.0.0.1").strip(),
             port=_integer(source, "CUSTOMS_AGENT_PORT", 18090, 1, 65_535),

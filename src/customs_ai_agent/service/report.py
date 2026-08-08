@@ -37,7 +37,7 @@ def build_grounded_report_sections(
     evidence: list[EvidenceV3],
     findings: list[FindingV3],
     actions: list[RequiredActionV1],
-    evidence_retrieval_skipped: bool = False,
+    evidence_retrieval_skip_reason: str | None = None,
 ) -> list[ReportSectionV3]:
     """Build all required sections using only identifiers already in the result."""
 
@@ -95,12 +95,7 @@ def build_grounded_report_sections(
     evidence_text = (
         f"연결된 법령 근거는 {len(evidence)}건입니다."
         if evidence
-        else (
-            "HS 코드가 확인된 품목이 없어 법령 근거 조회를 실행하지 않았습니다. "
-            "해당 문서의 HS 코드를 보완해 주세요."
-            if evidence_retrieval_skipped
-            else "연결 가능한 법령 근거가 없어 담당자 확인이 필요합니다."
-        )
+        else _evidence_skip_message(evidence_retrieval_skip_reason)
     )
     finding_text = _reviewer_sentence(
         finding.message if finding is not None else None,
@@ -175,6 +170,17 @@ def build_grounded_report_sections(
         }
     )
     return sections
+
+
+def _evidence_skip_message(reason: str | None) -> str:
+    if reason == "no_hs_qualified_commodity":
+        return "HS 코드가 확인된 품목이 없어 법령 근거 조회를 실행하지 않았습니다. 해당 문서의 HS 코드를 보완해 주세요."
+    if reason == "export_destination_country_missing":
+        return (
+            "수출 목적국 코드가 문서에서 확인되지 않아 법령 근거 조회를 실행하지 않았습니다. "
+            "수출신고증 또는 운송 문서의 두 자리 목적국 코드를 보완해 주세요."
+        )
+    return "연결 가능한 법령 근거가 없어 담당자 확인이 필요합니다."
 
 
 def validate_grounded_report_sections(
