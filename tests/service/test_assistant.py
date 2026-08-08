@@ -690,6 +690,127 @@ def test_case_question_can_keep_case_and_general_guidance_separate(
     assert GENERAL_GUIDANCE_DISCLAIMER in answer.answer_sections[1].content
 
 
+@pytest.mark.parametrize("failure_mode", ("request_failure", "semantic_invalid"))
+def test_functional_knowledge_provider_fallback_keeps_official_guidance_bounded(
+    monkeypatch: pytest.MonkeyPatch,
+    failure_mode: str,
+) -> None:
+    """A provider failure must never replace the code-owned official answer."""
+
+    class BrokenKnowledgeResponder:
+        def __init__(self) -> None:
+            self.purposes: list[str] = []
+
+        def respond(
+            self, _payload: dict[str, Any], *, purpose: str, **_kwargs: Any
+        ) -> dict[str, Any]:
+            self.purposes.append(purpose)
+            if failure_mode == "request_failure":
+                raise RuntimeError("simulated provider request failure")
+            # Missing the bounded presentation contract: semantic invalidity
+            # follows the same safe fallback path as a JSON/schema failure.
+            return {}
+
+        def close(self) -> None:
+            return None
+
+    def functional_guidance(
+        _self: ProfileEvidenceRetriever, request: dict[str, Any], **_kwargs: Any
+    ) -> dict[str, Any]:
+        response = _official_law_guidance()
+        response["request_id"] = request["request_id"]
+        response["as_of"] = request["as_of"]
+        return response
+
+    monkeypatch.setattr(ProfileEvidenceRetriever, "guidance_query", functional_guidance)
+    runtime = ProfileRuntime(_settings())
+    responder = BrokenKnowledgeResponder()
+    runtime.mode = "functional-uat"
+    runtime._grounded_responder = responder  # type: ignore[assignment]
+
+    answer = runtime.knowledge_answer_json(
+        json.dumps(
+            {
+                "schema_version": "1.0",
+                "conversation_id": "knowledge-provider-fallback",
+                "question": "수입 통관 절차에서 기본으로 확인할 서류를 알려 주세요.",
+                "trade_type": "import",
+                "as_of": "2026-08-05",
+                "recent_turns": [],
+            }
+        ).encode()
+    )
+
+    assert responder.purposes == ["knowledge_answer"]
+    assert answer.answer_scope == "general_customs_guidance"
+    assert answer.coverage == "covered"
+    assert answer.snapshot_id == "dev-fixture-guidance"
+    assert answer.citations and answer.citations[0].kind == "guidance_evidence"
+    assert [section.kind for section in answer.answer_sections] == ["general_guidance"]
+    assert GENERAL_GUIDANCE_DISCLAIMER in answer.direct_answer
+    assert "확인 절차" in answer.direct_answer
+    assert not contains_internal_result_marker(answer.direct_answer)
+
+
+@pytest.mark.parametrize("failure_mode", ("request_failure", "semantic_invalid"))
+def test_functional_mixed_answer_falls_back_to_separate_safe_sections(
+    monkeypatch: pytest.MonkeyPatch,
+    failure_mode: str,
+) -> None:
+    """An invalid Case-answer composition must not erase official guidance."""
+
+    class InvalidCaseResponder:
+        def __init__(self) -> None:
+            self.purposes: list[str] = []
+
+        def respond(
+            self, _payload: dict[str, Any], *, purpose: str, **_kwargs: Any
+        ) -> dict[str, Any]:
+            self.purposes.append(purpose)
+            if failure_mode == "request_failure":
+                raise RuntimeError("simulated provider request failure")
+            # A semantically invalid object is equivalent to a malformed
+            # provider answer at the Agent boundary.
+            return {}
+
+        def close(self) -> None:
+            return None
+
+    def functional_guidance(
+        _self: ProfileEvidenceRetriever, request: dict[str, Any], **_kwargs: Any
+    ) -> dict[str, Any]:
+        response = _official_law_guidance()
+        response["request_id"] = request["request_id"]
+        response["as_of"] = request["as_of"]
+        return response
+
+    monkeypatch.setattr(ProfileEvidenceRetriever, "retrieve", _stub_retrieve)
+    monkeypatch.setattr(ProfileEvidenceRetriever, "guidance_query", functional_guidance)
+    runtime = ProfileRuntime(_settings())
+    result = runtime.review_v3_json(json.dumps(_review_payload()).encode())
+    responder = InvalidCaseResponder()
+    runtime.mode = "functional-uat"
+    runtime._grounded_responder = responder  # type: ignore[assignment]
+
+    answer = runtime.assistant_answer_json(
+        _answer_payload(
+            result, question="현재 사건의 수입 통관 절차에서 먼저 확인할 항목을 안내해 주세요."
+        )
+    )
+
+    assert responder.purposes == ["assistant_answer"]
+    assert answer.answer_scope == "case_grounded"
+    assert [section.kind for section in answer.answer_sections] == [
+        "case_analysis",
+        "general_guidance",
+    ]
+    assert any(citation.kind == "comparison" for citation in answer.citations)
+    assert any(citation.kind == "guidance_evidence" for citation in answer.citations)
+    assert GENERAL_GUIDANCE_DISCLAIMER in answer.answer_sections[1].content
+    assert not contains_internal_result_marker(answer.direct_answer)
+    assert not contains_internal_result_marker(answer.answer_sections[1].content)
+
+
 @pytest.mark.parametrize(
     ("question", "expected_topic"),
     [

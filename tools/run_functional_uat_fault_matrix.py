@@ -179,7 +179,12 @@ class _StaticRetriever:
             "results": [],
         }
 
-    def record_retrieve_skipped(self, *, review_run_id: str) -> None:
+    def record_retrieve_skipped(
+        self,
+        *,
+        review_run_id: str,
+        reason_code: str = "no_hs_qualified_commodity",
+    ) -> None:
         """Match the production retriever without creating a transcript.
 
         The fault matrix deliberately has no Functional-UAT transcript root.
@@ -187,7 +192,7 @@ class _StaticRetriever:
         exercising the same ProfileRuntime branch as the service.
         """
 
-        del review_run_id
+        del review_run_id, reason_code
 
 
 def _headers(settings: ServiceSettings) -> dict[str, str]:
