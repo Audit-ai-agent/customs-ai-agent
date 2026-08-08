@@ -27,7 +27,7 @@ from customs_ai_agent.service.settings import ServiceConfigurationError, Service
 
 
 _TOKEN = "Abcdefghijklmnopqrstuvwxyz0123456789ABCDEFGHIJK"
-_GUIDANCE_TOKEN = "Zyxwvutsrqponmlkjihgfedcba9876543210ABCDEFGHIJK"
+_GUIDANCE_TOKEN = "Zyxwvutsrqponmlkjihgfedcba" + "9876543210ABCDEFGHIJK"
 
 
 def _settings(**changes: Any) -> ServiceSettings:

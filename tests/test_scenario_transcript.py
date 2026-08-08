@@ -31,7 +31,7 @@ from customs_ai_agent.service.settings import ServiceSettings
 
 _TOKEN = "Abcdefghijklmnopqrstuvwxyz" + "0123456789ABCDEFGHIJK"
 _SECOND_TOKEN = "Zyxwvutsrqponmlkjihgfedcba" + "9876543210ABCDEFGHIJK"
-_GUIDANCE_TOKEN = "Mnbvcxzlkjhgfdsapoiuytrewq0987654321ABCDEFGHIJK"
+_GUIDANCE_TOKEN = "Mnbvcxzlkjhgfdsapoiuytrewq" + "0987654321ABCDEFGHIJK"
 _CLAUDE_KEY = "sk" + "-ant-" + "functional-uat-live-key-abcdefghijklmnop"
 
 

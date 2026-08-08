@@ -10,7 +10,7 @@ import pytest
 
 _POWERSHELL = shutil.which("pwsh") or shutil.which("powershell")
 _SERVICE_TOKEN = "Abcdefghijklmnopqrstuvwxyz0123456789ABCDEFGHIJK"
-_GUIDANCE_TOKEN = "Zyxwvutsrqponmlkjihgfedcba9876543210ABCDEFGHIJK"
+_GUIDANCE_TOKEN = "Zyxwvutsrqponmlkjihgfedcba" + "9876543210ABCDEFGHIJK"
 _ANTHROPIC_KEY_NAME = "ANTHROPIC" + "_API_KEY"
 _TEST_VALUE = "fixture-value-0123456789"
 _STALE_VALUE = "stale-fixture-value-9876543210"

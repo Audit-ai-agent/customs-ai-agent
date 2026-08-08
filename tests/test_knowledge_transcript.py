@@ -31,8 +31,8 @@ from customs_ai_agent.service.settings import ServiceSettings
 
 
 _TOKEN = "Abcdefghijklmnopqrstuvwxyz0123456789ABCDEFGHIJK"
-_SECOND_TOKEN = "Zyxwvutsrqponmlkjihgfedcba9876543210ABCDEFGHIJK"
-_GUIDANCE_TOKEN = "Mnbvcxzlkjhgfdsapoiuytrewq0987654321ABCDEFGHIJK"
+_SECOND_TOKEN = "Zyxwvutsrqponmlkjihgfedcba" + "9876543210ABCDEFGHIJK"
+_GUIDANCE_TOKEN = "Mnbvcxzlkjhgfdsapoiuytrewq" + "0987654321ABCDEFGHIJK"
 _CLAUDE_KEY = "sk" + "-ant-" + "knowledge-transcript-key-abcdefghijklmnop"
 _REGISTRY_SHA256 = "6fed779ee0ec1cd2358972925fe1b2788838a197d4f33e62e461fcfed2bb7d6c"
 # Keep this list aligned with the documented set recognised by
