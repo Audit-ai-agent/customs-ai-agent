@@ -453,13 +453,17 @@ def test_claude_trace_contains_actual_prompt_and_full_text_response(tmp_path: Pa
     records = _lines(_root(tmp_path) / "run-claude-trace" / "claude.jsonl")
     assert [record["event"] for record in records] == ["request_started", "response_received"]
     request_payload = records[0]["payload"]
+    assert request_payload["analysis_phase"] == "initial_extraction"
     assert request_payload["system_prompt"].startswith("You are a transcription")
     assert request_payload["messages"][0]["content"].endswith("HS CODE: 0303540000")
     assert records[1]["payload"]["output_text"] == output
+    assert records[1]["payload"]["analysis_phase"] == "initial_extraction"
     assert "provider_response" not in records[1]["payload"]
 
 
-def test_claude_failure_records_safe_code_and_redacts_live_key(tmp_path: Path) -> None:
+def test_initial_extraction_failure_is_not_marked_as_focused_reextraction(
+    tmp_path: Path,
+) -> None:
     root = ScenarioTranscriptRoot.from_environment({TRANSCRIPT_ROOT_ENV: str(_root(tmp_path))})
     transcript = root.for_run("run-claude-failure")
     assert transcript is not None
@@ -484,11 +488,91 @@ def test_claude_failure_records_safe_code_and_redacts_live_key(tmp_path: Path) -
     records = _lines(_root(tmp_path) / "run-claude-failure" / "claude.jsonl")
     assert [record["event"] for record in records] == ["request_started", "request_failed"]
     assert records[1]["payload"] == {
+        "analysis_phase": "initial_extraction",
         "error_code": "provider_request_failed",
         "model": analyzer.model_id,
         "provider": "anthropic",
     }
     assert _TOKEN not in json.dumps(records)
+
+
+def test_initial_invalid_output_is_not_marked_as_focused_reextraction(
+    tmp_path: Path,
+) -> None:
+    root = ScenarioTranscriptRoot.from_environment({TRANSCRIPT_ROOT_ENV: str(_root(tmp_path))})
+    transcript = root.for_run("run-initial-invalid")
+    assert transcript is not None
+
+    class Messages:
+        def create(self, **_kwargs: Any) -> object:
+            return SimpleNamespace(content=[SimpleNamespace(text="not a JSON document analysis")])
+
+    analyzer = ClaudeDocumentAnalyzer(
+        ClaudeSettings(api_key=SecretStr(_TOKEN)), SimpleNamespace(messages=Messages())
+    )
+    with pytest.raises(LLMOutputValidationError, match="invalid document analysis"):
+        analyzer.analyze(
+            {
+                "document_id": "doc-initial-invalid",
+                "filename": "invoice.txt",
+                "content_text": "COMMERCIAL INVOICE\\nInvoice No: INV-1",
+            },
+            transcript=transcript,
+        )
+
+    records = _lines(_root(tmp_path) / "run-initial-invalid" / "claude.jsonl")
+    assert records[-1]["event"] == "response_invalid"
+    assert records[-1]["payload"] == {
+        "analysis_phase": "initial_extraction",
+        "error_code": "provider_output_invalid",
+        "model": analyzer.model_id,
+        "provider": "anthropic",
+    }
+
+
+def test_focused_reextraction_invalid_output_has_only_safe_phase_metadata(
+    tmp_path: Path,
+) -> None:
+    """A verifier can identify this bounded retry without document contents."""
+
+    root = ScenarioTranscriptRoot.from_environment({TRANSCRIPT_ROOT_ENV: str(_root(tmp_path))})
+    transcript = root.for_run("run-focused-reextract-invalid")
+    assert transcript is not None
+
+    class Messages:
+        def create(self, **_kwargs: Any) -> object:
+            return SimpleNamespace(content=[SimpleNamespace(text="not a JSON document analysis")])
+
+    analyzer = ClaudeDocumentAnalyzer(
+        ClaudeSettings(api_key=SecretStr(_TOKEN)), SimpleNamespace(messages=Messages())
+    )
+    with pytest.raises(LLMOutputValidationError, match="invalid document analysis"):
+        analyzer.analyze(
+            {
+                "document_id": "doc-focused-reextract-invalid",
+                "filename": "invoice.txt",
+                "content_text": "COMMERCIAL INVOICE\\nInvoice No: INV-1",
+            },
+            transcript=transcript,
+            focus_fields=("quantity",),
+        )
+
+    records = _lines(_root(tmp_path) / "run-focused-reextract-invalid" / "claude.jsonl")
+    assert [record["event"] for record in records] == [
+        "request_started",
+        "response_received",
+        "response_invalid",
+    ]
+    assert records[0]["payload"]["analysis_phase"] == "focused_reextraction"
+    assert records[1]["payload"]["analysis_phase"] == "focused_reextraction"
+    assert records[2]["payload"] == {
+        "analysis_phase": "focused_reextraction",
+        "error_code": "provider_output_invalid",
+        "model": analyzer.model_id,
+        "provider": "anthropic",
+    }
+    assert "content_text" not in records[2]["payload"]
+    assert "focus_fields" not in records[2]["payload"]
 
 
 def test_grounded_responder_records_one_redacted_chat_exchange(tmp_path: Path) -> None:

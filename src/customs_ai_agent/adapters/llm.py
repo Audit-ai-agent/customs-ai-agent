@@ -161,6 +161,13 @@ class ClaudeDocumentAnalyzer:
             raise LLMProviderError("The text document is invalid.")
         if not text.strip() or len(text) > 200_000:
             raise LLMProviderError("The text document exceeds the profile limit.")
+        # This is deliberately a fixed, non-document value.  A Functional-UAT
+        # verifier may distinguish the bounded retry degradation from an
+        # initial extraction failure without learning a document id, requested
+        # field, prompt, or provider output.
+        analysis_phase = (
+            "focused_reextraction" if focus_fields else "initial_extraction"
+        )
         focused_instruction = (
             "\nPerform one focused re-check for only these missing or ambiguous extraction fields: "
             + ", ".join(focus_fields)
@@ -175,6 +182,7 @@ class ClaudeDocumentAnalyzer:
         request_payload = {
             "provider": "anthropic",
             "model": self.model_id,
+            "analysis_phase": analysis_phase,
             "max_tokens": self._settings.max_tokens,
             "temperature": 0,
             "system_prompt": self._system_prompt,
@@ -203,6 +211,7 @@ class ClaudeDocumentAnalyzer:
                     {
                         "provider": "anthropic",
                         "model": self.model_id,
+                        "analysis_phase": analysis_phase,
                         "error_code": "provider_request_failed",
                     },
                 )
@@ -216,6 +225,7 @@ class ClaudeDocumentAnalyzer:
                     {
                         "provider": "anthropic",
                         "model": self.model_id,
+                        "analysis_phase": analysis_phase,
                         "error_code": "provider_response_invalid",
                     },
                 )
@@ -232,6 +242,7 @@ class ClaudeDocumentAnalyzer:
                 {
                     "provider": "anthropic",
                     "model": self.model_id,
+                    "analysis_phase": analysis_phase,
                     "output_text": output,
                 },
             )
@@ -247,6 +258,7 @@ class ClaudeDocumentAnalyzer:
                     {
                         "provider": "anthropic",
                         "model": self.model_id,
+                        "analysis_phase": analysis_phase,
                         "error_code": "provider_output_invalid",
                     },
                 )
