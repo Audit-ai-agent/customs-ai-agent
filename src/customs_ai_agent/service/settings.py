@@ -16,6 +16,7 @@ _MAX_BODY_BYTES = 2 * 1024 * 1024
 _MAX_DOCUMENTS = 20
 _MAX_TEXT_CHARACTERS = 500_000
 ServiceMode = Literal["local-development", "functional-uat"]
+GuidanceRegistryVersion = Literal["1.0", "2.0"]
 
 
 class ServiceConfigurationError(RuntimeError):
@@ -60,9 +61,9 @@ class ServiceSettings:
     """All service traffic stays on loopback and uses one peer-mode handshake.
 
     ``evidence_*`` always belongs to document-review retrieval.  A guidance
-    peer is opt-in as a complete URL/token pair.  When absent, the bounded
-    guidance query deliberately reuses the Evidence peer so the established
-    development and three-law UAT profiles keep their one-peer topology.
+    peer is opt-in as a complete URL/token pair.  Functional-UAT guidance
+    profiles also declare their registry version so a V2 scope request cannot
+    silently land on the preserved V1 peer.
     """
 
     bearer_token: SecretStr
@@ -70,6 +71,7 @@ class ServiceSettings:
     evidence_service_token: SecretStr
     guidance_base_url: str | None = None
     guidance_service_token: SecretStr | None = None
+    guidance_registry_version: GuidanceRegistryVersion | None = None
     service_mode: ServiceMode = "local-development"
     host: str = "127.0.0.1"
     # Backend owns 18081 and Data fixture owns 18083.  18090 avoids the
@@ -93,12 +95,17 @@ class ServiceSettings:
         evidence_token = self.evidence_service_token.get_secret_value()
         has_guidance_base_url = self.guidance_base_url is not None
         has_guidance_token = self.guidance_service_token is not None
+        has_guidance_registry_version = self.guidance_registry_version is not None
         if _TOKEN.fullmatch(service_token) is None or len(set(service_token)) < 12:
             raise ServiceConfigurationError("service_bearer_token_weak")
         if _B64_TOKEN.fullmatch(evidence_token) is None or len(set(evidence_token)) < 12:
             raise ServiceConfigurationError("evidence_service_token_weak")
         if has_guidance_base_url != has_guidance_token:
             raise ServiceConfigurationError("guidance_service_peer_incomplete")
+        if has_guidance_registry_version and not has_guidance_base_url:
+            raise ServiceConfigurationError("guidance_registry_version_without_peer")
+        if self.guidance_registry_version not in {None, "1.0", "2.0"}:
+            raise ServiceConfigurationError("guidance_registry_version_invalid")
         if has_guidance_base_url:
             assert self.guidance_base_url is not None
             assert self.guidance_service_token is not None
@@ -111,6 +118,12 @@ class ServiceSettings:
                 raise ServiceConfigurationError("guidance_service_token_weak")
         if self.service_mode not in {"local-development", "functional-uat"}:
             raise ServiceConfigurationError("customs_agent_service_mode_invalid")
+        if (
+            self.service_mode == "functional-uat"
+            and has_guidance_base_url
+            and self.guidance_registry_version is None
+        ):
+            raise ServiceConfigurationError("guidance_registry_version_peer_incomplete")
         if self.host != "127.0.0.1":
             raise ServiceConfigurationError("local_profile_bind_host_not_loopback")
         if not self.evidence_base_url.strip() or any(
@@ -170,19 +183,28 @@ class ServiceSettings:
             raise ServiceConfigurationError("local_profile_guidance_bearer_required")
         has_guidance_base_url = "GUIDANCE_SERVICE_BASE_URL" in source
         has_guidance_token = "GUIDANCE_SERVICE_TOKEN" in source
+        has_guidance_registry_version = "GUIDANCE_SERVICE_REGISTRY_VERSION" in source
         if has_guidance_base_url != has_guidance_token:
             raise ServiceConfigurationError("guidance_service_peer_incomplete")
+        if has_guidance_registry_version != has_guidance_base_url:
+            raise ServiceConfigurationError("guidance_registry_version_peer_incomplete")
         guidance_base_url: str | None = None
         guidance_service_token: SecretStr | None = None
+        guidance_registry_version: GuidanceRegistryVersion | None = None
         if has_guidance_base_url:
             guidance_base_url = _required(source, "GUIDANCE_SERVICE_BASE_URL")
             guidance_service_token = SecretStr(_required(source, "GUIDANCE_SERVICE_TOKEN"))
+            configured_registry_version = _required(source, "GUIDANCE_SERVICE_REGISTRY_VERSION")
+            if configured_registry_version not in {"1.0", "2.0"}:
+                raise ServiceConfigurationError("guidance_registry_version_invalid")
+            guidance_registry_version = cast(GuidanceRegistryVersion, configured_registry_version)
         return cls(
             bearer_token=SecretStr(_required(source, "CUSTOMS_AGENT_SERVICE_BEARER_TOKEN")),
             evidence_base_url=_required(source, "EVIDENCE_SERVICE_BASE_URL"),
             evidence_service_token=SecretStr(_required(source, "EVIDENCE_SERVICE_TOKEN")),
             guidance_base_url=guidance_base_url,
             guidance_service_token=guidance_service_token,
+            guidance_registry_version=guidance_registry_version,
             service_mode=cast(ServiceMode, configured_mode),
             host=source.get("CUSTOMS_AGENT_HOST", "127.0.0.1").strip(),
             port=_integer(source, "CUSTOMS_AGENT_PORT", 18090, 1, 65_535),
@@ -219,4 +241,9 @@ class ServiceSettings:
         )
 
 
-__all__ = ["ServiceConfigurationError", "ServiceMode", "ServiceSettings"]
+__all__ = [
+    "GuidanceRegistryVersion",
+    "ServiceConfigurationError",
+    "ServiceMode",
+    "ServiceSettings",
+]

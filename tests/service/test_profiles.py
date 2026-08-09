@@ -54,6 +54,7 @@ def test_default_profile_is_local_development() -> None:
     assert settings.port == 18090
     assert settings.guidance_base_url is None
     assert settings.guidance_service_token is None
+    assert settings.guidance_registry_version is None
 
 
 def test_regulatory_requirement_is_one_finding_and_action_across_linked_documents() -> None:
@@ -259,6 +260,35 @@ def test_guidance_peer_requires_a_complete_url_and_token_pair(
     assert raised.value.code == "guidance_service_peer_incomplete"
 
 
+def test_guidance_registry_version_is_an_explicit_complete_peer_binding() -> None:
+    base_environment = {
+        "CUSTOMS_AGENT_SERVICE_BEARER_TOKEN": _TOKEN,
+        "EVIDENCE_SERVICE_BASE_URL": "http://127.0.0.1:18083",
+        "EVIDENCE_SERVICE_TOKEN": _TOKEN,
+        "GUIDANCE_SERVICE_BASE_URL": "http://127.0.0.1:18094",
+        "GUIDANCE_SERVICE_TOKEN": _GUIDANCE_TOKEN,
+        "GUIDANCE_SERVICE_REGISTRY_VERSION": "2.0",
+    }
+    settings = ServiceSettings.from_environment(base_environment)
+    assert settings.guidance_registry_version == "2.0"
+
+    missing_version = dict(base_environment)
+    del missing_version["GUIDANCE_SERVICE_REGISTRY_VERSION"]
+    with pytest.raises(ServiceConfigurationError) as raised:
+        ServiceSettings.from_environment(missing_version)
+    assert raised.value.code == "guidance_registry_version_peer_incomplete"
+
+    orphan_version = {
+        key: value
+        for key, value in base_environment.items()
+        if not key.startswith("GUIDANCE_SERVICE_BASE_URL")
+        and not key.startswith("GUIDANCE_SERVICE_TOKEN")
+    }
+    with pytest.raises(ServiceConfigurationError) as raised:
+        ServiceSettings.from_environment(orphan_version)
+    assert raised.value.code == "guidance_registry_version_peer_incomplete"
+
+
 def test_profile_rejects_non_loopback_guidance_peer() -> None:
     settings = replace(
         _settings(),
@@ -330,6 +360,7 @@ def test_guidance_uses_its_own_loopback_origin_and_token_while_review_stays_on_e
             _settings(service_mode="functional-uat"),
             guidance_base_url="http://127.0.0.1:18093",
             guidance_service_token=SecretStr(_GUIDANCE_TOKEN),
+            guidance_registry_version="1.0",
         )
     )
     retriever.retrieve({"request_id": "evidence-request", "review_run_id": "review-run"})
@@ -337,9 +368,10 @@ def test_guidance_uses_its_own_loopback_origin_and_token_while_review_stays_on_e
         {
             "schema_version": "3.0",
             "request_id": "guidance-request",
-            "query": "수출 신고 절차를 알려 주세요.",
+            "query": "대한민국 수출 신고 절차 공식 안내",
             "trade_direction": "export",
             "topic_hint": "customs_declaration",
+            "scope_hint": "export_declaration",
             "as_of": "2026-08-05",
             "top_k": 3,
         }
@@ -350,6 +382,122 @@ def test_guidance_uses_its_own_loopback_origin_and_token_while_review_stays_on_e
         ("http://127.0.0.1:18083/internal/rag/v3/retrieve", f"Bearer {_TOKEN}"),
         ("http://127.0.0.1:18093/internal/rag/v3/guidance/query", f"Bearer {_GUIDANCE_TOKEN}"),
     ]
+
+
+def test_v2_guidance_requires_readiness_and_exact_configured_generation(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    calls: list[tuple[str, str, str]] = []
+    retriever = ProfileEvidenceRetriever(
+        replace(
+            _settings(service_mode="functional-uat"),
+            guidance_base_url="http://127.0.0.1:18094",
+            guidance_service_token=SecretStr(_GUIDANCE_TOKEN),
+            guidance_registry_version="2.0",
+        )
+    )
+
+    def data_request(
+        path: str,
+        *,
+        method: str,
+        peer: str,
+        payload: dict[str, Any] | None = None,
+        **_kwargs: Any,
+    ) -> dict[str, Any]:
+        calls.append((path, method, peer))
+        if method == "GET":
+            return {"status": "ready"}
+        assert payload is not None
+        return {
+            "schema_version": "3.0",
+            "request_id": payload["request_id"],
+            "status": "covered",
+            "coverage": "covered",
+            "registry_version": "2.0",
+            "results": [],
+        }
+
+    monkeypatch.setattr(retriever, "_request", data_request)
+    request = {
+        "schema_version": "3.0",
+        "request_id": "guidance-v2-ready",
+        "query": "대한민국 수출 신고 절차 공식 안내",
+        "trade_direction": "export",
+        "topic_hint": "customs_declaration",
+        "scope_hint": "export_declaration",
+        "as_of": "2026-08-05",
+        "top_k": 3,
+    }
+    retriever.guidance_query(request)
+    retriever.guidance_query({**request, "request_id": "guidance-v2-ready-second"})
+
+    assert calls == [
+        (ProfileEvidenceRetriever.readiness_path, "GET", "guidance"),
+        (ProfileEvidenceRetriever.guidance_query_path, "POST", "guidance"),
+        (ProfileEvidenceRetriever.guidance_query_path, "POST", "guidance"),
+    ]
+
+
+@pytest.mark.parametrize(
+    ("readiness", "registry_version", "expected_calls"),
+    [
+        ({"status": "not_ready"}, "2.0", 1),
+        ({"status": "ready"}, "1.0", 2),
+    ],
+)
+def test_v2_guidance_fails_closed_when_readiness_or_generation_is_wrong(
+    monkeypatch: pytest.MonkeyPatch,
+    readiness: dict[str, str],
+    registry_version: str,
+    expected_calls: int,
+) -> None:
+    retriever = ProfileEvidenceRetriever(
+        replace(
+            _settings(service_mode="functional-uat"),
+            guidance_base_url="http://127.0.0.1:18094",
+            guidance_service_token=SecretStr(_GUIDANCE_TOKEN),
+            guidance_registry_version="2.0",
+        )
+    )
+    calls = 0
+
+    def data_request(
+        _path: str,
+        *,
+        method: str,
+        payload: dict[str, Any] | None = None,
+        **_kwargs: Any,
+    ) -> dict[str, Any]:
+        nonlocal calls
+        calls += 1
+        if method == "GET":
+            return readiness
+        assert payload is not None
+        return {
+            "schema_version": "3.0",
+            "request_id": payload["request_id"],
+            "status": "covered",
+            "coverage": "covered",
+            "registry_version": registry_version,
+            "results": [],
+        }
+
+    monkeypatch.setattr(retriever, "_request", data_request)
+    with pytest.raises(RetrievalError):
+        retriever.guidance_query(
+            {
+                "schema_version": "3.0",
+                "request_id": "guidance-v2-fail",
+                "query": "대한민국 수출 신고 절차 공식 안내",
+                "trade_direction": "export",
+                "topic_hint": "customs_declaration",
+                "scope_hint": "export_declaration",
+                "as_of": "2026-08-05",
+                "top_k": 3,
+            }
+        )
+    assert calls == expected_calls
 
 
 @pytest.mark.parametrize("failure", ["mode", "token"])
@@ -387,6 +535,7 @@ def test_guidance_peer_mode_or_token_mismatch_fails_closed(
             _settings(service_mode="functional-uat"),
             guidance_base_url="http://127.0.0.1:18093",
             guidance_service_token=SecretStr(_GUIDANCE_TOKEN),
+            guidance_registry_version="1.0",
         )
     )
     with pytest.raises(RetrievalError):
@@ -394,9 +543,10 @@ def test_guidance_peer_mode_or_token_mismatch_fails_closed(
             {
                 "schema_version": "3.0",
                 "request_id": "guidance-failed",
-                "query": "수출 신고 절차를 알려 주세요.",
+                "query": "대한민국 수출 신고 절차 공식 안내",
                 "trade_direction": "export",
                 "topic_hint": "customs_declaration",
+                "scope_hint": "export_declaration",
                 "as_of": "2026-08-05",
                 "top_k": 3,
             }

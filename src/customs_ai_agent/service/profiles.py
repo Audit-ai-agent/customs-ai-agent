@@ -74,7 +74,9 @@ from customs_ai_agent.service.assistant import (
     provider_snapshot,
     response_from_knowledge_provider_candidate,
     response_from_provider_candidate,
+    unregistered_document_input_answer,
 )
+from customs_ai_agent.service.case_input import sanitize_case_assistant_request
 from customs_ai_agent.service.report import (
     build_grounded_report_sections,
     validate_grounded_report_sections,
@@ -113,17 +115,33 @@ _GUIDANCE_TOPIC_HINTS = frozenset(
     }
 )
 _GUIDANCE_SAFE_QUERY = {
-    "customs_clearance": "대한민국 수출입 통관 절차 공식 안내",
-    "customs_declaration": "대한민국 수출입 신고 절차 공식 안내",
-    "customs_duty": "대한민국 과세가격과 관세 기초 공식 안내",
-    "hs_classification": "대한민국 HS 품목분류 공식 안내",
-    "origin_verification": "대한민국 원산지 확인 공식 안내",
-    "trade_documents": "대한민국 수출입 무역 서류 공식 안내",
-    "import_requirements": "대한민국 수입 요건 공식 안내",
-    "export_requirements": "대한민국 수출 요건 공식 안내",
-    "transport_documents": "대한민국 수출입 운송 서류 공식 안내",
-    "fta_procedure": "대한민국 FTA 원산지와 특혜 절차 공식 안내",
-    "trade_terms": "대한민국 무역 거래조건 공식 안내",
+    ("customs_clearance", "import_clearance_flow"): "대한민국 수입 통관 흐름 공식 안내",
+    ("customs_clearance", "export_clearance_flow"): "대한민국 수출 통관 흐름 공식 안내",
+    ("customs_declaration", "import_declaration"): "대한민국 수입 신고 절차 공식 안내",
+    ("customs_declaration", "export_declaration"): "대한민국 수출 신고 절차 공식 안내",
+    ("customs_duty", "customs_value_basics"): "대한민국 수입 과세가격 기초 공식 안내",
+    ("customs_duty", "duty_payment_basics"): "대한민국 수입 관세 납세 기초 공식 안내",
+    ("hs_classification", "classification_principles"): "대한민국 HS 품목분류 원칙 공식 안내",
+    ("hs_classification", "advance_ruling_or_confirmation"): "대한민국 HS 사전심사 확인 공식 안내",
+    ("origin_verification", "origin_evidence"): "대한민국 원산지 증빙 공식 안내",
+    ("origin_verification", "origin_verification"): "대한민국 원산지 검증 공식 안내",
+    (
+        "trade_documents",
+        "commercial_and_declaration_documents",
+    ): "대한민국 상업 신고 관련 서류 공식 안내",
+    (
+        "import_requirements",
+        "agency_confirmation_and_supporting_documents",
+    ): "대한민국 수입 요건 보완서류 공식 안내",
+    (
+        "export_requirements",
+        "agency_confirmation_and_supporting_documents",
+    ): "대한민국 수출 요건 보완서류 공식 안내",
+    ("transport_documents", "bill_of_lading"): "대한민국 선하증권 B L 공식 안내",
+    ("transport_documents", "air_waybill"): "대한민국 항공화물운송장 AWB 공식 안내",
+    ("fta_procedure", "origin_certificate"): "대한민국 FTA 원산지증명 공식 안내",
+    ("fta_procedure", "preference_procedure"): "대한민국 FTA 특혜 절차 공식 안내",
+    ("trade_terms", "cost_risk_delivery_terms"): "대한민국 무역 거래조건 공식 안내",
 }
 
 
@@ -220,6 +238,19 @@ class ProfileEvidenceRetriever:
         self._guidance_base_url = self._validated_peer_url(guidance_base_url, peer="guidance")
         self._evidence_token = evidence_token.get_secret_value()
         self._guidance_token = guidance_token.get_secret_value()
+        self._guidance_registry_version = settings.guidance_registry_version
+        self._guidance_v2_ready = False
+
+    @property
+    def guidance_registry_version(self) -> Literal["1.0", "2.0"] | None:
+        """Configured guidance generation, if this runtime has one.
+
+        ``None`` remains a local-development compatibility mode only.  A
+        Functional-UAT caller must select a versioned composed profile before
+        the Agent is allowed to query general guidance.
+        """
+
+        return self._guidance_registry_version
 
     @staticmethod
     def _validated_peer_url(base_url: str, *, peer: DataPeer) -> str:
@@ -414,6 +445,39 @@ class ProfileEvidenceRetriever:
             raise RetrievalError("Data service is not ready")
         return {"status": "ready"}
 
+    def _ensure_v2_guidance_ready(
+        self,
+        *,
+        review_run_id: str | None = None,
+        transcript: ScenarioTranscriptRun | None = None,
+    ) -> None:
+        """Check the active V2 pointer once before its first bounded query.
+
+        The V2 Data service makes this readiness endpoint fail closed when the
+        active snapshot, registry, or source verification is not ready.  The
+        subsequent query still undergoes full response provenance validation.
+        """
+
+        if self._guidance_registry_version != "2.0" or self._guidance_v2_ready:
+            return
+        response = self._request(
+            self.readiness_path,
+            method="GET",
+            review_run_id=review_run_id,
+            transcript=transcript,
+            peer="guidance",
+        )
+        if response != {"status": "ready"}:
+            self._record_failure(
+                review_run_id,
+                transcript=transcript,
+                method="GET",
+                path=self.readiness_path,
+                error_code="guidance_v2_readiness_invalid",
+            )
+            raise RetrievalError("V2 guidance snapshot is not ready")
+        self._guidance_v2_ready = True
+
     def retrieve(self, request: dict[str, Any]) -> dict[str, Any]:
         review_run_id = request.get("review_run_id")
         if not isinstance(review_run_id, str):
@@ -449,9 +513,9 @@ class ProfileEvidenceRetriever:
     ) -> dict[str, Any]:
         """Make the one permitted official-guidance query for an assistant turn.
 
-        It deliberately does not call the item/HS review endpoint and does not
-        add a readiness request.  The Data endpoint owns its snapshot health
-        check, so this method represents exactly one bounded HTTP operation.
+        It deliberately does not call the item/HS review endpoint.  A V2
+        profile performs one cached readiness check before its first bounded
+        query; V1 and local dev-fixture calls retain the single-query path.
         """
 
         if (
@@ -461,10 +525,16 @@ class ProfileEvidenceRetriever:
             or not 1 <= len(request["query"]) <= 1_200
             or request.get("trade_direction") not in {"import", "export", "both"}
             or request.get("topic_hint") not in _GUIDANCE_TOPIC_HINTS
+            or not isinstance(request.get("scope_hint"), str)
+            or _GUIDANCE_SAFE_QUERY.get(
+                (str(request.get("topic_hint")), str(request.get("scope_hint")))
+            )
+            != request.get("query")
             or not isinstance(request.get("as_of"), str)
             or request.get("top_k") not in {1, 2, 3}
         ):
             raise RetrievalError("Data guidance request is invalid")
+        self._ensure_v2_guidance_ready(review_run_id=review_run_id, transcript=transcript)
         response = self._request(
             self.guidance_query_path,
             method="POST",
@@ -488,6 +558,18 @@ class ProfileEvidenceRetriever:
                 error_code="guidance_contract_invalid",
             )
             raise RetrievalError("Data guidance response does not satisfy the shared contract")
+        if (
+            self._guidance_registry_version is not None
+            and response.get("registry_version") != self._guidance_registry_version
+        ):
+            self._record_failure(
+                review_run_id,
+                transcript=transcript,
+                method="POST",
+                path=self.guidance_query_path,
+                error_code="guidance_registry_version_mismatch",
+            )
+            raise RetrievalError("Data guidance registry generation does not match the profile")
         return response
 
     def record_retrieve_skipped(
@@ -820,9 +902,14 @@ def _retrieve_request(
 
 
 def _guidance_query_request(
-    *, conversation_id: str, trade_type: str, as_of: str, topic_hint: str
+    *,
+    conversation_id: str,
+    trade_type: Literal["import", "export", "both"],
+    as_of: str,
+    topic_hint: str,
+    scope_hint: str,
 ) -> dict[str, Any]:
-    """Create one topic-owned guidance lookup without forwarding user prose.
+    """Create one topic-and-scope lookup without forwarding user prose.
 
     Data's versioned registry already receives the bounded ``topic_hint``.
     The required query field is therefore a fixed Korean retrieval label, not
@@ -831,23 +918,21 @@ def _guidance_query_request(
     shared Data wire contract and deterministic request identity.
     """
 
-    safe_query = _GUIDANCE_SAFE_QUERY.get(topic_hint)
+    safe_query = _GUIDANCE_SAFE_QUERY.get((topic_hint, scope_hint))
     if topic_hint not in _GUIDANCE_TOPIC_HINTS or safe_query is None:
         raise RuntimeInputError("guidance_topic_invalid", "guidance topic is invalid")
-    trade_direction = trade_type
-    if trade_type == "both" and topic_hint == "import_requirements":
-        trade_direction = "import"
-    elif trade_type == "both" and topic_hint == "export_requirements":
-        trade_direction = "export"
     digest = hashlib.sha256(
-        f"{conversation_id}\n{safe_query}\n{trade_direction}\n{topic_hint}\n{as_of}".encode("utf-8")
+        f"{conversation_id}\n{safe_query}\n{trade_type}\n{topic_hint}\n{scope_hint}\n{as_of}".encode(
+            "utf-8"
+        )
     ).hexdigest()[:32]
     return {
         "schema_version": "3.0",
         "request_id": f"guide-{digest}",
         "query": safe_query,
-        "trade_direction": trade_direction,
+        "trade_direction": trade_type,
         "topic_hint": topic_hint,
+        "scope_hint": scope_hint,
         "as_of": as_of,
         "top_k": 3,
     }
@@ -868,10 +953,12 @@ def _guidance_provider_snapshot(
 
     return {
         "topic": context.topic,
+        "scope": context.scope,
         "trade_direction": trade_direction,
         "snapshot_id": context.snapshot_id,
         "as_of": context.as_of.isoformat(),
         "coverage": context.coverage,
+        "registry_version": context.registry_version,
         "allowed_presentation_styles": ["overview", "checklist", "source_focus"],
         "allowed_suggestion_topics": sorted(_GUIDANCE_TOPIC_HINTS),
         "source_slots": [
@@ -1196,6 +1283,14 @@ class ProfileRuntime:
             model_id=str(self._analyzer.model_id),
         )
 
+    def _guidance_lookup_is_enabled(self) -> bool:
+        """Keep Functional-UAT generations explicit at the Agent boundary."""
+
+        return (
+            self.mode == "local-development"
+            or self._retriever.guidance_registry_version is not None
+        )
+
     def _compose_functional_report(
         self,
         result: ReviewRunResultV3,
@@ -1375,18 +1470,31 @@ class ProfileRuntime:
         """Answer once from an immutable review snapshot; never mutate Case state."""
 
         self._assert_open()
-        request = self._decode_assistant(payload)
+        sanitization = sanitize_case_assistant_request(self._decode_assistant(payload))
+        request = sanitization.request
+        if sanitization.current_input_was_document_shaped:
+            # Do not allocate or write a review transcript for the pasted
+            # body.  The safe response below is fully code-owned and does not
+            # invoke Data or Claude.
+            return unregistered_document_input_answer(request, engine=self._engine())
         transcript = self._transcript_root.for_run(request.review_run_id)
         policy = assistant_question_policy(request)
         guidance_context = None
-        if policy.general_topic is not None:
+        if (
+            policy.general_topic is not None
+            and policy.general_scope is not None
+            and policy.query_direction is not None
+            and not policy.direction_inapplicable
+            and self._guidance_lookup_is_enabled()
+        ):
             try:
                 data_response = self._retriever.guidance_query(
                     _guidance_query_request(
                         conversation_id=request.conversation_id,
-                        trade_type=request.review_result.trade_type,
+                        trade_type=policy.query_direction,
                         as_of=request.review_result.review_as_of.isoformat(),
                         topic_hint=policy.general_topic,
+                        scope_hint=policy.general_scope,
                     ),
                     review_run_id=request.review_run_id,
                 )
@@ -1394,15 +1502,20 @@ class ProfileRuntime:
                     data_response,
                     profile_mode=self.mode,
                     expected_as_of=request.review_result.review_as_of,
-                    expected_trade_direction=request.review_result.trade_type,
+                    expected_trade_direction=policy.query_direction,
                     expected_topic=policy.general_topic,
+                    expected_scope=policy.general_scope,
                 )
             except (RetrievalError, ValueError):
                 # A guidance lookup may not turn an otherwise usable Case
                 # conversation into a dependency error.  The answer below
                 # explicitly reports unavailable coverage without guessing.
                 guidance_context = None
-        if policy.scope == "general_customs_guidance":
+        if (
+            policy.general_topic is not None
+            and not policy.mixed
+            and policy.scope in {"general_customs_guidance", "insufficient_evidence"}
+        ):
             knowledge_request = KnowledgeAnswerRequestV1(
                 conversation_id=request.conversation_id,
                 question=request.question,
@@ -1489,7 +1602,10 @@ class ProfileRuntime:
                 )
         if policy.mixed:
             answer = combine_case_and_guidance(
-                answer, context=guidance_context, topic=policy.general_topic
+                answer,
+                context=guidance_context,
+                policy=policy,
+                as_of=request.review_result.review_as_of,
             )
         return answer
 
@@ -1503,7 +1619,7 @@ class ProfileRuntime:
 
         self._assert_open()
         request = self._decode_knowledge(payload)
-        policy = knowledge_question_policy(request.question.strip())
+        policy = knowledge_question_policy(request.question.strip(), trade_type=request.trade_type)
         guidance_context = None
         # A standalone transcript is allocated only for a permitted general
         # guidance lookup.  Ordinary development leaves this root disabled;
@@ -1511,15 +1627,22 @@ class ProfileRuntime:
         # an explicit dev-fixture may use that safe namespace or preserved
         # legacy knowledge-runs history, never a review's Case/Review tree.
         transcript: KnowledgeTranscriptTurn | None = None
-        if policy.general_topic is not None:
+        if (
+            policy.general_topic is not None
+            and policy.general_scope is not None
+            and policy.query_direction is not None
+            and not policy.direction_inapplicable
+            and self._guidance_lookup_is_enabled()
+        ):
             transcript = self._knowledge_transcript_root.start_turn(request.conversation_id)
             try:
                 data_response = self._retriever.guidance_query(
                     _guidance_query_request(
                         conversation_id=request.conversation_id,
-                        trade_type=request.trade_type,
+                        trade_type=policy.query_direction,
                         as_of=request.as_of.isoformat(),
                         topic_hint=policy.general_topic,
+                        scope_hint=policy.general_scope,
                     ),
                     transcript=transcript,
                 )
@@ -1527,8 +1650,9 @@ class ProfileRuntime:
                     data_response,
                     profile_mode=self.mode,
                     expected_as_of=request.as_of,
-                    expected_trade_direction=request.trade_type,
+                    expected_trade_direction=policy.query_direction,
                     expected_topic=policy.general_topic,
+                    expected_scope=policy.general_scope,
                 )
             except (RetrievalError, ValueError):
                 guidance_context = None

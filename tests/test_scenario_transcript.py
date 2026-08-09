@@ -157,6 +157,7 @@ def test_functional_runtime_automatically_redacts_all_live_secrets(
         evidence_service_token=SecretStr(_SECOND_TOKEN),
         guidance_base_url="http://127.0.0.1:18093",
         guidance_service_token=SecretStr(_GUIDANCE_TOKEN),
+        guidance_registry_version="1.0",
     )
     runtime = ProfileRuntime(settings)
     assert calls == ["functional-uat"]

@@ -51,6 +51,13 @@ class GuidanceEvidenceV1(AssistantWireModel):
     """
 
     source_id: str = Field(min_length=1, max_length=128)
+    # Data's page-level registry identity is necessary for Backend's strict
+    # provenance check.  Backend removes it before any user-facing response.
+    registry_source_id: str = Field(
+        min_length=1,
+        max_length=64,
+        pattern=r"^[a-z][a-z0-9_]{2,63}$",
+    )
     source_kind: GuidanceSourceKind
     title: str = Field(min_length=1, max_length=1_000)
     uri: str = Field(min_length=1, max_length=2_000)
@@ -67,7 +74,17 @@ class GuidanceEvidenceV1(AssistantWireModel):
     @model_validator(mode="after")
     def _official_law_provenance_is_precise(self) -> "GuidanceEvidenceV1":
         law_values = (self.law_id, self.law_name, self.article_no)
-        if self.source_kind == "official_law" and any(value is None for value in law_values):
+        is_v2_page_source = self.registry_source_id.startswith("v2_")
+        if self.source_kind == "official_law" and is_v2_page_source:
+            # V2 registers exact law status/body pages rather than pretending
+            # that every result is an article-level citation.  It may provide
+            # no law fields, or a complete future article triplet, but never a
+            # partial article claim.
+            if any(value is not None for value in law_values) and not all(
+                value is not None for value in law_values
+            ):
+                raise ValueError("v2 official law guidance must not claim partial law provenance")
+        elif self.source_kind == "official_law" and any(value is None for value in law_values):
             raise ValueError("official law guidance requires law provenance")
         if self.source_kind != "official_law" and any(value is not None for value in law_values):
             raise ValueError("non-law guidance must not claim law provenance")
@@ -79,6 +96,11 @@ class GuidanceCitationV1(AssistantWireModel):
 
     kind: Literal["guidance_evidence"] = "guidance_evidence"
     source_id: str = Field(min_length=1, max_length=256)
+    registry_source_id: str | None = Field(
+        default=None,
+        max_length=64,
+        pattern=r"^[a-z][a-z0-9_]{2,63}$",
+    )
     source_kind: GuidanceSourceKind
     source_title: str = Field(min_length=1, max_length=1_000)
     source_uri: str = Field(min_length=1, max_length=2_000)
@@ -91,14 +113,17 @@ AssistantAnswerCitationV1 = AssistantCitationV1 | GuidanceCitationV1
 
 
 class AssistantAnswerSectionV1(AssistantWireModel):
-    """A user-facing section for a case, official guidance, or both.
+    """A user-facing case, guidance, or evidence-linked application section.
 
     Sections are additive to the legacy ``direct_answer`` field so old
     persisted conversations remain readable.  New replies use at most one
-    case section and one general-guidance section.
+    case section, one general-guidance section, and one deterministic
+    application section.  The application section never adds a new legal
+    claim: it only identifies a next check from citations already present in
+    the case and guidance sections.
     """
 
-    kind: Literal["case_analysis", "general_guidance"]
+    kind: Literal["case_analysis", "general_guidance", "case_application"]
     title: str = Field(min_length=1, max_length=200)
     content: str = Field(min_length=1, max_length=4_000)
     citations: list[AssistantAnswerCitationV1] = Field(default_factory=list, max_length=100)
@@ -110,10 +135,17 @@ class AssistantAnswerSectionV1(AssistantWireModel):
                 isinstance(item, GuidanceCitationV1) for item in self.citations
             ):
                 raise ValueError("case analysis sections require only case citations")
-        elif not self.citations or any(
-            not isinstance(item, GuidanceCitationV1) for item in self.citations
+        elif self.kind == "general_guidance":
+            if not self.citations or any(
+                not isinstance(item, GuidanceCitationV1) for item in self.citations
+            ):
+                raise ValueError("general guidance sections require only guidance citations")
+        elif (
+            not self.citations
+            or not any(isinstance(item, AssistantCitationV1) for item in self.citations)
+            or not any(isinstance(item, GuidanceCitationV1) for item in self.citations)
         ):
-            raise ValueError("general guidance sections require only guidance citations")
+            raise ValueError("case application sections require case and guidance citations")
         return self
 
 
@@ -127,6 +159,32 @@ class AssistantCorrectionDraftV1(AssistantWireModel):
     new_value: str = Field(min_length=1, max_length=2000)
     unit: str | None = Field(default=None, max_length=64)
     reason: str = Field(min_length=1, max_length=2000)
+
+
+class GuidanceResolutionV1(AssistantWireModel):
+    """Safe public state of the one bounded general-guidance lookup.
+
+    ``registry_sha256`` is intentionally absent.  The Agent verifies that
+    digest at its Data boundary, while the Case UI only needs the official
+    snapshot identity, date, selected scope, direction, and coverage state.
+    """
+
+    topic: str = Field(min_length=1, max_length=128)
+    scope: str = Field(min_length=1, max_length=128)
+    requested_direction: Literal["import", "export", "both"]
+    applicable_directions: list[Literal["import", "export"]] = Field(min_length=1, max_length=2)
+    coverage: Literal["covered", "no_coverage", "partial", "unavailable"]
+    snapshot_id: str | None = Field(max_length=512)
+    as_of: date
+    registry_version: Literal["1.0", "2.0"]
+
+    @model_validator(mode="after")
+    def _directions_are_unique(self) -> "GuidanceResolutionV1":
+        if len(self.applicable_directions) != len(set(self.applicable_directions)):
+            raise ValueError("guidance resolution directions must be unique")
+        if self.coverage in {"covered", "partial"} and self.snapshot_id is None:
+            raise ValueError("covered guidance resolution requires a snapshot")
+        return self
 
 
 class AssistantAnswerRequestV1(AssistantWireModel):
@@ -177,9 +235,17 @@ class AssistantAnswerResponseV1(AssistantWireModel):
     # ``answer_sections`` is additive and gives mixed case/general replies an
     # explicit visual boundary.  The legacy top-level fields still carry the
     # primary answer and its citations for unchanged consumers.
-    answer_sections: list[AssistantAnswerSectionV1] = Field(default_factory=list, max_length=2)
+    answer_sections: list[AssistantAnswerSectionV1] = Field(default_factory=list, max_length=3)
     suggested_questions: list[str] = Field(default_factory=list, max_length=3)
     correction_draft: AssistantCorrectionDraftV1 | None = None
+    guidance_resolution: GuidanceResolutionV1 | None = None
+    # Internal Agent→Backend provenance only.  Backend validates and removes
+    # it before message persistence or user-facing serialization.
+    guidance_registry_sha256: str | None = Field(
+        default=None,
+        pattern=r"^[a-f0-9]{64}$",
+    )
+    case_input_notice: Literal["unregistered_document_text"] | None = None
     engine: EngineV3
 
     @model_validator(mode="after")
@@ -239,23 +305,63 @@ class AssistantAnswerResponseV1(AssistantWireModel):
         if len(section_kinds) != len(set(section_kinds)):
             raise ValueError("assistant answer sections must be unique by kind")
         if self.answer_sections:
+            valid_orders = {
+                (),
+                ("case_analysis",),
+                ("general_guidance",),
+                ("case_analysis", "general_guidance"),
+                ("case_analysis", "general_guidance", "case_application"),
+            }
+            if tuple(section_kinds) not in valid_orders:
+                raise ValueError("assistant answer sections must follow the fixed order")
             case_sections = [item for item in self.answer_sections if item.kind == "case_analysis"]
             guidance_sections = [
                 item for item in self.answer_sections if item.kind == "general_guidance"
+            ]
+            application_sections = [
+                item for item in self.answer_sections if item.kind == "case_application"
             ]
             if case_sections and self.answer_scope not in {"case_grounded", "evidence_grounded"}:
                 raise ValueError("case section requires a case-grounded top-level answer")
             if guidance_sections and not guidance_citations:
                 raise ValueError("guidance section requires top-level guidance citations")
+            if application_sections:
+                if self.answer_scope not in {"case_grounded", "evidence_grounded"}:
+                    raise ValueError("case application requires a case-grounded top-level answer")
+                if not case_sections or not guidance_sections:
+                    raise ValueError(
+                        "case application requires preceding case and guidance sections"
+                    )
             section_guidance_ids = {
                 item.source_id
-                for section in guidance_sections
+                for section in [*guidance_sections, *application_sections]
                 for item in section.citations
                 if isinstance(item, GuidanceCitationV1)
             }
             top_level_guidance_ids = {item.source_id for item in guidance_citations}
             if not section_guidance_ids.issubset(top_level_guidance_ids):
                 raise ValueError("guidance section citations must be exposed at the top level")
+            section_case_ids = {
+                (item.kind, item.reference_id)
+                for section in [*case_sections, *application_sections]
+                for item in section.citations
+                if isinstance(item, AssistantCitationV1)
+            }
+            top_level_case_ids = {(item.kind, item.reference_id) for item in case_citations}
+            if not section_case_ids.issubset(top_level_case_ids):
+                raise ValueError("case section citations must be exposed at the top level")
+        if self.guidance_resolution is not None and self.case_input_notice is not None:
+            raise ValueError("case input notice cannot claim a guidance lookup")
+        if self.guidance_resolution is None and self.guidance_registry_sha256 is not None:
+            raise ValueError("guidance registry hash requires a guidance resolution")
+        if self.guidance_resolution is not None and self.guidance_registry_sha256 is None:
+            raise ValueError("guidance resolution requires an internal registry hash")
+        if (
+            self.guidance_resolution is not None
+            and self.guidance_resolution.registry_version == "2.0"
+        ):
+            if any(citation.registry_source_id is None for citation in guidance_citations):
+                raise ValueError("v2 guidance citations require registry source identity")
         return self
 
 
@@ -292,6 +398,11 @@ class KnowledgeAnswerResponseV1(AssistantWireModel):
     coverage: Literal["covered", "no_coverage", "partial", "unavailable"]
     snapshot_id: str | None = Field(default=None, max_length=512)
     as_of: date
+    guidance_resolution: GuidanceResolutionV1 | None = None
+    guidance_registry_sha256: str | None = Field(
+        default=None,
+        pattern=r"^[a-f0-9]{64}$",
+    )
     engine: EngineV3
 
     @model_validator(mode="after")
@@ -305,6 +416,30 @@ class KnowledgeAnswerResponseV1(AssistantWireModel):
             GENERAL_GUIDANCE_DISCLAIMER not in self.direct_answer
         ):
             raise ValueError("standalone guidance must include the non-case disclaimer")
+        if any(section.kind != "general_guidance" for section in self.answer_sections):
+            raise ValueError("standalone guidance supports only general guidance sections")
+        if self.answer_sections and self.answer_scope != "general_customs_guidance":
+            raise ValueError("non-grounded knowledge answers must not have sections")
+        if self.answer_sections:
+            section_source_ids = {
+                citation.source_id
+                for section in self.answer_sections
+                for citation in section.citations
+                if isinstance(citation, GuidanceCitationV1)
+            }
+            citation_source_ids = {citation.source_id for citation in self.citations}
+            if not section_source_ids or not section_source_ids.issubset(citation_source_ids):
+                raise ValueError("knowledge section citations must be exposed at the top level")
+        if self.guidance_resolution is None and self.guidance_registry_sha256 is not None:
+            raise ValueError("guidance registry hash requires a guidance resolution")
+        if self.guidance_resolution is not None and self.guidance_registry_sha256 is None:
+            raise ValueError("guidance resolution requires an internal registry hash")
+        if (
+            self.guidance_resolution is not None
+            and self.guidance_resolution.registry_version == "2.0"
+        ):
+            if any(citation.registry_source_id is None for citation in self.citations):
+                raise ValueError("v2 guidance citations require registry source identity")
         return self
 
 
@@ -315,6 +450,7 @@ __all__ = [
     "AssistantAnswerCitationV1",
     "AssistantCitationV1",
     "AssistantCorrectionDraftV1",
+    "GuidanceResolutionV1",
     "AssistantRecentTurnV1",
     "GuidanceEvidenceV1",
     "GuidanceCitationV1",

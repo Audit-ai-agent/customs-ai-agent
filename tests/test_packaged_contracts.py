@@ -39,6 +39,36 @@ def test_optional_correction_targets_are_omittable_or_null_in_models_and_schema(
         "official_public_guidance",
         "development_fixture",
     ]
+    assert response_schema["$defs"]["AnswerSection"]["properties"]["kind"]["enum"] == [
+        "case_analysis",
+        "general_guidance",
+        "case_application",
+    ]
+    assert response_schema["properties"]["answer_sections"]["maxItems"] == 3
+    assert "guidance_resolution" in response_schema["properties"]
+    assert response_schema["properties"]["guidance_registry_sha256"] == {
+        "type": ["string", "null"],
+        "pattern": "^[a-f0-9]{64}$",
+    }
+    assert "case_input_notice" in response_schema["properties"]
+    assert "guidance_resolution" in knowledge_response_schema["properties"]
+    assert knowledge_response_schema["properties"]["guidance_registry_sha256"] == {
+        "type": ["string", "null"],
+        "pattern": "^[a-f0-9]{64}$",
+    }
+    assert response_schema["$defs"]["GuidanceCitation"]["properties"]["registry_source_id"][
+        "type"
+    ] == ["string", "null"]
+    assert knowledge_response_schema["$defs"]["GuidanceResolution"]["required"] == [
+        "topic",
+        "scope",
+        "requested_direction",
+        "applicable_directions",
+        "coverage",
+        "snapshot_id",
+        "as_of",
+        "registry_version",
+    ]
 
     request = ServiceReviewRunRequestV3.model_validate(
         {

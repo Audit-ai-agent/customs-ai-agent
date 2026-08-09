@@ -123,7 +123,7 @@ def _response(
 
 def _knowledge_payload(
     *,
-    question: str = "일반 통관 절차를 안내해 주세요.",
+    question: str = "수입 통관 절차를 안내해 주세요.",
     recent_turns: list[dict[str, str]] | None = None,
 ) -> bytes:
     return json.dumps(
@@ -306,7 +306,7 @@ def test_explicit_development_transcript_records_one_guidance_exchange_only(
     monkeypatch.setattr(profile_module._HTTP, "open", open_request)
     runtime = ProfileRuntime(_settings(), knowledge_transcript_root=root)
     answer = runtime.knowledge_answer_json(
-        _knowledge_payload(question=f"일반 통관 절차 {_SECOND_TOKEN}")
+        _knowledge_payload(question=f"수입 통관 절차 {_SECOND_TOKEN}")
     )
 
     assert answer.answer_scope == "general_customs_guidance"
@@ -395,12 +395,13 @@ def test_functional_knowledge_turn_records_one_data_and_one_claude_exchange(
             service_mode="functional-uat",
             guidance_base_url="http://127.0.0.1:18093",
             guidance_service_token=SecretStr(_GUIDANCE_TOKEN),
+            guidance_registry_version="1.0",
         ),
         knowledge_transcript_root=root,
     )
     answer = runtime.knowledge_answer_json(
         _knowledge_payload(
-            question=f"일반 통관 절차를 안내해 주세요. {_TOKEN} {_GUIDANCE_TOKEN} {_CLAUDE_KEY}",
+            question=f"수입 통관 절차를 안내해 주세요. {_TOKEN} {_GUIDANCE_TOKEN} {_CLAUDE_KEY}",
             recent_turns=[
                 {"role": "assistant", "content": "이전 일반 안내의 고유 문장: 이전-통관-범위-문구"},
                 {"role": "user", "content": "추가 일반 질문의 고유 문장: 사용자-최근-질문-문구"},
@@ -412,7 +413,7 @@ def test_functional_knowledge_turn_records_one_data_and_one_claude_exchange(
     assert "공식 자료 발췌" in answer.direct_answer
     assert len(data_calls) == 1
     assert len(claude_calls) == 1
-    raw_question = f"일반 통관 절차를 안내해 주세요. {_TOKEN} {_GUIDANCE_TOKEN} {_CLAUDE_KEY}"
+    raw_question = f"수입 통관 절차를 안내해 주세요. {_TOKEN} {_GUIDANCE_TOKEN} {_CLAUDE_KEY}"
     assert raw_question not in json.dumps(data_calls, ensure_ascii=False)
     provider_serialized = json.dumps(claude_calls, ensure_ascii=False)
     assert raw_question not in provider_serialized
@@ -548,7 +549,13 @@ def test_functional_knowledge_turn_records_safe_claude_non_call_for_no_coverage(
 
     monkeypatch.setattr(profile_module.ProfileEvidenceRetriever, "guidance_query", no_coverage)
     runtime = ProfileRuntime(
-        _settings(service_mode="functional-uat"), knowledge_transcript_root=root
+        _settings(
+            service_mode="functional-uat",
+            guidance_base_url="http://127.0.0.1:18093",
+            guidance_service_token=SecretStr(_GUIDANCE_TOKEN),
+            guidance_registry_version="1.0",
+        ),
+        knowledge_transcript_root=root,
     )
     answer = runtime.knowledge_answer_json(_knowledge_payload())
 

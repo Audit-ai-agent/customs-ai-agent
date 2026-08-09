@@ -26,11 +26,14 @@ def test_data_contract_resources_are_the_only_packaged_evidence_contracts() -> N
     assert guidance["$defs"]["GeneralGuidanceQueryRequestV3"]["properties"]["trade_direction"][
         "enum"
     ] == ["import", "export", "both"]
+    assert "scope_hint" in guidance["$defs"]["GeneralGuidanceQueryRequestV3"]["properties"]
     response = guidance["$defs"]["GeneralGuidanceQueryResponseV3"]
     source = guidance["$defs"]["GuidanceSourceV3"]
     assert response["properties"]["registry_sha256"]["pattern"] == "^[a-f0-9]{64}$"
     assert source["properties"]["registry_source_id"]["pattern"] == "^[a-z][a-z0-9_]{2,63}$"
     assert "registry_source_id" in source["required"]
+    assert "guidance_scope" in response["properties"]
+    assert response["properties"]["registry_version"]["enum"] == ["1.0", "2.0"]
 
 
 def test_guidance_registry_consumer_resource_matches_its_guidance_contract_digest() -> None:
@@ -50,6 +53,47 @@ def test_guidance_registry_consumer_resource_matches_its_guidance_contract_diges
             "default"
         ]
     )
+
+
+def test_v2_registry_consumer_resource_keeps_page_scope_provenance() -> None:
+    raw = (
+        resources.files("customs_ai_agent.contracts")
+        .joinpath("evidence/v3/guidance_registry_v2.manifest.json")
+        .read_bytes()
+    )
+    manifest = json.loads(raw.decode("utf-8"))
+
+    assert hashlib.sha256(raw).hexdigest() == (
+        "51375a77351e73a32763e65679099d9bf04190078956e28ed1161b3ec5e1b7bb"
+    )
+    assert manifest["schema_version"] == "2.0"
+    assert manifest["registry_sha256"] == (
+        "a450ae6286d9a12729c5459543a35fd9c1c3df2ff59977700f72887c3df6543e"
+    )
+    assert all(
+        set(source)
+        == {
+            "authority",
+            "availability",
+            "directions",
+            "jurisdiction",
+            "official_uri",
+            "scopes",
+            "source_id",
+            "source_kind",
+            "title",
+            "topics",
+        }
+        for source in manifest["sources"]
+    )
+    scope_pairs = {
+        (topic["topic"], scope["scope"])
+        for topic in manifest["topics"]
+        for scope in topic["scopes"]
+    }
+    assert ("customs_clearance", "import_clearance_flow") in scope_pairs
+    assert ("transport_documents", "air_waybill") in scope_pairs
+    assert ("fta_procedure", "preference_procedure") in scope_pairs
 
 
 def test_backend_v3_contract_has_one_packaged_canonical_source() -> None:

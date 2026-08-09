@@ -15,9 +15,9 @@ Frontend → Backend → Agent → Data Evidence API
 
 `local-development`는 결정론 텍스트 분석기와 Data `dev-fixture`를 사용합니다. Claude 키, 법령 API, 모델 cache, Docker가 필요하지 않은 기본 개발 경로입니다.
 
-`functional-uat`는 실제 Claude와 Data `functional-uat-3law` Evidence store를 사용합니다. Data가 기준일·source hash·모델 revision을 자기 manifest에 기록합니다. Agent는 그 manifest를 승인 증거로 해석하지 않고, 정상 HTTP 흐름과 사용자 여정만 확인합니다. 넓은 일반 통관 안내는 검증된 경우에만 별도 `functional-uat-kr-trade` guidance snapshot을 두 번째 loopback peer로 조합합니다. 이 snapshot은 `/guidance/query`만 제공하며, 문서 심사의 `/retrieve`는 계속 3법 Evidence peer 하나만 사용합니다.
+`functional-uat`는 실제 Claude와 Data `functional-uat-3law` Evidence store를 사용합니다. Data가 기준일·source hash·모델 revision을 자기 manifest에 기록합니다. Agent는 그 manifest를 승인 증거로 해석하지 않고, 정상 HTTP 흐름과 사용자 여정만 확인합니다. 기존 일반 통관 안내는 별도 `functional-uat-kr-trade` V1 guidance peer(18093)로 보존합니다. 공식 페이지 단위 V2는 Agent의 별도 `functional-uat-kr-trade-v2` runtime profile로 peer(18094)를 명시적으로 선택합니다. Data local token/state는 V1 profile과 공유하지만, readiness와 query의 registry version·hash·snapshot·기준일이 copied manifest와 맞을 때만 사용합니다. 문서 심사의 `/retrieve`는 계속 3법 Evidence peer 하나만 사용합니다.
 
-두 방식은 loopback에만 바인딩되고 `X-Customs-Service-Mode`가 정확히 같을 때만 서로 호출합니다. Backend→Agent 토큰과 Agent→Data 토큰은 분리됩니다. 별도 guidance peer를 쓸 때에도 URL·token은 완전한 한 쌍이어야 하며, 누락·mode 불일치·비loopback 주소는 실패로 처리합니다.
+두 방식은 loopback에만 바인딩되고 `X-Customs-Service-Mode`가 정확히 같을 때만 서로 호출합니다. Backend→Agent token과 Agent→Data token은 분리됩니다. 별도 guidance peer를 쓸 때에는 URL·token·registry version이 완전한 묶음이어야 하며, 누락·mode 불일치·비loopback 주소·V2 readiness/provenance 불일치는 실패로 처리합니다.
 
 ## 한 번의 검토
 
@@ -31,7 +31,9 @@ Frontend → Backend → Agent → Data Evidence API
 ## 근거 기반 대화와 수정 입력
 
 - Backend는 Review Run별 대화와 사람 수정 제안을 저장합니다. Agent는 한 번의 질문과 최근 8턴, 현재 Run의 구조화 결과만 받아 답변합니다.
-- `case_grounded`와 `evidence_grounded` 답변은 해당 Run의 fact·comparison·Evidence ID만 인용합니다. 일반 통관 안내는 사건 판단이 아니라는 한계를 함께 표시하고, 하나의 bounded `/guidance/query`만 사용합니다.
+- `case_grounded`와 `evidence_grounded` 답변은 해당 Run의 fact·comparison·Evidence ID만 인용합니다. 일반 통관 안내는 사건 판단이 아니라는 한계를 함께 표시하고, 하나의 `주제+세부범위` bounded `/guidance/query`만 사용합니다. 독립 scope가 둘 이상이면 Data나 Claude를 호출하지 않고 code-owned 선택지를 반환합니다.
+- 혼합 질문은 `현재 사건 기준`·`일반 통관 안내`를 분리하며, 적용·영향·보완·다음 확인을 명시한 경우에만 두 citation 영역을 함께 가리키는 결정론 `사건 적용·다음 확인` 구역을 추가합니다. 이 구역은 법적 결론이나 자동 승인·통관 판단을 만들지 않습니다.
+- 사건 채팅의 문서형 다줄 붙여넣기는 신규 심사 근거가 아닙니다. Agent는 해당 원문을 Data, Claude, transcript에 전달하지 않고 문서 등록·교체 후 새 Review Run을 안내합니다.
 - Agent는 대화로 상태를 변경하지 않습니다. 수정값은 Backend의 독립 승인 뒤 child Run에만 전달되며, Agent는 원문 인용을 지우지 않고 `human_provided` 사실을 추가해 비교에 우선 사용합니다.
 
 Agent 응답은 언제나 사람 검토 상태입니다. 자동완료, 이미지/OCR/PDF 처리, 서명·승인·commit pin·신뢰 저장소·배포 판정은 이 구조에 없습니다.
