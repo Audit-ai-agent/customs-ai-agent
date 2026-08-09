@@ -1669,6 +1669,19 @@ def _guidance_targets_for_question(question: str) -> tuple[_GuidanceTarget, ...]
     """
 
     selected = [target for target in _GUIDANCE_TARGETS if target.pattern.search(question)]
+    requirement_direction = _explicit_single_requirement_direction(question)
+    if requirement_direction is not None:
+        # ``세관장 확인`` is intentionally registered for both the import
+        # and export requirement scopes.  When the question explicitly names
+        # exactly one direction, that wording disambiguates only this shared
+        # requirement pair.  A bare phrase or an explicit 수입·수출 request
+        # must retain both candidates and ask the user to choose.
+        selected = [
+            target
+            for target in selected
+            if target.topic not in {"import_requirements", "export_requirements"}
+            or requirement_direction in target.applicable_directions
+        ]
     selected_pairs = {(target.topic, target.scope) for target in selected}
     # A specific HS confirmation wording also matches the generic
     # classification rule; it remains one scope, not a false compound query.
@@ -1714,6 +1727,18 @@ def _guidance_targets_for_question(question: str) -> tuple[_GuidanceTarget, ...]
             seen.add(key)
             unique.append(target)
     return tuple(unique)
+
+
+def _explicit_single_requirement_direction(
+    question: str,
+) -> Literal["import", "export"] | None:
+    """Return only an explicit one-sided Korean trade direction."""
+
+    has_import = bool(re.search(r"수입", question, re.I))
+    has_export = bool(re.search(r"수출", question, re.I))
+    if "수출입" in question or has_import == has_export:
+        return None
+    return "import" if has_import else "export"
 
 
 def _requested_direction(
