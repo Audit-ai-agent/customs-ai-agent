@@ -165,9 +165,7 @@ class ClaudeDocumentAnalyzer:
         # verifier may distinguish the bounded retry degradation from an
         # initial extraction failure without learning a document id, requested
         # field, prompt, or provider output.
-        analysis_phase = (
-            "focused_reextraction" if focus_fields else "initial_extraction"
-        )
+        analysis_phase = "focused_reextraction" if focus_fields else "initial_extraction"
         focused_instruction = (
             "\nPerform one focused re-check for only these missing or ambiguous extraction fields: "
             + ", ".join(focus_fields)
