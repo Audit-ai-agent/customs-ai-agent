@@ -293,7 +293,11 @@ class ClaudeGroundedResponder:
             client = module.Anthropic(
                 api_key=settings.api_key.get_secret_value(),
                 timeout=settings.timeout_seconds,
-                max_retries=1,
+                # Every grounded response has a deterministic caller fallback.
+                # Keep this one provider attempt inside Backend's response
+                # budget instead of allowing the SDK to consume it with a
+                # second full timeout.
+                max_retries=0,
             )
         except ModuleNotFoundError:
             raise LLMConfigurationError(

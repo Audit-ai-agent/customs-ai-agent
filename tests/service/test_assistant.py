@@ -10,6 +10,7 @@ import pytest
 from fastapi.testclient import TestClient
 from pydantic import SecretStr
 
+from customs_ai_agent.adapters.llm import LLMProviderError
 from customs_ai_agent.schemas.assistant import (
     AssistantAnswerRequestV1,
     GENERAL_GUIDANCE_DISCLAIMER,
@@ -880,6 +881,18 @@ def test_knowledge_answer_is_case_isolated_and_uses_one_official_lookup(
             "agency_confirmation_and_supporting_documents",
             "export",
         ),
+        (
+            "수입 세관장 확인에 필요한 보완서류를 알려 주세요.",
+            "import_requirements",
+            "agency_confirmation_and_supporting_documents",
+            "import",
+        ),
+        (
+            "수출 세관장 확인에 필요한 보완서류를 알려 주세요.",
+            "export_requirements",
+            "agency_confirmation_and_supporting_documents",
+            "export",
+        ),
     ],
 )
 def test_v2_browser_prompts_resolve_to_one_official_scope(
@@ -925,6 +938,44 @@ def test_v2_browser_prompts_resolve_to_one_official_scope(
     assert guidance_calls[0]["scope_hint"] == expected_scope
     assert guidance_calls[0]["trade_direction"] == expected_direction
     assert guidance_calls[0]["query"] != question
+
+
+@pytest.mark.parametrize(
+    "question",
+    (
+        "세관장 확인에 필요한 보완서류를 알려 주세요.",
+        "수입 및 수출 세관장 확인에 필요한 보완서류를 알려 주세요.",
+    ),
+)
+def test_shared_agency_confirmation_without_one_direction_requests_clarification(
+    monkeypatch: pytest.MonkeyPatch,
+    question: str,
+) -> None:
+    def guidance(*_args: Any, **_kwargs: Any) -> dict[str, Any]:
+        raise AssertionError("ambiguous requirement scope must not query Data")
+
+    monkeypatch.setattr(ProfileEvidenceRetriever, "guidance_query", guidance)
+    runtime = ProfileRuntime(_settings())
+
+    answer = runtime.knowledge_answer_json(
+        json.dumps(
+            {
+                "schema_version": "1.0",
+                "conversation_id": "knowledge-v2-ambiguous-agency-confirmation",
+                "question": question,
+                "trade_type": "both",
+                "as_of": "2026-08-05",
+                "recent_turns": [],
+            }
+        ).encode()
+    )
+
+    assert answer.answer_scope == "clarification_needed"
+    assert answer.citations == []
+    assert set(answer.suggested_questions) == {
+        "수입 요건·보완서류 공식 안내를 알려 주세요.",
+        "수출 요건·보완서류 공식 안내를 알려 주세요.",
+    }
 
 
 def test_independent_v2_scopes_request_safe_choices_without_data_or_claude(
@@ -1311,7 +1362,10 @@ def test_functional_knowledge_provider_fallback_keeps_official_guidance_bounded(
         ) -> dict[str, Any]:
             self.purposes.append(purpose)
             if failure_mode == "request_failure":
-                raise RuntimeError("simulated provider request failure")
+                # The responder maps its sole SDK attempt failure to this
+                # bounded signal; ProfileRuntime must retain the official
+                # deterministic answer instead of surfacing it.
+                raise LLMProviderError("simulated provider request failure")
             # Missing the bounded presentation contract: semantic invalidity
             # follows the same safe fallback path as a JSON/schema failure.
             return {}

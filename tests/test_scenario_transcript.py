@@ -10,6 +10,7 @@ from urllib.error import URLError
 import pytest
 from pydantic import SecretStr
 
+import customs_ai_agent.adapters.llm as llm_module
 import customs_ai_agent.service.profiles as profile_module
 import customs_ai_agent.scenario_transcript as transcript_module
 from customs_ai_agent.adapters.llm import (
@@ -573,6 +574,35 @@ def test_focused_reextraction_invalid_output_has_only_safe_phase_metadata(
     }
     assert "content_text" not in records[2]["payload"]
     assert "focus_fields" not in records[2]["payload"]
+
+
+def test_grounded_responder_disables_sdk_retries(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    """Bounded answer composition must leave time for its code-owned fallback."""
+
+    client_options: list[dict[str, Any]] = []
+
+    class Client:
+        def __init__(self, **kwargs: Any) -> None:
+            client_options.append(kwargs)
+
+    original_import_module = llm_module.importlib.import_module
+
+    def import_module(module_name: str, package: str | None = None) -> Any:
+        if module_name == "anthropic":
+            return SimpleNamespace(Anthropic=Client)
+        return original_import_module(module_name, package)
+
+    monkeypatch.setattr(llm_module.importlib, "import_module", import_module)
+
+    settings = ClaudeSettings(api_key=SecretStr(_TOKEN))
+    responder = ClaudeGroundedResponder.from_settings(settings)
+
+    assert responder.model_id == settings.model
+    assert len(client_options) == 1
+    assert client_options[0]["timeout"] == settings.timeout_seconds
+    assert client_options[0]["max_retries"] == 0
 
 
 def test_grounded_responder_records_one_redacted_chat_exchange(tmp_path: Path) -> None:
