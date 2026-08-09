@@ -13,7 +13,12 @@ import customs_ai_agent.service.profiles as profile_module
 from customs_ai_agent.adapters.retrieval import RetrievalError
 from customs_ai_agent.schemas.v3 import ServiceReviewRunRequestV3, canonical_json_sha256
 from customs_ai_agent.service.app import create_app
+from customs_ai_agent.service.guidance_registry import guidance_registry
 from customs_ai_agent.service.profiles import (
+    _GUIDANCE_LEGACY_SAFE_QUERY,
+    _GUIDANCE_LEGACY_TOPIC_BY_SCOPE,
+    _GUIDANCE_SAFE_QUERY,
+    _guidance_query_request,
     _DeterministicDocumentAnalyzer,
     _actions,
     _dedupe_evidence_records,
@@ -300,6 +305,116 @@ def test_profile_rejects_non_loopback_guidance_peer() -> None:
     assert raised.value.code == "guidance_base_url_invalid"
 
 
+@pytest.mark.parametrize(
+    ("target", "legacy_topic"),
+    sorted(_GUIDANCE_LEGACY_TOPIC_BY_SCOPE.items()),
+)
+def test_versioned_guidance_request_keeps_v2_scope_and_omits_it_for_v1(
+    target: tuple[str, str], legacy_topic: str
+) -> None:
+    """A V1 request must be usable by Data's preserved scope-free endpoint."""
+
+    topic, scope = target
+    v1 = _guidance_query_request(
+        conversation_id="conversation-v1-request",
+        trade_type="import",
+        as_of="2026-08-05",
+        topic_hint=topic,
+        scope_hint=scope,
+        registry_version="1.0",
+    )
+    v2 = _guidance_query_request(
+        conversation_id="conversation-v2-request",
+        trade_type="import",
+        as_of="2026-08-05",
+        topic_hint=topic,
+        scope_hint=scope,
+        registry_version="2.0",
+    )
+
+    assert v1["topic_hint"] == legacy_topic
+    assert v1["query"] == _GUIDANCE_LEGACY_SAFE_QUERY[legacy_topic]
+    assert "scope_hint" not in v1
+    assert v2["topic_hint"] == topic
+    assert v2["scope_hint"] == scope
+    assert v2["query"] == _GUIDANCE_SAFE_QUERY[target]
+    # Both forms are built from code-owned labels only.  A question or a
+    # conversation turn cannot be supplied to the builder.
+    assert "사용자 원문" not in json.dumps({"v1": v1, "v2": v2}, ensure_ascii=False)
+
+
+def test_v1_legacy_projection_covers_every_v2_target_once() -> None:
+    assert set(_GUIDANCE_LEGACY_TOPIC_BY_SCOPE) == set(_GUIDANCE_SAFE_QUERY)
+    assert set(_GUIDANCE_LEGACY_TOPIC_BY_SCOPE.values()) == set(_GUIDANCE_LEGACY_SAFE_QUERY)
+
+
+@pytest.mark.parametrize("scope_hint", ["export_declaration", None])
+def test_v1_retriever_rejects_an_additive_scope_hint_before_http_dispatch(
+    monkeypatch: pytest.MonkeyPatch, scope_hint: str | None
+) -> None:
+    retriever = ProfileEvidenceRetriever(
+        replace(
+            _settings(service_mode="functional-uat"),
+            guidance_base_url="http://127.0.0.1:18093",
+            guidance_service_token=SecretStr(_GUIDANCE_TOKEN),
+            guidance_registry_version="1.0",
+        )
+    )
+    request = _guidance_query_request(
+        conversation_id="conversation-v1-invalid",
+        trade_type="export",
+        as_of="2026-08-05",
+        topic_hint="customs_declaration",
+        scope_hint="export_declaration",
+        registry_version="1.0",
+    )
+    request["scope_hint"] = scope_hint
+    dispatched = False
+
+    def data_request(*_args: Any, **_kwargs: Any) -> dict[str, Any]:
+        nonlocal dispatched
+        dispatched = True
+        return {}
+
+    monkeypatch.setattr(retriever, "_request", data_request)
+    with pytest.raises(RetrievalError, match="Data guidance request is invalid"):
+        retriever.guidance_query(request)
+    assert not dispatched
+
+
+def test_v2_retriever_rejects_a_missing_scope_hint_before_readiness(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    retriever = ProfileEvidenceRetriever(
+        replace(
+            _settings(service_mode="functional-uat"),
+            guidance_base_url="http://127.0.0.1:18094",
+            guidance_service_token=SecretStr(_GUIDANCE_TOKEN),
+            guidance_registry_version="2.0",
+        )
+    )
+    request = _guidance_query_request(
+        conversation_id="conversation-v2-invalid",
+        trade_type="export",
+        as_of="2026-08-05",
+        topic_hint="customs_declaration",
+        scope_hint="export_declaration",
+        registry_version="2.0",
+    )
+    del request["scope_hint"]
+    dispatched = False
+
+    def data_request(*_args: Any, **_kwargs: Any) -> dict[str, Any]:
+        nonlocal dispatched
+        dispatched = True
+        return {}
+
+    monkeypatch.setattr(retriever, "_request", data_request)
+    with pytest.raises(RetrievalError, match="Data guidance request is invalid"):
+        retriever.guidance_query(request)
+    assert not dispatched
+
+
 def test_guidance_uses_its_own_loopback_origin_and_token_while_review_stays_on_evidence(
     monkeypatch: pytest.MonkeyPatch,
 ) -> None:
@@ -310,6 +425,7 @@ def test_guidance_uses_its_own_loopback_origin_and_token_while_review_stays_on_e
             return None
 
     calls: list[tuple[str, str | None]] = []
+    guidance_bodies: list[dict[str, Any]] = []
 
     def open_request(request: Any, **_kwargs: Any) -> object:
         headers = {key.casefold(): value for key, value in request.header_items()}
@@ -327,6 +443,10 @@ def test_guidance_uses_its_own_loopback_origin_and_token_while_review_stays_on_e
             }
         else:
             body = json.loads(request.data.decode("utf-8"))
+            guidance_bodies.append(body)
+            # A V1 profile must never emit the additive V2 field.  The
+            # retriever independently rejects it before HTTP dispatch.
+            assert "scope_hint" not in body
             payload = {
                 "schema_version": "3.0",
                 "request_id": body["request_id"],
@@ -335,6 +455,7 @@ def test_guidance_uses_its_own_loopback_origin_and_token_while_review_stays_on_e
                 "as_of": body["as_of"],
                 "coverage": "covered",
                 "registry_version": "1.0",
+                "registry_sha256": "6fed779ee0ec1cd2358972925fe1b2788838a197d4f33e62e461fcfed2bb7d6c",
                 "topic": body["topic_hint"],
                 "results": [],
                 "errors": [],
@@ -364,17 +485,15 @@ def test_guidance_uses_its_own_loopback_origin_and_token_while_review_stays_on_e
         )
     )
     retriever.retrieve({"request_id": "evidence-request", "review_run_id": "review-run"})
-    retriever.guidance_query(
-        {
-            "schema_version": "3.0",
-            "request_id": "guidance-request",
-            "query": "대한민국 수출 신고 절차 공식 안내",
-            "trade_direction": "export",
-            "topic_hint": "customs_declaration",
-            "scope_hint": "export_declaration",
-            "as_of": "2026-08-05",
-            "top_k": 3,
-        }
+    response = retriever.guidance_query(
+        _guidance_query_request(
+            conversation_id="guidance-request",
+            trade_type="export",
+            as_of="2026-08-05",
+            topic_hint="customs_declaration",
+            scope_hint="export_declaration",
+            registry_version="1.0",
+        )
     )
 
     assert calls == [
@@ -382,6 +501,119 @@ def test_guidance_uses_its_own_loopback_origin_and_token_while_review_stays_on_e
         ("http://127.0.0.1:18083/internal/rag/v3/retrieve", f"Bearer {_TOKEN}"),
         ("http://127.0.0.1:18093/internal/rag/v3/guidance/query", f"Bearer {_GUIDANCE_TOKEN}"),
     ]
+    assert response["status"] == "covered"
+    assert guidance_bodies == [
+        {
+            "schema_version": "3.0",
+            "request_id": guidance_bodies[0]["request_id"],
+            "query": _GUIDANCE_LEGACY_SAFE_QUERY["customs_declaration"],
+            "trade_direction": "export",
+            "topic_hint": "customs_declaration",
+            "as_of": "2026-08-05",
+            "top_k": 3,
+        }
+    ]
+
+
+def test_v1_runtime_uses_scope_free_legacy_request_and_v1_provenance(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    """Exercise the Agent HTTP boundary with the preserved V1 profile.
+
+    The local response shape is deliberately the V1 public contract.  This
+    checks the builder, retriever, response provenance, and deterministic
+    answer path together without importing Data implementation code into this
+    repository.
+    """
+
+    class Headers(dict[str, str]):
+        def get_all(self, _name: str) -> None:
+            return None
+
+    registry = guidance_registry()
+    observed_bodies: list[dict[str, Any]] = []
+
+    def open_request(request: Any, **_kwargs: Any) -> object:
+        body = json.loads(request.data.decode("utf-8"))
+        observed_bodies.append(body)
+        topic = body["topic_hint"]
+        assert "scope_hint" not in body
+        source_id = sorted(registry.topic_source_ids[topic])[0]
+        payload: dict[str, Any] = {
+            "schema_version": "3.0",
+            "request_id": body["request_id"],
+            "status": "covered",
+            "snapshot_id": "dev-fixture-v1",
+            "as_of": body["as_of"],
+            "coverage": "covered",
+            "registry_version": "1.0",
+            "registry_sha256": registry.registry_sha256,
+            "topic": topic,
+            "results": [
+                {
+                    "source_id": "guide_" + "a" * 64,
+                    "registry_source_id": source_id,
+                    "source_kind": "development_fixture",
+                    "title": registry.topic_titles[topic],
+                    "uri": f"https://customs.local.invalid/dev-fixture/guidance/{topic}",
+                    "topic": topic,
+                    "direction": body["trade_direction"],
+                    "excerpt": "등록된 공식 자료의 범위와 기준일을 확인해야 합니다.",
+                    "version_hash": "a" * 64,
+                    "retrieval_methods": ["registry"],
+                }
+            ],
+            "errors": [],
+        }
+
+        class Response:
+            headers = Headers({SERVICE_MODE_HEADER: "local-development"})
+
+            def __enter__(self) -> "Response":
+                return self
+
+            def __exit__(self, *_args: object) -> None:
+                return None
+
+            def read(self, _limit: int) -> bytes:
+                return json.dumps(payload).encode("utf-8")
+
+        return Response()
+
+    monkeypatch.setattr(profile_module._HTTP, "open", open_request)
+    runtime = ProfileRuntime(
+        replace(
+            _settings(),
+            guidance_base_url="http://127.0.0.1:18093",
+            guidance_service_token=SecretStr(_GUIDANCE_TOKEN),
+            guidance_registry_version="1.0",
+        )
+    )
+    question = "수입 통관 절차에서 기본으로 확인할 항목을 알려 주세요. 사용자원문표식"
+    answer = runtime.knowledge_answer_json(
+        json.dumps(
+            {
+                "schema_version": "1.0",
+                "conversation_id": "knowledge-v1-http",
+                "question": question,
+                "trade_type": "import",
+                "as_of": "2026-08-05",
+                "recent_turns": [],
+            }
+        ).encode("utf-8")
+    )
+
+    assert answer.answer_scope == "general_customs_guidance"
+    assert answer.coverage == "covered"
+    assert answer.guidance_resolution is not None
+    assert answer.guidance_resolution.registry_version == "1.0"
+    assert answer.guidance_resolution.scope == "legacy_topic"
+    assert answer.guidance_registry_sha256 == registry.registry_sha256
+    assert len(observed_bodies) == 1
+    assert "scope_hint" not in observed_bodies[0]
+    assert observed_bodies[0]["topic_hint"] == "customs_clearance"
+    assert observed_bodies[0]["query"] == _GUIDANCE_LEGACY_SAFE_QUERY["customs_clearance"]
+    assert "사용자원문표식" not in json.dumps(observed_bodies[0], ensure_ascii=False)
 
 
 def test_v2_guidance_requires_readiness_and_exact_configured_generation(

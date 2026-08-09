@@ -20,7 +20,9 @@ from customs_ai_agent.service.app import create_app
 from customs_ai_agent.service.assistant import (
     deterministic_knowledge_answer,
     guidance_context_from_data,
+    guidance_policy_for_registry,
     guidance_topic_for_question,
+    knowledge_question_policy,
     response_from_knowledge_provider_candidate,
     response_from_provider_candidate,
 )
@@ -597,6 +599,55 @@ def test_deterministic_knowledge_template_uses_only_data_source_fields() -> None
     assert "확인 절차" in answer.direct_answer
     assert "공식 자료 발췌" in answer.direct_answer
     assert GENERAL_GUIDANCE_DISCLAIMER in answer.direct_answer
+
+
+def test_v1_legacy_direction_projection_and_unavailable_provenance_are_explicit() -> None:
+    """V1 keeps its manifest's broad duty topic without widening V2 itself."""
+
+    question = "수출 관세의 기본을 알려 주세요."
+    v2_policy = knowledge_question_policy(question, trade_type="export")
+    v1_policy = guidance_policy_for_registry(v2_policy, registry_version="1.0")
+
+    assert v2_policy.scope == "insufficient_evidence"
+    assert v2_policy.direction_inapplicable
+    assert v2_policy.applicable_directions == ("import",)
+    assert v1_policy.scope == "general_customs_guidance"
+    assert not v1_policy.direction_inapplicable
+    assert v1_policy.applicable_directions == ("import", "export")
+
+    answer = deterministic_knowledge_answer(
+        KnowledgeAnswerRequestV1(
+            conversation_id="knowledge-v1-unavailable",
+            question=question,
+            trade_type="export",
+            as_of=date(2026, 8, 5),
+        ),
+        engine=EngineV3(kind="deterministic", model_id="deterministic"),
+        context=None,
+        registry_version="1.0",
+    )
+
+    assert answer.answer_scope == "insufficient_evidence"
+    assert answer.coverage == "unavailable"
+    assert answer.guidance_resolution is not None
+    assert answer.guidance_resolution.model_dump(mode="json") == {
+        "topic": "customs_duty",
+        "scope": "legacy_topic",
+        "requested_direction": "export",
+        "applicable_directions": ["import", "export"],
+        "coverage": "unavailable",
+        "snapshot_id": None,
+        "as_of": "2026-08-05",
+        "registry_version": "1.0",
+    }
+    assert answer.guidance_registry_sha256 == _REGISTRY_SHA256
+
+    requirements = guidance_policy_for_registry(
+        knowledge_question_policy("수출입 수입 요건을 알려 주세요.", trade_type="both"),
+        registry_version="1.0",
+    )
+    assert requirements.direction_inapplicable
+    assert requirements.applicable_directions == ("import",)
 
 
 def _review_payload() -> dict[str, Any]:
