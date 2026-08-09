@@ -56,20 +56,32 @@ $env:CUSTOMS_AGENT_SERVICE_BEARER_TOKEN = 'Abcdefghijklmnopqrstuvwxyz0123456789A
 
     backend_profile = (
         "functional-uat"
-        if profile in {"functional-uat-3law", "functional-uat-kr-trade"}
+        if profile
+        in {
+            "functional-uat-3law",
+            "functional-uat-kr-trade",
+            "functional-uat-kr-trade-v2",
+        }
         else "dev-fixture"
     )
     (workspace / "_local" / "profiles" / backend_profile).mkdir(parents=True)
     (workspace / "_local" / "profiles" / backend_profile / "backend.env").write_text(
         "placeholder\n", encoding="utf-8"
     )
-    evidence_profile = "functional-uat-3law" if profile == "functional-uat-kr-trade" else profile
+    evidence_profile = (
+        "functional-uat-3law"
+        if profile in {"functional-uat-kr-trade", "functional-uat-kr-trade-v2"}
+        else profile
+    )
     evidence_file = workspace / "_local" / "profiles" / evidence_profile / "evidence-service-token"
     evidence_file.parent.mkdir(parents=True, exist_ok=True)
     evidence_file.write_text(_SERVICE_TOKEN, encoding="utf-8")
     if guidance_token is not None:
+        # V2 is a separate Agent runtime selection, but Data intentionally
+        # retains the same profile-local service token as V1.
+        guidance_profile = "functional-uat-kr-trade"
         guidance_file = (
-            workspace / "_local" / "profiles" / "functional-uat-kr-trade" / "evidence-service-token"
+            workspace / "_local" / "profiles" / guidance_profile / "evidence-service-token"
         )
         guidance_file.parent.mkdir(parents=True, exist_ok=True)
         guidance_file.write_text(guidance_token, encoding="utf-8")
@@ -123,7 +135,7 @@ def _run_peer_boundary_check(
     *,
     profile: str,
     evidence_port: int = 18083,
-    guidance_port: int = 18093,
+    guidance_port: int | None = None,
     expect_guidance: bool,
     stale_guidance: bool = False,
 ) -> subprocess.CompletedProcess[str]:
@@ -133,22 +145,29 @@ def _run_peer_boundary_check(
         pytest.skip("PowerShell is required to test the Agent profile importer")
 
     importer = workspace / "customs-ai-agent" / "tools" / "Import-AgentProfile.ps1"
+    expected_guidance_port = guidance_port or (
+        18094 if profile == "functional-uat-kr-trade-v2" else 18093
+    )
+    expected_registry_version = "2.0" if profile == "functional-uat-kr-trade-v2" else "1.0"
     guidance_check = (
         "($env:GUIDANCE_SERVICE_BASE_URL -eq "
-        f"'http://127.0.0.1:{guidance_port}' -and "
+        f"'http://127.0.0.1:{expected_guidance_port}' -and "
         f"$env:GUIDANCE_SERVICE_TOKEN -eq '{_GUIDANCE_TOKEN}' -and "
-        "$env:GUIDANCE_SERVICE_TOKEN_HEADER -eq 'Authorization')"
+        "$env:GUIDANCE_SERVICE_TOKEN_HEADER -eq 'Authorization' -and "
+        f"$env:GUIDANCE_SERVICE_REGISTRY_VERSION -eq '{expected_registry_version}')"
         if expect_guidance
         else (
             "([string]::IsNullOrEmpty($env:GUIDANCE_SERVICE_BASE_URL) -and "
             "[string]::IsNullOrEmpty($env:GUIDANCE_SERVICE_TOKEN) -and "
-            "[string]::IsNullOrEmpty($env:GUIDANCE_SERVICE_TOKEN_HEADER))"
+            "[string]::IsNullOrEmpty($env:GUIDANCE_SERVICE_TOKEN_HEADER) -and "
+            "[string]::IsNullOrEmpty($env:GUIDANCE_SERVICE_REGISTRY_VERSION))"
         )
     )
+    guidance_port_argument = "" if guidance_port is None else f" -GuidancePort {guidance_port}"
     command = (
         "& { $ErrorActionPreference = 'Stop'; "
         f". {_powershell_literal(str(importer))} -Profile {_powershell_literal(profile)} "
-        f"-EvidencePort {evidence_port} -GuidancePort {guidance_port}; "
+        f"-EvidencePort {evidence_port}{guidance_port_argument}; "
         "if (($env:EVIDENCE_SERVICE_BASE_URL -eq "
         f"'http://127.0.0.1:{evidence_port}' -and "
         f"$env:EVIDENCE_SERVICE_TOKEN -eq '{_SERVICE_TOKEN}' -and "
@@ -262,6 +281,29 @@ def test_kr_trade_profile_composes_three_law_evidence_and_guidance_peers(tmp_pat
     assert _SERVICE_TOKEN not in result.stdout + result.stderr
     assert _GUIDANCE_TOKEN not in result.stdout + result.stderr
     assert _TEST_VALUE not in result.stdout + result.stderr
+
+
+def test_kr_trade_v2_profile_selects_the_separate_readiness_gated_peer(tmp_path: Path) -> None:
+    workspace = _write_workspace(
+        tmp_path,
+        profile="functional-uat-kr-trade-v2",
+        secret_contents=_anthropic_assignment(_TEST_VALUE),
+        guidance_token=_GUIDANCE_TOKEN,
+    )
+    result = _run_peer_boundary_check(
+        workspace,
+        profile="functional-uat-kr-trade-v2",
+        evidence_port=18183,
+        # Omit GuidancePort to prove that V2 selects 18094 rather than the
+        # preserved V1 profile's 18093 default.
+        guidance_port=None,
+        expect_guidance=True,
+    )
+
+    assert result.returncode == 0
+    assert result.stdout == "EVIDENCE_OK|GUIDANCE_OK"
+    assert _SERVICE_TOKEN not in result.stdout + result.stderr
+    assert _GUIDANCE_TOKEN not in result.stdout + result.stderr
 
 
 def test_kr_trade_profile_rejects_missing_or_malformed_guidance_token_without_echoing_it(

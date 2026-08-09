@@ -14,14 +14,16 @@ file.  The value is placed only in the current PowerShell process; the legacy
 [CmdletBinding()]
 param(
     [Parameter(Mandatory)]
-    [ValidateSet("dev-fixture", "functional-uat-3law", "functional-uat-kr-trade")]
+    [ValidateSet("dev-fixture", "functional-uat-3law", "functional-uat-kr-trade", "functional-uat-kr-trade-v2")]
     [string]$Profile,
 
     [ValidateRange(1, 65535)]
     [int]$EvidencePort = 18083,
 
-    [ValidateRange(1, 65535)]
-    [int]$GuidancePort = 18093
+    # Zero selects the profile's immutable default: legacy V1 guidance uses
+    # 18093 and the separately verified V2 guidance peer uses 18094.
+    [ValidateRange(0, 65535)]
+    [int]$GuidancePort = 0
 )
 
 Set-StrictMode -Version Latest
@@ -130,6 +132,21 @@ switch ($Profile) {
         $backendProfile = "functional-uat"
         $evidenceProfile = "functional-uat-3law"
         $guidanceProfile = "functional-uat-kr-trade"
+        $guidanceRegistryVersion = "1.0"
+        $defaultGuidancePort = 18093
+        $expectedMode = "functional-uat"
+    }
+    "functional-uat-kr-trade-v2" {
+        # V2 is a distinct, readiness-gated Data peer.  Keeping this profile
+        # explicit prevents a scope-specific V2 request from silently using
+        # the preserved V1 guidance endpoint.  Data deliberately keeps the
+        # local token/state below its existing kr-trade profile; only the
+        # Agent's runtime selection and peer port are new.
+        $backendProfile = "functional-uat"
+        $evidenceProfile = "functional-uat-3law"
+        $guidanceProfile = "functional-uat-kr-trade"
+        $guidanceRegistryVersion = "2.0"
+        $defaultGuidancePort = 18094
         $expectedMode = "functional-uat"
     }
 }
@@ -137,6 +154,9 @@ $requiresFunctionalUatKey = $Profile -ne "dev-fixture"
 
 if ($Profile -eq "dev-fixture") {
     $guidanceProfile = $null
+}
+if ($null -ne $guidanceProfile -and $GuidancePort -eq 0) {
+    $GuidancePort = $defaultGuidancePort
 }
 if ($null -ne $guidanceProfile -and $GuidancePort -eq $EvidencePort) {
     throw "agent_profile_guidance_port_conflict"
@@ -203,8 +223,10 @@ if ($null -eq $guidanceProfile) {
     Remove-Item -LiteralPath "Env:GUIDANCE_SERVICE_BASE_URL" -ErrorAction SilentlyContinue
     Remove-Item -LiteralPath "Env:GUIDANCE_SERVICE_TOKEN" -ErrorAction SilentlyContinue
     Remove-Item -LiteralPath "Env:GUIDANCE_SERVICE_TOKEN_HEADER" -ErrorAction SilentlyContinue
+    Remove-Item -LiteralPath "Env:GUIDANCE_SERVICE_REGISTRY_VERSION" -ErrorAction SilentlyContinue
 } else {
     $env:GUIDANCE_SERVICE_BASE_URL = "http://127.0.0.1:$GuidancePort"
     $env:GUIDANCE_SERVICE_TOKEN = $guidanceToken
     $env:GUIDANCE_SERVICE_TOKEN_HEADER = "Authorization"
+    $env:GUIDANCE_SERVICE_REGISTRY_VERSION = $guidanceRegistryVersion
 }

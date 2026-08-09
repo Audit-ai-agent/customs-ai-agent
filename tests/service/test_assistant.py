@@ -20,11 +20,17 @@ from customs_ai_agent.service.app import create_app
 from customs_ai_agent.service.assistant import (
     deterministic_knowledge_answer,
     guidance_context_from_data,
+    guidance_policy_for_registry,
     guidance_topic_for_question,
+    knowledge_question_policy,
     response_from_knowledge_provider_candidate,
     response_from_provider_candidate,
 )
-from customs_ai_agent.service.guidance_registry import guidance_registry
+from customs_ai_agent.service.case_input import (
+    CASE_DOCUMENT_PLACEHOLDER,
+    is_document_shaped_case_text,
+)
+from customs_ai_agent.service.guidance_registry import guidance_registry, guidance_registry_v2
 from customs_ai_agent.service.profiles import (
     ProfileEvidenceRetriever,
     ProfileRuntime,
@@ -40,6 +46,7 @@ from customs_ai_agent.service.user_text import (
 
 _TOKEN = "Abcdefghijklmnopqrstuvwxyz0123456789ABCDEFGHIJK"
 _REGISTRY_SHA256 = "6fed779ee0ec1cd2358972925fe1b2788838a197d4f33e62e461fcfed2bb7d6c"
+_V2_REGISTRY_SHA256 = "a450ae6286d9a12729c5459543a35fd9c1c3df2ff59977700f72887c3df6543e"
 _FIXTURE_SOURCE_BY_TOPIC = {
     "customs_clearance": "law_001556",
     "customs_declaration": "law_001556",
@@ -129,6 +136,48 @@ def _stub_guidance(
                 "direction": request.get("trade_direction", "both"),
                 "excerpt": "통관은 신고 내용과 관련 서류를 확인하는 절차입니다.",
                 "version_hash": "a" * 64,
+                "retrieval_methods": ["registry"],
+            }
+        ],
+        "errors": [],
+    }
+
+
+def _stub_guidance_v2(
+    _self: ProfileEvidenceRetriever | None,
+    request: dict[str, Any],
+    **_kwargs: Any,
+) -> dict[str, Any]:
+    """Return Data's narrow V2 development-fixture shape for one scope."""
+
+    del _self
+    topic = str(request["topic_hint"])
+    scope = str(request["scope_hint"])
+    registry = guidance_registry_v2()
+    required_sources = registry.scope_required_source_ids[(topic, scope)]
+    registry_source_id = sorted(required_sources)[0]
+    return {
+        "schema_version": "3.0",
+        "request_id": request["request_id"],
+        "status": "covered",
+        "snapshot_id": "dev-fixture-kr-trade-v2",
+        "as_of": request["as_of"],
+        "coverage": "covered",
+        "registry_version": "2.0",
+        "registry_sha256": registry.registry_sha256,
+        "topic": topic,
+        "guidance_scope": scope,
+        "results": [
+            {
+                "source_id": "guide_" + "b" * 64,
+                "registry_source_id": registry_source_id,
+                "source_kind": "development_fixture",
+                "title": registry.scope_titles[(topic, scope)],
+                "uri": f"https://customs.local.invalid/dev-fixture/guidance/{topic}/{scope}",
+                "topic": topic,
+                "direction": request["trade_direction"],
+                "excerpt": "등록된 공식 자료의 범위와 기준일을 확인해야 합니다.",
+                "version_hash": "b" * 64,
                 "retrieval_methods": ["registry"],
             }
         ],
@@ -238,6 +287,121 @@ def test_guidance_registry_consumer_loads_the_expected_safe_manifest() -> None:
     assert registry.topic_titles["customs_clearance"] == "통관 절차의 기본 안내"
 
 
+def test_v2_guidance_context_uses_exact_scope_and_registry_provenance() -> None:
+    request = {
+        "request_id": "guide-v2-bill",
+        "as_of": "2026-08-05",
+        "topic_hint": "transport_documents",
+        "scope_hint": "bill_of_lading",
+        "trade_direction": "both",
+    }
+    context = guidance_context_from_data(
+        _stub_guidance_v2(None, request),
+        profile_mode="local-development",
+        expected_as_of=date(2026, 8, 5),
+        expected_trade_direction="both",
+        expected_topic="transport_documents",
+        expected_scope="bill_of_lading",
+    )
+
+    assert context.registry_version == "2.0"
+    assert context.registry_sha256 == _V2_REGISTRY_SHA256
+    assert context.scope == "bill_of_lading"
+    assert context.applicable_directions == ("import", "export")
+    assert (
+        context.evidence[0].registry_source_id
+        in guidance_registry_v2().scope_required_source_ids[
+            ("transport_documents", "bill_of_lading")
+        ]
+    )
+
+
+def test_v2_page_level_law_source_accepts_no_article_fields_and_a_directional_receipt() -> None:
+    """A V2 whole-page statute citation must not be forced into V1 article metadata."""
+
+    request = {
+        "request_id": "guide-v2-law-page",
+        "as_of": "2026-08-05",
+        "topic_hint": "hs_classification",
+        "scope_hint": "classification_principles",
+        "trade_direction": "both",
+    }
+    registry = guidance_registry_v2()
+    source = registry.sources_by_id["v2_law_customs_act"]
+    response = _stub_guidance_v2(None, request)
+    response["results"][0].update(
+        {
+            "registry_source_id": source.source_id,
+            "source_kind": source.source_kind,
+            "title": source.title,
+            "uri": source.official_uri,
+            # One direction-specific page record is valid inside a request
+            # whose covered scope itself applies to import and export.
+            "direction": "import",
+        }
+    )
+
+    context = guidance_context_from_data(
+        response,
+        profile_mode="functional-uat",
+        expected_as_of=date(2026, 8, 5),
+        expected_trade_direction="both",
+        expected_topic="hs_classification",
+        expected_scope="classification_principles",
+    )
+
+    assert context.evidence[0].law_id is None
+    assert context.evidence[0].direction == "import"
+
+
+@pytest.mark.parametrize(
+    ("mutate", "error"),
+    [
+        (
+            lambda response: response.__setitem__("guidance_scope", "air_waybill"),
+            "scope_mismatch",
+        ),
+        (
+            lambda response: response.__setitem__("registry_sha256", "0" * 64),
+            "registry_sha256_mismatch",
+        ),
+        (
+            lambda response: response["results"][0].__setitem__(
+                "registry_source_id", "v2_kcs_import_clearance"
+            ),
+            "provenance_invalid",
+        ),
+        (
+            lambda response: response["results"][0].__setitem__(
+                "uri",
+                "https://customs.local.invalid/dev-fixture/guidance/transport_documents/wrong",
+            ),
+            "provenance_invalid",
+        ),
+    ],
+)
+def test_v2_guidance_context_rejects_scope_or_source_drift(mutate: Any, error: str) -> None:
+    request = {
+        "request_id": "guide-v2-drift",
+        "as_of": "2026-08-05",
+        "topic_hint": "transport_documents",
+        "scope_hint": "bill_of_lading",
+        "trade_direction": "both",
+    }
+    response = _stub_guidance_v2(None, request)
+    mutate(response)
+
+    with pytest.raises(ValueError, match=error):
+        guidance_context_from_data(
+            response,
+            profile_mode="local-development",
+            expected_as_of=date(2026, 8, 5),
+            expected_trade_direction="both",
+            expected_topic="transport_documents",
+            expected_scope="bill_of_lading",
+        )
+
+
 @pytest.mark.parametrize(
     "mutate",
     [
@@ -271,7 +435,7 @@ def test_guidance_context_rejects_unregistered_or_noncanonical_law_provenance(
     response = _official_law_guidance()
     mutate(response)
 
-    with pytest.raises(ValueError, match="provenance_invalid"):
+    with pytest.raises(ValueError, match="(?:registry_sha256_mismatch|provenance_invalid)"):
         guidance_context_from_data(
             response,
             profile_mode="functional-uat",
@@ -375,8 +539,8 @@ def test_knowledge_provider_can_select_only_code_owned_presentation() -> None:
     )
     request = KnowledgeAnswerRequestV1(
         conversation_id="knowledge-template",
-        question="일반 통관 절차를 알려 주세요.",
-        trade_type="both",
+        question="수입 통관 절차를 알려 주세요.",
+        trade_type="import",
         as_of=date(2026, 8, 5),
     )
     engine = EngineV3(kind="claude", model_id="claude-haiku")
@@ -423,7 +587,8 @@ def test_deterministic_knowledge_template_uses_only_data_source_fields() -> None
     answer = deterministic_knowledge_answer(
         KnowledgeAnswerRequestV1(
             conversation_id="knowledge-deterministic",
-            question="통관 절차의 기본을 알려 주세요.",
+            question="수입 통관 절차의 기본을 알려 주세요.",
+            trade_type="import",
             as_of=date(2026, 8, 5),
         ),
         engine=EngineV3(kind="deterministic", model_id="deterministic"),
@@ -434,6 +599,55 @@ def test_deterministic_knowledge_template_uses_only_data_source_fields() -> None
     assert "확인 절차" in answer.direct_answer
     assert "공식 자료 발췌" in answer.direct_answer
     assert GENERAL_GUIDANCE_DISCLAIMER in answer.direct_answer
+
+
+def test_v1_legacy_direction_projection_and_unavailable_provenance_are_explicit() -> None:
+    """V1 keeps its manifest's broad duty topic without widening V2 itself."""
+
+    question = "수출 관세의 기본을 알려 주세요."
+    v2_policy = knowledge_question_policy(question, trade_type="export")
+    v1_policy = guidance_policy_for_registry(v2_policy, registry_version="1.0")
+
+    assert v2_policy.scope == "insufficient_evidence"
+    assert v2_policy.direction_inapplicable
+    assert v2_policy.applicable_directions == ("import",)
+    assert v1_policy.scope == "general_customs_guidance"
+    assert not v1_policy.direction_inapplicable
+    assert v1_policy.applicable_directions == ("import", "export")
+
+    answer = deterministic_knowledge_answer(
+        KnowledgeAnswerRequestV1(
+            conversation_id="knowledge-v1-unavailable",
+            question=question,
+            trade_type="export",
+            as_of=date(2026, 8, 5),
+        ),
+        engine=EngineV3(kind="deterministic", model_id="deterministic"),
+        context=None,
+        registry_version="1.0",
+    )
+
+    assert answer.answer_scope == "insufficient_evidence"
+    assert answer.coverage == "unavailable"
+    assert answer.guidance_resolution is not None
+    assert answer.guidance_resolution.model_dump(mode="json") == {
+        "topic": "customs_duty",
+        "scope": "legacy_topic",
+        "requested_direction": "export",
+        "applicable_directions": ["import", "export"],
+        "coverage": "unavailable",
+        "snapshot_id": None,
+        "as_of": "2026-08-05",
+        "registry_version": "1.0",
+    }
+    assert answer.guidance_registry_sha256 == _REGISTRY_SHA256
+
+    requirements = guidance_policy_for_registry(
+        knowledge_question_policy("수출입 수입 요건을 알려 주세요.", trade_type="both"),
+        registry_version="1.0",
+    )
+    assert requirements.direction_inapplicable
+    assert requirements.applicable_directions == ("import",)
 
 
 def _review_payload() -> dict[str, Any]:
@@ -561,7 +775,7 @@ def test_deterministic_assistant_scopes_citations_and_turn_limit(
     assert general_evidence_concept.citations == []
 
     general_answer = runtime.assistant_answer_json(
-        _answer_payload(result, question="일반 통관 절차를 안내해 주세요.")
+        _answer_payload(result, question="수입 통관 절차를 안내해 주세요.")
     )
     assert general_answer.answer_scope == "general_customs_guidance"
     assert len(general_answer.citations) == 1
@@ -629,8 +843,204 @@ def test_knowledge_answer_is_case_isolated_and_uses_one_official_lookup(
     assert len(guidance_calls) == 1
     assert guidance_calls[0]["trade_direction"] == "export"
     assert guidance_calls[0]["topic_hint"] == "customs_clearance"
-    assert guidance_calls[0]["query"] == "대한민국 수출입 통관 절차 공식 안내"
+    assert guidance_calls[0]["scope_hint"] == "export_clearance_flow"
+    assert guidance_calls[0]["query"] == "대한민국 수출 통관 흐름 공식 안내"
     assert guidance_calls[0]["query"] != question
+
+
+@pytest.mark.parametrize(
+    ("question", "expected_topic", "expected_scope", "expected_direction"),
+    [
+        ("수입 통관 흐름", "customs_clearance", "import_clearance_flow", "import"),
+        ("수출 신고 절차", "customs_declaration", "export_declaration", "export"),
+        (
+            "FTA 특혜 적용 절차에서 공식 자료로 확인할 항목을 알려 주세요.",
+            "fta_procedure",
+            "preference_procedure",
+            "both",
+        ),
+        (
+            "HS 품목분류 사전심사·확인",
+            "hs_classification",
+            "advance_ruling_or_confirmation",
+            "both",
+        ),
+        ("수입 과세가격 기초", "customs_duty", "customs_value_basics", "import"),
+        ("B/L", "transport_documents", "bill_of_lading", "both"),
+        ("AWB", "transport_documents", "air_waybill", "both"),
+        (
+            "수입요건",
+            "import_requirements",
+            "agency_confirmation_and_supporting_documents",
+            "import",
+        ),
+        (
+            "수출요건",
+            "export_requirements",
+            "agency_confirmation_and_supporting_documents",
+            "export",
+        ),
+    ],
+)
+def test_v2_browser_prompts_resolve_to_one_official_scope(
+    monkeypatch: pytest.MonkeyPatch,
+    question: str,
+    expected_topic: str,
+    expected_scope: str,
+    expected_direction: str,
+) -> None:
+    guidance_calls: list[dict[str, Any]] = []
+
+    def guidance(
+        _self: ProfileEvidenceRetriever, request: dict[str, Any], **_kwargs: Any
+    ) -> dict[str, Any]:
+        guidance_calls.append(deepcopy(request))
+        return _stub_guidance_v2(None, request)
+
+    monkeypatch.setattr(ProfileEvidenceRetriever, "guidance_query", guidance)
+    runtime = ProfileRuntime(_settings())
+    answer = runtime.knowledge_answer_json(
+        json.dumps(
+            {
+                "schema_version": "1.0",
+                "conversation_id": f"knowledge-v2-{expected_scope}",
+                "question": question,
+                "trade_type": "both",
+                "as_of": "2026-08-05",
+                "recent_turns": [],
+            }
+        ).encode()
+    )
+
+    assert answer.answer_scope == "general_customs_guidance"
+    assert answer.coverage == "covered"
+    assert answer.guidance_resolution is not None
+    assert answer.guidance_resolution.topic == expected_topic
+    assert answer.guidance_resolution.scope == expected_scope
+    assert answer.guidance_resolution.requested_direction == expected_direction
+    assert answer.guidance_resolution.registry_version == "2.0"
+    assert answer.citations[0].registry_source_id is not None
+    assert len(guidance_calls) == 1
+    assert guidance_calls[0]["topic_hint"] == expected_topic
+    assert guidance_calls[0]["scope_hint"] == expected_scope
+    assert guidance_calls[0]["trade_direction"] == expected_direction
+    assert guidance_calls[0]["query"] != question
+
+
+def test_independent_v2_scopes_request_safe_choices_without_data_or_claude(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    guidance_calls: list[dict[str, Any]] = []
+
+    class UnexpectedResponder:
+        def __init__(self) -> None:
+            self.calls = 0
+
+        def respond(self, *_args: Any, **_kwargs: Any) -> dict[str, Any]:
+            self.calls += 1
+            raise AssertionError("compound scope clarification must not call Claude")
+
+    def guidance(
+        _self: ProfileEvidenceRetriever, request: dict[str, Any], **_kwargs: Any
+    ) -> dict[str, Any]:
+        guidance_calls.append(deepcopy(request))
+        raise AssertionError("compound scope clarification must not query Data")
+
+    monkeypatch.setattr(ProfileEvidenceRetriever, "guidance_query", guidance)
+    runtime = ProfileRuntime(_settings())
+    responder = UnexpectedResponder()
+    runtime.mode = "functional-uat"
+    runtime._grounded_responder = responder  # type: ignore[assignment]
+
+    answer = runtime.knowledge_answer_json(
+        json.dumps(
+            {
+                "schema_version": "1.0",
+                "conversation_id": "knowledge-v2-compound",
+                "question": "HS 품목분류와 수입 관세를 함께 알려 주세요.",
+                "trade_type": "both",
+                "as_of": "2026-08-05",
+                "recent_turns": [],
+            }
+        ).encode()
+    )
+
+    assert answer.answer_scope == "clarification_needed"
+    assert answer.citations == []
+    assert guidance_calls == []
+    assert responder.calls == 0
+    assert set(answer.suggested_questions) == {
+        "HS 품목분류 원칙 공식 안내를 알려 주세요.",
+        "관세·납세 기초 공식 안내를 알려 주세요.",
+    }
+
+
+@pytest.mark.parametrize(
+    ("question", "expected_scope"),
+    [
+        ("미국 수입 요건과 통관 규제를 알려 주세요.", "out_of_scope"),
+        ("이 물품의 HS 품목분류를 최종 확정해 주세요.", "insufficient_evidence"),
+    ],
+)
+def test_unsupported_foreign_or_final_individual_judgment_never_queries_guidance(
+    monkeypatch: pytest.MonkeyPatch,
+    question: str,
+    expected_scope: str,
+) -> None:
+    def guidance(*_args: Any, **_kwargs: Any) -> dict[str, Any]:
+        raise AssertionError("unsupported scope must not query Data")
+
+    monkeypatch.setattr(ProfileEvidenceRetriever, "guidance_query", guidance)
+    runtime = ProfileRuntime(_settings())
+
+    answer = runtime.knowledge_answer_json(
+        json.dumps(
+            {
+                "schema_version": "1.0",
+                "conversation_id": "knowledge-boundary",
+                "question": question,
+                "trade_type": "both",
+                "as_of": "2026-08-05",
+                "recent_turns": [],
+            }
+        ).encode()
+    )
+
+    assert answer.answer_scope == expected_scope
+    assert answer.citations == []
+
+
+def test_fta_certificate_and_preference_are_independent_v2_scopes(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    calls = 0
+
+    def guidance(*_args: Any, **_kwargs: Any) -> dict[str, Any]:
+        nonlocal calls
+        calls += 1
+        raise AssertionError("independent FTA scopes must not query Data")
+
+    monkeypatch.setattr(ProfileEvidenceRetriever, "guidance_query", guidance)
+    runtime = ProfileRuntime(_settings())
+    answer = runtime.knowledge_answer_json(
+        json.dumps(
+            {
+                "schema_version": "1.0",
+                "conversation_id": "knowledge-v2-fta-compound",
+                "question": "FTA 특혜 적용 절차와 원산지증명서를 알려 주세요.",
+                "trade_type": "both",
+                "as_of": "2026-08-05",
+                "recent_turns": [],
+            }
+        ).encode()
+    )
+
+    assert answer.answer_scope == "clarification_needed"
+    assert calls == 0
+    assert answer.suggested_questions == [
+        "FTA 원산지증명 공식 안내를 알려 주세요.",
+        "FTA 특혜 절차 공식 안내를 알려 주세요.",
+    ]
 
 
 def test_standalone_export_requirements_narrows_both_to_export_guidance(
@@ -666,6 +1076,29 @@ def test_standalone_export_requirements_narrows_both_to_export_guidance(
     assert guidance_calls[0]["trade_direction"] == "export"
 
 
+def test_v2_shared_requirement_scope_keeps_its_import_topic_label(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    monkeypatch.setattr(ProfileEvidenceRetriever, "guidance_query", _stub_guidance_v2)
+    runtime = ProfileRuntime(_settings())
+
+    answer = runtime.knowledge_answer_json(
+        json.dumps(
+            {
+                "schema_version": "1.0",
+                "conversation_id": "knowledge-v2-import-requirements",
+                "question": "수입요건을 알려 주세요.",
+                "trade_type": "import",
+                "as_of": "2026-08-05",
+                "recent_turns": [],
+            }
+        ).encode()
+    )
+
+    assert "수입 요건·보완서류" in answer.direct_answer
+    assert "수출 요건·보완서류" not in answer.direct_answer
+
+
 def test_case_question_can_keep_case_and_general_guidance_separate(
     monkeypatch: pytest.MonkeyPatch,
 ) -> None:
@@ -684,10 +1117,182 @@ def test_case_question_can_keep_case_and_general_guidance_separate(
     assert [section.kind for section in answer.answer_sections] == [
         "case_analysis",
         "general_guidance",
+        "case_application",
     ]
     assert any(citation.kind == "comparison" for citation in answer.citations)
     assert any(citation.kind == "guidance_evidence" for citation in answer.citations)
     assert GENERAL_GUIDANCE_DISCLAIMER in answer.answer_sections[1].content
+
+
+def test_v2_mixed_application_keeps_case_and_guidance_citations_separate(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    def partial_guidance(
+        _self: ProfileEvidenceRetriever, request: dict[str, Any], **_kwargs: Any
+    ) -> dict[str, Any]:
+        response = _stub_guidance_v2(None, request)
+        response.update(
+            {
+                "status": "partial",
+                "coverage": "partial",
+                "errors": [
+                    {
+                        "code": "source_bundle_partial",
+                        "message": "일부 공식 자료를 확인할 수 없습니다.",
+                        "retryable": False,
+                    }
+                ],
+            }
+        )
+        return response
+
+    monkeypatch.setattr(ProfileEvidenceRetriever, "retrieve", _stub_retrieve)
+    monkeypatch.setattr(ProfileEvidenceRetriever, "guidance_query", partial_guidance)
+    runtime = ProfileRuntime(_settings())
+    result = runtime.review_v3_json(json.dumps(_review_payload()).encode())
+
+    answer = runtime.assistant_answer_json(
+        _answer_payload(
+            result,
+            question=(
+                "현재 사건의 수입 통관 절차 일반 안내가 어떤 영향을 주는지 "
+                "다음 확인 항목을 알려 주세요."
+            ),
+        )
+    )
+
+    assert [section.kind for section in answer.answer_sections] == [
+        "case_analysis",
+        "general_guidance",
+        "case_application",
+    ]
+    application = answer.answer_sections[2]
+    assert {citation.kind for citation in application.citations} == {
+        "comparison",
+        "guidance_evidence",
+    }
+    assert "일부" in application.content
+    assert answer.guidance_resolution is not None
+    assert answer.guidance_resolution.coverage == "partial"
+    assert answer.guidance_resolution.registry_version == "2.0"
+    assert answer.guidance_registry_sha256 == _V2_REGISTRY_SHA256
+    top_level_ids = {
+        citation.reference_id if hasattr(citation, "reference_id") else citation.source_id
+        for citation in answer.citations
+    }
+    assert all(
+        (citation.reference_id if hasattr(citation, "reference_id") else citation.source_id)
+        in top_level_ids
+        for citation in application.citations
+    )
+
+
+def test_mixed_application_intent_does_not_require_the_literal_word_general(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    monkeypatch.setattr(ProfileEvidenceRetriever, "retrieve", _stub_retrieve)
+    monkeypatch.setattr(ProfileEvidenceRetriever, "guidance_query", _stub_guidance_v2)
+    runtime = ProfileRuntime(_settings())
+    result = runtime.review_v3_json(json.dumps(_review_payload()).encode())
+
+    answer = runtime.assistant_answer_json(
+        _answer_payload(
+            result,
+            question="현재 사건의 수입 통관 절차가 어떤 영향을 주는지 다음 확인 항목을 알려 주세요.",
+        )
+    )
+
+    assert [section.kind for section in answer.answer_sections] == [
+        "case_analysis",
+        "general_guidance",
+        "case_application",
+    ]
+    assert answer.guidance_resolution is not None
+    assert answer.guidance_resolution.scope == "import_clearance_flow"
+
+
+def test_v2_no_coverage_keeps_case_answer_but_never_creates_application_section(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    def no_coverage_guidance(
+        _self: ProfileEvidenceRetriever, request: dict[str, Any], **_kwargs: Any
+    ) -> dict[str, Any]:
+        response = _stub_guidance_v2(None, request)
+        response.update(
+            {
+                "status": "no_coverage",
+                "coverage": "no_coverage",
+                "snapshot_id": None,
+                "results": [],
+                "errors": [],
+            }
+        )
+        return response
+
+    monkeypatch.setattr(ProfileEvidenceRetriever, "retrieve", _stub_retrieve)
+    monkeypatch.setattr(ProfileEvidenceRetriever, "guidance_query", no_coverage_guidance)
+    runtime = ProfileRuntime(_settings())
+    result = runtime.review_v3_json(json.dumps(_review_payload()).encode())
+
+    answer = runtime.assistant_answer_json(
+        _answer_payload(
+            result,
+            question=(
+                "현재 사건의 수입 통관 절차 일반 안내가 어떤 영향을 주는지 "
+                "다음 확인 항목을 알려 주세요."
+            ),
+        )
+    )
+
+    assert [section.kind for section in answer.answer_sections] == ["case_analysis"]
+    assert all(citation.kind != "guidance_evidence" for citation in answer.citations)
+    assert answer.guidance_resolution is not None
+    assert answer.guidance_resolution.coverage == "no_coverage"
+    assert answer.guidance_resolution.snapshot_id is None
+    assert answer.guidance_resolution.registry_version == "2.0"
+    assert answer.guidance_registry_sha256 == _V2_REGISTRY_SHA256
+
+
+def test_v2_direction_no_coverage_skips_data_and_carries_safe_resolution(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    calls = 0
+
+    def guidance(*_args: Any, **_kwargs: Any) -> dict[str, Any]:
+        nonlocal calls
+        calls += 1
+        raise AssertionError("direction outside a V2 scope must not query Data")
+
+    monkeypatch.setattr(ProfileEvidenceRetriever, "guidance_query", guidance)
+    runtime = ProfileRuntime(_settings())
+    answer = runtime.knowledge_answer_json(
+        json.dumps(
+            {
+                "schema_version": "1.0",
+                "conversation_id": "knowledge-v2-export-value",
+                "question": "수출 과세가격의 기본을 알려 주세요.",
+                "trade_type": "both",
+                "as_of": "2026-08-05",
+                "recent_turns": [],
+            }
+        ).encode()
+    )
+
+    assert calls == 0
+    assert answer.answer_scope == "insufficient_evidence"
+    assert answer.coverage == "no_coverage"
+    assert answer.guidance_resolution is not None
+    assert answer.guidance_resolution.model_dump(mode="json") == {
+        "topic": "customs_duty",
+        "scope": "customs_value_basics",
+        "requested_direction": "export",
+        "applicable_directions": ["import"],
+        "coverage": "no_coverage",
+        "snapshot_id": None,
+        "as_of": "2026-08-05",
+        "registry_version": "2.0",
+    }
+    assert answer.guidance_registry_sha256 == _V2_REGISTRY_SHA256
 
 
 @pytest.mark.parametrize("failure_mode", ("request_failure", "semantic_invalid"))
@@ -726,6 +1331,7 @@ def test_functional_knowledge_provider_fallback_keeps_official_guidance_bounded(
     runtime = ProfileRuntime(_settings())
     responder = BrokenKnowledgeResponder()
     runtime.mode = "functional-uat"
+    runtime._retriever._guidance_registry_version = "1.0"  # type: ignore[attr-defined]
     runtime._grounded_responder = responder  # type: ignore[assignment]
 
     answer = runtime.knowledge_answer_json(
@@ -790,6 +1396,7 @@ def test_functional_mixed_answer_falls_back_to_separate_safe_sections(
     result = runtime.review_v3_json(json.dumps(_review_payload()).encode())
     responder = InvalidCaseResponder()
     runtime.mode = "functional-uat"
+    runtime._retriever._guidance_registry_version = "1.0"  # type: ignore[attr-defined]
     runtime._grounded_responder = responder  # type: ignore[assignment]
 
     answer = runtime.assistant_answer_json(
@@ -803,6 +1410,7 @@ def test_functional_mixed_answer_falls_back_to_separate_safe_sections(
     assert [section.kind for section in answer.answer_sections] == [
         "case_analysis",
         "general_guidance",
+        "case_application",
     ]
     assert any(citation.kind == "comparison" for citation in answer.citations)
     assert any(citation.kind == "guidance_evidence" for citation in answer.citations)
@@ -1036,6 +1644,129 @@ def test_recent_case_context_keeps_a_short_follow_up_grounded(
         )
     )
 
+    assert answer.answer_scope == "case_grounded"
+    assert answer.citations
+
+
+def test_case_document_shaped_current_paste_is_non_evidence_before_any_capability_call(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    class UnexpectedResponder:
+        def __init__(self) -> None:
+            self.calls = 0
+
+        def respond(self, *_args: Any, **_kwargs: Any) -> dict[str, Any]:
+            self.calls += 1
+            raise AssertionError("unregistered document text must not reach Claude")
+
+    class TranscriptRootSpy:
+        def __init__(self) -> None:
+            self.run_ids: list[str] = []
+
+        def for_run(self, review_run_id: str) -> object:
+            self.run_ids.append(review_run_id)
+            raise AssertionError("unregistered document text must not allocate a transcript")
+
+    guidance_calls = 0
+
+    def guidance(*_args: Any, **_kwargs: Any) -> dict[str, Any]:
+        nonlocal guidance_calls
+        guidance_calls += 1
+        raise AssertionError("unregistered document text must not reach Data")
+
+    monkeypatch.setattr(ProfileEvidenceRetriever, "retrieve", _stub_retrieve)
+    monkeypatch.setattr(ProfileEvidenceRetriever, "guidance_query", guidance)
+    runtime = ProfileRuntime(_settings())
+    result = runtime.review_v3_json(json.dumps(_review_payload()).encode())
+    runtime.mode = "functional-uat"
+    responder = UnexpectedResponder()
+    runtime._grounded_responder = responder  # type: ignore[assignment]
+    transcript_root = TranscriptRootSpy()
+    runtime._transcript_root = transcript_root  # type: ignore[assignment]
+
+    pasted_body = (
+        "COMMERCIAL INVOICE\n"
+        "Invoice No: INV-UNREGISTERED-001\n"
+        "Total Amount: USD 10\n"
+        "HS Code: 123456"
+    )
+    answer = runtime.assistant_answer_json(_answer_payload(result, question=pasted_body))
+
+    assert answer.answer_scope == "insufficient_evidence"
+    assert answer.case_input_notice == "unregistered_document_text"
+    assert answer.citations == []
+    assert guidance_calls == 0
+    assert responder.calls == 0
+    assert transcript_root.run_ids == []
+    assert "INV-UNREGISTERED-001" not in json.dumps(answer.model_dump(mode="json"))
+
+
+def test_case_document_shaped_history_is_replaced_before_claude_and_transcript(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    class RecordingResponder:
+        def __init__(self) -> None:
+            self.payloads: list[dict[str, Any]] = []
+
+        def respond(self, payload: dict[str, Any], **_kwargs: Any) -> dict[str, Any]:
+            self.payloads.append(payload)
+            # Force the normal deterministic fallback after recording the
+            # bounded provider input.
+            return {}
+
+    class RecordingRun:
+        def __init__(self) -> None:
+            self.writes: list[dict[str, Any]] = []
+
+        def write(self, _stream: str, _event: str, payload: dict[str, Any]) -> None:
+            self.writes.append(payload)
+
+    class TranscriptRootSpy:
+        def __init__(self) -> None:
+            self.run = RecordingRun()
+
+        def for_run(self, _review_run_id: str) -> RecordingRun:
+            return self.run
+
+    monkeypatch.setattr(ProfileEvidenceRetriever, "retrieve", _stub_retrieve)
+    runtime = ProfileRuntime(_settings())
+    result = runtime.review_v3_json(json.dumps(_review_payload()).encode())
+    runtime.mode = "functional-uat"
+    responder = RecordingResponder()
+    runtime._grounded_responder = responder  # type: ignore[assignment]
+    transcript_root = TranscriptRootSpy()
+    runtime._transcript_root = transcript_root  # type: ignore[assignment]
+
+    raw_history = "PACKING LIST\nPacking No: PL-UNREGISTERED-001\nQuantity: 5 PCS"
+    answer = runtime.assistant_answer_json(
+        _answer_payload(
+            result,
+            question="현재 문서 비교 결과를 설명해 주세요.",
+            recent_turns=[{"role": "user", "content": raw_history}],
+        )
+    )
+
+    assert answer.answer_scope == "case_grounded"
+    assert len(responder.payloads) == 1
+    recent_turns = responder.payloads[0]["recent_turns"]
+    assert recent_turns == [{"role": "user", "content": CASE_DOCUMENT_PLACEHOLDER}]
+    assert raw_history not in json.dumps(transcript_root.run.writes, ensure_ascii=False)
+    assert CASE_DOCUMENT_PLACEHOLDER not in answer.direct_answer
+
+
+def test_case_chat_allows_short_document_values_without_treating_them_as_new_evidence(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    monkeypatch.setattr(ProfileEvidenceRetriever, "retrieve", _stub_retrieve)
+    runtime = ProfileRuntime(_settings())
+    result = runtime.review_v3_json(json.dumps(_review_payload()).encode())
+
+    assert not is_document_shaped_case_text("B/L 번호: BL-12345")
+    answer = runtime.assistant_answer_json(
+        _answer_payload(result, question="B/L 번호 BL-12345의 현재 문서 비교 결과를 설명해 주세요.")
+    )
+
+    assert answer.case_input_notice is None
     assert answer.answer_scope == "case_grounded"
     assert answer.citations
 

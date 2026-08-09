@@ -4,7 +4,7 @@ from __future__ import annotations
 
 import re
 from collections.abc import Mapping
-from dataclasses import dataclass
+from dataclasses import dataclass, replace
 from datetime import date
 from typing import Any, Literal, cast
 
@@ -20,12 +20,15 @@ from customs_ai_agent.schemas.assistant import (
     GENERAL_GUIDANCE_DISCLAIMER,
     GuidanceCitationV1,
     GuidanceEvidenceV1,
+    GuidanceResolutionV1,
     KnowledgeAnswerRequestV1,
     KnowledgeAnswerResponseV1,
 )
 from customs_ai_agent.schemas.v3 import EngineV3, FactV3, ReviewRunResultV3
 from customs_ai_agent.service.guidance_registry import (
     GuidanceRegistryError,
+    guidance_registry_for_version,
+    guidance_scope_directions,
     validate_guidance_source_provenance,
 )
 from customs_ai_agent.service.user_text import (
@@ -48,20 +51,155 @@ _GENERAL_REQUEST = re.compile(
     r"fob|cif|exw|ddp|수출\s*제한|수출\s*허가)",
     re.IGNORECASE,
 )
-# General guidance is deliberately classified into a small named topic set.
-# A topic is a retrieval hint for Data's approved official-source registry,
-# never a free-form legal search instruction or an LLM tool capability.
-_GENERAL_TOPICS: tuple[tuple[str, re.Pattern[str]], ...] = (
-    (
+
+
+@dataclass(frozen=True)
+class _GuidanceTarget:
+    """One closed official-guidance retrieval target.
+
+    The user question is classified locally into this immutable pair.  Only
+    the pair (not user prose) may cross the Agent→Data boundary.
+    """
+
+    topic: str
+    scope: str
+    label: str
+    applicable_directions: tuple[Literal["import", "export"], ...]
+    pattern: re.Pattern[str]
+
+
+# The V2 registry distinguishes adjacent subjects that V1 collapsed into a
+# broad topic.  These IDs are part of the Data contract, never model output.
+_GUIDANCE_TARGETS: tuple[_GuidanceTarget, ...] = (
+    _GuidanceTarget(
         "customs_clearance",
-        re.compile(r"(?:통관|신고|납세).*(?:절차|흐름|준비|방법|서류)|(?:수입|수출)\s*통관", re.I),
+        "import_clearance_flow",
+        "수입 통관 흐름",
+        ("import",),
+        re.compile(r"(?:수입\s*통관|수입.*통관)", re.I),
     ),
-    ("hs_classification", re.compile(r"(?:hs\s*code|hs코드|품목\s*분류)", re.I)),
-    ("customs_duty", re.compile(r"(?:과세가격|관세|세율|관세액|신고가격)", re.I)),
-    ("fta_procedure", re.compile(r"(?:fta\s*(?:절차|적용|특혜)|특혜관세)", re.I)),
-    ("origin_verification", re.compile(r"(?:원산지(?:\s*증명)?|원산지\s*검증)", re.I)),
-    (
+    _GuidanceTarget(
+        "customs_clearance",
+        "export_clearance_flow",
+        "수출 통관 흐름",
+        ("export",),
+        re.compile(r"(?:수출\s*통관|수출.*통관)", re.I),
+    ),
+    _GuidanceTarget(
+        "customs_declaration",
+        "import_declaration",
+        "수입 신고",
+        ("import",),
+        re.compile(r"(?:수입\s*신고|수입.*신고)", re.I),
+    ),
+    _GuidanceTarget(
+        "customs_declaration",
+        "export_declaration",
+        "수출 신고",
+        ("export",),
+        re.compile(r"(?:수출\s*신고|수출.*신고|선적\s*신고)", re.I),
+    ),
+    _GuidanceTarget(
+        "customs_duty",
+        "customs_value_basics",
+        "과세가격 기초",
+        ("import",),
+        re.compile(r"(?:과세가격|신고가격|관세평가)", re.I),
+    ),
+    _GuidanceTarget(
+        "customs_duty",
+        "duty_payment_basics",
+        "관세·납세 기초",
+        ("import",),
+        re.compile(r"(?:관세(?:액|율)?|세율|납세|관세\s*납부)", re.I),
+    ),
+    _GuidanceTarget(
+        "hs_classification",
+        "advance_ruling_or_confirmation",
+        "HS 사전심사·확인",
+        ("import", "export"),
+        re.compile(
+            r"(?:hs\s*(?:사전\s*)?(?:심사|확인)|품목\s*분류\s*(?:사전\s*)?(?:심사|확인))", re.I
+        ),
+    ),
+    _GuidanceTarget(
+        "hs_classification",
+        "classification_principles",
+        "HS 품목분류 원칙",
+        ("import", "export"),
+        re.compile(r"(?:hs\s*code|hs코드|품목\s*분류)", re.I),
+    ),
+    _GuidanceTarget(
+        "origin_verification",
+        "origin_verification",
+        "원산지 검증",
+        ("import", "export"),
+        re.compile(r"(?:원산지\s*(?:검증|조사|사후\s*검증))", re.I),
+    ),
+    _GuidanceTarget(
+        "origin_verification",
+        "origin_evidence",
+        "원산지 증빙",
+        ("import", "export"),
+        re.compile(r"(?:원산지(?:\s*(?:증명|확인서|입증))?)", re.I),
+    ),
+    _GuidanceTarget(
+        "trade_documents",
+        "commercial_and_declaration_documents",
+        "상업·신고 관련 서류",
+        ("import", "export"),
+        re.compile(
+            r"(?:상업송장|인보이스|포장명세서|packing\s*list|commercial\s*invoice|무역\s*서류)",
+            re.I,
+        ),
+    ),
+    _GuidanceTarget(
+        "import_requirements",
+        "agency_confirmation_and_supporting_documents",
+        "수입 요건·보완서류",
+        ("import",),
+        re.compile(r"(?:수입\s*요건|수입식품|수입\s*(?:허가|검사)|세관장\s*확인)", re.I),
+    ),
+    _GuidanceTarget(
+        "export_requirements",
+        "agency_confirmation_and_supporting_documents",
+        "수출 요건·보완서류",
+        ("export",),
+        re.compile(r"(?:수출\s*요건|수출\s*(?:제한|허가|승인|검사)|세관장\s*확인)", re.I),
+    ),
+    _GuidanceTarget(
+        "transport_documents",
+        "bill_of_lading",
+        "선하증권(B/L)",
+        ("import", "export"),
+        re.compile(r"(?:선하\s*증권|bill\s+of\s+lading|b\s*/?\s*l|해상\s*운송)", re.I),
+    ),
+    _GuidanceTarget(
+        "transport_documents",
+        "air_waybill",
+        "항공화물운송장(AWB)",
+        ("import", "export"),
+        re.compile(r"(?:air\s*waybill|awb|항공\s*화물\s*운송장|항공\s*운송)", re.I),
+    ),
+    _GuidanceTarget(
+        "fta_procedure",
+        "origin_certificate",
+        "FTA 원산지증명",
+        ("import", "export"),
+        re.compile(r"(?:fta.*원산지\s*(?:증명|확인서)|원산지\s*증명.*fta)", re.I),
+    ),
+    _GuidanceTarget(
+        "fta_procedure",
+        "preference_procedure",
+        "FTA 특혜 절차",
+        ("import", "export"),
+        re.compile(r"(?:fta\s*(?:절차|적용|특혜)|특혜관세)", re.I),
+    ),
+    _GuidanceTarget(
         "trade_terms",
+        "cost_risk_delivery_terms",
+        "무역거래조건",
+        ("import", "export"),
         re.compile(
             r"(?:incoterms?|인코텀즈|(?<![A-Za-z])fob(?![A-Za-z])|"
             r"(?<![A-Za-z])cif(?![A-Za-z])|(?<![A-Za-z])exw(?![A-Za-z])|"
@@ -69,35 +207,13 @@ _GENERAL_TOPICS: tuple[tuple[str, re.Pattern[str]], ...] = (
             re.I,
         ),
     ),
-    (
-        "transport_documents",
-        re.compile(
-            r"(?:awb|항공\s*화물\s*운송장|항공\s*운송|선하\s*증권|b\s*/?\s*l|해상\s*운송|운송\s*서류)",
-            re.I,
-        ),
-    ),
-    (
-        "trade_documents",
-        re.compile(
-            r"(?:상업송장|인보이스|포장명세서|선하증권|b\s*/?\s*l|awb|항공화물운송장|원산지증명서|수출신고증|무역서류)",
-            re.I,
-        ),
-    ),
-    (
-        "import_requirements",
-        re.compile(r"(?:수입\s*요건|수입\s*신고|수입식품|검사|세관장\s*확인)", re.I),
-    ),
-    (
-        "export_requirements",
-        re.compile(r"(?:수출\s*요건|수출\s*제한|수출\s*허가|수출\s*승인)", re.I),
-    ),
-    (
-        "customs_declaration",
-        re.compile(
-            r"(?:수출\s*신고|수출\s*절차|수출\s*통관|선적|컨테이너)",
-            re.I,
-        ),
-    ),
+)
+_GUIDANCE_TARGET_BY_PAIR = {(item.topic, item.scope): item for item in _GUIDANCE_TARGETS}
+_GUIDANCE_SCOPE_LABELS = {(item.topic, item.scope): item.label for item in _GUIDANCE_TARGETS}
+_GENERIC_DIRECTIONAL_TARGETS: tuple[tuple[re.Pattern[str], tuple[str, str]], ...] = (
+    (re.compile(r"통관\s*(?:절차|흐름|준비|방법|서류)?", re.I), ("customs_clearance", "")),
+    (re.compile(r"(?:신고\s*(?:절차|방법|준비)?|신고\s*서류)", re.I), ("customs_declaration", "")),
+    (re.compile(r"운송\s*서류", re.I), ("transport_documents", "")),
 )
 _CORRECTION_DRAFT = re.compile(
     r"(?:문서|document)\s*[:=]\s*(?P<document>[A-Za-z0-9._:-]+).*?"
@@ -116,8 +232,25 @@ _MULTI_DOCUMENT_HS_QUESTION = re.compile(
     re.I,
 )
 _GENERAL_INTENT = re.compile(r"(?:역할|차이|기본|일반|란|이란|절차|방법|개념)", re.I)
+_APPLICATION_INTENT = re.compile(
+    r"(?:적용|영향|보완|다음\s*단계|후속\s*조치|확인\s*(?:항목|사항|해야|할)|"
+    r"무엇(?:을|을\s*더)?\s*확인|어떤\s*(?:항목|서류|사항).*확인|먼저\s*확인)",
+    re.I,
+)
+_MIXED_GUIDANCE_INTENT = re.compile(
+    r"(?:공식\s*(?:자료|안내)|일반\s*통관|안내|역할|차이|기본|절차|방법|개념|"
+    r"적용|영향|보완|다음\s*단계|확인\s*(?:항목|사항|해야))",
+    re.I,
+)
 _GENERAL_COVERAGE_GAP = re.compile(
-    r"(?:환급|절세|회피|전략|정확한\s*세액|개별\s*허가|특정\s*업체|실시간\s*처리)",
+    r"(?:환급|절세|회피|전략|정확한\s*세액|개별\s*허가|특정\s*업체|실시간\s*처리|"
+    r"(?:개별|특정)\s*(?:품목|물품).*(?:허가|세액|hs|품목\s*분류)|"
+    r"(?:hs|품목\s*분류).*(?:최종\s*)?확정)",
+    re.I,
+)
+_FOREIGN_IMPORT_REGULATION = re.compile(
+    r"(?:외국|해외|미국|중국|일본|유럽|eu|영국|수입국).{0,24}"
+    r"(?:수입\s*(?:규제|요건|허가|통관)|통관\s*(?:규제|요건)|규제|허가)",
     re.I,
 )
 _GUIDANCE_SOURCE_ID = re.compile(r"^guide_[a-f0-9]{64}$")
@@ -166,7 +299,14 @@ class _QuestionPolicy:
         "comparison"
     )
     general_topic: str | None = None
+    general_scope: str | None = None
+    requested_direction: Literal["import", "export", "both"] | None = None
+    query_direction: Literal["import", "export", "both"] | None = None
+    applicable_directions: tuple[Literal["import", "export"], ...] = ()
     mixed: bool = False
+    application_intent: bool = False
+    direction_inapplicable: bool = False
+    clarification_targets: tuple[_GuidanceTarget, ...] = ()
 
 
 _SAFE_DIRECT_ANSWER = {
@@ -213,12 +353,20 @@ def deterministic_assistant_answer(
             request,
             engine=engine,
             scope="clarification_needed",
-            text="어느 문서, 비교 항목 또는 법령 근거를 확인할지 구체적으로 알려 주세요.",
+            text=(
+                _guidance_clarification_text(policy)
+                if policy.clarification_targets
+                else "어느 문서, 비교 항목 또는 법령 근거를 확인할지 구체적으로 알려 주세요."
+            ),
             citations=[],
-            suggestions=[
-                "수량 비교 결과를 설명해 주세요.",
-                "연결된 법령 근거를 보여 주세요.",
-            ],
+            suggestions=(
+                _guidance_clarification_suggestions(policy)
+                if policy.clarification_targets
+                else [
+                    "수량 비교 결과를 설명해 주세요.",
+                    "연결된 법령 근거를 보여 주세요.",
+                ]
+            ),
         )
     if policy.scope == "general_customs_guidance":
         # This helper intentionally has no Data guidance context.  The
@@ -237,10 +385,14 @@ def deterministic_assistant_answer(
         )
     if policy.scope == "insufficient_evidence":
         text = (
-            "현재 심사 결과에는 수입신고확인증의 제출 또는 제출 예정 여부를 확인할 사실이 "
-            "포함되어 있지 않습니다. 관련 증빙을 보완한 뒤 다시 확인해 주세요."
-            if policy.target == "submission"
-            else "현재 심사 결과에는 이 질문을 뒷받침할 충분한 문서 비교 또는 법령 근거가 없습니다."
+            _direction_scope_text(policy)
+            if policy.direction_inapplicable
+            else (
+                "현재 심사 결과에는 수입신고확인증의 제출 또는 제출 예정 여부를 확인할 사실이 "
+                "포함되어 있지 않습니다. 관련 증빙을 보완한 뒤 다시 확인해 주세요."
+                if policy.target == "submission"
+                else "현재 심사 결과에는 이 질문을 뒷받침할 충분한 문서 비교 또는 법령 근거가 없습니다."
+            )
         )
         return _answer(
             request,
@@ -320,6 +472,37 @@ def deterministic_assistant_answer(
         ],
         correction_draft=_draft_from_question(question, result),
     )
+
+
+def unregistered_document_input_answer(
+    request: AssistantAnswerRequestV1,
+    *,
+    engine: EngineV3,
+) -> AssistantAnswerResponseV1:
+    """Explain the Case-chat evidence boundary without retaining pasted text.
+
+    This is deliberately emitted before a transcript, Data request, or Claude
+    request.  A user message may remain in Backend's authorized conversation,
+    but it cannot become a fact, citation, finding, or correction proposal.
+    """
+
+    answer = AssistantAnswerResponseV1(
+        case_id=request.case_id,
+        review_run_id=request.review_run_id,
+        conversation_id=request.conversation_id,
+        answer_scope="insufficient_evidence",
+        direct_answer=(
+            "붙여넣은 문서 원문은 현재 심사의 새 근거로 사용하지 않았습니다. "
+            "문서를 등록하거나 교체한 뒤 새 심사를 실행하면, 그 결과를 기준으로 다시 확인할 수 있습니다."
+        ),
+        citations=[],
+        suggested_questions=["등록된 문서의 현재 심사 결과에서 확인이 필요한 항목은 무엇인가요?"],
+        correction_draft=None,
+        case_input_notice="unregistered_document_text",
+        engine=engine,
+    )
+    _validate_references(answer, request.review_result)
+    return answer
 
 
 def response_from_provider_candidate(
@@ -539,8 +722,11 @@ class GuidanceContext:
     coverage: Literal["covered", "no_coverage", "partial", "unavailable"]
     snapshot_id: str | None
     as_of: date
-    registry_version: Literal["1.0"]
+    registry_version: Literal["1.0", "2.0"]
+    registry_sha256: str
     topic: str | None
+    scope: str | None
+    applicable_directions: tuple[Literal["import", "export"], ...]
     evidence: tuple[GuidanceEvidenceV1, ...]
 
 
@@ -552,6 +738,7 @@ def _guidance_citations(context: GuidanceContext) -> list[GuidanceCitationV1]:
     return [
         GuidanceCitationV1(
             source_id=item.source_id,
+            registry_source_id=item.registry_source_id,
             source_kind=item.source_kind,
             source_title=item.title,
             source_uri=item.uri,
@@ -561,6 +748,119 @@ def _guidance_citations(context: GuidanceContext) -> list[GuidanceCitationV1]:
         )
         for item in context.evidence
     ]
+
+
+def _ordered_directions(
+    values: object,
+) -> tuple[Literal["import", "export"], ...]:
+    return tuple(
+        cast(Literal["import", "export"], direction)
+        for direction in ("import", "export")
+        if isinstance(values, (set, frozenset, tuple, list)) and direction in values
+    )
+
+
+def _guidance_scope_label(
+    topic: str | None,
+    scope: str | None,
+    *,
+    fallback: str,
+) -> str:
+    """Resolve a label from the full topic/scope pair, never scope alone.
+
+    ``agency_confirmation_and_supporting_documents`` is intentionally shared
+    by the import- and export-requirement topics.  Looking up a scope on its
+    own would make an import answer display the export label (or vice versa).
+    """
+
+    if topic is not None and scope is not None:
+        return _GUIDANCE_SCOPE_LABELS.get((topic, scope), fallback)
+    return fallback
+
+
+def guidance_resolution_for_policy(
+    policy: _QuestionPolicy,
+    *,
+    context: GuidanceContext | None,
+    as_of: date,
+    registry_version: Literal["1.0", "2.0"] = "2.0",
+) -> GuidanceResolutionV1 | None:
+    """Expose only safe lookup state for a selected general-guidance scope."""
+
+    if (
+        policy.general_topic is None
+        or policy.general_scope is None
+        or policy.requested_direction is None
+        or not policy.applicable_directions
+    ):
+        return None
+    if context is None:
+        resolution_scope = "legacy_topic" if registry_version == "1.0" else policy.general_scope
+        try:
+            applicable_directions = _ordered_directions(
+                guidance_scope_directions(
+                    registry_version=registry_version,
+                    topic=policy.general_topic,
+                    scope=resolution_scope,
+                )
+            )
+        except GuidanceRegistryError:
+            # The profile runtime only invokes this helper for an approved
+            # target.  If a copied registry becomes inconsistent, preserve
+            # the classifier's narrow direction boundary and make no claim
+            # that a source or snapshot was used.
+            applicable_directions = policy.applicable_directions
+        coverage: Literal["covered", "no_coverage", "partial", "unavailable"] = (
+            "no_coverage" if policy.direction_inapplicable else "unavailable"
+        )
+        return GuidanceResolutionV1(
+            topic=policy.general_topic,
+            scope=resolution_scope,
+            requested_direction=policy.requested_direction,
+            applicable_directions=list(applicable_directions),
+            coverage=coverage,
+            snapshot_id=None,
+            as_of=as_of,
+            registry_version=registry_version,
+        )
+    return GuidanceResolutionV1(
+        topic=context.topic or policy.general_topic,
+        scope=context.scope or policy.general_scope,
+        requested_direction=policy.requested_direction,
+        applicable_directions=list(context.applicable_directions or policy.applicable_directions),
+        coverage=context.coverage,
+        snapshot_id=context.snapshot_id,
+        as_of=context.as_of,
+        registry_version=context.registry_version,
+    )
+
+
+def guidance_registry_sha256_for_policy(
+    policy: _QuestionPolicy,
+    *,
+    context: GuidanceContext | None,
+    registry_version: Literal["1.0", "2.0"] = "2.0",
+) -> str | None:
+    """Return internal-only registry provenance for a selected guidance scope.
+
+    This digest never appears in the user DTO.  It lets Backend independently
+    compare the Agent's accepted Data response to the exact copied V1/V2
+    manifest before it projects an answer into persistent conversation state.
+    For an unavailable, direction-inapplicable V2 lookup, it identifies the
+    V2 manifest whose scope boundary Agent applied without claiming a Data
+    source or snapshot was used.
+    """
+
+    if (
+        policy.general_topic is None
+        or policy.general_scope is None
+        or policy.requested_direction is None
+        or not policy.applicable_directions
+    ):
+        return None
+    if context is not None:
+        return context.registry_sha256
+    return guidance_registry_for_version(registry_version).registry_sha256
 
 
 def _answer_citations(
@@ -578,6 +878,7 @@ def guidance_context_from_data(
     expected_as_of: date | None = None,
     expected_trade_direction: Literal["import", "export", "both"] | None = None,
     expected_topic: str | None = None,
+    expected_scope: str | None = None,
 ) -> GuidanceContext:
     """Validate a Data guidance response before it can ground user prose.
 
@@ -587,11 +888,21 @@ def guidance_context_from_data(
     limitation instead of a model-completed answer.
     """
 
-    if response.get("schema_version") != "3.0" or response.get("registry_version") != "1.0":
+    registry_version = response.get("registry_version")
+    if response.get("schema_version") != "3.0" or registry_version not in {"1.0", "2.0"}:
         raise ValueError("guidance_response_version_invalid")
     registry_sha256 = response.get("registry_sha256")
-    if not isinstance(registry_sha256, str):
+    if (
+        not isinstance(registry_sha256, str)
+        or re.fullmatch(r"[a-f0-9]{64}", registry_sha256) is None
+    ):
         raise ValueError("guidance_response_registry_sha256_missing")
+    try:
+        registry = guidance_registry_for_version(registry_version)
+    except GuidanceRegistryError:
+        raise ValueError("guidance_response_registry_invalid") from None
+    if registry_sha256 != registry.registry_sha256:
+        raise ValueError("guidance_response_registry_sha256_mismatch")
     status = response.get("status")
     coverage = response.get("coverage")
     snapshot_id = response.get("snapshot_id")
@@ -645,6 +956,33 @@ def guidance_context_from_data(
         raise ValueError("guidance_response_topic_invalid")
     if expected_topic is not None and response_topic != expected_topic:
         raise ValueError("guidance_response_topic_mismatch")
+    raw_scope = response.get("guidance_scope")
+    if registry_version == "1.0":
+        if raw_scope is not None:
+            raise ValueError("guidance_response_scope_invalid")
+        response_scope = "legacy_topic"
+    elif not isinstance(raw_scope, str) or not raw_scope:
+        raise ValueError("guidance_response_scope_invalid")
+    else:
+        response_scope = raw_scope
+    if (
+        registry_version == "2.0"
+        and expected_scope is not None
+        and response_scope != expected_scope
+    ):
+        raise ValueError("guidance_response_scope_mismatch")
+    applicable_directions: frozenset[Literal["import", "export"]]
+    if response_topic is not None:
+        try:
+            applicable_directions = guidance_scope_directions(
+                registry_version=registry_version,
+                topic=response_topic,
+                scope=response_scope,
+            )
+        except GuidanceRegistryError:
+            raise ValueError("guidance_response_scope_invalid") from None
+    else:
+        applicable_directions = frozenset()
     evidence: list[GuidanceEvidenceV1] = []
     source_ids: set[str] = set()
     for result in results:
@@ -671,8 +1009,16 @@ def guidance_context_from_data(
             "both",
         }:
             raise ValueError("guidance_response_direction_mismatch")
+        # A request for both directions may legitimately contain a page whose
+        # registered binding is import-only or export-only.  The selected V2
+        # scope and every individual source are still provenance-validated
+        # below; Data's covered/partial status is what asserts whether the
+        # full requested bundle was available.  Requiring every citation to
+        # spell ``both`` would incorrectly reject a complete bundle made of
+        # direction-specific official pages.
         candidate = {
             "source_id": result.get("source_id"),
+            "registry_source_id": result.get("registry_source_id"),
             "source_kind": result.get("source_kind"),
             "title": result.get("title"),
             "uri": result.get("uri"),
@@ -696,6 +1042,7 @@ def guidance_context_from_data(
         try:
             validate_guidance_source_provenance(
                 profile_mode=profile_mode,
+                registry_version=registry_version,
                 registry_sha256=registry_sha256,
                 registry_source_id=registry_source_id,
                 source_kind=item.source_kind,
@@ -706,6 +1053,7 @@ def guidance_context_from_data(
                 law_id=item.law_id,
                 law_name=item.law_name,
                 article_no=item.article_no,
+                guidance_scope=response_scope if registry_version == "2.0" else None,
             )
         except GuidanceRegistryError:
             raise ValueError("guidance_response_provenance_invalid") from None
@@ -722,8 +1070,11 @@ def guidance_context_from_data(
         coverage=coverage,
         snapshot_id=snapshot_id,
         as_of=as_of,
-        registry_version="1.0",
+        registry_version=registry_version,
+        registry_sha256=registry_sha256,
         topic=response_topic if isinstance(response_topic, str) else None,
+        scope=response_scope if isinstance(response_topic, str) else None,
+        applicable_directions=_ordered_directions(applicable_directions),
         evidence=tuple(evidence),
     )
 
@@ -816,7 +1167,11 @@ def _knowledge_template(
     if presentation_style not in _KNOWLEDGE_PRESENTATION_STYLES:
         raise ValueError("knowledge_provider_presentation_style_invalid")
     topic = context.topic or ""
-    topic_label = _TOPIC_LABELS.get(topic, "통관 안내")
+    topic_label = _guidance_scope_label(
+        topic,
+        context.scope,
+        fallback=_TOPIC_LABELS.get(topic, "통관 안내"),
+    )
     introductions = {
         "overview": (
             f"공식 지식 스냅샷에 등록된 {topic_label} 자료 {len(context.evidence)}건을 "
@@ -855,10 +1210,14 @@ def deterministic_knowledge_answer(
     *,
     engine: EngineV3,
     context: GuidanceContext | None,
+    registry_version: Literal["1.0", "2.0"] = "2.0",
 ) -> KnowledgeAnswerResponseV1:
     """Return a source-bounded standalone answer without a Case snapshot."""
 
-    policy = knowledge_question_policy(request.question.strip())
+    policy = guidance_policy_for_registry(
+        knowledge_question_policy(request.question.strip(), trade_type=request.trade_type),
+        registry_version=context.registry_version if context is not None else registry_version,
+    )
     if policy.scope == "out_of_scope":
         return KnowledgeAnswerResponseV1(
             conversation_id=request.conversation_id,
@@ -878,11 +1237,38 @@ def deterministic_knowledge_answer(
         return KnowledgeAnswerResponseV1(
             conversation_id=request.conversation_id,
             answer_scope="clarification_needed",
-            direct_answer="수입·수출, HS 품목분류, 원산지·FTA, 통관 서류 중 확인할 주제를 알려 주세요.",
-            suggested_questions=["원산지증명서는 어떤 경우에 확인하나요?"],
+            direct_answer=_guidance_clarification_text(policy),
+            suggested_questions=_guidance_clarification_suggestions(policy),
             coverage="unavailable",
             snapshot_id=None,
             as_of=request.as_of,
+            engine=engine,
+        )
+    selected_registry = context.registry_version if context is not None else registry_version
+    resolution = guidance_resolution_for_policy(
+        policy,
+        context=context,
+        as_of=request.as_of,
+        registry_version=selected_registry,
+    )
+    registry_sha256 = guidance_registry_sha256_for_policy(
+        policy,
+        context=context,
+        registry_version=selected_registry,
+    )
+    if policy.direction_inapplicable:
+        return KnowledgeAnswerResponseV1(
+            conversation_id=request.conversation_id,
+            answer_scope="insufficient_evidence",
+            direct_answer=_direction_scope_text(policy),
+            suggested_questions=[
+                "대한민국 수입 또는 수출 중 적용 방향을 선택해 다시 질문해 주세요."
+            ],
+            coverage="no_coverage",
+            snapshot_id=None,
+            as_of=request.as_of,
+            guidance_resolution=resolution,
+            guidance_registry_sha256=registry_sha256,
             engine=engine,
         )
     if context is None or context.status in {"no_coverage", "failed"}:
@@ -897,6 +1283,8 @@ def deterministic_knowledge_answer(
             coverage=context.coverage if context is not None else "unavailable",
             snapshot_id=context.snapshot_id if context is not None else None,
             as_of=context.as_of if context is not None else request.as_of,
+            guidance_resolution=resolution,
+            guidance_registry_sha256=registry_sha256,
             engine=engine,
         )
     topic = context.topic or policy.general_topic
@@ -918,6 +1306,8 @@ def deterministic_knowledge_answer(
         coverage=context.coverage,
         snapshot_id=context.snapshot_id,
         as_of=context.as_of,
+        guidance_resolution=resolution,
+        guidance_registry_sha256=registry_sha256,
         engine=engine,
     )
 
@@ -983,6 +1373,8 @@ def response_from_knowledge_provider_candidate(
             coverage=context.coverage,
             snapshot_id=context.snapshot_id,
             as_of=context.as_of,
+            guidance_resolution=fallback.guidance_resolution,
+            guidance_registry_sha256=fallback.guidance_registry_sha256,
             engine=engine,
         )
     except ValidationError:
@@ -1016,13 +1408,19 @@ def guidance_answer_for_case(
         context=context,
     )
     if standalone.answer_scope != "general_customs_guidance":
-        return _answer(
+        answer = _answer(
             request,
             engine=engine,
             scope=standalone.answer_scope,
             text=standalone.direct_answer,
             citations=[],
             suggestions=standalone.suggested_questions,
+        )
+        return answer.model_copy(
+            update={
+                "guidance_resolution": standalone.guidance_resolution,
+                "guidance_registry_sha256": standalone.guidance_registry_sha256,
+            }
         )
     section = AssistantAnswerSectionV1(
         kind="general_guidance",
@@ -1040,6 +1438,8 @@ def guidance_answer_for_case(
         answer_sections=[section],
         suggested_questions=standalone.suggested_questions,
         correction_draft=None,
+        guidance_resolution=standalone.guidance_resolution,
+        guidance_registry_sha256=standalone.guidance_registry_sha256,
         engine=engine,
     )
     _validate_references(answer, request.review_result)
@@ -1050,57 +1450,115 @@ def combine_case_and_guidance(
     case_answer: AssistantAnswerResponseV1,
     *,
     context: GuidanceContext | None,
-    topic: str | None,
+    policy: _QuestionPolicy,
+    as_of: date,
+    registry_version: Literal["1.0", "2.0"] = "2.0",
 ) -> AssistantAnswerResponseV1:
-    """Expose a mixed request as separate case and general sections.
+    """Expose a mixed request as separate, evidence-bound sections.
 
     The legacy top-level fields retain the case answer, so a consumer that has
     not yet adopted sections cannot mistake general guidance for a case fact.
+    The optional third section is deterministic: it never combines source text
+    into a legal conclusion and is emitted only when both citation domains are
+    present.
     """
 
+    selected_registry = context.registry_version if context is not None else registry_version
+    resolution = guidance_resolution_for_policy(
+        policy,
+        context=context,
+        as_of=as_of,
+        registry_version=selected_registry,
+    )
+    registry_sha256 = guidance_registry_sha256_for_policy(
+        policy,
+        context=context,
+        registry_version=selected_registry,
+    )
+    case_citations = [
+        citation for citation in case_answer.citations if isinstance(citation, AssistantCitationV1)
+    ]
+    if not case_citations:
+        return case_answer.model_copy(
+            update={
+                "guidance_resolution": resolution,
+                "guidance_registry_sha256": registry_sha256,
+            }
+        )
     case_section = AssistantAnswerSectionV1(
         kind="case_analysis",
         title="현재 사건 기준",
         content=case_answer.direct_answer,
-        citations=case_answer.citations,
+        citations=_answer_citations(case_citations),
     )
     if context is None or context.status not in {"covered", "partial"}:
         return AssistantAnswerResponseV1.model_validate(
             case_answer.model_dump(mode="json", warnings=False)
-            | {"answer_sections": [case_section.model_dump(mode="json", warnings=False)]}
+            | {
+                "answer_sections": [case_section.model_dump(mode="json", warnings=False)],
+                "guidance_resolution": (
+                    resolution.model_dump(mode="json", warnings=False)
+                    if resolution is not None
+                    else None
+                ),
+                "guidance_registry_sha256": registry_sha256,
+            }
         )
-    general = deterministic_knowledge_answer(
-        KnowledgeAnswerRequestV1(
-            conversation_id=case_answer.conversation_id,
-            question=_TOPIC_LABELS.get(topic or "", "통관 안내"),
-            trade_type="both",
-            as_of=context.as_of,
-        ),
-        engine=case_answer.engine,
-        context=context,
-    )
-    if general.answer_scope != "general_customs_guidance":
-        return AssistantAnswerResponseV1.model_validate(
-            case_answer.model_dump(mode="json", warnings=False)
-            | {"answer_sections": [case_section.model_dump(mode="json", warnings=False)]}
-        )
+    general_content = _knowledge_template(context, presentation_style="overview")
+    general_citations = _guidance_citations(context)
     guidance_section = AssistantAnswerSectionV1(
         kind="general_guidance",
         title="일반 통관 안내",
-        content=general.direct_answer,
-        citations=_answer_citations(general.citations),
+        content=general_content,
+        citations=_answer_citations(general_citations),
     )
+    sections: list[AssistantAnswerSectionV1] = [case_section, guidance_section]
+    if policy.application_intent:
+        application_citations: list[AssistantAnswerCitationV1] = [
+            case_citations[0],
+            general_citations[0],
+        ]
+        scope_label = _guidance_scope_label(
+            policy.general_topic,
+            policy.general_scope,
+            fallback="일반 통관 안내",
+        )
+        partial_note = (
+            " 공식 자료 범위가 일부이므로, 아래 항목은 담당자가 인용된 원문과 함께 추가 확인해야 합니다."
+            if context.coverage == "partial"
+            else ""
+        )
+        sections.append(
+            AssistantAnswerSectionV1(
+                kind="case_application",
+                title="사건 적용·다음 확인",
+                content=(
+                    f"현재 사건의 인용된 문서·비교 결과와 {scope_label} 공식 안내를 함께 보면, "
+                    "다음 확인을 담당자가 진행해 주세요.\n"
+                    "1. 현재 사건의 인용 근거가 일반 안내의 적용 대상과 맞는지 확인합니다.\n"
+                    "2. 인용된 공식 자료의 기준일과 실제 신고·보완 요건을 원문으로 확인합니다.\n"
+                    "3. 이 안내만으로 신고 수리·허가·FTA 적용 또는 통관 결과를 확정하지 않습니다."
+                    f"{partial_note}"
+                ),
+                citations=application_citations,
+            )
+        )
     return AssistantAnswerResponseV1.model_validate(
         case_answer.model_dump(mode="json", warnings=False)
         | {
             "answer_sections": [
-                case_section.model_dump(mode="json", warnings=False),
-                guidance_section.model_dump(mode="json", warnings=False),
+                section.model_dump(mode="json", warnings=False) for section in sections
             ],
             "citations": [
                 *(item.model_dump(mode="json", warnings=False) for item in case_answer.citations),
-                *(item.model_dump(mode="json", warnings=False) for item in general.citations),
+                *(item.model_dump(mode="json", warnings=False) for item in general_citations),
             ],
+            "guidance_resolution": (
+                resolution.model_dump(mode="json", warnings=False)
+                if resolution is not None
+                else None
+            ),
+            "guidance_registry_sha256": registry_sha256,
         }
     )
 
@@ -1201,16 +1659,233 @@ def _mentions_case_reference(question: str) -> bool:
     )
 
 
+def _guidance_targets_for_question(question: str) -> tuple[_GuidanceTarget, ...]:
+    """Return every independent closed retrieval target in a question.
+
+    A first-regex-wins router hid the second subject in questions such as
+    "B/L과 AWB".  We instead discover every target, collapse only a more
+    specific spelling of the *same* target, and ask the user to choose when
+    independent scopes remain.
+    """
+
+    selected = [target for target in _GUIDANCE_TARGETS if target.pattern.search(question)]
+    selected_pairs = {(target.topic, target.scope) for target in selected}
+    # A specific HS confirmation wording also matches the generic
+    # classification rule; it remains one scope, not a false compound query.
+    if ("hs_classification", "advance_ruling_or_confirmation") in selected_pairs:
+        selected = [
+            target
+            for target in selected
+            if (target.topic, target.scope) != ("hs_classification", "classification_principles")
+        ]
+    # FTA-origin certificate wording is governed by the dedicated FTA scope;
+    # do not also turn its ordinary "원산지" substring into a second query.
+    if ("fta_procedure", "origin_certificate") in selected_pairs:
+        selected = [
+            target
+            for target in selected
+            if (target.topic, target.scope) != ("origin_verification", "origin_evidence")
+        ]
+    # In a question about the FTA preference procedure, a bare "원산지" is
+    # normally an attribute of that procedure rather than a second requested
+    # consultation.  Keep an explicit certificate/confirmation/verification
+    # request independent so "FTA 특혜와 원산지증명" still asks the user to
+    # choose instead of silently selecting a first scope.
+    if (
+        ("fta_procedure", "preference_procedure") in selected_pairs
+        and ("origin_verification", "origin_evidence") in selected_pairs
+        and re.search(r"원산지\s*(?:증명|확인서|검증|조사)", question, re.I) is None
+    ):
+        selected = [
+            target
+            for target in selected
+            if (target.topic, target.scope) != ("origin_verification", "origin_evidence")
+        ]
+    selected_topics = {target.topic for target in selected}
+    for pattern, (topic, _unused_scope) in _GENERIC_DIRECTIONAL_TARGETS:
+        if pattern.search(question) and topic not in selected_topics:
+            selected.extend(target for target in _GUIDANCE_TARGETS if target.topic == topic)
+            selected_topics.add(topic)
+    unique: list[_GuidanceTarget] = []
+    seen: set[tuple[str, str]] = set()
+    for target in selected:
+        key = (target.topic, target.scope)
+        if key not in seen:
+            seen.add(key)
+            unique.append(target)
+    return tuple(unique)
+
+
+def _requested_direction(
+    question: str,
+    *,
+    fallback: Literal["import", "export", "both"],
+) -> Literal["import", "export", "both"]:
+    has_import = bool(re.search(r"수입", question, re.I))
+    has_export = bool(re.search(r"수출", question, re.I))
+    if "수출입" in question or (has_import and has_export):
+        return "both"
+    if has_import:
+        return "import"
+    if has_export:
+        return "export"
+    return fallback
+
+
+def _policy_for_guidance_target(
+    target: _GuidanceTarget,
+    *,
+    requested_direction: Literal["import", "export", "both"],
+    scope: _AnswerScope,
+    mixed: bool = False,
+    application_intent: bool = False,
+) -> _QuestionPolicy:
+    applicable = target.applicable_directions
+    if requested_direction == "both":
+        query_direction: Literal["import", "export", "both"] = "both"
+        # ``both`` is a real request direction, not permission to silently
+        # narrow a Korea import-only rule to its import half.  Asking for
+        # import/export together where the selected scope is import-only (or
+        # export-only) must surface an explicit scope limitation without a
+        # Data lookup or model completion.
+        direction_inapplicable = len(applicable) != 2
+    elif requested_direction in applicable:
+        query_direction = requested_direction
+        direction_inapplicable = False
+    else:
+        # Do not substitute an import-only Korean rule for a user asking an
+        # export question (or the reverse).  The runtime presents the scope
+        # boundary without calling Data or Claude.
+        query_direction = requested_direction
+        direction_inapplicable = True
+    return _QuestionPolicy(
+        scope=scope,
+        general_topic=target.topic,
+        general_scope=target.scope,
+        requested_direction=requested_direction,
+        query_direction=query_direction,
+        applicable_directions=applicable,
+        mixed=mixed,
+        application_intent=application_intent,
+        direction_inapplicable=direction_inapplicable,
+    )
+
+
+def guidance_policy_for_registry(
+    policy: _QuestionPolicy,
+    *,
+    registry_version: Literal["1.0", "2.0"],
+) -> _QuestionPolicy:
+    """Project a classified V2 pair onto the selected registry generation.
+
+    The classifier deliberately uses V2 scopes because they are the narrowest
+    safe interpretation of a Korean trade question.  The preserved V1
+    registry, however, publishes only broad topics.  Its manifest is the
+    authority for the legacy direction set; using it here restores the V1
+    profile's former topic-level behavior without widening V2 itself.
+
+    This function does *not* pick a different subject.  It merely replaces a
+    V2 scope's direction boundary with the copied V1 topic boundary after the
+    caller has explicitly selected the V1 profile.  Import/export requirements
+    remain one-direction-only because the V1 manifest says so.
+    """
+
+    if (
+        registry_version != "1.0"
+        or policy.general_topic is None
+        or policy.general_scope is None
+        or policy.requested_direction is None
+        or policy.query_direction is None
+    ):
+        return policy
+    try:
+        directions = _ordered_directions(
+            guidance_scope_directions(
+                registry_version="1.0",
+                topic=policy.general_topic,
+                scope="legacy_topic",
+            )
+        )
+    except GuidanceRegistryError:
+        # The runtime later refuses a missing request mapping.  Retain the
+        # narrow V2 classifier state rather than guessing a legacy direction.
+        return policy
+    if policy.requested_direction == "both":
+        direction_inapplicable = len(directions) != 2
+    else:
+        direction_inapplicable = policy.requested_direction not in directions
+    scope = policy.scope
+    if (
+        scope == "insufficient_evidence"
+        and policy.direction_inapplicable
+        and not direction_inapplicable
+    ):
+        # ``knowledge_question_policy`` has already classified this as an
+        # official general topic; only its V2 direction test made it
+        # insufficient.  The V1 profile's manifest explicitly supports the
+        # requested direction, so restore the original general route.
+        scope = "general_customs_guidance"
+    return replace(
+        policy,
+        scope=scope,
+        applicable_directions=directions,
+        direction_inapplicable=direction_inapplicable,
+    )
+
+
+def _guidance_clarification_text(policy: _QuestionPolicy) -> str:
+    labels = [target.label for target in policy.clarification_targets[:3]]
+    choices = ", ".join(labels)
+    if choices:
+        return (
+            "한 번에 하나의 공식 통관 주제 범위만 조회할 수 있습니다. "
+            f"먼저 {choices} 중 확인할 한 가지를 선택해 주세요."
+        )
+    return "수입·수출, HS 품목분류, 원산지·FTA, 통관 서류 중 확인할 한 가지 주제를 알려 주세요."
+
+
+def _guidance_clarification_suggestions(policy: _QuestionPolicy) -> list[str]:
+    """Offer only code-owned single-scope choices after a compound request."""
+
+    suggestions: list[str] = []
+    for target in policy.clarification_targets[:3]:
+        question = f"{target.label} 공식 안내를 알려 주세요."
+        if question not in suggestions:
+            suggestions.append(question)
+    return suggestions or ["확인하려는 통관 주제 한 가지를 알려 주세요."]
+
+
+def _direction_scope_text(policy: _QuestionPolicy) -> str:
+    label = _guidance_scope_label(
+        policy.general_topic,
+        policy.general_scope,
+        fallback="선택한 통관 안내",
+    )
+    requested = {"import": "수입", "export": "수출", "both": "수출입"}.get(
+        policy.requested_direction or "both", "수출입"
+    )
+    applicable = "·".join(
+        {"import": "수입", "export": "수출"}[direction]
+        for direction in policy.applicable_directions
+    )
+    return (
+        f"{label} 공식 안내는 대한민국 기준 {applicable} 범위에만 등록되어 있습니다. "
+        f"요청한 {requested} 방향에는 적용 범위가 없어 현재 공식 지식 스냅샷으로 안내할 수 없습니다."
+    )
+
+
 def guidance_topic_for_question(question: str) -> str | None:
-    """Return one approved official-guidance topic, never a free-form query class."""
+    """Return a topic only when the question contains one independent scope."""
 
-    for topic, pattern in _GENERAL_TOPICS:
-        if pattern.search(question):
-            return topic
-    return None
+    targets = _guidance_targets_for_question(question)
+    return targets[0].topic if len(targets) == 1 else None
 
 
-def knowledge_question_policy(question: str) -> _QuestionPolicy:
+def knowledge_question_policy(
+    question: str,
+    *,
+    trade_type: Literal["import", "export", "both"] = "both",
+) -> _QuestionPolicy:
     """Classify a standalone knowledge turn without a Case snapshot.
 
     The separate knowledge assistant has no document or review-result access.
@@ -1220,13 +1895,34 @@ def knowledge_question_policy(question: str) -> _QuestionPolicy:
 
     if _OUT_OF_SCOPE.search(question):
         return _QuestionPolicy("out_of_scope")
+    if _FOREIGN_IMPORT_REGULATION.search(question):
+        return _QuestionPolicy("out_of_scope")
     if len(question.strip()) < 3 or question.strip() in {"?", "무엇", "확인"}:
         return _QuestionPolicy("clarification_needed")
     if _GENERAL_COVERAGE_GAP.search(question):
         return _QuestionPolicy("insufficient_evidence")
-    topic = guidance_topic_for_question(question)
-    if topic is not None:
-        return _QuestionPolicy("general_customs_guidance", general_topic=topic)
+    targets = _guidance_targets_for_question(question)
+    if len(targets) > 1:
+        return _QuestionPolicy("clarification_needed", clarification_targets=targets)
+    if len(targets) == 1:
+        target = targets[0]
+        requested_direction = _requested_direction(question, fallback=trade_type)
+        policy = _policy_for_guidance_target(
+            target,
+            requested_direction=requested_direction,
+            scope="general_customs_guidance",
+        )
+        if policy.direction_inapplicable:
+            return _QuestionPolicy(
+                "insufficient_evidence",
+                general_topic=policy.general_topic,
+                general_scope=policy.general_scope,
+                requested_direction=policy.requested_direction,
+                query_direction=policy.query_direction,
+                applicable_directions=policy.applicable_directions,
+                direction_inapplicable=True,
+            )
+        return policy
     return _QuestionPolicy("out_of_scope")
 
 
@@ -1245,10 +1941,11 @@ def _classify_question(
 
     if _OUT_OF_SCOPE.search(question):
         return _QuestionPolicy("out_of_scope")
+    if _FOREIGN_IMPORT_REGULATION.search(question):
+        return _QuestionPolicy("out_of_scope")
     if len(question) < 3 or question in {"?", "무엇", "확인"}:
         return _QuestionPolicy("clarification_needed")
     case_reference = _question_matches_current_case(question, result, recent_turns=recent_turns)
-    general_topic = guidance_topic_for_question(question)
     explicit_case_reference = _mentions_case_reference(question)
     # A request for the review's legal basis remains evidence-grounded even
     # when the user explicitly says "this case".  Checking a general topic
@@ -1264,26 +1961,64 @@ def _classify_question(
         )
     ):
         return _QuestionPolicy("evidence_grounded" if result.evidence else "insufficient_evidence")
-    if case_reference and not _GENERAL_INTENT.search(question):
-        if _SUBMISSION_STATUS_QUESTION.search(question):
-            return _QuestionPolicy(
-                "case_grounded" if _has_submission_context(result) else "insufficient_evidence",
-                "submission",
-            )
+    # Submission and document-status questions remain case-first even when
+    # they contain general words such as "절차".  A general guide can never
+    # create filing, receipt, acceptance, or rejection evidence.
+    if case_reference and _SUBMISSION_STATUS_QUESTION.search(question):
+        return _QuestionPolicy(
+            "case_grounded" if _has_submission_context(result) else "insufficient_evidence",
+            "submission",
+        )
+    targets = _guidance_targets_for_question(question)
+    is_explicit_mixed_scope = (
+        case_reference
+        and explicit_case_reference
+        and len(targets) == 1
+        and bool(_MIXED_GUIDANCE_INTENT.search(question))
+    )
+    if case_reference and not is_explicit_mixed_scope:
         if _MULTI_DOCUMENT_HS_QUESTION.search(question):
             return _QuestionPolicy("case_grounded", "multi_document_hs")
         if _CERTIFICATE_HS_QUESTION.search(question):
             return _QuestionPolicy("case_grounded", "certificate_hs")
         return _QuestionPolicy("case_grounded")
-    if case_reference and explicit_case_reference and general_topic is not None:
+    if _GENERAL_COVERAGE_GAP.search(question):
+        return _QuestionPolicy("insufficient_evidence")
+    if len(targets) > 1:
+        return _QuestionPolicy("clarification_needed", clarification_targets=targets)
+    if len(targets) == 1:
+        target = targets[0]
+        requested_direction = _requested_direction(question, fallback=result.trade_type)
+        if case_reference and explicit_case_reference:
+            # The user deliberately connected a current case to one general
+            # topic.  A later Data lookup is still bounded to that one scope.
+            return _policy_for_guidance_target(
+                target,
+                requested_direction=requested_direction,
+                scope="case_grounded",
+                mixed=True,
+                application_intent=bool(_APPLICATION_INTENT.search(question)),
+            )
+        policy = _policy_for_guidance_target(
+            target,
+            requested_direction=requested_direction,
+            scope="general_customs_guidance",
+        )
+        if policy.direction_inapplicable:
+            return _QuestionPolicy(
+                "insufficient_evidence",
+                general_topic=policy.general_topic,
+                general_scope=policy.general_scope,
+                requested_direction=policy.requested_direction,
+                query_direction=policy.query_direction,
+                applicable_directions=policy.applicable_directions,
+                direction_inapplicable=True,
+            )
+        return policy
+    if case_reference and explicit_case_reference:
         # The user deliberately connected a current case to a general topic.
-        # ProfileRuntime later obtains a single official guidance result and
-        # exposes it separately from the immutable case answer.
-        return _QuestionPolicy("case_grounded", general_topic=general_topic, mixed=True)
-    if general_topic is not None:
-        if _GENERAL_COVERAGE_GAP.search(question):
-            return _QuestionPolicy("insufficient_evidence")
-        return _QuestionPolicy("general_customs_guidance", general_topic=general_topic)
+        # No approved subject was selected, so keep the response case-bound.
+        return _QuestionPolicy("case_grounded")
     if _GENERAL_REQUEST.search(question):
         return _QuestionPolicy("out_of_scope")
     # Do not turn an unrecognised question into an arbitrary first comparison.
@@ -1629,10 +2364,12 @@ __all__ = [
     "deterministic_knowledge_answer",
     "guidance_answer_for_case",
     "guidance_context_from_data",
+    "guidance_policy_for_registry",
     "guidance_topic_for_question",
     "knowledge_question_policy",
     "provider_answer_allowed",
     "provider_snapshot",
     "response_from_provider_candidate",
     "response_from_knowledge_provider_candidate",
+    "unregistered_document_input_answer",
 ]
