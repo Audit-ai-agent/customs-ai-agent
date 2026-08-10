@@ -2,6 +2,7 @@ from __future__ import annotations
 
 import json
 from dataclasses import replace
+from datetime import date
 from typing import Any
 from urllib.error import HTTPError
 
@@ -29,6 +30,7 @@ from customs_ai_agent.service.profiles import (
     _dedupe_evidence_records,
     _evidence_from_data,
     _findings_from_evidence,
+    _retrieve_request,
     _temporal_context_from_data,
     ProfileEvidenceRetriever,
     ProfileRuntime,
@@ -211,10 +213,29 @@ def test_evidence_consumer_accepts_rerank_but_rejects_unregistered_retrieval_met
         _evidence_from_data(response)
 
 
+def test_retrieve_request_keeps_legacy_wire_and_enables_law_support_explicitly() -> None:
+    request = ServiceReviewRunRequestV3.model_construct(
+        case_id="case-retrieve-intent",
+        review_run_id="run-retrieve-intent",
+        review_as_of=date(2026, 8, 5),
+        trade_type="import",
+        jurisdiction="KR",
+    )
+
+    legacy = _retrieve_request(request, [])
+    law_history = _retrieve_request(request, [], include_law_support=True)
+
+    assert "query_intent" not in legacy
+    assert law_history["query_intent"] == "required_import_documents_and_law_support"
+
+
 def test_review_result_preserves_data_temporal_context_for_backend_persistence(
     monkeypatch: pytest.MonkeyPatch,
 ) -> None:
+    requests: list[dict[str, Any]] = []
+
     def retrieve(_self: ProfileEvidenceRetriever, request: dict[str, Any]) -> dict[str, Any]:
+        requests.append(request)
         return {
             "schema_version": "3.0",
             "request_id": request["request_id"],
@@ -225,7 +246,22 @@ def test_review_result_preserves_data_temporal_context_for_backend_persistence(
                 "hsk_snapshot_as_of": "2026-08-05",
                 "requirements_snapshot_as_of": "2026-08-05",
             },
-            "results": [],
+            "results": [
+                {
+                    "evidence": [
+                        {
+                            "evidence_id": "ev_" + "a" * 64,
+                            "item_id": "commodity-law-history",
+                            "title": "법령 조문",
+                            "text": "검증된 법령 근거입니다.",
+                            "source_uri": "https://www.law.go.kr/example",
+                            "source_type": "law_article",
+                            "version_hash": "a" * 64,
+                            "retrieval_methods": ["dense", "bm25"],
+                        }
+                    ]
+                }
+            ],
         }
 
     monkeypatch.setattr(ProfileEvidenceRetriever, "retrieve", retrieve)
@@ -257,6 +293,8 @@ def test_review_result_preserves_data_temporal_context_for_backend_persistence(
     assert result.temporal_context.law_as_of.isoformat() == "2026-08-05"
     assert result.temporal_context.hsk_snapshot_as_of.isoformat() == "2026-08-05"
     assert result.temporal_context.requirements_snapshot_as_of.isoformat() == "2026-08-05"
+    assert requests[0]["query_intent"] == "required_import_documents_and_law_support"
+    assert [item.source_type for item in result.evidence] == ["law_article"]
 
     # Existing immutable 3-law snapshots did not have the additive field.
     # Their old hashes must remain readable when Backend sends one back for a

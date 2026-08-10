@@ -963,10 +963,13 @@ def _deterministic_line_item(line: str) -> ClaudeLineItemCandidate | None:
 
 
 def _retrieve_request(
-    request: ServiceReviewRunRequestV3, items: list[dict[str, Any]]
+    request: ServiceReviewRunRequestV3,
+    items: list[dict[str, Any]],
+    *,
+    include_law_support: bool = False,
 ) -> dict[str, Any]:
     request_id = "rag-" + hashlib.sha256(request.review_run_id.encode("utf-8")).hexdigest()[:32]
-    return {
+    payload: dict[str, Any] = {
         "schema_version": "3.0",
         "request_id": request_id,
         "case_id": request.case_id,
@@ -977,6 +980,12 @@ def _retrieve_request(
         "top_k": 10,
         "items": items,
     }
+    # The law-history profile owns the extra legal-evidence branch.  Preserve
+    # the historic V3 request shape for three-law, dev-fixture, and manually
+    # configured callers by omitting this additive field everywhere else.
+    if include_law_support:
+        payload["query_intent"] = "required_import_documents_and_law_support"
+    return payload
 
 
 def _guidance_query_request(
@@ -1329,6 +1338,7 @@ class ProfileRuntime:
     ) -> None:
         self.mode = service_mode(settings)
         self._requires_temporal_context = settings.requires_temporal_context
+        self._law_history_evidence = settings.evidence_profile == "functional-uat-law-history"
         self._closed = False
         self._transcript_root = _transcript_root(settings, transcript_root)
         self._knowledge_transcript_root = _knowledge_transcript_root(
@@ -1869,7 +1879,11 @@ class ProfileRuntime:
             )
             if workflow_output.retrieval_items:
                 data_response = self._retriever.retrieve(
-                    _retrieve_request(request, workflow_output.retrieval_items)
+                    _retrieve_request(
+                        request,
+                        workflow_output.retrieval_items,
+                        include_law_support=self._law_history_evidence,
+                    )
                 )
                 temporal_context = _temporal_context_from_data(
                     data_response,
