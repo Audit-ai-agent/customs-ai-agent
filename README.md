@@ -43,6 +43,7 @@ GUIDANCE_SERVICE_TOKEN              # 그 snapshot이 만든 별도 호출 토�
 GUIDANCE_SERVICE_TOKEN_HEADER=Authorization
 GUIDANCE_SERVICE_REGISTRY_VERSION   # 1.0 또는 2.0
 CUSTOMS_AGENT_SERVICE_MODE          # local-development 또는 functional-uat
+CUSTOMS_AGENT_EVIDENCE_RETRIEVE_TIMEOUT_SECONDS  # Evidence /retrieve POST 전용, 기본 90초
 ```
 
 `GUIDANCE_SERVICE_BASE_URL`·`GUIDANCE_SERVICE_TOKEN`·`GUIDANCE_SERVICE_REGISTRY_VERSION`은
@@ -53,6 +54,11 @@ CUSTOMS_AGENT_SERVICE_MODE          # local-development 또는 functional-uat
 잘못된 token, 다른 mode header, registry version/hash 불일치가 있으면 Agent는 일반 안내를
 추측해 이어가지 않고 coverage 부족으로 처리합니다. 문서 심사의 readiness·`/retrieve`는
 어떤 경우에도 Evidence URL·token만 사용합니다.
+
+`CUSTOMS_AGENT_EVIDENCE_RETRIEVE_TIMEOUT_SECONDS`는 생략하면 90초이며 1~120초만 허용합니다.
+이는 초기화 중인 Evidence 모델의 `/retrieve` POST에만 적용됩니다. readiness GET과 guidance POST는
+기존 5초 제한을 유지합니다. 기본 importer 수정은 필요 없고, 필요할 때만 현재 PowerShell 세션에서
+비밀이 아닌 이 값을 명시해 조정할 수 있습니다.
 
 기능 UAT에는 여기에 개인 `ANTHROPIC_API_KEY`를 추가합니다. 기본 입력 위치는 Git이 무시하는 workspace의 `../_local/secrets/.env`이며, 파일에는 아래 한 항목만 둡니다.
 

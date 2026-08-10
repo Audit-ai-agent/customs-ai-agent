@@ -69,6 +69,26 @@ def test_default_profile_is_local_development() -> None:
     assert settings.guidance_base_url is None
     assert settings.guidance_service_token is None
     assert settings.guidance_registry_version is None
+    assert settings.readiness_timeout_seconds == 5
+    assert settings.evidence_retrieve_timeout_seconds == 90
+
+
+def test_evidence_retrieve_timeout_is_environment_configurable_and_bounded() -> None:
+    source = {
+        "CUSTOMS_AGENT_SERVICE_BEARER_TOKEN": _TOKEN,
+        "EVIDENCE_SERVICE_BASE_URL": "http://127.0.0.1:18083",
+        "EVIDENCE_SERVICE_TOKEN": _TOKEN,
+        "EVIDENCE_SERVICE_TOKEN_HEADER": "Authorization",
+        "CUSTOMS_AGENT_EVIDENCE_RETRIEVE_TIMEOUT_SECONDS": "91.5",
+    }
+
+    assert ServiceSettings.from_environment(source).evidence_retrieve_timeout_seconds == 91.5
+    for invalid in (0.9, 120.1):
+        with pytest.raises(
+            ServiceConfigurationError,
+            match="customs_agent_evidence_retrieve_timeout_seconds_invalid",
+        ):
+            _settings(evidence_retrieve_timeout_seconds=invalid)
 
 
 def test_temporal_context_is_atomic_and_bound_to_the_requested_law_date() -> None:
@@ -861,6 +881,71 @@ def test_guidance_uses_its_own_loopback_origin_and_token_while_review_stays_on_e
             "as_of": "2026-08-05",
             "top_k": 3,
         }
+    ]
+
+
+def test_evidence_retrieve_uses_dedicated_timeout_only(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    """A cold Evidence model may take longer than readiness, never guidance."""
+
+    class Headers(dict[str, str]):
+        def get_all(self, _name: str) -> None:
+            return None
+
+    calls: list[tuple[str, str, float]] = []
+
+    def open_request(request: Any, *, timeout: float) -> object:
+        if request.full_url.endswith(ProfileEvidenceRetriever.readiness_path):
+            kind = "readiness"
+            payload: dict[str, Any] = {"status": "ready"}
+        elif request.full_url.endswith(ProfileEvidenceRetriever.retrieve_path):
+            kind = "retrieve"
+            body = json.loads(request.data.decode("utf-8"))
+            payload = {
+                "schema_version": "3.0",
+                "request_id": body["request_id"],
+                "status": "ok",
+                "knowledge_snapshot_id": "test-snapshot",
+                "results": [],
+            }
+        else:
+            kind = "guidance"
+            payload = {}
+        calls.append((kind, request.get_method(), timeout))
+
+        class Response:
+            def __init__(self, response_payload: dict[str, Any]) -> None:
+                self.headers = Headers({SERVICE_MODE_HEADER: "local-development"})
+                self._payload = response_payload
+
+            def __enter__(self) -> "Response":
+                return self
+
+            def __exit__(self, *_args: object) -> None:
+                return None
+
+            def read(self, _limit: int) -> bytes:
+                return json.dumps(self._payload).encode("utf-8")
+
+        return Response(payload)
+
+    monkeypatch.setattr(profile_module._HTTP, "open", open_request)
+    retriever = ProfileEvidenceRetriever(_settings())
+    retriever.retrieve(
+        {"schema_version": "3.0", "request_id": "retrieve-timeout", "review_run_id": "run-timeout"}
+    )
+    retriever._request(
+        ProfileEvidenceRetriever.guidance_query_path,
+        method="POST",
+        peer="guidance",
+        payload={"request_id": "guidance-timeout"},
+    )
+
+    assert calls == [
+        ("readiness", "GET", 5.0),
+        ("retrieve", "POST", 90.0),
+        ("guidance", "POST", 5.0),
     ]
 
 

@@ -278,7 +278,8 @@ class ProfileEvidenceRetriever:
         self, settings: ServiceSettings, *, transcript_root: ScenarioTranscriptRoot | None = None
     ) -> None:
         self.mode = service_mode(settings)
-        self._timeout = settings.readiness_timeout_seconds
+        self._readiness_timeout = settings.readiness_timeout_seconds
+        self._evidence_retrieve_timeout = settings.evidence_retrieve_timeout_seconds
         self._transcript_root = _transcript_root(settings, transcript_root)
         evidence_token = settings.evidence_service_token
         guidance_token = settings.guidance_service_token or evidence_token
@@ -377,8 +378,13 @@ class ProfileEvidenceRetriever:
             ),
             method=method,
         )
+        timeout = (
+            self._evidence_retrieve_timeout
+            if peer == "evidence" and method == "POST" and path == self.retrieve_path
+            else self._readiness_timeout
+        )
         try:
-            with _HTTP.open(request, timeout=self._timeout) as response:
+            with _HTTP.open(request, timeout=timeout) as response:
                 if _one_header(response, SERVICE_MODE_HEADER) != self.mode:
                     self._record_failure(
                         review_run_id,

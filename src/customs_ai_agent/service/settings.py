@@ -102,6 +102,7 @@ class ServiceSettings:
     replay_ttl_seconds: float = 600.0
     replay_max_entries: int = 1_000
     readiness_timeout_seconds: float = 5.0
+    evidence_retrieve_timeout_seconds: float = 90.0
     shutdown_grace_seconds: float = 30.0
     log_level: str = "INFO"
 
@@ -175,6 +176,10 @@ class ServiceSettings:
             raise ServiceConfigurationError("customs_agent_replay_max_entries_invalid")
         if not 0.1 <= self.readiness_timeout_seconds <= 120:
             raise ServiceConfigurationError("customs_agent_readiness_timeout_seconds_invalid")
+        if not 1 <= self.evidence_retrieve_timeout_seconds <= 120:
+            raise ServiceConfigurationError(
+                "customs_agent_evidence_retrieve_timeout_seconds_invalid"
+            )
         if not 1 <= self.shutdown_grace_seconds <= 900:
             raise ServiceConfigurationError("customs_agent_shutdown_grace_seconds_invalid")
         if self.log_level not in _LOG_LEVELS:
@@ -265,6 +270,9 @@ class ServiceSettings:
             ),
             readiness_timeout_seconds=_number(
                 source, "CUSTOMS_AGENT_READINESS_TIMEOUT_SECONDS", 5, 0.1, 120
+            ),
+            evidence_retrieve_timeout_seconds=_number(
+                source, "CUSTOMS_AGENT_EVIDENCE_RETRIEVE_TIMEOUT_SECONDS", 90, 1, 120
             ),
             shutdown_grace_seconds=_number(
                 source, "CUSTOMS_AGENT_SHUTDOWN_GRACE_SECONDS", 30, 1, 900
