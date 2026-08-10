@@ -47,6 +47,7 @@ from customs_ai_agent.schemas.v3 import (
     RequiredActionV1,
     ReviewRunResultV3,
     ServiceReviewRunRequestV3,
+    TemporalContextV3,
     canonical_json_sha256,
     review_result_v3_sha256,
 )
@@ -115,6 +116,7 @@ _GUIDANCE_TOPIC_HINTS = frozenset(
         "trade_terms",
     }
 )
+_EVIDENCE_RETRIEVAL_METHODS = frozenset({"exact_hs", "dense", "bm25", "graph", "rerank"})
 _GUIDANCE_SAFE_QUERY = {
     ("customs_clearance", "import_clearance_flow"): "대한민국 수입 통관 흐름 공식 안내",
     ("customs_clearance", "export_clearance_flow"): "대한민국 수출 통관 흐름 공식 안내",
@@ -276,7 +278,8 @@ class ProfileEvidenceRetriever:
         self, settings: ServiceSettings, *, transcript_root: ScenarioTranscriptRoot | None = None
     ) -> None:
         self.mode = service_mode(settings)
-        self._timeout = settings.readiness_timeout_seconds
+        self._readiness_timeout = settings.readiness_timeout_seconds
+        self._evidence_retrieve_timeout = settings.evidence_retrieve_timeout_seconds
         self._transcript_root = _transcript_root(settings, transcript_root)
         evidence_token = settings.evidence_service_token
         guidance_token = settings.guidance_service_token or evidence_token
@@ -288,6 +291,7 @@ class ProfileEvidenceRetriever:
         self._evidence_token = evidence_token.get_secret_value()
         self._guidance_token = guidance_token.get_secret_value()
         self._guidance_registry_version = settings.guidance_registry_version
+        self._requires_temporal_context = settings.requires_temporal_context
         self._guidance_v2_ready = False
 
     @property
@@ -374,8 +378,13 @@ class ProfileEvidenceRetriever:
             ),
             method=method,
         )
+        timeout = (
+            self._evidence_retrieve_timeout
+            if peer == "evidence" and method == "POST" and path == self.retrieve_path
+            else self._readiness_timeout
+        )
         try:
-            with _HTTP.open(request, timeout=self._timeout) as response:
+            with _HTTP.open(request, timeout=timeout) as response:
                 if _one_header(response, SERVICE_MODE_HEADER) != self.mode:
                     self._record_failure(
                         review_run_id,
@@ -551,6 +560,20 @@ class ProfileEvidenceRetriever:
                 error_code="data_contract_invalid",
             )
             raise RetrievalError("Data service response does not satisfy the shared contract")
+        try:
+            _temporal_context_from_data(
+                response,
+                expected_law_as_of=str(request.get("review_as_of", "")),
+                required=self._requires_temporal_context,
+            )
+        except RetrievalError:
+            self._record_failure(
+                review_run_id,
+                method="POST",
+                path=self.retrieve_path,
+                error_code="data_contract_invalid",
+            )
+            raise
         return response
 
     def guidance_query(
@@ -946,10 +969,13 @@ def _deterministic_line_item(line: str) -> ClaudeLineItemCandidate | None:
 
 
 def _retrieve_request(
-    request: ServiceReviewRunRequestV3, items: list[dict[str, Any]]
+    request: ServiceReviewRunRequestV3,
+    items: list[dict[str, Any]],
+    *,
+    include_law_support: bool = False,
 ) -> dict[str, Any]:
     request_id = "rag-" + hashlib.sha256(request.review_run_id.encode("utf-8")).hexdigest()[:32]
-    return {
+    payload: dict[str, Any] = {
         "schema_version": "3.0",
         "request_id": request_id,
         "case_id": request.case_id,
@@ -960,6 +986,12 @@ def _retrieve_request(
         "top_k": 10,
         "items": items,
     }
+    # The law-history profile owns the extra legal-evidence branch.  Preserve
+    # the historic V3 request shape for three-law, dev-fixture, and manually
+    # configured callers by omitting this additive field everywhere else.
+    if include_law_support:
+        payload["query_intent"] = "required_import_documents_and_law_support"
+    return payload
 
 
 def _guidance_query_request(
@@ -1087,6 +1119,20 @@ def _evidence_from_data(response: Mapping[str, Any]) -> list[dict[str, Any]]:
                 raise RetrievalError("Data service evidence is invalid")
             if _HASH.fullmatch(item["version_hash"]) is None:
                 raise RetrievalError("Data service evidence is invalid")
+            # This non-user-facing diagnostic is required by the shared V3
+            # contract.  Keep its enum closed while allowing the new pinned
+            # cross-encoder marker alongside the established methods.
+            retrieval_methods = item.get("retrieval_methods")
+            if (
+                not isinstance(retrieval_methods, list)
+                or not retrieval_methods
+                or any(
+                    not isinstance(method, str) or method not in _EVIDENCE_RETRIEVAL_METHODS
+                    for method in retrieval_methods
+                )
+                or len(retrieval_methods) != len(set(retrieval_methods))
+            ):
+                raise RetrievalError("Data service evidence is invalid")
             evidence.append(
                 {
                     "evidence_id": item["evidence_id"],
@@ -1106,6 +1152,36 @@ def _evidence_from_data(response: Mapping[str, Any]) -> list[dict[str, Any]]:
                 }
             )
     return _dedupe_evidence_records(evidence)
+
+
+def _temporal_context_from_data(
+    response: Mapping[str, Any],
+    *,
+    expected_law_as_of: str | None = None,
+    required: bool = False,
+) -> TemporalContextV3 | None:
+    """Validate additive Data temporal provenance before it reaches Backend.
+
+    An absent/null field keeps the legacy three-law response compatible.  The
+    explicitly bound law-history profile instead requires it.  A present field
+    is atomic: all three date values must be valid, and its law date must bind
+    to the reviewed date rather than a stale retrieval result.
+    """
+
+    raw_context = response.get("temporal_context")
+    if raw_context is None:
+        if required:
+            raise RetrievalError(
+                "Data service temporal context is required for this Evidence profile"
+            )
+        return None
+    try:
+        context = TemporalContextV3.model_validate(raw_context)
+    except ValidationError:
+        raise RetrievalError("Data service temporal context is invalid") from None
+    if expected_law_as_of is not None and context.law_as_of.isoformat() != expected_law_as_of:
+        raise RetrievalError("Data service temporal context does not match the review date")
+    return context
 
 
 def _requirement_identity(item: Mapping[str, Any]) -> tuple[str, str, str]:
@@ -1267,6 +1343,8 @@ class ProfileRuntime:
         knowledge_transcript_root: KnowledgeTranscriptRoot | None = None,
     ) -> None:
         self.mode = service_mode(settings)
+        self._requires_temporal_context = settings.requires_temporal_context
+        self._law_history_evidence = settings.evidence_profile == "functional-uat-law-history"
         self._closed = False
         self._transcript_root = _transcript_root(settings, transcript_root)
         self._knowledge_transcript_root = _knowledge_transcript_root(
@@ -1807,7 +1885,16 @@ class ProfileRuntime:
             )
             if workflow_output.retrieval_items:
                 data_response = self._retriever.retrieve(
-                    _retrieve_request(request, workflow_output.retrieval_items)
+                    _retrieve_request(
+                        request,
+                        workflow_output.retrieval_items,
+                        include_law_support=self._law_history_evidence,
+                    )
+                )
+                temporal_context = _temporal_context_from_data(
+                    data_response,
+                    expected_law_as_of=request.review_as_of.isoformat(),
+                    required=self._requires_temporal_context,
                 )
                 evidence_records = _evidence_from_data(data_response)
                 workflow_output = workflow_output.with_evidence_status(str(data_response["status"]))
@@ -1815,6 +1902,7 @@ class ProfileRuntime:
                 # Data rejects an empty retrieval request by contract.  This is
                 # an input limitation, not an unhealthy or partial Data store.
                 data_response = {"status": "ok", "results": []}
+                temporal_context = None
                 evidence_records = []
                 self._retriever.record_retrieve_skipped(
                     review_run_id=request.review_run_id,
@@ -1905,6 +1993,7 @@ class ProfileRuntime:
             "evidence": evidence,
             "findings": findings,
             "required_actions": actions,
+            "temporal_context": temporal_context,
             "engine": {
                 "kind": "deterministic" if self.mode == "local-development" else "claude",
                 "model_id": str(self._analyzer.model_id),

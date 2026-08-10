@@ -7,7 +7,7 @@ Frontend → Backend → Agent → Data Evidence API
 - Frontend는 사용자 화면을 소유합니다.
 - Backend는 로그인, Case, 업로드, Job, 최종 사람 결정을 소유합니다.
 - Agent는 문서 텍스트 분석, Data HTTP 검색, 검토용 결과 변환을 소유합니다.
-- Data는 합성 fixture 또는 실제 3법령의 수집·store·Evidence API를 소유합니다.
+- Data는 합성 fixture, 보존된 3법령 또는 65법령 이력의 수집·store·Evidence API를 소유합니다.
 
 저장소 사이에는 HTTP와 versioned schema만 사용합니다. Agent는 sibling 경로 import, DB 연결, Data container 제어를 하지 않습니다.
 
@@ -15,7 +15,7 @@ Frontend → Backend → Agent → Data Evidence API
 
 `local-development`는 결정론 텍스트 분석기와 Data `dev-fixture`를 사용합니다. Claude 키, 법령 API, 모델 cache, Docker가 필요하지 않은 기본 개발 경로입니다.
 
-`functional-uat`는 실제 Claude와 Data `functional-uat-3law` Evidence store를 사용합니다. Data가 기준일·source hash·모델 revision을 자기 manifest에 기록합니다. Agent는 그 manifest를 승인 증거로 해석하지 않고, 정상 HTTP 흐름과 사용자 여정만 확인합니다. 기존 일반 통관 안내는 별도 `functional-uat-kr-trade` V1 guidance peer(18093)로 보존합니다. V1 request는 legacy topic만 포함하고 `scope_hint`를 키 자체로 생략합니다. Agent가 V2 scope를 V1 topic으로 명시적으로 매핑하되, V1 manifest가 선언한 방향만 적용합니다. 공식 페이지 단위 V2는 Agent의 별도 `functional-uat-kr-trade-v2` runtime profile로 peer(18094)를 명시적으로 선택하고 정확한 `topic + scope_hint`와 readiness를 요구합니다. Data local token/state는 V1 profile과 공유하지만, readiness와 query의 registry version·hash·snapshot·기준일이 copied manifest와 맞을 때만 사용합니다. 문서 심사의 `/retrieve`는 계속 3법 Evidence peer 하나만 사용합니다.
+`functional-uat`의 기본 Evidence profile은 Data `functional-uat-law-history`입니다. Data가 65법령의 기준일·source hash·모델 revision과 법령·HSK·요건 snapshot 날짜를 검증합니다. Agent는 `temporal_context`의 세 날짜를 그대로 Backend에 보존하고 법령 날짜가 Review Run 기준일과 다르면 실패로 처리합니다. 보존된 `functional-uat-3law`은 명시적 legacy profile로 유지합니다. 기존 일반 통관 안내는 별도 `functional-uat-kr-trade` V1 guidance peer(18093)로 보존합니다. V1 request는 legacy topic만 포함하고 `scope_hint`를 키 자체로 생략합니다. Agent가 V2 scope를 V1 topic으로 명시적으로 매핑하되, V1 manifest가 선언한 방향만 적용합니다. 공식 페이지 단위 V2는 `functional-uat-kr-trade-v2-law-history` runtime profile에서 peer(18094)를 명시적으로 선택하고 정확한 `topic + scope_hint`와 readiness를 요구합니다. Data local token/state는 V1 profile과 공유하지만, readiness와 query의 registry version·hash·snapshot·기준일이 copied manifest와 맞을 때만 사용합니다. 문서 심사의 `/retrieve`는 언제나 선택된 Evidence peer 하나만 사용합니다.
 
 두 방식은 loopback에만 바인딩되고 `X-Customs-Service-Mode`가 정확히 같을 때만 서로 호출합니다. Backend→Agent token과 Agent→Data token은 분리됩니다. 별도 guidance peer를 쓸 때에는 URL·token·registry version이 완전한 묶음이어야 하며, 누락·mode 불일치·비loopback 주소·V2 readiness/provenance 불일치는 실패로 처리합니다.
 
@@ -25,7 +25,7 @@ Frontend → Backend → Agent → Data Evidence API
 2. Agent가 결정론 분석기 또는 Claude로 문서 유형·HS 후보를 읽습니다.
 3. Agent가 코드로 문서·품목을 대응하고 수량·금액·원산지·B/L 값을 비교합니다.
 4. 필요한 문서만 최대 한 번 재추출한 뒤 Data Evidence API에 한 번 일괄 조회합니다.
-5. Agent가 최대 2 cycle·6 action의 trace와 8구역 근거 보고서를 돌려줍니다.
+5. Agent가 최대 2 cycle·6 action의 trace와 8구역 근거 보고서를 돌려주며, 이력 Evidence의 세 기준일은 nullable `temporal_context`로 함께 보존합니다.
 6. Backend가 사용자에게 보여 주고 담당자가 finding 판단, 수정 제안, child Run 재심사를 수행합니다.
 
 ## 근거 기반 대화와 수정 입력

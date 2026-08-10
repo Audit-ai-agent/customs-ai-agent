@@ -14,7 +14,14 @@ file.  The value is placed only in the current PowerShell process; the legacy
 [CmdletBinding()]
 param(
     [Parameter(Mandatory)]
-    [ValidateSet("dev-fixture", "functional-uat-3law", "functional-uat-kr-trade", "functional-uat-kr-trade-v2")]
+    [ValidateSet(
+        "dev-fixture",
+        "functional-uat-3law",
+        "functional-uat-law-history",
+        "functional-uat-kr-trade",
+        "functional-uat-kr-trade-v2",
+        "functional-uat-kr-trade-v2-law-history"
+    )]
     [string]$Profile,
 
     [ValidateRange(1, 65535)]
@@ -126,6 +133,16 @@ switch ($Profile) {
         $guidanceProfile = $null
         $expectedMode = "functional-uat"
     }
+    "functional-uat-law-history" {
+        # The 65-law temporal Evidence profile is intentionally distinct from
+        # the preserved three-law profile.  Data owns collection, history and
+        # the temporal response context; this importer only binds its local
+        # loopback token to the Agent process.
+        $backendProfile = "functional-uat"
+        $evidenceProfile = "functional-uat-law-history"
+        $guidanceProfile = $null
+        $expectedMode = "functional-uat"
+    }
     "functional-uat-kr-trade" {
         # The broader official guidance snapshot deliberately complements, not
         # replaces, the verified three-law Evidence store used by document review.
@@ -144,6 +161,18 @@ switch ($Profile) {
         # Agent's runtime selection and peer port are new.
         $backendProfile = "functional-uat"
         $evidenceProfile = "functional-uat-3law"
+        $guidanceProfile = "functional-uat-kr-trade"
+        $guidanceRegistryVersion = "2.0"
+        $defaultGuidancePort = 18094
+        $expectedMode = "functional-uat"
+    }
+    "functional-uat-kr-trade-v2-law-history" {
+        # This is the new composed Functional-UAT default: time-aware legal
+        # Evidence plus the separately verified V2 official-guidance peer.
+        # It deliberately shares only the V2 guidance token/state; the
+        # Evidence token comes from the independent law-history profile.
+        $backendProfile = "functional-uat"
+        $evidenceProfile = "functional-uat-law-history"
         $guidanceProfile = "functional-uat-kr-trade"
         $guidanceRegistryVersion = "2.0"
         $defaultGuidancePort = 18094
@@ -216,6 +245,10 @@ $env:CUSTOMS_AGENT_PORT = "18090"
 $env:EVIDENCE_SERVICE_BASE_URL = "http://127.0.0.1:$EvidencePort"
 $env:EVIDENCE_SERVICE_TOKEN = $evidenceToken
 $env:EVIDENCE_SERVICE_TOKEN_HEADER = "Authorization"
+# Keep the Data-owned profile identity alongside its local token.  It is not a
+# credential and lets the runtime require law-history temporal provenance
+# without weakening nullable compatibility for the retained three-law profile.
+$env:CUSTOMS_AGENT_EVIDENCE_PROFILE = $evidenceProfile
 if ($null -eq $guidanceProfile) {
     # A shell can switch from the composed profile back to an existing one.
     # Remove stale overrides so its bounded guidance query falls back to the

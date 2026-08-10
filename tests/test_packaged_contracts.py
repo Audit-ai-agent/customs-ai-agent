@@ -50,6 +50,15 @@ def test_optional_correction_targets_are_omittable_or_null_in_models_and_schema(
         "type": ["string", "null"],
         "pattern": "^[a-f0-9]{64}$",
     }
+    review_result_schema = get_schema("backend", "v3", "review-result")
+    assert review_result_schema["properties"]["temporal_context"] == {
+        "anyOf": [{"$ref": "#/$defs/TemporalContext"}, {"type": "null"}]
+    }
+    assert review_result_schema["$defs"]["TemporalContext"]["required"] == [
+        "law_as_of",
+        "hsk_snapshot_as_of",
+        "requirements_snapshot_as_of",
+    ]
     assert "case_input_notice" in response_schema["properties"]
     assert "guidance_resolution" in knowledge_response_schema["properties"]
     assert knowledge_response_schema["properties"]["guidance_registry_sha256"] == {

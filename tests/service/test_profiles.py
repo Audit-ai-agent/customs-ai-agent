@@ -2,16 +2,22 @@ from __future__ import annotations
 
 import json
 from dataclasses import replace
+from datetime import date
 from typing import Any
 from urllib.error import HTTPError
 
 import pytest
 from fastapi.testclient import TestClient
-from pydantic import SecretStr
+from pydantic import SecretStr, ValidationError
 
 import customs_ai_agent.service.profiles as profile_module
 from customs_ai_agent.adapters.retrieval import RetrievalError
-from customs_ai_agent.schemas.v3 import ServiceReviewRunRequestV3, canonical_json_sha256
+from customs_ai_agent.schemas.v3 import (
+    ReviewRunResultV3,
+    ServiceReviewRunRequestV3,
+    canonical_json_sha256,
+    review_result_v3_sha256,
+)
 from customs_ai_agent.service.app import create_app
 from customs_ai_agent.service.guidance_registry import guidance_registry
 from customs_ai_agent.service.profiles import (
@@ -22,12 +28,15 @@ from customs_ai_agent.service.profiles import (
     _DeterministicDocumentAnalyzer,
     _actions,
     _dedupe_evidence_records,
+    _evidence_from_data,
     _findings_from_evidence,
+    _retrieve_request,
+    _temporal_context_from_data,
     ProfileEvidenceRetriever,
     ProfileRuntime,
     SERVICE_MODE_HEADER,
 )
-from customs_ai_agent.service.runtime_errors import RuntimeConfigurationError
+from customs_ai_agent.service.runtime_errors import RuntimeConfigurationError, RuntimeExecutionError
 from customs_ai_agent.service.settings import ServiceConfigurationError, ServiceSettings
 
 
@@ -60,6 +69,310 @@ def test_default_profile_is_local_development() -> None:
     assert settings.guidance_base_url is None
     assert settings.guidance_service_token is None
     assert settings.guidance_registry_version is None
+    assert settings.readiness_timeout_seconds == 5
+    assert settings.evidence_retrieve_timeout_seconds == 90
+
+
+def test_evidence_retrieve_timeout_is_environment_configurable_and_bounded() -> None:
+    source = {
+        "CUSTOMS_AGENT_SERVICE_BEARER_TOKEN": _TOKEN,
+        "EVIDENCE_SERVICE_BASE_URL": "http://127.0.0.1:18083",
+        "EVIDENCE_SERVICE_TOKEN": _TOKEN,
+        "EVIDENCE_SERVICE_TOKEN_HEADER": "Authorization",
+        "CUSTOMS_AGENT_EVIDENCE_RETRIEVE_TIMEOUT_SECONDS": "91.5",
+    }
+
+    assert ServiceSettings.from_environment(source).evidence_retrieve_timeout_seconds == 91.5
+    for invalid in (0.9, 120.1):
+        with pytest.raises(
+            ServiceConfigurationError,
+            match="customs_agent_evidence_retrieve_timeout_seconds_invalid",
+        ):
+            _settings(evidence_retrieve_timeout_seconds=invalid)
+
+
+def test_temporal_context_is_atomic_and_bound_to_the_requested_law_date() -> None:
+    response = {
+        "temporal_context": {
+            "law_as_of": "2026-08-05",
+            "hsk_snapshot_as_of": "2026-08-05",
+            "requirements_snapshot_as_of": "2026-08-05",
+        }
+    }
+
+    context = _temporal_context_from_data(response, expected_law_as_of="2026-08-05")
+
+    assert context is not None
+    assert context.law_as_of.isoformat() == "2026-08-05"
+    assert context.hsk_snapshot_as_of.isoformat() == "2026-08-05"
+    assert context.requirements_snapshot_as_of.isoformat() == "2026-08-05"
+
+    with pytest.raises(RetrievalError, match="does not match the review date"):
+        _temporal_context_from_data(response, expected_law_as_of="2026-08-06")
+    with pytest.raises(RetrievalError, match="temporal context is invalid"):
+        _temporal_context_from_data(
+            {"temporal_context": {"law_as_of": "2026-08-05"}},
+            expected_law_as_of="2026-08-05",
+        )
+
+
+def test_retriever_rejects_data_temporal_context_for_a_different_review_date(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    retriever = ProfileEvidenceRetriever(_settings())
+    monkeypatch.setattr(retriever, "readiness", lambda **_kwargs: {"status": "ready"})
+    monkeypatch.setattr(
+        retriever,
+        "_request",
+        lambda *_args, **_kwargs: {
+            "schema_version": "3.0",
+            "request_id": "rag-temporal-mismatch",
+            "status": "partial",
+            "knowledge_snapshot_id": "functional-uat-law-history",
+            "temporal_context": {
+                "law_as_of": "2026-08-06",
+                "hsk_snapshot_as_of": "2026-08-05",
+                "requirements_snapshot_as_of": "2026-08-05",
+            },
+            "results": [],
+        },
+    )
+
+    with pytest.raises(RetrievalError, match="does not match the review date"):
+        retriever.retrieve(
+            {
+                "review_run_id": "run-temporal-mismatch",
+                "request_id": "rag-temporal-mismatch",
+                "review_as_of": "2026-08-05",
+            }
+        )
+
+
+def test_law_history_profile_requires_a_complete_temporal_context(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    retriever = ProfileEvidenceRetriever(_settings(evidence_profile="functional-uat-law-history"))
+    monkeypatch.setattr(retriever, "readiness", lambda **_kwargs: {"status": "ready"})
+    monkeypatch.setattr(
+        retriever,
+        "_request",
+        lambda *_args, **_kwargs: {
+            "schema_version": "3.0",
+            "request_id": "rag-history-context-required",
+            "status": "partial",
+            "knowledge_snapshot_id": "snapshot-history",
+            "temporal_context": None,
+            "results": [],
+        },
+    )
+
+    with pytest.raises(RetrievalError, match="temporal context is required"):
+        retriever.retrieve(
+            {
+                "review_run_id": "run-history-context-required",
+                "request_id": "rag-history-context-required",
+                "review_as_of": "2026-08-05",
+            }
+        )
+
+
+def test_legacy_evidence_profile_keeps_nullable_temporal_context_compatibility(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    retriever = ProfileEvidenceRetriever(_settings(evidence_profile="functional-uat-3law"))
+    monkeypatch.setattr(retriever, "readiness", lambda **_kwargs: {"status": "ready"})
+    monkeypatch.setattr(
+        retriever,
+        "_request",
+        lambda *_args, **_kwargs: {
+            "schema_version": "3.0",
+            "request_id": "rag-legacy-null-context",
+            "status": "partial",
+            "knowledge_snapshot_id": "snapshot-3law",
+            "temporal_context": None,
+            "results": [],
+        },
+    )
+
+    response = retriever.retrieve(
+        {
+            "review_run_id": "run-legacy-null-context",
+            "request_id": "rag-legacy-null-context",
+            "review_as_of": "2026-08-05",
+        }
+    )
+
+    assert response["temporal_context"] is None
+
+
+def test_evidence_consumer_accepts_rerank_but_rejects_unregistered_retrieval_methods() -> None:
+    response = {
+        "results": [
+            {
+                "evidence": [
+                    {
+                        "evidence_id": "ev_" + "a" * 64,
+                        "item_id": "commodity-rerank",
+                        "title": "법령 조문",
+                        "text": "검토할 법령 근거입니다.",
+                        "source_uri": "https://law.go.kr/example",
+                        "source_type": "law_article",
+                        "version_hash": "a" * 64,
+                        "retrieval_methods": ["dense", "bm25", "rerank"],
+                    }
+                ]
+            }
+        ]
+    }
+
+    evidence = _evidence_from_data(response)
+
+    assert evidence[0]["evidence_id"] == "ev_" + "a" * 64
+    response["results"][0]["evidence"][0]["retrieval_methods"] = ["dense", "shell"]
+    with pytest.raises(RetrievalError, match="evidence is invalid"):
+        _evidence_from_data(response)
+
+
+def test_retrieve_request_keeps_legacy_wire_and_enables_law_support_explicitly() -> None:
+    request = ServiceReviewRunRequestV3.model_construct(
+        case_id="case-retrieve-intent",
+        review_run_id="run-retrieve-intent",
+        review_as_of=date(2026, 8, 5),
+        trade_type="import",
+        jurisdiction="KR",
+    )
+
+    legacy = _retrieve_request(request, [])
+    law_history = _retrieve_request(request, [], include_law_support=True)
+
+    assert "query_intent" not in legacy
+    assert law_history["query_intent"] == "required_import_documents_and_law_support"
+
+
+def test_review_result_preserves_data_temporal_context_for_backend_persistence(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    requests: list[dict[str, Any]] = []
+
+    def retrieve(_self: ProfileEvidenceRetriever, request: dict[str, Any]) -> dict[str, Any]:
+        requests.append(request)
+        return {
+            "schema_version": "3.0",
+            "request_id": request["request_id"],
+            "status": "partial",
+            "knowledge_snapshot_id": "functional-uat-law-history",
+            "temporal_context": {
+                "law_as_of": "2026-08-05",
+                "hsk_snapshot_as_of": "2026-08-05",
+                "requirements_snapshot_as_of": "2026-08-05",
+            },
+            "results": [
+                {
+                    "evidence": [
+                        {
+                            "evidence_id": "ev_" + "a" * 64,
+                            "item_id": "commodity-law-history",
+                            "title": "법령 조문",
+                            "text": "검증된 법령 근거입니다.",
+                            "source_uri": "https://www.law.go.kr/example",
+                            "source_type": "law_article",
+                            "version_hash": "a" * 64,
+                            "retrieval_methods": ["dense", "bm25"],
+                        }
+                    ]
+                }
+            ],
+        }
+
+    monkeypatch.setattr(ProfileEvidenceRetriever, "retrieve", retrieve)
+    runtime = ProfileRuntime(_settings(evidence_profile="functional-uat-law-history"))
+    result = runtime.review_v3_json(
+        json.dumps(
+            {
+                "case_id": "case-law-history",
+                "review_run_id": "run-law-history",
+                "review_as_of": "2026-08-05",
+                "trade_type": "import",
+                "jurisdiction": "KR",
+                "documents": [
+                    {
+                        "document_id": "invoice",
+                        "filename": "invoice.txt",
+                        "content_text": (
+                            "COMMERCIAL INVOICE\nHS Code: 123456\n"
+                            "Description: Widget | HS Code: 123456 | Quantity: 1 PCS"
+                        ),
+                    }
+                ],
+            }
+        ).encode()
+    )
+
+    assert result.execution_status == "partial"
+    assert result.temporal_context is not None
+    assert result.temporal_context.law_as_of.isoformat() == "2026-08-05"
+    assert result.temporal_context.hsk_snapshot_as_of.isoformat() == "2026-08-05"
+    assert result.temporal_context.requirements_snapshot_as_of.isoformat() == "2026-08-05"
+    assert requests[0]["query_intent"] == "required_import_documents_and_law_support"
+    assert [item.source_type for item in result.evidence] == ["law_article"]
+
+    # Existing immutable 3-law snapshots did not have the additive field.
+    # Their old hashes must remain readable when Backend sends one back for a
+    # grounded follow-up conversation.
+    legacy_wire = result.model_dump(mode="json", warnings=False)
+    legacy_wire.pop("temporal_context")
+    legacy_wire["result_sha256"] = review_result_v3_sha256(legacy_wire)
+    legacy_result = ReviewRunResultV3.model_validate(legacy_wire)
+    assert legacy_result.temporal_context is None
+
+    mismatched_wire = result.model_dump(mode="json", warnings=False)
+    assert mismatched_wire["temporal_context"] is not None
+    mismatched_wire["temporal_context"]["law_as_of"] = "2026-08-06"
+    mismatched_wire["result_sha256"] = review_result_v3_sha256(mismatched_wire)
+    with pytest.raises(ValidationError, match="law_as_of must match review_as_of"):
+        ReviewRunResultV3.model_validate(mismatched_wire)
+
+
+def test_law_history_runtime_rejects_a_null_temporal_context_even_if_retriever_is_stubbed(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    def retrieve(_self: ProfileEvidenceRetriever, request: dict[str, Any]) -> dict[str, Any]:
+        return {
+            "schema_version": "3.0",
+            "request_id": request["request_id"],
+            "status": "partial",
+            "knowledge_snapshot_id": "snapshot-history",
+            "temporal_context": None,
+            "results": [],
+        }
+
+    monkeypatch.setattr(ProfileEvidenceRetriever, "retrieve", retrieve)
+    runtime = ProfileRuntime(_settings(evidence_profile="functional-uat-law-history"))
+
+    with pytest.raises(RuntimeExecutionError) as raised:
+        runtime.review_v3_json(
+            json.dumps(
+                {
+                    "case_id": "case-history-null-context",
+                    "review_run_id": "run-history-null-context",
+                    "review_as_of": "2026-08-05",
+                    "trade_type": "import",
+                    "jurisdiction": "KR",
+                    "documents": [
+                        {
+                            "document_id": "invoice",
+                            "filename": "invoice.txt",
+                            "content_text": (
+                                "COMMERCIAL INVOICE\nHS Code: 123456\n"
+                                "Description: Widget | HS Code: 123456 | Quantity: 1 PCS"
+                            ),
+                        }
+                    ],
+                }
+            ).encode()
+        )
+
+    assert raised.value.code == "evidence_dependency_unready"
 
 
 def test_regulatory_requirement_is_one_finding_and_action_across_linked_documents() -> None:
@@ -229,9 +542,65 @@ def test_backend_profile_loader_mode_is_accepted() -> None:
             "EVIDENCE_SERVICE_TOKEN": _TOKEN,
             "EVIDENCE_SERVICE_TOKEN_HEADER": "Authorization",
             "CUSTOMS_AGENT_SERVICE_MODE": "functional-uat",
+            "CUSTOMS_AGENT_EVIDENCE_PROFILE": "functional-uat-law-history",
         }
     )
     assert settings.service_mode == "functional-uat"
+    assert settings.evidence_profile == "functional-uat-law-history"
+    assert settings.requires_temporal_context is True
+
+
+@pytest.mark.parametrize(
+    ("profile", "requires_temporal_context"),
+    [
+        ("dev-fixture", False),
+        ("functional-uat-3law", False),
+        ("functional-uat-law-history", True),
+    ],
+)
+def test_evidence_profile_selection_is_explicit_and_nonsecret(
+    profile: str, requires_temporal_context: bool
+) -> None:
+    settings = ServiceSettings.from_environment(
+        {
+            "CUSTOMS_AGENT_SERVICE_BEARER_TOKEN": _TOKEN,
+            "EVIDENCE_SERVICE_BASE_URL": "http://127.0.0.1:18083",
+            "EVIDENCE_SERVICE_TOKEN": _TOKEN,
+            "EVIDENCE_SERVICE_TOKEN_HEADER": "Authorization",
+            "CUSTOMS_AGENT_EVIDENCE_PROFILE": profile,
+        }
+    )
+
+    assert settings.evidence_profile == profile
+    assert settings.requires_temporal_context is requires_temporal_context
+
+
+def test_evidence_profile_rejects_unknown_value() -> None:
+    with pytest.raises(ServiceConfigurationError) as raised:
+        ServiceSettings.from_environment(
+            {
+                "CUSTOMS_AGENT_SERVICE_BEARER_TOKEN": _TOKEN,
+                "EVIDENCE_SERVICE_BASE_URL": "http://127.0.0.1:18083",
+                "EVIDENCE_SERVICE_TOKEN": _TOKEN,
+                "EVIDENCE_SERVICE_TOKEN_HEADER": "Authorization",
+                "CUSTOMS_AGENT_EVIDENCE_PROFILE": "unknown-profile",
+            }
+        )
+    assert raised.value.code == "customs_agent_evidence_profile_invalid"
+
+
+def test_functional_uat_requires_an_explicit_evidence_profile_binding() -> None:
+    with pytest.raises(ServiceConfigurationError) as raised:
+        ServiceSettings.from_environment(
+            {
+                "CUSTOMS_AGENT_SERVICE_BEARER_TOKEN": _TOKEN,
+                "EVIDENCE_SERVICE_BASE_URL": "http://127.0.0.1:18083",
+                "EVIDENCE_SERVICE_TOKEN": _TOKEN,
+                "EVIDENCE_SERVICE_TOKEN_HEADER": "Authorization",
+                "CUSTOMS_AGENT_SERVICE_MODE": "functional-uat",
+            }
+        )
+    assert raised.value.code == "customs_agent_evidence_profile_missing"
 
 
 def test_profile_rejects_non_loopback_evidence() -> None:
@@ -512,6 +881,71 @@ def test_guidance_uses_its_own_loopback_origin_and_token_while_review_stays_on_e
             "as_of": "2026-08-05",
             "top_k": 3,
         }
+    ]
+
+
+def test_evidence_retrieve_uses_dedicated_timeout_only(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    """A cold Evidence model may take longer than readiness, never guidance."""
+
+    class Headers(dict[str, str]):
+        def get_all(self, _name: str) -> None:
+            return None
+
+    calls: list[tuple[str, str, float]] = []
+
+    def open_request(request: Any, *, timeout: float) -> object:
+        if request.full_url.endswith(ProfileEvidenceRetriever.readiness_path):
+            kind = "readiness"
+            payload: dict[str, Any] = {"status": "ready"}
+        elif request.full_url.endswith(ProfileEvidenceRetriever.retrieve_path):
+            kind = "retrieve"
+            body = json.loads(request.data.decode("utf-8"))
+            payload = {
+                "schema_version": "3.0",
+                "request_id": body["request_id"],
+                "status": "ok",
+                "knowledge_snapshot_id": "test-snapshot",
+                "results": [],
+            }
+        else:
+            kind = "guidance"
+            payload = {}
+        calls.append((kind, request.get_method(), timeout))
+
+        class Response:
+            def __init__(self, response_payload: dict[str, Any]) -> None:
+                self.headers = Headers({SERVICE_MODE_HEADER: "local-development"})
+                self._payload = response_payload
+
+            def __enter__(self) -> "Response":
+                return self
+
+            def __exit__(self, *_args: object) -> None:
+                return None
+
+            def read(self, _limit: int) -> bytes:
+                return json.dumps(self._payload).encode("utf-8")
+
+        return Response(payload)
+
+    monkeypatch.setattr(profile_module._HTTP, "open", open_request)
+    retriever = ProfileEvidenceRetriever(_settings())
+    retriever.retrieve(
+        {"schema_version": "3.0", "request_id": "retrieve-timeout", "review_run_id": "run-timeout"}
+    )
+    retriever._request(
+        ProfileEvidenceRetriever.guidance_query_path,
+        method="POST",
+        peer="guidance",
+        payload={"request_id": "guidance-timeout"},
+    )
+
+    assert calls == [
+        ("readiness", "GET", 5.0),
+        ("retrieve", "POST", 90.0),
+        ("guidance", "POST", 5.0),
     ]
 
 

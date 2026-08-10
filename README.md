@@ -8,7 +8,7 @@
 | 방식 | 목적 | 외부 입력 |
 | --- | --- | --- |
 | `local-development` | 팀의 기본 전체 개발 | 없음. Data의 합성 Evidence와 결정론 분석기를 사용합니다. |
-| `functional-uat` | 실제 관세 3법 Evidence·Data·Claude 흐름을 한 번 확인 | 개인 Law API 권한, `ANTHROPIC_API_KEY`, Data의 로컬 모델 캐시 |
+| `functional-uat` | 실제 법령 Evidence·Data·Claude 흐름을 한 번 확인 | 개인 Law API 권한, `ANTHROPIC_API_KEY`, Data의 로컬 모델 캐시 |
 
 두 방식 모두 텍스트만 처리하고 결과를 항상 `human_review_required`로 반환합니다. 자동완료나 배포 판단 기능은 없습니다.
 
@@ -43,6 +43,7 @@ GUIDANCE_SERVICE_TOKEN              # 그 snapshot이 만든 별도 호출 토�
 GUIDANCE_SERVICE_TOKEN_HEADER=Authorization
 GUIDANCE_SERVICE_REGISTRY_VERSION   # 1.0 또는 2.0
 CUSTOMS_AGENT_SERVICE_MODE          # local-development 또는 functional-uat
+CUSTOMS_AGENT_EVIDENCE_RETRIEVE_TIMEOUT_SECONDS  # Evidence /retrieve POST 전용, 기본 90초
 ```
 
 `GUIDANCE_SERVICE_BASE_URL`·`GUIDANCE_SERVICE_TOKEN`·`GUIDANCE_SERVICE_REGISTRY_VERSION`은
@@ -54,23 +55,29 @@ CUSTOMS_AGENT_SERVICE_MODE          # local-development 또는 functional-uat
 추측해 이어가지 않고 coverage 부족으로 처리합니다. 문서 심사의 readiness·`/retrieve`는
 어떤 경우에도 Evidence URL·token만 사용합니다.
 
+`CUSTOMS_AGENT_EVIDENCE_RETRIEVE_TIMEOUT_SECONDS`는 생략하면 90초이며 1~120초만 허용합니다.
+이는 초기화 중인 Evidence 모델의 `/retrieve` POST에만 적용됩니다. readiness GET과 guidance POST는
+기존 5초 제한을 유지합니다. 기본 importer 수정은 필요 없고, 필요할 때만 현재 PowerShell 세션에서
+비밀이 아닌 이 값을 명시해 조정할 수 있습니다.
+
 기능 UAT에는 여기에 개인 `ANTHROPIC_API_KEY`를 추가합니다. 기본 입력 위치는 Git이 무시하는 workspace의 `../_local/secrets/.env`이며, 파일에는 아래 한 항목만 둡니다.
 
 ```text
 ANTHROPIC_API_KEY=personal-key
 ```
 
-세 Functional-UAT importer(`functional-uat-3law`, `functional-uat-kr-trade`,
-`functional-uat-kr-trade-v2`)만 이 파일을 읽어 현재 Agent PowerShell 세션과 그 자식
+다섯 Functional-UAT importer(`functional-uat-3law`, `functional-uat-law-history`,
+`functional-uat-kr-trade`, `functional-uat-kr-trade-v2`,
+`functional-uat-kr-trade-v2-law-history`)만 이 파일을 읽어 현재 Agent PowerShell 세션과 그 자식
 프로세스에 값을 넣습니다. 빈 줄과 `#` 주석 외의 다른 키·중복 키·공백이 있는 값은 거부하며,
 값은 출력하지 않습니다. 파일이 없을 때만 기존의 현재-세션 환경변수 주입을 호환용으로
 허용합니다. `dev-fixture`와 legacy `../_local/secrets/uat/agent.env`는 이 파일을 읽지
 않습니다. 법령 원문, DB dump, 모델 파일, 토큰을 저장소·Docker image·공유 ZIP에 넣지
 않습니다.
 
-Backend profile 초기화는 `../_local/profiles/<profile>/backend.env`에 `CUSTOMS_AGENT_SERVICE_BEARER_TOKEN`과 `CUSTOMS_AGENT_SERVICE_MODE`를 만듭니다. Data의 `dev-fixture` 첫 실행 또는 `functional-uat-3law init`은 Evidence token을 `../_local/profiles/dev-fixture/evidence-service-token` 또는 `../_local/profiles/functional-uat-3law/evidence-service-token`에 만듭니다. V1과 V2 일반 안내는 Data가 공유하는 `../_local/profiles/functional-uat-kr-trade/evidence-service-token`을 사용합니다. `functional-uat-kr-trade-v2`는 Agent의 명시적 runtime/port/registry 선택 이름이며 별도 token 디렉터리가 아닙니다. 이름은 Data의 공통 service-token 파일명일 뿐, Agent에서는 guidance 전용으로만 사용합니다. Agent는 어떤 값을 복사하거나 생성하지 않습니다.
+Backend profile 초기화는 `../_local/profiles/<profile>/backend.env`에 `CUSTOMS_AGENT_SERVICE_BEARER_TOKEN`과 `CUSTOMS_AGENT_SERVICE_MODE`를 만듭니다. Data의 `dev-fixture` 첫 실행 또는 `functional-uat-3law`·`functional-uat-law-history` 초기화는 각각의 Evidence token을 같은 profile-local `evidence-service-token`에 만듭니다. V1과 V2 일반 안내는 Data가 공유하는 `../_local/profiles/functional-uat-kr-trade/evidence-service-token`을 사용합니다. `functional-uat-kr-trade-v2`와 `functional-uat-kr-trade-v2-law-history`는 Agent의 명시적 runtime/port/registry 선택 이름이며 별도 guidance token 디렉터리가 아닙니다. 이름은 Data의 공통 service-token 파일명일 뿐, Agent에서는 guidance 전용으로만 사용합니다. Agent는 어떤 값을 복사하거나 생성하지 않습니다.
 
-`tools/Import-AgentProfile.ps1`는 생성된 local 파일을 읽어 현재 PowerShell 세션의 Agent 환경변수에만 넣습니다. `functional-uat-3law`은 기존 Evidence peer 하나만, `functional-uat-kr-trade`는 **3법 Evidence + V1 guidance(18093)**, `functional-uat-kr-trade-v2`는 **3법 Evidence + readiness-gated V2 guidance(18094)**를 조합합니다. V1은 scope 계약이 없으므로 Agent가 V2 분류 결과를 명시적 legacy topic으로 축소하고 `scope_hint` 키를 보내지 않습니다. V2만 정확한 `topic + scope_hint`를 보냅니다. V2 importer는 `GUIDANCE_SERVICE_REGISTRY_VERSION=2.0`을 함께 설정합니다. 기존 profile을 다시 가져오면 남아 있던 guidance 환경변수도 지워 단일 peer fallback을 복구합니다. 세 Functional-UAT profile만 추가로 `../_local/secrets/.env`의 개인 Claude 키를 좁게 읽습니다. token·원문·환경변수 값을 출력하지 않고, 파일 누락·profile/mode 불일치·형식 오류만 코드로 실패합니다. 반드시 점(`.`)으로 dot-source 하여 실행합니다.
+`tools/Import-AgentProfile.ps1`는 생성된 local 파일을 읽어 현재 PowerShell 세션의 Agent 환경변수에만 넣습니다. `functional-uat-3law`은 보존된 3법 Evidence peer, `functional-uat-law-history`는 새 65법령 이력 Evidence peer를 사용합니다. `functional-uat-kr-trade`는 **3법 Evidence + V1 guidance(18093)**, `functional-uat-kr-trade-v2`는 **3법 Evidence + readiness-gated V2 guidance(18094)**, `functional-uat-kr-trade-v2-law-history`는 **65법령 이력 Evidence + V2 guidance(18094)**를 조합한 기본 UAT 선택지입니다. Importer는 Data token과 함께 비밀이 아닌 `CUSTOMS_AGENT_EVIDENCE_PROFILE`도 설정합니다. 이 값이 `functional-uat-law-history`이면 Agent는 실제 `/retrieve` 응답에 세 날짜가 모두 든 `temporal_context`와 심사 기준일과 같은 `law_as_of`를 요구합니다. 보존된 3법·개발 profile은 null/누락 문맥을 계속 읽을 수 있습니다. V1은 scope 계약이 없으므로 Agent가 V2 분류 결과를 명시적 legacy topic으로 축소하고 `scope_hint` 키를 보내지 않습니다. V2만 정확한 `topic + scope_hint`를 보냅니다. V2 importer는 `GUIDANCE_SERVICE_REGISTRY_VERSION=2.0`을 함께 설정합니다. 기존 profile을 다시 가져오면 남아 있던 guidance 환경변수도 지워 단일 peer fallback을 복구합니다. 다섯 Functional-UAT profile만 추가로 `../_local/secrets/.env`의 개인 Claude 키를 좁게 읽습니다. token·원문·환경변수 값을 출력하지 않고, 파일 누락·profile/mode 불일치·형식 오류만 코드로 실패합니다. 반드시 점(`.`)으로 dot-source 하여 실행합니다.
 
 ## 상세 시나리오 transcript
 
@@ -164,10 +171,10 @@ HTTP Authorization/Cookie 헤더, 세션·서비스 token, API key, 비밀번호
 uv run --locked --no-sync --group dev customs-ai-agent-dev-serve
 ```
 
-기능 UAT에서는 Data가 `functional-uat-3law` 법령 수집·store build를 끝낸 뒤 같은 방식으로 Agent를 시작합니다. 먼저 `../_local/secrets/.env`에 새 개인 키를 한 줄로 넣고, importer를 dot-source 합니다. importer는 그 키를 현재 세션에만 주입하고 출력하지 않습니다. 기존 V1 일반 안내 `functional-uat-kr-trade`와 V2 공식 페이지 snapshot은 공유 Data local state에서 각각 build·verify·guidance service가 완료된 뒤에만 Agent의 명시적 조합 profile(`functional-uat-kr-trade`, `functional-uat-kr-trade-v2`)로 사용합니다. 그 전에는 기존 3법 UAT를 유지하며, 넓은 주제는 근거 부족으로 안전하게 답합니다.
+기능 UAT의 기본 경로는 Data가 `functional-uat-law-history` 65법령 기준 snapshot·store build를 끝낸 뒤 Agent를 시작하는 것입니다. Agent는 Data가 응답한 법령·HSK·요건 snapshot 기준일을 `temporal_context`로 그대로 보존하며, 법령 기준일이 현재 심사 기준일과 다르면 응답을 거부합니다. 기존 `functional-uat-3law`은 호환 UAT로 남습니다. V1 일반 안내 `functional-uat-kr-trade`와 V2 공식 페이지 snapshot은 공유 Data local state에서 각각 build·verify·guidance service가 완료된 뒤에만 명시적 조합 profile로 사용합니다.
 
 ```powershell
-. .\tools\Import-AgentProfile.ps1 -Profile functional-uat-3law
+. .\tools\Import-AgentProfile.ps1 -Profile functional-uat-law-history
 uv run --locked --no-sync --group dev --extra functional-uat customs-ai-agent-functional-uat-serve
 ```
 
@@ -193,7 +200,15 @@ copied V2 manifest와 정확히 일치할 때만 공식 안내로 채택합니�
 uv run --locked --no-sync --group dev --extra functional-uat customs-ai-agent-functional-uat-serve
 ```
 
-Data profile을 같은 PC에서 병렬로 띄울 때에는 각 Data peer를 다른 loopback 포트로 실행하고, Agent importer에 정확한 포트를 지정합니다. 예를 들어 3법 Evidence를 `18183`, V2 guidance snapshot을 `18194`으로 실행했다면 `-EvidencePort 18183 -GuidancePort 18194`를 `functional-uat-kr-trade-v2`와 함께 사용합니다. 단일 peer profile에는 `-EvidencePort`만 필요합니다. 표준 전체 서비스 topology에서 Agent는 Backend가 가리키는 `18090`을 유지합니다.
+새 기본 조합 UAT는 위 V2 안내 peer를 유지하면서 Evidence만 법령 이력 profile로 바꿉니다.
+
+```powershell
+. .\tools\Import-AgentProfile.ps1 -Profile functional-uat-kr-trade-v2-law-history `
+  -EvidencePort 18083 -GuidancePort 18094
+uv run --locked --no-sync --group dev --extra functional-uat customs-ai-agent-functional-uat-serve
+```
+
+Data profile을 같은 PC에서 병렬로 띄울 때에는 각 Data peer를 다른 loopback 포트로 실행하고, Agent importer에 정확한 포트를 지정합니다. 예를 들어 law-history Evidence를 `18183`, V2 guidance snapshot을 `18194`으로 실행했다면 `-EvidencePort 18183 -GuidancePort 18194`를 `functional-uat-kr-trade-v2-law-history`와 함께 사용합니다. 단일 peer profile에는 `-EvidencePort`만 필요합니다. 표준 전체 서비스 topology에서 Agent는 Backend가 가리키는 `18090`을 유지합니다.
 
 모든 내부 요청은 `127.0.0.1`에만 바인딩되고, 요청·응답의 `X-Customs-Service-Mode`가 일치해야 합니다.
 
@@ -210,7 +225,7 @@ POST /internal/agent/v2/assistant/answers
 POST /internal/agent/v2/knowledge/answers
 ```
 
-`POST /internal/agent/v2/reviews`는 텍스트 문서, Case ID, 실행 ID, 기준일, 무역 유형, `KR`만 받습니다. 상업송장·포장명세서·B/L·AWB·원산지증명서·수출신고서·보완 증빙 문서를 받아 수입 또는 수출 심사를 수행합니다. V3.2 응답은 사람 검토 상태와 함께 실제 workflow 단계, 최대 2 cycle·6 action의 제한된 계획 trace, 문서별 추출 사실과 원문 인용, 코드 기반 비교 결과, Evidence에 연결된 finding·담당자 조치, 8구역 근거 보고서를 담습니다. 승인된 사람 수정은 원문을 덮어쓰지 않고 `human_provided` 사실로 별도 표시합니다. 수량·금액·원산지·문서 식별자 판정은 LLM이 아니라 코드가 수행하며, 결과는 언제나 자동완료 대상이 아닙니다.
+`POST /internal/agent/v2/reviews`는 텍스트 문서, Case ID, 실행 ID, 기준일, 무역 유형, `KR`만 받습니다. 상업송장·포장명세서·B/L·AWB·원산지증명서·수출신고서·보완 증빙 문서를 받아 수입 또는 수출 심사를 수행합니다. V3.2 응답은 사람 검토 상태와 함께 실제 workflow 단계, 최대 2 cycle·6 action의 제한된 계획 trace, 문서별 추출 사실과 원문 인용, 코드 기반 비교 결과, Evidence에 연결된 finding·담당자 조치, 8구역 근거 보고서를 담습니다. 이력 Evidence가 사용된 경우에는 법령·HSK·요건의 기준일만 담은 nullable `temporal_context`도 추가됩니다. 승인된 사람 수정은 원문을 덮어쓰지 않고 `human_provided` 사실로 별도 표시합니다. 수량·금액·원산지·문서 식별자 판정은 LLM이 아니라 코드가 수행하며, 결과는 언제나 자동완료 대상이 아닙니다.
 
 `POST /internal/agent/v2/assistant/answers`는 Backend가 저장한 Review Run snapshot, 질문, 최근 검증 대화 최대 8턴만 받습니다. 답변은 `현재 사건 기준`·`일반 통관 안내`·명시적으로 적용을 물었을 때만 `사건 적용·다음 확인`의 최대 세 구역으로 나뉩니다. 세 번째 구역은 첫 두 구역의 citation을 함께 가리키는 결정론 확인 목록일 뿐 법적 결론·승인·통관 결과를 만들지 않습니다. 문서 본문처럼 보이는 다줄 붙여넣기는 새 심사 근거가 아니며 Agent·Data·Claude·transcript에 전달하지 않고 문서 등록 또는 교체 후 재심사를 안내합니다. 이 호출은 Case, 문서, finding, 수정 제안을 직접 바꾸지 않습니다.
 
