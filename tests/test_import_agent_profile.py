@@ -59,8 +59,10 @@ $env:CUSTOMS_AGENT_SERVICE_BEARER_TOKEN = 'Abcdefghijklmnopqrstuvwxyz0123456789A
         if profile
         in {
             "functional-uat-3law",
+            "functional-uat-law-history",
             "functional-uat-kr-trade",
             "functional-uat-kr-trade-v2",
+            "functional-uat-kr-trade-v2-law-history",
         }
         else "dev-fixture"
     )
@@ -68,11 +70,11 @@ $env:CUSTOMS_AGENT_SERVICE_BEARER_TOKEN = 'Abcdefghijklmnopqrstuvwxyz0123456789A
     (workspace / "_local" / "profiles" / backend_profile / "backend.env").write_text(
         "placeholder\n", encoding="utf-8"
     )
-    evidence_profile = (
-        "functional-uat-3law"
-        if profile in {"functional-uat-kr-trade", "functional-uat-kr-trade-v2"}
-        else profile
-    )
+    evidence_profile = {
+        "functional-uat-kr-trade": "functional-uat-3law",
+        "functional-uat-kr-trade-v2": "functional-uat-3law",
+        "functional-uat-kr-trade-v2-law-history": "functional-uat-law-history",
+    }.get(profile, profile)
     evidence_file = workspace / "_local" / "profiles" / evidence_profile / "evidence-service-token"
     evidence_file.parent.mkdir(parents=True, exist_ok=True)
     evidence_file.write_text(_SERVICE_TOKEN, encoding="utf-8")
@@ -145,10 +147,12 @@ def _run_peer_boundary_check(
         pytest.skip("PowerShell is required to test the Agent profile importer")
 
     importer = workspace / "customs-ai-agent" / "tools" / "Import-AgentProfile.ps1"
-    expected_guidance_port = guidance_port or (
-        18094 if profile == "functional-uat-kr-trade-v2" else 18093
-    )
-    expected_registry_version = "2.0" if profile == "functional-uat-kr-trade-v2" else "1.0"
+    is_v2_guidance = profile in {
+        "functional-uat-kr-trade-v2",
+        "functional-uat-kr-trade-v2-law-history",
+    }
+    expected_guidance_port = guidance_port or (18094 if is_v2_guidance else 18093)
+    expected_registry_version = "2.0" if is_v2_guidance else "1.0"
     guidance_check = (
         "($env:GUIDANCE_SERVICE_BASE_URL -eq "
         f"'http://127.0.0.1:{expected_guidance_port}' -and "
@@ -306,6 +310,55 @@ def test_kr_trade_v2_profile_selects_the_separate_readiness_gated_peer(tmp_path:
     assert _GUIDANCE_TOKEN not in result.stdout + result.stderr
 
 
+def test_law_history_profile_selects_its_own_evidence_peer_and_clears_guidance(
+    tmp_path: Path,
+) -> None:
+    workspace = _write_workspace(
+        tmp_path,
+        profile="functional-uat-law-history",
+        secret_contents=_anthropic_assignment(_TEST_VALUE),
+    )
+    result = _run_peer_boundary_check(
+        workspace,
+        profile="functional-uat-law-history",
+        evidence_port=18183,
+        expect_guidance=False,
+        stale_guidance=True,
+    )
+
+    assert result.returncode == 0
+    assert result.stdout == "EVIDENCE_OK|GUIDANCE_OK"
+    assert _SERVICE_TOKEN not in result.stdout + result.stderr
+    assert _GUIDANCE_TOKEN not in result.stdout + result.stderr
+    assert _TEST_VALUE not in result.stdout + result.stderr
+
+
+def test_kr_trade_v2_law_history_profile_composes_history_evidence_and_v2_guidance(
+    tmp_path: Path,
+) -> None:
+    workspace = _write_workspace(
+        tmp_path,
+        profile="functional-uat-kr-trade-v2-law-history",
+        secret_contents=_anthropic_assignment(_TEST_VALUE),
+        guidance_token=_GUIDANCE_TOKEN,
+    )
+    result = _run_peer_boundary_check(
+        workspace,
+        profile="functional-uat-kr-trade-v2-law-history",
+        evidence_port=18183,
+        # Omit GuidancePort to prove the composed history profile retains the
+        # V2 peer's immutable 18094 default.
+        guidance_port=None,
+        expect_guidance=True,
+    )
+
+    assert result.returncode == 0
+    assert result.stdout == "EVIDENCE_OK|GUIDANCE_OK"
+    assert _SERVICE_TOKEN not in result.stdout + result.stderr
+    assert _GUIDANCE_TOKEN not in result.stdout + result.stderr
+    assert _TEST_VALUE not in result.stdout + result.stderr
+
+
 def test_kr_trade_profile_rejects_missing_or_malformed_guidance_token_without_echoing_it(
     tmp_path: Path,
 ) -> None:
@@ -370,6 +423,7 @@ def test_kr_trade_profile_rejects_equal_evidence_and_guidance_ports(tmp_path: Pa
     [
         ("dev-fixture", None),
         ("functional-uat-3law", _anthropic_assignment(_TEST_VALUE)),
+        ("functional-uat-law-history", _anthropic_assignment(_TEST_VALUE)),
     ],
 )
 def test_existing_profiles_remove_stale_guidance_overrides_and_keep_one_peer(

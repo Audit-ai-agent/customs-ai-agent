@@ -105,6 +105,7 @@ def _stub_retrieve(_self: ProfileEvidenceRetriever, request: dict[str, Any]) -> 
                         "source_uri": "https://law.example.invalid/1",
                         "source_type": "law",
                         "version_hash": "a" * 64,
+                        "retrieval_methods": ["dense", "bm25"],
                     }
                 ],
             }
@@ -1527,6 +1528,7 @@ def test_case_specific_follow_up_questions_do_not_fall_back_to_general_guidance(
                             "source_uri": "https://law.example.invalid/food",
                             "source_type": "law",
                             "version_hash": "b" * 64,
+                            "retrieval_methods": ["dense", "bm25"],
                             "law_id": "food-law",
                             "law_name": "수입식품안전관리 특별법",
                             "eligibility": "finding",

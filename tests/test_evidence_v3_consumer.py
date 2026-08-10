@@ -14,6 +14,9 @@ def test_data_contract_resources_are_the_only_packaged_evidence_contracts() -> N
     assert retrieval["$id"].endswith("rag_retrieval_v3.schema.json")
     assert readiness["$id"].endswith("readiness_v3.schema.json")
     assert len(schema_sha256("evidence", "v3", "rag-retrieval")) == 64
+    assert schema_sha256("evidence", "v3", "rag-retrieval") == (
+        "4bb8066c4836192844a1387c6197eaccd0d932a4b9f95e2cce7bb07301aff71d"
+    )
     assert len(schema_sha256("evidence", "v3", "guidance-query")) == 64
     assert len(schema_sha256("evidence", "v3", "readiness")) == 64
     assert readiness["required"] == ["status"]
@@ -22,6 +25,24 @@ def test_data_contract_resources_are_the_only_packaged_evidence_contracts() -> N
     }
     assert "requirement_verification" not in str(retrieval)
     assert "policy_release" not in str(retrieval)
+    evidence = retrieval["$defs"]["Evidence"]
+    response = retrieval["$defs"]["RetrieveResponseV3"]
+    assert evidence["properties"]["retrieval_methods"]["items"]["enum"] == [
+        "exact_hs",
+        "dense",
+        "bm25",
+        "graph",
+        "rerank",
+    ]
+    assert response["properties"]["temporal_context"] == {
+        "anyOf": [{"$ref": "#/$defs/TemporalContext"}, {"type": "null"}],
+        "default": None,
+    }
+    assert retrieval["$defs"]["TemporalContext"]["required"] == [
+        "law_as_of",
+        "hsk_snapshot_as_of",
+        "requirements_snapshot_as_of",
+    ]
     assert guidance["$id"].endswith("guidance_query_v3.schema.json")
     assert guidance["$defs"]["GeneralGuidanceQueryRequestV3"]["properties"]["trade_direction"][
         "enum"

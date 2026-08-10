@@ -125,6 +125,20 @@ class EvidenceV3(V3WireModel):
     law_name: str | None = Field(default=None, max_length=2000)
 
 
+class TemporalContextV3(V3WireModel):
+    """Dates that bind one Evidence response to its immutable sources.
+
+    This is provenance metadata, not a decision or an assertion that the
+    HSK/requirements snapshots apply to every historical review date.  Data
+    owns its construction; Agent preserves the validated values for Backend
+    persistence and the user-facing snapshot notice.
+    """
+
+    law_as_of: date
+    hsk_snapshot_as_of: date
+    requirements_snapshot_as_of: date
+
+
 class SourceV3(V3WireModel):
     """A verbatim quote and its zero-based occurrence in one input document."""
 
@@ -378,6 +392,10 @@ class ReviewRunResultV3(V3WireModel):
     evidence: list[EvidenceV3] = Field(default_factory=list, max_length=10_000)
     findings: list[FindingV3] = Field(default_factory=list, max_length=2000)
     required_actions: list[RequiredActionV1] = Field(min_length=1, max_length=2001)
+    # Additive provenance from the Data Evidence response.  Old three-law
+    # results may legitimately omit it; the new law-history profile supplies
+    # all three dates as one atomic context.
+    temporal_context: TemporalContextV3 | None = None
     result_sha256: str = Field(pattern=r"^[a-f0-9]{64}$")
     schema_version: Literal["3.2"] = "3.2"
     engine: EngineV3 | None = None
@@ -388,6 +406,11 @@ class ReviewRunResultV3(V3WireModel):
             raise ValueError("blocked result must have failed execution_status")
         if self.status == "needs_review" and self.report.overall_status != "needs_review":
             raise ValueError("needs_review result must have needs_review report status")
+        if (
+            self.temporal_context is not None
+            and self.temporal_context.law_as_of != self.review_as_of
+        ):
+            raise ValueError("temporal context law_as_of must match review_as_of")
         comparison_ids = [comparison.comparison_id for comparison in self.comparisons]
         if len(comparison_ids) != len(set(comparison_ids)):
             raise ValueError("comparison_id values must be unique")
@@ -452,6 +475,12 @@ def review_result_v3_sha256(result: ReviewRunResultV3 | Mapping[str, Any]) -> st
     else:
         payload = dict(result)
     payload.pop("result_sha256", None)
+    # ``temporal_context`` was added after existing immutable Review Runs had
+    # already been hashed.  A null context carries no provenance, so omit only
+    # that null additive field to keep those legacy snapshots readable.  A
+    # present date bundle remains covered by the result hash.
+    if payload.get("temporal_context") is None:
+        payload.pop("temporal_context", None)
     return canonical_json_sha256(payload)
 
 
@@ -478,6 +507,7 @@ __all__ = [
     "ServiceReviewRunRequestV3",
     "SourceV3",
     "TextDocumentInputV3",
+    "TemporalContextV3",
     "WorkflowStageV3",
     "WorkflowV3",
     "canonical_json_sha256",

@@ -7,11 +7,16 @@ from urllib.error import HTTPError
 
 import pytest
 from fastapi.testclient import TestClient
-from pydantic import SecretStr
+from pydantic import SecretStr, ValidationError
 
 import customs_ai_agent.service.profiles as profile_module
 from customs_ai_agent.adapters.retrieval import RetrievalError
-from customs_ai_agent.schemas.v3 import ServiceReviewRunRequestV3, canonical_json_sha256
+from customs_ai_agent.schemas.v3 import (
+    ReviewRunResultV3,
+    ServiceReviewRunRequestV3,
+    canonical_json_sha256,
+    review_result_v3_sha256,
+)
 from customs_ai_agent.service.app import create_app
 from customs_ai_agent.service.guidance_registry import guidance_registry
 from customs_ai_agent.service.profiles import (
@@ -22,7 +27,9 @@ from customs_ai_agent.service.profiles import (
     _DeterministicDocumentAnalyzer,
     _actions,
     _dedupe_evidence_records,
+    _evidence_from_data,
     _findings_from_evidence,
+    _temporal_context_from_data,
     ProfileEvidenceRetriever,
     ProfileRuntime,
     SERVICE_MODE_HEADER,
@@ -60,6 +67,155 @@ def test_default_profile_is_local_development() -> None:
     assert settings.guidance_base_url is None
     assert settings.guidance_service_token is None
     assert settings.guidance_registry_version is None
+
+
+def test_temporal_context_is_atomic_and_bound_to_the_requested_law_date() -> None:
+    response = {
+        "temporal_context": {
+            "law_as_of": "2026-08-05",
+            "hsk_snapshot_as_of": "2026-08-05",
+            "requirements_snapshot_as_of": "2026-08-05",
+        }
+    }
+
+    context = _temporal_context_from_data(response, expected_law_as_of="2026-08-05")
+
+    assert context is not None
+    assert context.law_as_of.isoformat() == "2026-08-05"
+    assert context.hsk_snapshot_as_of.isoformat() == "2026-08-05"
+    assert context.requirements_snapshot_as_of.isoformat() == "2026-08-05"
+
+    with pytest.raises(RetrievalError, match="does not match the review date"):
+        _temporal_context_from_data(response, expected_law_as_of="2026-08-06")
+    with pytest.raises(RetrievalError, match="temporal context is invalid"):
+        _temporal_context_from_data(
+            {"temporal_context": {"law_as_of": "2026-08-05"}},
+            expected_law_as_of="2026-08-05",
+        )
+
+
+def test_retriever_rejects_data_temporal_context_for_a_different_review_date(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    retriever = ProfileEvidenceRetriever(_settings())
+    monkeypatch.setattr(retriever, "readiness", lambda **_kwargs: {"status": "ready"})
+    monkeypatch.setattr(
+        retriever,
+        "_request",
+        lambda *_args, **_kwargs: {
+            "schema_version": "3.0",
+            "request_id": "rag-temporal-mismatch",
+            "status": "partial",
+            "knowledge_snapshot_id": "functional-uat-law-history",
+            "temporal_context": {
+                "law_as_of": "2026-08-06",
+                "hsk_snapshot_as_of": "2026-08-05",
+                "requirements_snapshot_as_of": "2026-08-05",
+            },
+            "results": [],
+        },
+    )
+
+    with pytest.raises(RetrievalError, match="does not match the review date"):
+        retriever.retrieve(
+            {
+                "review_run_id": "run-temporal-mismatch",
+                "request_id": "rag-temporal-mismatch",
+                "review_as_of": "2026-08-05",
+            }
+        )
+
+
+def test_evidence_consumer_accepts_rerank_but_rejects_unregistered_retrieval_methods() -> None:
+    response = {
+        "results": [
+            {
+                "evidence": [
+                    {
+                        "evidence_id": "ev_" + "a" * 64,
+                        "item_id": "commodity-rerank",
+                        "title": "법령 조문",
+                        "text": "검토할 법령 근거입니다.",
+                        "source_uri": "https://law.go.kr/example",
+                        "source_type": "law_article",
+                        "version_hash": "a" * 64,
+                        "retrieval_methods": ["dense", "bm25", "rerank"],
+                    }
+                ]
+            }
+        ]
+    }
+
+    evidence = _evidence_from_data(response)
+
+    assert evidence[0]["evidence_id"] == "ev_" + "a" * 64
+    response["results"][0]["evidence"][0]["retrieval_methods"] = ["dense", "shell"]
+    with pytest.raises(RetrievalError, match="evidence is invalid"):
+        _evidence_from_data(response)
+
+
+def test_review_result_preserves_data_temporal_context_for_backend_persistence(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    def retrieve(_self: ProfileEvidenceRetriever, request: dict[str, Any]) -> dict[str, Any]:
+        return {
+            "schema_version": "3.0",
+            "request_id": request["request_id"],
+            "status": "partial",
+            "knowledge_snapshot_id": "functional-uat-law-history",
+            "temporal_context": {
+                "law_as_of": "2026-08-05",
+                "hsk_snapshot_as_of": "2026-08-05",
+                "requirements_snapshot_as_of": "2026-08-05",
+            },
+            "results": [],
+        }
+
+    monkeypatch.setattr(ProfileEvidenceRetriever, "retrieve", retrieve)
+    runtime = ProfileRuntime(_settings())
+    result = runtime.review_v3_json(
+        json.dumps(
+            {
+                "case_id": "case-law-history",
+                "review_run_id": "run-law-history",
+                "review_as_of": "2026-08-05",
+                "trade_type": "import",
+                "jurisdiction": "KR",
+                "documents": [
+                    {
+                        "document_id": "invoice",
+                        "filename": "invoice.txt",
+                        "content_text": (
+                            "COMMERCIAL INVOICE\nHS Code: 123456\n"
+                            "Description: Widget | HS Code: 123456 | Quantity: 1 PCS"
+                        ),
+                    }
+                ],
+            }
+        ).encode()
+    )
+
+    assert result.execution_status == "partial"
+    assert result.temporal_context is not None
+    assert result.temporal_context.law_as_of.isoformat() == "2026-08-05"
+    assert result.temporal_context.hsk_snapshot_as_of.isoformat() == "2026-08-05"
+    assert result.temporal_context.requirements_snapshot_as_of.isoformat() == "2026-08-05"
+
+    # Existing immutable 3-law snapshots did not have the additive field.
+    # Their old hashes must remain readable when Backend sends one back for a
+    # grounded follow-up conversation.
+    legacy_wire = result.model_dump(mode="json", warnings=False)
+    legacy_wire.pop("temporal_context")
+    legacy_wire["result_sha256"] = review_result_v3_sha256(legacy_wire)
+    legacy_result = ReviewRunResultV3.model_validate(legacy_wire)
+    assert legacy_result.temporal_context is None
+
+    mismatched_wire = result.model_dump(mode="json", warnings=False)
+    assert mismatched_wire["temporal_context"] is not None
+    mismatched_wire["temporal_context"]["law_as_of"] = "2026-08-06"
+    mismatched_wire["result_sha256"] = review_result_v3_sha256(mismatched_wire)
+    with pytest.raises(ValidationError, match="law_as_of must match review_as_of"):
+        ReviewRunResultV3.model_validate(mismatched_wire)
 
 
 def test_regulatory_requirement_is_one_finding_and_action_across_linked_documents() -> None:

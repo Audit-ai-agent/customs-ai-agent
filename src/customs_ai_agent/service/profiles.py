@@ -47,6 +47,7 @@ from customs_ai_agent.schemas.v3 import (
     RequiredActionV1,
     ReviewRunResultV3,
     ServiceReviewRunRequestV3,
+    TemporalContextV3,
     canonical_json_sha256,
     review_result_v3_sha256,
 )
@@ -115,6 +116,7 @@ _GUIDANCE_TOPIC_HINTS = frozenset(
         "trade_terms",
     }
 )
+_EVIDENCE_RETRIEVAL_METHODS = frozenset({"exact_hs", "dense", "bm25", "graph", "rerank"})
 _GUIDANCE_SAFE_QUERY = {
     ("customs_clearance", "import_clearance_flow"): "대한민국 수입 통관 흐름 공식 안내",
     ("customs_clearance", "export_clearance_flow"): "대한민국 수출 통관 흐름 공식 안내",
@@ -551,6 +553,19 @@ class ProfileEvidenceRetriever:
                 error_code="data_contract_invalid",
             )
             raise RetrievalError("Data service response does not satisfy the shared contract")
+        try:
+            _temporal_context_from_data(
+                response,
+                expected_law_as_of=str(request.get("review_as_of", "")),
+            )
+        except RetrievalError:
+            self._record_failure(
+                review_run_id,
+                method="POST",
+                path=self.retrieve_path,
+                error_code="data_contract_invalid",
+            )
+            raise
         return response
 
     def guidance_query(
@@ -1087,6 +1102,20 @@ def _evidence_from_data(response: Mapping[str, Any]) -> list[dict[str, Any]]:
                 raise RetrievalError("Data service evidence is invalid")
             if _HASH.fullmatch(item["version_hash"]) is None:
                 raise RetrievalError("Data service evidence is invalid")
+            # This non-user-facing diagnostic is required by the shared V3
+            # contract.  Keep its enum closed while allowing the new pinned
+            # cross-encoder marker alongside the established methods.
+            retrieval_methods = item.get("retrieval_methods")
+            if (
+                not isinstance(retrieval_methods, list)
+                or not retrieval_methods
+                or any(
+                    not isinstance(method, str) or method not in _EVIDENCE_RETRIEVAL_METHODS
+                    for method in retrieval_methods
+                )
+                or len(retrieval_methods) != len(set(retrieval_methods))
+            ):
+                raise RetrievalError("Data service evidence is invalid")
             evidence.append(
                 {
                     "evidence_id": item["evidence_id"],
@@ -1106,6 +1135,30 @@ def _evidence_from_data(response: Mapping[str, Any]) -> list[dict[str, Any]]:
                 }
             )
     return _dedupe_evidence_records(evidence)
+
+
+def _temporal_context_from_data(
+    response: Mapping[str, Any],
+    *,
+    expected_law_as_of: str | None = None,
+) -> TemporalContextV3 | None:
+    """Validate additive Data temporal provenance before it reaches Backend.
+
+    An absent/null field keeps the legacy three-law response compatible.  A
+    present field is atomic: all three date values must be valid, and its law
+    date must bind to the reviewed date rather than a stale retrieval result.
+    """
+
+    raw_context = response.get("temporal_context")
+    if raw_context is None:
+        return None
+    try:
+        context = TemporalContextV3.model_validate(raw_context)
+    except ValidationError:
+        raise RetrievalError("Data service temporal context is invalid") from None
+    if expected_law_as_of is not None and context.law_as_of.isoformat() != expected_law_as_of:
+        raise RetrievalError("Data service temporal context does not match the review date")
+    return context
 
 
 def _requirement_identity(item: Mapping[str, Any]) -> tuple[str, str, str]:
@@ -1809,12 +1862,17 @@ class ProfileRuntime:
                 data_response = self._retriever.retrieve(
                     _retrieve_request(request, workflow_output.retrieval_items)
                 )
+                temporal_context = _temporal_context_from_data(
+                    data_response,
+                    expected_law_as_of=request.review_as_of.isoformat(),
+                )
                 evidence_records = _evidence_from_data(data_response)
                 workflow_output = workflow_output.with_evidence_status(str(data_response["status"]))
             else:
                 # Data rejects an empty retrieval request by contract.  This is
                 # an input limitation, not an unhealthy or partial Data store.
                 data_response = {"status": "ok", "results": []}
+                temporal_context = None
                 evidence_records = []
                 self._retriever.record_retrieve_skipped(
                     review_run_id=request.review_run_id,
@@ -1905,6 +1963,7 @@ class ProfileRuntime:
             "evidence": evidence,
             "findings": findings,
             "required_actions": actions,
+            "temporal_context": temporal_context,
             "engine": {
                 "kind": "deterministic" if self.mode == "local-development" else "claude",
                 "model_id": str(self._analyzer.model_id),
