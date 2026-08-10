@@ -17,6 +17,17 @@ _MAX_DOCUMENTS = 20
 _MAX_TEXT_CHARACTERS = 500_000
 ServiceMode = Literal["local-development", "functional-uat"]
 GuidanceRegistryVersion = Literal["1.0", "2.0"]
+# This is intentionally the Data-owned local profile name, rather than an
+# Agent runtime profile name.  The composed V2 + law-history Agent profile
+# therefore resolves to the same expected Evidence profile as review-only
+# law-history Functional-UAT.
+EvidenceProfile = Literal[
+    "dev-fixture",
+    "functional-uat-3law",
+    "functional-uat-law-history",
+]
+_EVIDENCE_PROFILES = frozenset({"dev-fixture", "functional-uat-3law", "functional-uat-law-history"})
+_TEMPORAL_EVIDENCE_PROFILES = frozenset({"functional-uat-law-history"})
 
 
 class ServiceConfigurationError(RuntimeError):
@@ -69,6 +80,10 @@ class ServiceSettings:
     bearer_token: SecretStr
     evidence_base_url: str
     evidence_service_token: SecretStr
+    # The local importer sets this non-secret Data profile identity.  It is
+    # optional only so existing manually configured legacy environments and
+    # immutable historical test fixtures remain readable.
+    evidence_profile: EvidenceProfile | None = None
     guidance_base_url: str | None = None
     guidance_service_token: SecretStr | None = None
     guidance_registry_version: GuidanceRegistryVersion | None = None
@@ -90,6 +105,12 @@ class ServiceSettings:
     shutdown_grace_seconds: float = 30.0
     log_level: str = "INFO"
 
+    @property
+    def requires_temporal_context(self) -> bool:
+        """Whether this selected Evidence profile must return temporal provenance."""
+
+        return self.evidence_profile in _TEMPORAL_EVIDENCE_PROFILES
+
     def __post_init__(self) -> None:
         service_token = self.bearer_token.get_secret_value()
         evidence_token = self.evidence_service_token.get_secret_value()
@@ -100,6 +121,8 @@ class ServiceSettings:
             raise ServiceConfigurationError("service_bearer_token_weak")
         if _B64_TOKEN.fullmatch(evidence_token) is None or len(set(evidence_token)) < 12:
             raise ServiceConfigurationError("evidence_service_token_weak")
+        if self.evidence_profile not in {None, *_EVIDENCE_PROFILES}:
+            raise ServiceConfigurationError("customs_agent_evidence_profile_invalid")
         if has_guidance_base_url != has_guidance_token:
             raise ServiceConfigurationError("guidance_service_peer_incomplete")
         if has_guidance_registry_version and not has_guidance_base_url:
@@ -191,6 +214,14 @@ class ServiceSettings:
         guidance_base_url: str | None = None
         guidance_service_token: SecretStr | None = None
         guidance_registry_version: GuidanceRegistryVersion | None = None
+        evidence_profile: EvidenceProfile | None = None
+        if "CUSTOMS_AGENT_EVIDENCE_PROFILE" in source:
+            configured_evidence_profile = _required(source, "CUSTOMS_AGENT_EVIDENCE_PROFILE")
+            if configured_evidence_profile not in _EVIDENCE_PROFILES:
+                raise ServiceConfigurationError("customs_agent_evidence_profile_invalid")
+            evidence_profile = cast(EvidenceProfile, configured_evidence_profile)
+        if configured_mode == "functional-uat" and evidence_profile is None:
+            raise ServiceConfigurationError("customs_agent_evidence_profile_missing")
         if has_guidance_base_url:
             guidance_base_url = _required(source, "GUIDANCE_SERVICE_BASE_URL")
             guidance_service_token = SecretStr(_required(source, "GUIDANCE_SERVICE_TOKEN"))
@@ -202,6 +233,7 @@ class ServiceSettings:
             bearer_token=SecretStr(_required(source, "CUSTOMS_AGENT_SERVICE_BEARER_TOKEN")),
             evidence_base_url=_required(source, "EVIDENCE_SERVICE_BASE_URL"),
             evidence_service_token=SecretStr(_required(source, "EVIDENCE_SERVICE_TOKEN")),
+            evidence_profile=evidence_profile,
             guidance_base_url=guidance_base_url,
             guidance_service_token=guidance_service_token,
             guidance_registry_version=guidance_registry_version,
@@ -242,6 +274,7 @@ class ServiceSettings:
 
 
 __all__ = [
+    "EvidenceProfile",
     "GuidanceRegistryVersion",
     "ServiceConfigurationError",
     "ServiceMode",

@@ -34,7 +34,7 @@ from customs_ai_agent.service.profiles import (
     ProfileRuntime,
     SERVICE_MODE_HEADER,
 )
-from customs_ai_agent.service.runtime_errors import RuntimeConfigurationError
+from customs_ai_agent.service.runtime_errors import RuntimeConfigurationError, RuntimeExecutionError
 from customs_ai_agent.service.settings import ServiceConfigurationError, ServiceSettings
 
 
@@ -126,6 +126,63 @@ def test_retriever_rejects_data_temporal_context_for_a_different_review_date(
         )
 
 
+def test_law_history_profile_requires_a_complete_temporal_context(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    retriever = ProfileEvidenceRetriever(_settings(evidence_profile="functional-uat-law-history"))
+    monkeypatch.setattr(retriever, "readiness", lambda **_kwargs: {"status": "ready"})
+    monkeypatch.setattr(
+        retriever,
+        "_request",
+        lambda *_args, **_kwargs: {
+            "schema_version": "3.0",
+            "request_id": "rag-history-context-required",
+            "status": "partial",
+            "knowledge_snapshot_id": "snapshot-history",
+            "temporal_context": None,
+            "results": [],
+        },
+    )
+
+    with pytest.raises(RetrievalError, match="temporal context is required"):
+        retriever.retrieve(
+            {
+                "review_run_id": "run-history-context-required",
+                "request_id": "rag-history-context-required",
+                "review_as_of": "2026-08-05",
+            }
+        )
+
+
+def test_legacy_evidence_profile_keeps_nullable_temporal_context_compatibility(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    retriever = ProfileEvidenceRetriever(_settings(evidence_profile="functional-uat-3law"))
+    monkeypatch.setattr(retriever, "readiness", lambda **_kwargs: {"status": "ready"})
+    monkeypatch.setattr(
+        retriever,
+        "_request",
+        lambda *_args, **_kwargs: {
+            "schema_version": "3.0",
+            "request_id": "rag-legacy-null-context",
+            "status": "partial",
+            "knowledge_snapshot_id": "snapshot-3law",
+            "temporal_context": None,
+            "results": [],
+        },
+    )
+
+    response = retriever.retrieve(
+        {
+            "review_run_id": "run-legacy-null-context",
+            "request_id": "rag-legacy-null-context",
+            "review_as_of": "2026-08-05",
+        }
+    )
+
+    assert response["temporal_context"] is None
+
+
 def test_evidence_consumer_accepts_rerank_but_rejects_unregistered_retrieval_methods() -> None:
     response = {
         "results": [
@@ -172,7 +229,7 @@ def test_review_result_preserves_data_temporal_context_for_backend_persistence(
         }
 
     monkeypatch.setattr(ProfileEvidenceRetriever, "retrieve", retrieve)
-    runtime = ProfileRuntime(_settings())
+    runtime = ProfileRuntime(_settings(evidence_profile="functional-uat-law-history"))
     result = runtime.review_v3_json(
         json.dumps(
             {
@@ -216,6 +273,48 @@ def test_review_result_preserves_data_temporal_context_for_backend_persistence(
     mismatched_wire["result_sha256"] = review_result_v3_sha256(mismatched_wire)
     with pytest.raises(ValidationError, match="law_as_of must match review_as_of"):
         ReviewRunResultV3.model_validate(mismatched_wire)
+
+
+def test_law_history_runtime_rejects_a_null_temporal_context_even_if_retriever_is_stubbed(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    def retrieve(_self: ProfileEvidenceRetriever, request: dict[str, Any]) -> dict[str, Any]:
+        return {
+            "schema_version": "3.0",
+            "request_id": request["request_id"],
+            "status": "partial",
+            "knowledge_snapshot_id": "snapshot-history",
+            "temporal_context": None,
+            "results": [],
+        }
+
+    monkeypatch.setattr(ProfileEvidenceRetriever, "retrieve", retrieve)
+    runtime = ProfileRuntime(_settings(evidence_profile="functional-uat-law-history"))
+
+    with pytest.raises(RuntimeExecutionError) as raised:
+        runtime.review_v3_json(
+            json.dumps(
+                {
+                    "case_id": "case-history-null-context",
+                    "review_run_id": "run-history-null-context",
+                    "review_as_of": "2026-08-05",
+                    "trade_type": "import",
+                    "jurisdiction": "KR",
+                    "documents": [
+                        {
+                            "document_id": "invoice",
+                            "filename": "invoice.txt",
+                            "content_text": (
+                                "COMMERCIAL INVOICE\nHS Code: 123456\n"
+                                "Description: Widget | HS Code: 123456 | Quantity: 1 PCS"
+                            ),
+                        }
+                    ],
+                }
+            ).encode()
+        )
+
+    assert raised.value.code == "evidence_dependency_unready"
 
 
 def test_regulatory_requirement_is_one_finding_and_action_across_linked_documents() -> None:
@@ -385,9 +484,65 @@ def test_backend_profile_loader_mode_is_accepted() -> None:
             "EVIDENCE_SERVICE_TOKEN": _TOKEN,
             "EVIDENCE_SERVICE_TOKEN_HEADER": "Authorization",
             "CUSTOMS_AGENT_SERVICE_MODE": "functional-uat",
+            "CUSTOMS_AGENT_EVIDENCE_PROFILE": "functional-uat-law-history",
         }
     )
     assert settings.service_mode == "functional-uat"
+    assert settings.evidence_profile == "functional-uat-law-history"
+    assert settings.requires_temporal_context is True
+
+
+@pytest.mark.parametrize(
+    ("profile", "requires_temporal_context"),
+    [
+        ("dev-fixture", False),
+        ("functional-uat-3law", False),
+        ("functional-uat-law-history", True),
+    ],
+)
+def test_evidence_profile_selection_is_explicit_and_nonsecret(
+    profile: str, requires_temporal_context: bool
+) -> None:
+    settings = ServiceSettings.from_environment(
+        {
+            "CUSTOMS_AGENT_SERVICE_BEARER_TOKEN": _TOKEN,
+            "EVIDENCE_SERVICE_BASE_URL": "http://127.0.0.1:18083",
+            "EVIDENCE_SERVICE_TOKEN": _TOKEN,
+            "EVIDENCE_SERVICE_TOKEN_HEADER": "Authorization",
+            "CUSTOMS_AGENT_EVIDENCE_PROFILE": profile,
+        }
+    )
+
+    assert settings.evidence_profile == profile
+    assert settings.requires_temporal_context is requires_temporal_context
+
+
+def test_evidence_profile_rejects_unknown_value() -> None:
+    with pytest.raises(ServiceConfigurationError) as raised:
+        ServiceSettings.from_environment(
+            {
+                "CUSTOMS_AGENT_SERVICE_BEARER_TOKEN": _TOKEN,
+                "EVIDENCE_SERVICE_BASE_URL": "http://127.0.0.1:18083",
+                "EVIDENCE_SERVICE_TOKEN": _TOKEN,
+                "EVIDENCE_SERVICE_TOKEN_HEADER": "Authorization",
+                "CUSTOMS_AGENT_EVIDENCE_PROFILE": "unknown-profile",
+            }
+        )
+    assert raised.value.code == "customs_agent_evidence_profile_invalid"
+
+
+def test_functional_uat_requires_an_explicit_evidence_profile_binding() -> None:
+    with pytest.raises(ServiceConfigurationError) as raised:
+        ServiceSettings.from_environment(
+            {
+                "CUSTOMS_AGENT_SERVICE_BEARER_TOKEN": _TOKEN,
+                "EVIDENCE_SERVICE_BASE_URL": "http://127.0.0.1:18083",
+                "EVIDENCE_SERVICE_TOKEN": _TOKEN,
+                "EVIDENCE_SERVICE_TOKEN_HEADER": "Authorization",
+                "CUSTOMS_AGENT_SERVICE_MODE": "functional-uat",
+            }
+        )
+    assert raised.value.code == "customs_agent_evidence_profile_missing"
 
 
 def test_profile_rejects_non_loopback_evidence() -> None:

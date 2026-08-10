@@ -245,6 +245,10 @@ $env:CUSTOMS_AGENT_PORT = "18090"
 $env:EVIDENCE_SERVICE_BASE_URL = "http://127.0.0.1:$EvidencePort"
 $env:EVIDENCE_SERVICE_TOKEN = $evidenceToken
 $env:EVIDENCE_SERVICE_TOKEN_HEADER = "Authorization"
+# Keep the Data-owned profile identity alongside its local token.  It is not a
+# credential and lets the runtime require law-history temporal provenance
+# without weakening nullable compatibility for the retained three-law profile.
+$env:CUSTOMS_AGENT_EVIDENCE_PROFILE = $evidenceProfile
 if ($null -eq $guidanceProfile) {
     # A shell can switch from the composed profile back to an existing one.
     # Remove stale overrides so its bounded guidance query falls back to the

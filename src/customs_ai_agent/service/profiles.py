@@ -290,6 +290,7 @@ class ProfileEvidenceRetriever:
         self._evidence_token = evidence_token.get_secret_value()
         self._guidance_token = guidance_token.get_secret_value()
         self._guidance_registry_version = settings.guidance_registry_version
+        self._requires_temporal_context = settings.requires_temporal_context
         self._guidance_v2_ready = False
 
     @property
@@ -557,6 +558,7 @@ class ProfileEvidenceRetriever:
             _temporal_context_from_data(
                 response,
                 expected_law_as_of=str(request.get("review_as_of", "")),
+                required=self._requires_temporal_context,
             )
         except RetrievalError:
             self._record_failure(
@@ -1141,16 +1143,22 @@ def _temporal_context_from_data(
     response: Mapping[str, Any],
     *,
     expected_law_as_of: str | None = None,
+    required: bool = False,
 ) -> TemporalContextV3 | None:
     """Validate additive Data temporal provenance before it reaches Backend.
 
-    An absent/null field keeps the legacy three-law response compatible.  A
-    present field is atomic: all three date values must be valid, and its law
-    date must bind to the reviewed date rather than a stale retrieval result.
+    An absent/null field keeps the legacy three-law response compatible.  The
+    explicitly bound law-history profile instead requires it.  A present field
+    is atomic: all three date values must be valid, and its law date must bind
+    to the reviewed date rather than a stale retrieval result.
     """
 
     raw_context = response.get("temporal_context")
     if raw_context is None:
+        if required:
+            raise RetrievalError(
+                "Data service temporal context is required for this Evidence profile"
+            )
         return None
     try:
         context = TemporalContextV3.model_validate(raw_context)
@@ -1320,6 +1328,7 @@ class ProfileRuntime:
         knowledge_transcript_root: KnowledgeTranscriptRoot | None = None,
     ) -> None:
         self.mode = service_mode(settings)
+        self._requires_temporal_context = settings.requires_temporal_context
         self._closed = False
         self._transcript_root = _transcript_root(settings, transcript_root)
         self._knowledge_transcript_root = _knowledge_transcript_root(
@@ -1865,6 +1874,7 @@ class ProfileRuntime:
                 temporal_context = _temporal_context_from_data(
                     data_response,
                     expected_law_as_of=request.review_as_of.isoformat(),
+                    required=self._requires_temporal_context,
                 )
                 evidence_records = _evidence_from_data(data_response)
                 workflow_output = workflow_output.with_evidence_status(str(data_response["status"]))

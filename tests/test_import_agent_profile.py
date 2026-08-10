@@ -151,6 +151,11 @@ def _run_peer_boundary_check(
         "functional-uat-kr-trade-v2",
         "functional-uat-kr-trade-v2-law-history",
     }
+    expected_evidence_profile = {
+        "functional-uat-kr-trade": "functional-uat-3law",
+        "functional-uat-kr-trade-v2": "functional-uat-3law",
+        "functional-uat-kr-trade-v2-law-history": "functional-uat-law-history",
+    }.get(profile, profile)
     expected_guidance_port = guidance_port or (18094 if is_v2_guidance else 18093)
     expected_registry_version = "2.0" if is_v2_guidance else "1.0"
     guidance_check = (
@@ -175,7 +180,8 @@ def _run_peer_boundary_check(
         "if (($env:EVIDENCE_SERVICE_BASE_URL -eq "
         f"'http://127.0.0.1:{evidence_port}' -and "
         f"$env:EVIDENCE_SERVICE_TOKEN -eq '{_SERVICE_TOKEN}' -and "
-        "$env:EVIDENCE_SERVICE_TOKEN_HEADER -eq 'Authorization')) "
+        "$env:EVIDENCE_SERVICE_TOKEN_HEADER -eq 'Authorization' -and "
+        f"$env:CUSTOMS_AGENT_EVIDENCE_PROFILE -eq '{expected_evidence_profile}')) "
         "{ [Console]::Out.Write('EVIDENCE_OK|') } else { [Console]::Out.Write('EVIDENCE_BAD|') }; "
         f"if ({guidance_check}) {{ [Console]::Out.Write('GUIDANCE_OK') }} "
         "else { [Console]::Out.Write('GUIDANCE_BAD') } }"
