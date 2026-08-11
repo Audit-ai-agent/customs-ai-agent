@@ -31,6 +31,7 @@ from customs_ai_agent.service.profiles import (
     _evidence_from_data,
     _findings_from_evidence,
     _retrieve_request,
+    _temporal_coverage_from_data,
     _temporal_context_from_data,
     ProfileEvidenceRetriever,
     ProfileRuntime,
@@ -116,6 +117,35 @@ def test_temporal_context_is_atomic_and_bound_to_the_requested_law_date() -> Non
         )
 
 
+def test_temporal_coverage_is_atomic_and_never_inferred_from_snapshot_dates() -> None:
+    response = {
+        "temporal_context": {
+            "law_as_of": "2026-08-05",
+            "hsk_snapshot_as_of": "2026-08-05",
+            "requirements_snapshot_as_of": "2026-08-05",
+        },
+        "temporal_coverage": {
+            "law": "covered",
+            "hsk": "unavailable",
+            "requirements": "unavailable",
+        },
+    }
+
+    coverage = _temporal_coverage_from_data(response, required=True)
+
+    assert coverage is not None
+    assert coverage.law == "covered"
+    assert coverage.hsk == "unavailable"
+    assert coverage.requirements == "unavailable"
+    with pytest.raises(RetrievalError, match="temporal coverage is invalid"):
+        _temporal_coverage_from_data(
+            {"temporal_context": response["temporal_context"], "temporal_coverage": {"law": "covered"}},
+            required=True,
+        )
+    with pytest.raises(RetrievalError, match="temporal coverage requires temporal context"):
+        _temporal_coverage_from_data({"temporal_coverage": response["temporal_coverage"]})
+
+
 def test_retriever_rejects_data_temporal_context_for_a_different_review_date(
     monkeypatch: pytest.MonkeyPatch,
 ) -> None:
@@ -171,6 +201,39 @@ def test_law_history_profile_requires_a_complete_temporal_context(
             {
                 "review_run_id": "run-history-context-required",
                 "request_id": "rag-history-context-required",
+                "review_as_of": "2026-08-05",
+            }
+        )
+
+
+def test_law_history_profile_requires_temporal_coverage_too(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    retriever = ProfileEvidenceRetriever(_settings(evidence_profile="functional-uat-law-history"))
+    monkeypatch.setattr(retriever, "readiness", lambda **_kwargs: {"status": "ready"})
+    monkeypatch.setattr(
+        retriever,
+        "_request",
+        lambda *_args, **_kwargs: {
+            "schema_version": "3.0",
+            "request_id": "rag-history-coverage-required",
+            "status": "partial",
+            "knowledge_snapshot_id": "snapshot-history",
+            "temporal_context": {
+                "law_as_of": "2026-08-05",
+                "hsk_snapshot_as_of": "2026-08-05",
+                "requirements_snapshot_as_of": "2026-08-05",
+            },
+            "temporal_coverage": None,
+            "results": [],
+        },
+    )
+
+    with pytest.raises(RetrievalError, match="temporal coverage is required"):
+        retriever.retrieve(
+            {
+                "review_run_id": "run-history-coverage-required",
+                "request_id": "rag-history-coverage-required",
                 "review_as_of": "2026-08-05",
             }
         )
@@ -266,6 +329,11 @@ def test_review_result_preserves_data_temporal_context_for_backend_persistence(
                 "hsk_snapshot_as_of": "2026-08-05",
                 "requirements_snapshot_as_of": "2026-08-05",
             },
+            "temporal_coverage": {
+                "law": "covered",
+                "hsk": "unavailable",
+                "requirements": "unavailable",
+            },
             "results": [
                 {
                     "evidence": [
@@ -313,6 +381,10 @@ def test_review_result_preserves_data_temporal_context_for_backend_persistence(
     assert result.temporal_context.law_as_of.isoformat() == "2026-08-05"
     assert result.temporal_context.hsk_snapshot_as_of.isoformat() == "2026-08-05"
     assert result.temporal_context.requirements_snapshot_as_of.isoformat() == "2026-08-05"
+    assert result.temporal_coverage is not None
+    assert result.temporal_coverage.law == "covered"
+    assert result.temporal_coverage.hsk == "unavailable"
+    assert result.temporal_coverage.requirements == "unavailable"
     assert requests[0]["query_intent"] == "required_import_documents_and_law_support"
     assert [item.source_type for item in result.evidence] == ["law_article"]
 
@@ -321,6 +393,7 @@ def test_review_result_preserves_data_temporal_context_for_backend_persistence(
     # grounded follow-up conversation.
     legacy_wire = result.model_dump(mode="json", warnings=False)
     legacy_wire.pop("temporal_context")
+    legacy_wire.pop("temporal_coverage")
     legacy_wire["result_sha256"] = review_result_v3_sha256(legacy_wire)
     legacy_result = ReviewRunResultV3.model_validate(legacy_wire)
     assert legacy_result.temporal_context is None

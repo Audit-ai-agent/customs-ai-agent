@@ -15,7 +15,7 @@ def test_data_contract_resources_are_the_only_packaged_evidence_contracts() -> N
     assert readiness["$id"].endswith("readiness_v3.schema.json")
     assert len(schema_sha256("evidence", "v3", "rag-retrieval")) == 64
     assert schema_sha256("evidence", "v3", "rag-retrieval") == (
-        "4bb8066c4836192844a1387c6197eaccd0d932a4b9f95e2cce7bb07301aff71d"
+        "5ec96e88fac55982840e256a160e776e14c8b1ba0010924cbdfafb6f1c7f5c38"
     )
     assert len(schema_sha256("evidence", "v3", "guidance-query")) == 64
     assert len(schema_sha256("evidence", "v3", "readiness")) == 64
@@ -38,16 +38,28 @@ def test_data_contract_resources_are_the_only_packaged_evidence_contracts() -> N
         "anyOf": [{"$ref": "#/$defs/TemporalContext"}, {"type": "null"}],
         "default": None,
     }
+    assert response["properties"]["temporal_coverage"] == {
+        "anyOf": [{"$ref": "#/$defs/TemporalCoverage"}, {"type": "null"}],
+        "default": None,
+    }
     assert retrieval["$defs"]["TemporalContext"]["required"] == [
         "law_as_of",
         "hsk_snapshot_as_of",
         "requirements_snapshot_as_of",
+    ]
+    assert retrieval["$defs"]["TemporalCoverage"]["required"] == [
+        "law",
+        "hsk",
+        "requirements",
     ]
     assert guidance["$id"].endswith("guidance_query_v3.schema.json")
     assert guidance["$defs"]["GeneralGuidanceQueryRequestV3"]["properties"]["trade_direction"][
         "enum"
     ] == ["import", "export", "both"]
     assert "scope_hint" in guidance["$defs"]["GeneralGuidanceQueryRequestV3"]["properties"]
+    assert guidance["$defs"]["GeneralGuidanceQueryRequestV3"]["properties"][
+        "expected_snapshot_id"
+    ]["anyOf"][0]["pattern"] == "^[a-z0-9][a-z0-9-]{2,80}$"
     response = guidance["$defs"]["GeneralGuidanceQueryResponseV3"]
     source = guidance["$defs"]["GuidanceSourceV3"]
     assert response["properties"]["registry_sha256"]["pattern"] == "^[a-f0-9]{64}$"

@@ -46,8 +46,10 @@ def test_optional_correction_targets_are_omittable_or_null_in_models_and_schema(
         "general_guidance",
         "case_application",
     ]
-    assert response_schema["properties"]["answer_sections"]["maxItems"] == 3
+    assert response_schema["properties"]["answer_sections"]["maxItems"] == 4
     assert "guidance_resolution" in response_schema["properties"]
+    assert "guidance_resolutions" in response_schema["properties"]
+    assert "answer_format" in response_schema["properties"]
     assert response_schema["properties"]["guidance_registry_sha256"] == {
         "type": ["string", "null"],
         "pattern": "^[a-f0-9]{64}$",
@@ -55,6 +57,9 @@ def test_optional_correction_targets_are_omittable_or_null_in_models_and_schema(
     review_result_schema = get_schema("backend", "v3", "review-result")
     assert review_result_schema["properties"]["temporal_context"] == {
         "anyOf": [{"$ref": "#/$defs/TemporalContext"}, {"type": "null"}]
+    }
+    assert review_result_schema["properties"]["temporal_coverage"] == {
+        "anyOf": [{"$ref": "#/$defs/TemporalCoverage"}, {"type": "null"}]
     }
     assert review_result_schema["$defs"]["TemporalContext"]["required"] == [
         "law_as_of",
@@ -78,6 +83,8 @@ def test_optional_correction_targets_are_omittable_or_null_in_models_and_schema(
     assert "base64" not in extraction_result_schema["properties"]
     assert "case_input_notice" in response_schema["properties"]
     assert "guidance_resolution" in knowledge_response_schema["properties"]
+    assert "guidance_resolutions" in knowledge_response_schema["properties"]
+    assert "answer_format" in knowledge_response_schema["properties"]
     assert knowledge_response_schema["properties"]["guidance_registry_sha256"] == {
         "type": ["string", "null"],
         "pattern": "^[a-f0-9]{64}$",

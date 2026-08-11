@@ -7,6 +7,7 @@ import ipaddress
 import json
 import re
 from collections.abc import Mapping
+from datetime import date
 from typing import Any, Literal, cast
 from urllib.error import HTTPError, URLError
 from urllib.parse import urlsplit
@@ -48,6 +49,7 @@ from customs_ai_agent.schemas.v3 import (
     ReviewRunResultV3,
     ServiceReviewRunRequestV3,
     TemporalContextV3,
+    TemporalCoverageV3,
     canonical_json_sha256,
     review_result_v3_sha256,
 )
@@ -72,6 +74,8 @@ from customs_ai_agent.service.assistant import (
     guidance_context_from_data,
     guidance_policy_for_registry,
     knowledge_question_policy,
+    multi_scope_guidance_answer_for_case,
+    multi_scope_knowledge_answer,
     provider_answer_allowed,
     provider_snapshot,
     response_from_knowledge_provider_candidate,
@@ -95,6 +99,7 @@ DataPeer = Literal["evidence", "guidance"]
 SERVICE_MODE_HEADER = "X-Customs-Service-Mode"
 _MAX_RESPONSE_BYTES = 2 * 1024 * 1024
 _SAFE_RUN_ID = re.compile(r"^[A-Za-z0-9][A-Za-z0-9._:-]{0,127}$")
+_GUIDANCE_SNAPSHOT_ID = re.compile(r"^[a-z0-9][a-z0-9-]{2,80}$")
 _HASH = re.compile(r"^[a-f0-9]{64}$")
 _AWB_NUMBER_LABEL_PATTERN = (
     r"(?:a\s*/\s*w\s*b\s*(?:no|number)?|(?<![A-Za-z0-9-])awb(?![A-Za-z0-9-])"
@@ -566,6 +571,10 @@ class ProfileEvidenceRetriever:
                 expected_law_as_of=str(request.get("review_as_of", "")),
                 required=self._requires_temporal_context,
             )
+            _temporal_coverage_from_data(
+                response,
+                required=self._requires_temporal_context,
+            )
         except RetrievalError:
             self._record_failure(
                 review_run_id,
@@ -583,18 +592,21 @@ class ProfileEvidenceRetriever:
         review_run_id: str | None = None,
         transcript: ScenarioTranscriptRun | None = None,
     ) -> dict[str, Any]:
-        """Make the one permitted official-guidance query for an assistant turn.
+        """Make one bounded official-guidance query for an assistant turn.
 
         It deliberately does not call the item/HS review endpoint.  A V2
         profile performs one cached readiness check before its first bounded
-        query; V1 and local dev-fixture calls retain the single-query path.
+        query.  The runtime may invoke this method a second time only for an
+        already-classified, independently validated V2 scope pair.
         """
 
         topic_hint = request.get("topic_hint")
         configured_registry = self._guidance_registry_version
+        expected_snapshot_id = request.get("expected_snapshot_id")
         if configured_registry == "1.0":
             request_shape_is_valid = (
-                "scope_hint" not in request
+                expected_snapshot_id is None
+                and "scope_hint" not in request
                 and topic_hint in _GUIDANCE_TOPIC_HINTS
                 and _GUIDANCE_LEGACY_SAFE_QUERY.get(str(topic_hint)) == request.get("query")
             )
@@ -614,6 +626,13 @@ class ProfileEvidenceRetriever:
             or request.get("trade_direction") not in {"import", "export", "both"}
             or topic_hint not in _GUIDANCE_TOPIC_HINTS
             or not request_shape_is_valid
+            or (
+                expected_snapshot_id is not None
+                and (
+                    not isinstance(expected_snapshot_id, str)
+                    or _GUIDANCE_SNAPSHOT_ID.fullmatch(expected_snapshot_id) is None
+                )
+            )
             or not isinstance(request.get("as_of"), str)
             or request.get("top_k") not in {1, 2, 3}
         ):
@@ -1002,6 +1021,7 @@ def _guidance_query_request(
     topic_hint: str,
     scope_hint: str,
     registry_version: Literal["1.0", "2.0"],
+    expected_snapshot_id: str | None = None,
 ) -> dict[str, Any]:
     """Create one versioned lookup without forwarding user prose.
 
@@ -1017,7 +1037,19 @@ def _guidance_query_request(
     target = (topic_hint, scope_hint)
     if topic_hint not in _GUIDANCE_TOPIC_HINTS:
         raise RuntimeInputError("guidance_topic_invalid", "guidance topic is invalid")
+    if (
+        expected_snapshot_id is not None
+        and _GUIDANCE_SNAPSHOT_ID.fullmatch(expected_snapshot_id) is None
+    ):
+        raise RuntimeInputError(
+            "guidance_snapshot_pin_invalid", "guidance snapshot pin is invalid"
+        )
     if registry_version == "1.0":
+        if expected_snapshot_id is not None:
+            raise RuntimeInputError(
+                "guidance_snapshot_pin_unsupported",
+                "V1 guidance cannot select an immutable V2 snapshot.",
+            )
         legacy_topic = _GUIDANCE_LEGACY_TOPIC_BY_SCOPE.get(target)
         safe_query = (
             _GUIDANCE_LEGACY_SAFE_QUERY.get(legacy_topic) if legacy_topic is not None else None
@@ -1044,11 +1076,12 @@ def _guidance_query_request(
     if safe_query is None:
         raise RuntimeInputError("guidance_topic_invalid", "guidance topic is invalid")
     digest = hashlib.sha256(
-        f"{conversation_id}\n{safe_query}\n{trade_type}\n{topic_hint}\n{scope_hint}\n2.0\n{as_of}".encode(
-            "utf-8"
-        )
+        (
+            f"{conversation_id}\n{safe_query}\n{trade_type}\n{topic_hint}\n{scope_hint}\n"
+            f"2.0\n{as_of}\n{expected_snapshot_id or ''}"
+        ).encode("utf-8")
     ).hexdigest()[:32]
-    return {
+    payload: dict[str, Any] = {
         "schema_version": "3.0",
         "request_id": f"guide-{digest}",
         "query": safe_query,
@@ -1058,6 +1091,9 @@ def _guidance_query_request(
         "as_of": as_of,
         "top_k": 3,
     }
+    if expected_snapshot_id is not None:
+        payload["expected_snapshot_id"] = expected_snapshot_id
+    return payload
 
 
 def _guidance_provider_snapshot(
@@ -1182,6 +1218,33 @@ def _temporal_context_from_data(
     if expected_law_as_of is not None and context.law_as_of.isoformat() != expected_law_as_of:
         raise RetrievalError("Data service temporal context does not match the review date")
     return context
+
+
+def _temporal_coverage_from_data(
+    response: Mapping[str, Any],
+    *,
+    required: bool = False,
+) -> TemporalCoverageV3 | None:
+    """Validate explicit HSK/requirements/law availability independently.
+
+    The law-history profile must receive the coverage triplet together with
+    temporal dates.  Legacy peers retain their nullable compatibility path.
+    """
+
+    raw_coverage = response.get("temporal_coverage")
+    if raw_coverage is None:
+        if required:
+            raise RetrievalError(
+                "Data service temporal coverage is required for this Evidence profile"
+            )
+        return None
+    try:
+        coverage = TemporalCoverageV3.model_validate(raw_coverage)
+    except ValidationError:
+        raise RetrievalError("Data service temporal coverage is invalid") from None
+    if response.get("temporal_context") is None:
+        raise RetrievalError("Data service temporal coverage requires temporal context")
+    return coverage
 
 
 def _requirement_identity(item: Mapping[str, Any]) -> tuple[str, str, str]:
@@ -1650,6 +1713,80 @@ class ProfileRuntime:
                 )
             return fallback
 
+    def _assert_v2_snapshot_pin_boundary(self, expected_snapshot_id: str | None) -> None:
+        """Reject a stored V2 pin before a legacy profile could ignore it."""
+
+        if expected_snapshot_id is None:
+            return
+        if _GUIDANCE_SNAPSHOT_ID.fullmatch(expected_snapshot_id) is None:
+            raise RuntimeInputError(
+                "guidance_snapshot_pin_invalid", "guidance snapshot pin is invalid"
+            )
+        if self._guidance_request_registry_version() != "2.0":
+            raise RuntimeInputError(
+                "guidance_snapshot_pin_unsupported",
+                "The selected guidance profile cannot select the stored snapshot.",
+            )
+
+    def _multi_guidance_contexts(
+        self,
+        *,
+        policy: Any,
+        conversation_id: str,
+        as_of: date,
+        expected_snapshot_id: str | None,
+        review_run_id: str | None = None,
+        transcript: KnowledgeTranscriptTurn | None = None,
+    ) -> tuple[GuidanceContext | None, GuidanceContext | None]:
+        """Resolve two closed V2 scopes sequentially against one snapshot.
+
+        The first new-conversation query uses Data's active pointer.  Its
+        validated immutable ID pins the second query before it is sent, so an
+        activation between the two requests cannot create a mixed answer.
+        Existing conversations receive their Backend-persisted pin from the
+        outset.  No question, Case field, document, or history is placed in
+        either Data request.
+        """
+
+        if len(policy.multi_targets) != 2 or policy.query_direction is None:
+            raise RuntimeInputError("guidance_multi_scope_invalid", "multi-scope policy is invalid")
+        if self._guidance_request_registry_version() != "2.0":
+            raise RuntimeInputError(
+                "guidance_multi_scope_unsupported", "multi-scope guidance requires V2."
+            )
+        selected_snapshot_id = expected_snapshot_id
+        contexts: list[GuidanceContext | None] = []
+        for target in policy.multi_targets:
+            try:
+                data_response = self._retriever.guidance_query(
+                    _guidance_query_request(
+                        conversation_id=conversation_id,
+                        trade_type=policy.query_direction,
+                        as_of=as_of.isoformat(),
+                        topic_hint=target.topic,
+                        scope_hint=target.scope,
+                        registry_version="2.0",
+                        expected_snapshot_id=selected_snapshot_id,
+                    ),
+                    review_run_id=review_run_id,
+                    transcript=transcript,
+                )
+                context = guidance_context_from_data(
+                    data_response,
+                    profile_mode=self.mode,
+                    expected_as_of=as_of,
+                    expected_trade_direction=policy.query_direction,
+                    expected_topic=target.topic,
+                    expected_scope=target.scope,
+                    expected_snapshot_id=selected_snapshot_id,
+                )
+            except (RetrievalError, ValueError):
+                context = None
+            contexts.append(context)
+            if selected_snapshot_id is None and context is not None and context.snapshot_id is not None:
+                selected_snapshot_id = context.snapshot_id
+        return contexts[0], contexts[1]
+
     def assistant_answer_json(self, payload: bytes) -> AssistantAnswerResponseV1:
         """Answer once from an immutable review snapshot; never mutate Case state."""
 
@@ -1663,9 +1800,43 @@ class ProfileRuntime:
             return unregistered_document_input_answer(request, engine=self._engine())
         transcript = self._transcript_root.for_run(request.review_run_id)
         registry_version = self._guidance_request_registry_version()
+        self._assert_v2_snapshot_pin_boundary(request.expected_snapshot_id)
         policy = guidance_policy_for_registry(
             assistant_question_policy(request), registry_version=registry_version
         )
+        if policy.multi_targets:
+            contexts: tuple[GuidanceContext | None, GuidanceContext | None] = (None, None)
+            if self._guidance_lookup_is_enabled():
+                contexts = self._multi_guidance_contexts(
+                    policy=policy,
+                    conversation_id=request.conversation_id,
+                    as_of=request.review_result.review_as_of,
+                    expected_snapshot_id=request.expected_snapshot_id,
+                    review_run_id=request.review_run_id,
+                )
+            case_answer = (
+                deterministic_assistant_answer(request, engine=self._engine())
+                if policy.scope in {"case_grounded", "evidence_grounded"}
+                else None
+            )
+            answer = multi_scope_guidance_answer_for_case(
+                request,
+                engine=self._engine(),
+                policy=policy,
+                contexts=contexts,
+                case_answer=case_answer,
+            )
+            if transcript is not None:
+                transcript.write(
+                    "claude",
+                    "assistant_answer_deterministic",
+                    {
+                        "answer_scope": answer.answer_scope,
+                        "citation_count": len(answer.citations),
+                        "reason_code": "multi_scope_checklist_deterministic",
+                    },
+                )
+            return answer
         guidance_context = None
         if (
             policy.general_topic is not None
@@ -1683,6 +1854,7 @@ class ProfileRuntime:
                         topic_hint=policy.general_topic,
                         scope_hint=policy.general_scope,
                         registry_version=registry_version,
+                        expected_snapshot_id=request.expected_snapshot_id,
                     ),
                     review_run_id=request.review_run_id,
                 )
@@ -1693,6 +1865,7 @@ class ProfileRuntime:
                     expected_trade_direction=policy.query_direction,
                     expected_topic=policy.general_topic,
                     expected_scope=policy.general_scope,
+                    expected_snapshot_id=request.expected_snapshot_id,
                 )
             except (RetrievalError, ValueError):
                 # A guidance lookup may not turn an otherwise usable Case
@@ -1710,6 +1883,7 @@ class ProfileRuntime:
                 trade_type=request.review_result.trade_type,
                 as_of=request.review_result.review_as_of,
                 recent_turns=request.recent_turns,
+                expected_snapshot_id=request.expected_snapshot_id,
             )
             knowledge_answer = self._knowledge_answer(
                 knowledge_request,
@@ -1809,12 +1983,15 @@ class ProfileRuntime:
 
         No Case, Review Run, document text, Evidence IDs, or human-correction
         state crosses this method's boundary.  The Data call is optional only
-        for a classified official topic and occurs at most once per turn.
+        for a classified official topic and occurs once, or exactly twice in
+        a fixed V2 multi-scope sequence.  The latter never forwards user prose
+        and pins its second lookup to the first validated immutable snapshot.
         """
 
         self._assert_open()
         request = self._decode_knowledge(payload)
         registry_version = self._guidance_request_registry_version()
+        self._assert_v2_snapshot_pin_boundary(request.expected_snapshot_id)
         policy = guidance_policy_for_registry(
             knowledge_question_policy(request.question.strip(), trade_type=request.trade_type),
             registry_version=registry_version,
@@ -1826,6 +2003,34 @@ class ProfileRuntime:
         # an explicit dev-fixture may use that safe namespace or preserved
         # legacy knowledge-runs history, never a review's Case/Review tree.
         transcript: KnowledgeTranscriptTurn | None = None
+        if policy.multi_targets:
+            contexts: tuple[GuidanceContext | None, GuidanceContext | None] = (None, None)
+            if self._guidance_lookup_is_enabled():
+                transcript = self._knowledge_transcript_root.start_turn(request.conversation_id)
+                contexts = self._multi_guidance_contexts(
+                    policy=policy,
+                    conversation_id=request.conversation_id,
+                    as_of=request.as_of,
+                    expected_snapshot_id=request.expected_snapshot_id,
+                    transcript=transcript,
+                )
+            answer = multi_scope_knowledge_answer(
+                request,
+                engine=self._engine(),
+                policy=policy,
+                contexts=contexts,
+            )
+            if transcript is not None and self.mode == "functional-uat":
+                transcript.write(
+                    "claude",
+                    "knowledge_answer_not_called",
+                    {
+                        "provider": "claude",
+                        "called": False,
+                        "reason_code": "multi_scope_checklist_deterministic",
+                    },
+                )
+            return answer
         if (
             policy.general_topic is not None
             and policy.general_scope is not None
@@ -1843,6 +2048,7 @@ class ProfileRuntime:
                         topic_hint=policy.general_topic,
                         scope_hint=policy.general_scope,
                         registry_version=registry_version,
+                        expected_snapshot_id=request.expected_snapshot_id,
                     ),
                     transcript=transcript,
                 )
@@ -1853,6 +2059,7 @@ class ProfileRuntime:
                     expected_trade_direction=policy.query_direction,
                     expected_topic=policy.general_topic,
                     expected_scope=policy.general_scope,
+                    expected_snapshot_id=request.expected_snapshot_id,
                 )
             except (RetrievalError, ValueError):
                 guidance_context = None
@@ -1896,6 +2103,10 @@ class ProfileRuntime:
                     expected_law_as_of=request.review_as_of.isoformat(),
                     required=self._requires_temporal_context,
                 )
+                temporal_coverage = _temporal_coverage_from_data(
+                    data_response,
+                    required=self._requires_temporal_context,
+                )
                 evidence_records = _evidence_from_data(data_response)
                 workflow_output = workflow_output.with_evidence_status(str(data_response["status"]))
             else:
@@ -1903,6 +2114,7 @@ class ProfileRuntime:
                 # an input limitation, not an unhealthy or partial Data store.
                 data_response = {"status": "ok", "results": []}
                 temporal_context = None
+                temporal_coverage = None
                 evidence_records = []
                 self._retriever.record_retrieve_skipped(
                     review_run_id=request.review_run_id,
@@ -1994,6 +2206,7 @@ class ProfileRuntime:
             "findings": findings,
             "required_actions": actions,
             "temporal_context": temporal_context,
+            "temporal_coverage": temporal_coverage,
             "engine": {
                 "kind": "deterministic" if self.mode == "local-development" else "claude",
                 "model_id": str(self._analyzer.model_id),

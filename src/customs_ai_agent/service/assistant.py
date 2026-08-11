@@ -307,6 +307,9 @@ class _QuestionPolicy:
     application_intent: bool = False
     direction_inapplicable: bool = False
     clarification_targets: tuple[_GuidanceTarget, ...] = ()
+    # Exactly two independently classified V2 scopes may be resolved in a
+    # fixed order.  Three or more always remain a clarification boundary.
+    multi_targets: tuple[_GuidanceTarget, ...] = ()
 
 
 _SAFE_DIRECT_ANSWER = {
@@ -367,6 +370,47 @@ def deterministic_assistant_answer(
                     "연결된 법령 근거를 보여 주세요.",
                 ]
             ),
+        )
+    if policy.multi_targets:
+        # The profile runtime owns the two bounded Data calls and may attach
+        # the checklist only after both outcomes validate.  This local branch
+        # supplies the independent Case citation required for that later
+        # deterministic composition; it never emits guidance itself.
+        if policy.scope != "case_grounded":
+            return _answer(
+                request,
+                engine=engine,
+                scope="insufficient_evidence",
+                text=(
+                    "두 일반 통관 주제를 사건에 함께 적용하려면 현재 사건의 문서 비교 또는 "
+                    "법령 근거가 먼저 필요합니다."
+                ),
+                citations=[],
+                suggestions=["현재 사건에서 확인할 문서 또는 비교 항목을 지정해 주세요."],
+            )
+        comparison = _primary_comparison(result)
+        if comparison is None:
+            return _answer(
+                request,
+                engine=engine,
+                scope="insufficient_evidence",
+                text=(
+                    "현재 심사 결과에는 두 일반 통관 주제를 사건에 적용할 수 있는 문서 비교 또는 "
+                    "법령 근거가 없습니다."
+                ),
+                citations=[],
+                suggestions=["문서를 보완한 뒤 새 심사를 실행해 주세요."],
+            )
+        return _answer(
+            request,
+            engine=engine,
+            scope="case_grounded",
+            text=(
+                f"현재 사건의 관련 비교 결과는 ‘{comparison.message}’입니다. "
+                "이 결과는 자동 결론이 아니며, 공식 안내와 원문을 담당자가 함께 확인해야 합니다."
+            ),
+            citations=[AssistantCitationV1(kind="comparison", reference_id=comparison.comparison_id)],
+            suggestions=["현재 사건에서 추가로 확인할 문서 비교 항목은 무엇인가요?"],
         )
     if policy.scope == "general_customs_guidance":
         # This helper intentionally has no Data guidance context.  The
@@ -730,7 +774,11 @@ class GuidanceContext:
     evidence: tuple[GuidanceEvidenceV1, ...]
 
 
-def _guidance_citations(context: GuidanceContext) -> list[GuidanceCitationV1]:
+def _guidance_citations(
+    context: GuidanceContext,
+    *,
+    resolution_index: int | None = None,
+) -> list[GuidanceCitationV1]:
     """Project Data source records onto the lean public conversation citation."""
 
     if context.snapshot_id is None:
@@ -745,6 +793,7 @@ def _guidance_citations(context: GuidanceContext) -> list[GuidanceCitationV1]:
             as_of=context.as_of,
             snapshot_id=context.snapshot_id,
             coverage=context.coverage,
+            resolution_index=resolution_index,
         )
         for item in context.evidence
     ]
@@ -879,6 +928,7 @@ def guidance_context_from_data(
     expected_trade_direction: Literal["import", "export", "both"] | None = None,
     expected_topic: str | None = None,
     expected_scope: str | None = None,
+    expected_snapshot_id: str | None = None,
 ) -> GuidanceContext:
     """Validate a Data guidance response before it can ground user prose.
 
@@ -916,6 +966,8 @@ def guidance_context_from_data(
         not isinstance(snapshot_id, str) or not 1 <= len(snapshot_id) <= 512
     ):
         raise ValueError("guidance_response_snapshot_invalid")
+    if expected_snapshot_id is not None and snapshot_id != expected_snapshot_id:
+        raise ValueError("guidance_response_snapshot_mismatch")
     try:
         as_of = date.fromisoformat(str(raw_as_of))
     except ValueError:
@@ -1381,6 +1433,281 @@ def response_from_knowledge_provider_candidate(
         raise ValueError("knowledge_provider_output_invalid") from None
 
 
+def multi_guidance_resolutions_for_policy(
+    policy: _QuestionPolicy,
+    *,
+    contexts: tuple[GuidanceContext | None, GuidanceContext | None],
+    as_of: date,
+) -> list[GuidanceResolutionV1]:
+    """Project two independent V2 responses without merging their evidence."""
+
+    if len(policy.multi_targets) != 2 or policy.requested_direction is None:
+        raise ValueError("multi-scope policy is incomplete")
+    resolutions: list[GuidanceResolutionV1] = []
+    for target, context in zip(policy.multi_targets, contexts):
+        single_policy = _policy_for_guidance_target(
+            target,
+            requested_direction=policy.requested_direction,
+            scope="general_customs_guidance",
+        )
+        resolution = guidance_resolution_for_policy(
+            single_policy,
+            context=context,
+            as_of=as_of,
+            registry_version="2.0",
+        )
+        if resolution is None:
+            raise ValueError("multi-scope resolution is incomplete")
+        resolutions.append(resolution)
+    return resolutions
+
+
+def multi_guidance_registry_sha256(
+    contexts: tuple[GuidanceContext | None, GuidanceContext | None],
+) -> str:
+    """Return the copied V2 registry digest after per-response verification."""
+
+    digests = {context.registry_sha256 for context in contexts if context is not None}
+    if len(digests) > 1:
+        raise ValueError("multi-scope responses use different registry digests")
+    # If a peer is unreachable there is no source claim, but Backend still
+    # needs the local V2 registry digest that governed the closed classifier.
+    return next(iter(digests), guidance_registry_for_version("2.0").registry_sha256)
+
+
+def _multi_scope_is_covered(
+    contexts: tuple[GuidanceContext | None, GuidanceContext | None],
+) -> bool:
+    if any(context is None or context.coverage != "covered" for context in contexts):
+        return False
+    snapshot_ids = {context.snapshot_id for context in contexts if context is not None}
+    return None not in snapshot_ids and len(snapshot_ids) == 1
+
+
+def _multi_scope_common_snapshot_id(
+    contexts: tuple[GuidanceContext | None, GuidanceContext | None],
+) -> str | None:
+    snapshot_ids = {context.snapshot_id for context in contexts if context is not None}
+    if len(snapshot_ids) == 1:
+        selected = next(iter(snapshot_ids))
+        return selected if selected is not None else None
+    return None
+
+
+def _multi_scope_coverage(
+    resolutions: list[GuidanceResolutionV1],
+) -> Literal["covered", "no_coverage", "partial", "unavailable"]:
+    values = {resolution.coverage for resolution in resolutions}
+    if values == {"covered"}:
+        return "covered"
+    if "partial" in values:
+        return "partial"
+    if values == {"no_coverage"}:
+        return "no_coverage"
+    return "unavailable"
+
+
+def _multi_scope_unavailable_text(resolutions: list[GuidanceResolutionV1]) -> str:
+    """Render an itemized, source-free limitation for a failed pair."""
+
+    lines = [
+        "두 공식 안내를 함께 종합할 수 있는 근거가 충분하지 않아 사건 적용 또는 결론을 만들지 않았습니다."
+    ]
+    labels = {"covered": "확인됨", "no_coverage": "등록 자료 없음", "partial": "자료 범위 일부", "unavailable": "snapshot을 사용할 수 없음"}
+    for index, resolution in enumerate(resolutions, start=1):
+        label = _guidance_scope_label(
+            resolution.topic,
+            resolution.scope,
+            fallback="선택한 공식 안내",
+        )
+        lines.append(f"{index}. {label}: {labels[resolution.coverage]}")
+    lines.append("각 범위의 공식 원문과 현재 사건의 문서 근거를 보완한 뒤 다시 확인해 주세요.")
+    return "\n".join(lines)
+
+
+def multi_scope_knowledge_answer(
+    request: KnowledgeAnswerRequestV1,
+    *,
+    engine: EngineV3,
+    policy: _QuestionPolicy,
+    contexts: tuple[GuidanceContext | None, GuidanceContext | None],
+) -> KnowledgeAnswerResponseV1:
+    """Return a deterministic two-topic general answer, never a Case conclusion."""
+
+    resolutions = multi_guidance_resolutions_for_policy(
+        policy,
+        contexts=contexts,
+        as_of=request.as_of,
+    )
+    registry_sha256 = multi_guidance_registry_sha256(contexts)
+    coverage = _multi_scope_coverage(resolutions)
+    common_snapshot_id = _multi_scope_common_snapshot_id(contexts)
+    if not _multi_scope_is_covered(contexts):
+        return KnowledgeAnswerResponseV1(
+            conversation_id=request.conversation_id,
+            answer_scope="insufficient_evidence",
+            direct_answer=_multi_scope_unavailable_text(resolutions),
+            citations=[],
+            answer_sections=[],
+            suggested_questions=["확인할 공식 통관 주제를 한 가지로 나누어 다시 질문해 주세요."],
+            coverage=coverage,
+            snapshot_id=common_snapshot_id,
+            as_of=request.as_of,
+            guidance_resolutions=resolutions,
+            answer_format="multi_scope_checklist",
+            guidance_registry_sha256=registry_sha256,
+            engine=engine,
+        )
+    first, second = contexts
+    assert first is not None and second is not None
+    first_citations = _guidance_citations(first, resolution_index=0)
+    second_citations = _guidance_citations(second, resolution_index=1)
+    first_label = _guidance_scope_label(first.topic, first.scope, fallback="주제 1")
+    second_label = _guidance_scope_label(second.topic, second.scope, fallback="주제 2")
+    return KnowledgeAnswerResponseV1(
+        conversation_id=request.conversation_id,
+        answer_scope="general_customs_guidance",
+        direct_answer=(
+            "서로 독립된 두 공식 안내를 인용 범위별로 분리해 정리했습니다. "
+            f"{GENERAL_GUIDANCE_DISCLAIMER}"
+        ),
+        citations=[*first_citations, *second_citations],
+        answer_sections=[
+            AssistantAnswerSectionV1(
+                kind="general_guidance",
+                resolution_index=0,
+                title=f"주제 1 공식 안내 — {first_label}",
+                content=_knowledge_template(first, presentation_style="overview"),
+                citations=_answer_citations(first_citations),
+            ),
+            AssistantAnswerSectionV1(
+                kind="general_guidance",
+                resolution_index=1,
+                title=f"주제 2 공식 안내 — {second_label}",
+                content=_knowledge_template(second, presentation_style="overview"),
+                citations=_answer_citations(second_citations),
+            ),
+        ],
+        suggested_questions=_knowledge_suggestions(
+            None,
+            selected_topics=[first.topic or "", second.topic or ""],
+        ),
+        coverage="covered",
+        snapshot_id=common_snapshot_id,
+        as_of=request.as_of,
+        guidance_resolutions=resolutions,
+        answer_format="multi_scope_checklist",
+        guidance_registry_sha256=registry_sha256,
+        engine=engine,
+    )
+
+
+def multi_scope_guidance_answer_for_case(
+    request: AssistantAnswerRequestV1,
+    *,
+    engine: EngineV3,
+    policy: _QuestionPolicy,
+    contexts: tuple[GuidanceContext | None, GuidanceContext | None],
+    case_answer: AssistantAnswerResponseV1 | None,
+) -> AssistantAnswerResponseV1:
+    """Build the fixed four-section Case checklist only when all gates pass."""
+
+    resolutions = multi_guidance_resolutions_for_policy(
+        policy,
+        contexts=contexts,
+        as_of=request.review_result.review_as_of,
+    )
+    registry_sha256 = multi_guidance_registry_sha256(contexts)
+
+    def insufficient(reason: str) -> AssistantAnswerResponseV1:
+        return AssistantAnswerResponseV1(
+            case_id=request.case_id,
+            review_run_id=request.review_run_id,
+            conversation_id=request.conversation_id,
+            answer_scope="insufficient_evidence",
+            direct_answer=f"{reason}\n{_multi_scope_unavailable_text(resolutions)}",
+            citations=[],
+            answer_sections=[],
+            suggested_questions=["현재 사건에서 확인할 문서 또는 비교 항목을 지정해 주세요."],
+            correction_draft=None,
+            guidance_resolutions=resolutions,
+            answer_format="multi_scope_checklist",
+            guidance_registry_sha256=registry_sha256,
+            engine=engine,
+        )
+
+    if not _multi_scope_is_covered(contexts):
+        return insufficient("두 scope 중 하나 이상이 완전하게 확인되지 않았습니다.")
+    if case_answer is None or case_answer.answer_scope not in {
+        "case_grounded",
+        "evidence_grounded",
+    }:
+        return insufficient("현재 사건을 적용할 독립된 문서 또는 법령 근거가 충분하지 않습니다.")
+    case_citations = [
+        citation for citation in case_answer.citations if isinstance(citation, AssistantCitationV1)
+    ]
+    if not case_citations:
+        return insufficient("현재 사건을 적용할 독립된 문서 또는 법령 근거가 충분하지 않습니다.")
+    first, second = contexts
+    assert first is not None and second is not None
+    first_citations = _guidance_citations(first, resolution_index=0)
+    second_citations = _guidance_citations(second, resolution_index=1)
+    if not first_citations or not second_citations:
+        return insufficient("두 scope의 공식 인용을 모두 확인하지 못했습니다.")
+    first_label = _guidance_scope_label(first.topic, first.scope, fallback="주제 1")
+    second_label = _guidance_scope_label(second.topic, second.scope, fallback="주제 2")
+    return AssistantAnswerResponseV1(
+        case_id=request.case_id,
+        review_run_id=request.review_run_id,
+        conversation_id=request.conversation_id,
+        answer_scope=case_answer.answer_scope,
+        direct_answer=(
+            "현재 사건의 검토 근거와 두 공식 안내를 분리해 확인 목록으로 정리했습니다. "
+            "아래 내용은 최종 HS·세액·허가·통관 승인 판단이 아닙니다."
+        ),
+        citations=[*case_citations, *first_citations, *second_citations],
+        answer_sections=[
+            AssistantAnswerSectionV1(
+                kind="case_analysis",
+                title="사건 분석",
+                content=case_answer.direct_answer,
+                citations=_answer_citations(case_citations),
+            ),
+            AssistantAnswerSectionV1(
+                kind="general_guidance",
+                resolution_index=0,
+                title=f"주제 1 공식 안내 — {first_label}",
+                content=_knowledge_template(first, presentation_style="overview"),
+                citations=_answer_citations(first_citations),
+            ),
+            AssistantAnswerSectionV1(
+                kind="general_guidance",
+                resolution_index=1,
+                title=f"주제 2 공식 안내 — {second_label}",
+                content=_knowledge_template(second, presentation_style="overview"),
+                citations=_answer_citations(second_citations),
+            ),
+            AssistantAnswerSectionV1(
+                kind="case_application",
+                title="사건 확인 목록",
+                content=(
+                    "1. 사건 분석의 인용된 문서·비교 근거가 실제 거래 사실과 맞는지 확인합니다.\n"
+                    f"2. {first_label} 공식 안내의 적용 대상·기준일을 인용 원문으로 확인합니다.\n"
+                    f"3. {second_label} 공식 안내의 적용 대상·기준일을 인용 원문으로 확인합니다.\n"
+                    "4. 이 확인 목록만으로 HS 분류, 세액, 허가 또는 통관 승인 결과를 확정하지 않습니다."
+                ),
+                citations=[case_citations[0], first_citations[0], second_citations[0]],
+            ),
+        ],
+        suggested_questions=["사건 분석의 인용된 문서 비교 근거를 다시 보여 주세요."],
+        correction_draft=None,
+        guidance_resolutions=resolutions,
+        answer_format="multi_scope_checklist",
+        guidance_registry_sha256=registry_sha256,
+        engine=engine,
+    )
+
+
 def guidance_answer_for_case(
     request: AssistantAnswerRequestV1,
     *,
@@ -1664,8 +1991,8 @@ def _guidance_targets_for_question(question: str) -> tuple[_GuidanceTarget, ...]
 
     A first-regex-wins router hid the second subject in questions such as
     "B/L과 AWB".  We instead discover every target, collapse only a more
-    specific spelling of the *same* target, and ask the user to choose when
-    independent scopes remain.
+    specific spelling of the *same* target, then let the policy decide whether
+    one scope, a compatible V2 pair, or a clarification boundary is safe.
     """
 
     selected = [target for target in _GUIDANCE_TARGETS if target.pattern.search(question)]
@@ -1702,8 +2029,9 @@ def _guidance_targets_for_question(question: str) -> tuple[_GuidanceTarget, ...]
     # In a question about the FTA preference procedure, a bare "원산지" is
     # normally an attribute of that procedure rather than a second requested
     # consultation.  Keep an explicit certificate/confirmation/verification
-    # request independent so "FTA 특혜와 원산지증명" still asks the user to
-    # choose instead of silently selecting a first scope.
+    # request independent so an explicitly distinct pair is preserved for the
+    # bounded V2 two-scope policy instead of silently selecting the first
+    # scope.
     if (
         ("fta_procedure", "preference_procedure") in selected_pairs
         and ("origin_verification", "origin_evidence") in selected_pairs
@@ -1796,6 +2124,37 @@ def _policy_for_guidance_target(
     )
 
 
+def _policy_for_multi_guidance_targets(
+    targets: tuple[_GuidanceTarget, ...],
+    *,
+    requested_direction: Literal["import", "export", "both"],
+    scope: _AnswerScope,
+) -> _QuestionPolicy:
+    """Select two scopes only when one trade-direction request fits both.
+
+    This is deliberately stricter than calling the two single-scope routes
+    independently.  A compound question must not silently pair an import-only
+    guide with an export-only guide or cut a ``both`` request down to one side.
+    """
+
+    if len(targets) != 2:
+        return _QuestionPolicy("clarification_needed", clarification_targets=targets)
+    shared = set(targets[0].applicable_directions) & set(targets[1].applicable_directions)
+    direction_compatible = (
+        shared == {"import", "export"}
+        if requested_direction == "both"
+        else requested_direction in shared
+    )
+    if not direction_compatible:
+        return _QuestionPolicy("clarification_needed", clarification_targets=targets)
+    return _QuestionPolicy(
+        scope=scope,
+        requested_direction=requested_direction,
+        query_direction=requested_direction,
+        multi_targets=targets,
+    )
+
+
 def guidance_policy_for_registry(
     policy: _QuestionPolicy,
     *,
@@ -1815,6 +2174,16 @@ def guidance_policy_for_registry(
     remain one-direction-only because the V1 manifest says so.
     """
 
+    if policy.multi_targets:
+        # V1 publishes broad legacy topics and has no immutable snapshot
+        # selector.  Preserve that profile's one-scope behavior rather than
+        # widening it through a V2 compound interpretation.
+        if registry_version == "1.0":
+            return _QuestionPolicy(
+                "clarification_needed",
+                clarification_targets=policy.multi_targets,
+            )
+        return policy
     if (
         registry_version != "1.0"
         or policy.general_topic is None
@@ -1863,7 +2232,8 @@ def _guidance_clarification_text(policy: _QuestionPolicy) -> str:
     choices = ", ".join(labels)
     if choices:
         return (
-            "한 번에 하나의 공식 통관 주제 범위만 조회할 수 있습니다. "
+            "현재 요청은 하나의 안전한 공식 안내 조합으로 조회할 수 없습니다. "
+            "V2에서는 같은 수출입 방향에 맞는 독립 범위 최대 두 개만 함께 조회할 수 있습니다. "
             f"먼저 {choices} 중 확인할 한 가지를 선택해 주세요."
         )
     return "수입·수출, HS 품목분류, 원산지·FTA, 통관 서류 중 확인할 한 가지 주제를 알려 주세요."
@@ -1915,7 +2285,9 @@ def knowledge_question_policy(
 
     The separate knowledge assistant has no document or review-result access.
     Consequently it can only ask Data for one approved official-source topic,
-    request clarification, or refuse a prohibited/uncovered request.
+    or for exactly two direction-compatible V2 scopes in sequence.  Three or
+    more scopes still require clarification; prohibited and uncovered requests
+    remain closed rather than being completed from model knowledge.
     """
 
     if _OUT_OF_SCOPE.search(question):
@@ -1927,8 +2299,14 @@ def knowledge_question_policy(
     if _GENERAL_COVERAGE_GAP.search(question):
         return _QuestionPolicy("insufficient_evidence")
     targets = _guidance_targets_for_question(question)
-    if len(targets) > 1:
+    if len(targets) > 2:
         return _QuestionPolicy("clarification_needed", clarification_targets=targets)
+    if len(targets) == 2:
+        return _policy_for_multi_guidance_targets(
+            targets,
+            requested_direction=_requested_direction(question, fallback=trade_type),
+            scope="general_customs_guidance",
+        )
     if len(targets) == 1:
         target = targets[0]
         requested_direction = _requested_direction(question, fallback=trade_type)
@@ -1995,10 +2373,16 @@ def _classify_question(
             "submission",
         )
     targets = _guidance_targets_for_question(question)
+    if len(targets) == 2 and case_reference and explicit_case_reference:
+        return _policy_for_multi_guidance_targets(
+            targets,
+            requested_direction=_requested_direction(question, fallback=result.trade_type),
+            scope="case_grounded",
+        )
     is_explicit_mixed_scope = (
         case_reference
         and explicit_case_reference
-        and len(targets) == 1
+        and len(targets) in {1, 2}
         and bool(_MIXED_GUIDANCE_INTENT.search(question))
     )
     if case_reference and not is_explicit_mixed_scope:
@@ -2009,8 +2393,19 @@ def _classify_question(
         return _QuestionPolicy("case_grounded")
     if _GENERAL_COVERAGE_GAP.search(question):
         return _QuestionPolicy("insufficient_evidence")
-    if len(targets) > 1:
+    if len(targets) > 2:
         return _QuestionPolicy("clarification_needed", clarification_targets=targets)
+    if len(targets) == 2:
+        requested_direction = _requested_direction(question, fallback=result.trade_type)
+        return _policy_for_multi_guidance_targets(
+            targets,
+            requested_direction=requested_direction,
+            scope=(
+                "case_grounded"
+                if case_reference and explicit_case_reference
+                else "general_customs_guidance"
+            ),
+        )
     if len(targets) == 1:
         target = targets[0]
         requested_direction = _requested_direction(question, fallback=result.trade_type)
@@ -2389,6 +2784,10 @@ __all__ = [
     "deterministic_knowledge_answer",
     "guidance_answer_for_case",
     "guidance_context_from_data",
+    "multi_guidance_registry_sha256",
+    "multi_guidance_resolutions_for_policy",
+    "multi_scope_guidance_answer_for_case",
+    "multi_scope_knowledge_answer",
     "guidance_policy_for_registry",
     "guidance_topic_for_question",
     "knowledge_question_policy",

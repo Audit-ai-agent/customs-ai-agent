@@ -45,6 +45,9 @@ def test_openapi_exposes_only_active_backend_surface() -> None:
     assert response_schema["properties"]["temporal_context"] == {
         "anyOf": [{"$ref": "#/$defs/TemporalContext"}, {"type": "null"}]
     }
+    assert response_schema["properties"]["temporal_coverage"] == {
+        "anyOf": [{"$ref": "#/$defs/TemporalCoverage"}, {"type": "null"}]
+    }
     assistant = schema["paths"]["/internal/agent/v2/assistant/answers"]["post"]
     assistant_request = assistant["requestBody"]["content"]["application/json"]["schema"]
     assistant_response = assistant["responses"]["200"]["content"]["application/json"]["schema"]

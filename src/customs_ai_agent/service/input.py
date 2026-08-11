@@ -21,6 +21,7 @@ from customs_ai_agent.service.settings import ServiceSettings
 
 
 _RUN_ID = re.compile(r"^[A-Za-z0-9][A-Za-z0-9._:-]{0,127}$")
+_GUIDANCE_SNAPSHOT_ID = re.compile(r"^[a-z0-9][a-z0-9-]{2,80}$")
 _REQUIRED_REQUEST_FIELDS = {
     "case_id",
     "documents",
@@ -57,7 +58,7 @@ _ASSISTANT_REQUIRED_FIELDS = {
     "question",
     "recent_turns",
 }
-_ASSISTANT_ALLOWED_FIELDS = _ASSISTANT_REQUIRED_FIELDS
+_ASSISTANT_ALLOWED_FIELDS = _ASSISTANT_REQUIRED_FIELDS | {"expected_snapshot_id"}
 _KNOWLEDGE_REQUIRED_FIELDS = {
     "schema_version",
     "conversation_id",
@@ -66,7 +67,7 @@ _KNOWLEDGE_REQUIRED_FIELDS = {
     "as_of",
     "recent_turns",
 }
-_KNOWLEDGE_ALLOWED_FIELDS = _KNOWLEDGE_REQUIRED_FIELDS
+_KNOWLEDGE_ALLOWED_FIELDS = _KNOWLEDGE_REQUIRED_FIELDS | {"expected_snapshot_id"}
 
 ERROR_RESPONSE_SCHEMA: dict[str, Any] = {
     "type": "object",
@@ -336,6 +337,12 @@ def inspect_assistant_request(payload: bytes) -> InspectedAssistantRequest:
         raise ServiceHttpError("request_invalid", 422)
     if not isinstance(turns, list) or len(turns) > 8:
         raise ServiceHttpError("request_invalid", 422)
+    expected_snapshot_id = decoded.get("expected_snapshot_id")
+    if expected_snapshot_id is not None and (
+        not isinstance(expected_snapshot_id, str)
+        or _GUIDANCE_SNAPSHOT_ID.fullmatch(expected_snapshot_id) is None
+    ):
+        raise ServiceHttpError("request_invalid", 422)
     return InspectedAssistantRequest(review_run_id=review_run_id)
 
 
@@ -383,6 +390,12 @@ def inspect_knowledge_request(payload: bytes) -> InspectedKnowledgeRequest:
         and isinstance(turn.get("content"), str)
         and 1 <= len(turn["content"]) <= 4_000
         for turn in turns
+    ):
+        raise ServiceHttpError("request_invalid", 422)
+    expected_snapshot_id = decoded.get("expected_snapshot_id")
+    if expected_snapshot_id is not None and (
+        not isinstance(expected_snapshot_id, str)
+        or _GUIDANCE_SNAPSHOT_ID.fullmatch(expected_snapshot_id) is None
     ):
         raise ServiceHttpError("request_invalid", 422)
     try:

@@ -139,6 +139,19 @@ class TemporalContextV3(V3WireModel):
     requirements_snapshot_as_of: date
 
 
+class TemporalCoverageV3(V3WireModel):
+    """Verified availability for each date-bearing Evidence source family.
+
+    This deliberately does not infer coverage from the dates in
+    ``TemporalContextV3``.  A historical request can retain the baseline HSK
+    or CCCT date while Data explicitly marks that family unavailable.
+    """
+
+    law: Literal["covered", "unavailable"]
+    hsk: Literal["covered", "unavailable"]
+    requirements: Literal["covered", "unavailable"]
+
+
 class SourceV3(V3WireModel):
     """A verbatim quote and its zero-based occurrence in one input document."""
 
@@ -396,6 +409,9 @@ class ReviewRunResultV3(V3WireModel):
     # results may legitimately omit it; the new law-history profile supplies
     # all three dates as one atomic context.
     temporal_context: TemporalContextV3 | None = None
+    # Additive availability state.  Law-history runs require this companion
+    # object; legacy serialized results may still omit it.
+    temporal_coverage: TemporalCoverageV3 | None = None
     result_sha256: str = Field(pattern=r"^[a-f0-9]{64}$")
     schema_version: Literal["3.2"] = "3.2"
     engine: EngineV3 | None = None
@@ -411,6 +427,8 @@ class ReviewRunResultV3(V3WireModel):
             and self.temporal_context.law_as_of != self.review_as_of
         ):
             raise ValueError("temporal context law_as_of must match review_as_of")
+        if self.temporal_coverage is not None and self.temporal_context is None:
+            raise ValueError("temporal coverage requires temporal context")
         comparison_ids = [comparison.comparison_id for comparison in self.comparisons]
         if len(comparison_ids) != len(set(comparison_ids)):
             raise ValueError("comparison_id values must be unique")
@@ -481,6 +499,8 @@ def review_result_v3_sha256(result: ReviewRunResultV3 | Mapping[str, Any]) -> st
     # present date bundle remains covered by the result hash.
     if payload.get("temporal_context") is None:
         payload.pop("temporal_context", None)
+    if payload.get("temporal_coverage") is None:
+        payload.pop("temporal_coverage", None)
     return canonical_json_sha256(payload)
 
 
@@ -508,6 +528,7 @@ __all__ = [
     "SourceV3",
     "TextDocumentInputV3",
     "TemporalContextV3",
+    "TemporalCoverageV3",
     "WorkflowStageV3",
     "WorkflowV3",
     "canonical_json_sha256",

@@ -722,19 +722,24 @@ def _matching_review_payload() -> dict[str, Any]:
 
 
 def _answer_payload(
-    result: Any, *, question: str, recent_turns: list[dict[str, str]] | None = None
+    result: Any,
+    *,
+    question: str,
+    recent_turns: list[dict[str, str]] | None = None,
+    expected_snapshot_id: str | None = None,
 ) -> bytes:
-    return json.dumps(
-        {
-            "schema_version": "1.0",
-            "case_id": result.case_id,
-            "review_run_id": result.review_run_id,
-            "conversation_id": "conversation-assistant",
-            "review_result": result.model_dump(mode="json"),
-            "question": question,
-            "recent_turns": recent_turns or [],
-        }
-    ).encode()
+    payload: dict[str, Any] = {
+        "schema_version": "1.0",
+        "case_id": result.case_id,
+        "review_run_id": result.review_run_id,
+        "conversation_id": "conversation-assistant",
+        "review_result": result.model_dump(mode="json"),
+        "question": question,
+        "recent_turns": recent_turns or [],
+    }
+    if expected_snapshot_id is not None:
+        payload["expected_snapshot_id"] = expected_snapshot_id
+    return json.dumps(payload).encode()
 
 
 def test_deterministic_assistant_scopes_citations_and_turn_limit(
@@ -979,7 +984,7 @@ def test_shared_agency_confirmation_without_one_direction_requests_clarification
     }
 
 
-def test_independent_v2_scopes_request_safe_choices_without_data_or_claude(
+def test_two_compatible_v2_scopes_are_resolved_sequentially_without_claude(
     monkeypatch: pytest.MonkeyPatch,
 ) -> None:
     guidance_calls: list[dict[str, Any]] = []
@@ -990,18 +995,17 @@ def test_independent_v2_scopes_request_safe_choices_without_data_or_claude(
 
         def respond(self, *_args: Any, **_kwargs: Any) -> dict[str, Any]:
             self.calls += 1
-            raise AssertionError("compound scope clarification must not call Claude")
+            raise AssertionError("multi-scope checklist must not call Claude")
 
     def guidance(
         _self: ProfileEvidenceRetriever, request: dict[str, Any], **_kwargs: Any
     ) -> dict[str, Any]:
         guidance_calls.append(deepcopy(request))
-        raise AssertionError("compound scope clarification must not query Data")
+        return _stub_guidance_v2(None, request)
 
     monkeypatch.setattr(ProfileEvidenceRetriever, "guidance_query", guidance)
     runtime = ProfileRuntime(_settings())
     responder = UnexpectedResponder()
-    runtime.mode = "functional-uat"
     runtime._grounded_responder = responder  # type: ignore[assignment]
 
     answer = runtime.knowledge_answer_json(
@@ -1017,14 +1021,20 @@ def test_independent_v2_scopes_request_safe_choices_without_data_or_claude(
         ).encode()
     )
 
-    assert answer.answer_scope == "clarification_needed"
-    assert answer.citations == []
-    assert guidance_calls == []
+    assert answer.answer_scope == "general_customs_guidance"
+    assert answer.answer_format == "multi_scope_checklist"
+    assert answer.guidance_resolution is None
+    assert answer.guidance_resolutions is not None
+    assert [(item.topic, item.scope) for item in answer.guidance_resolutions] == [
+        ("customs_duty", "duty_payment_basics"),
+        ("hs_classification", "classification_principles"),
+    ]
+    assert [section.resolution_index for section in answer.answer_sections] == [0, 1]
+    assert {citation.resolution_index for citation in answer.citations} == {0, 1}
+    assert len(guidance_calls) == 2
+    assert "expected_snapshot_id" not in guidance_calls[0]
+    assert guidance_calls[1]["expected_snapshot_id"] == "dev-fixture-kr-trade-v2"
     assert responder.calls == 0
-    assert set(answer.suggested_questions) == {
-        "HS 품목분류 원칙 공식 안내를 알려 주세요.",
-        "관세·납세 기초 공식 안내를 알려 주세요.",
-    }
 
 
 @pytest.mark.parametrize(
@@ -1065,12 +1075,13 @@ def test_unsupported_foreign_or_final_individual_judgment_never_queries_guidance
 def test_fta_certificate_and_preference_are_independent_v2_scopes(
     monkeypatch: pytest.MonkeyPatch,
 ) -> None:
-    calls = 0
+    calls: list[dict[str, Any]] = []
 
-    def guidance(*_args: Any, **_kwargs: Any) -> dict[str, Any]:
-        nonlocal calls
-        calls += 1
-        raise AssertionError("independent FTA scopes must not query Data")
+    def guidance(
+        _self: ProfileEvidenceRetriever, request: dict[str, Any], **_kwargs: Any
+    ) -> dict[str, Any]:
+        calls.append(deepcopy(request))
+        return _stub_guidance_v2(None, request)
 
     monkeypatch.setattr(ProfileEvidenceRetriever, "guidance_query", guidance)
     runtime = ProfileRuntime(_settings())
@@ -1087,12 +1098,224 @@ def test_fta_certificate_and_preference_are_independent_v2_scopes(
         ).encode()
     )
 
-    assert answer.answer_scope == "clarification_needed"
-    assert calls == 0
-    assert answer.suggested_questions == [
-        "FTA 원산지증명 공식 안내를 알려 주세요.",
-        "FTA 특혜 절차 공식 안내를 알려 주세요.",
+    assert answer.answer_scope == "general_customs_guidance"
+    assert answer.answer_format == "multi_scope_checklist"
+    assert answer.guidance_resolutions is not None
+    assert [(item.topic, item.scope) for item in answer.guidance_resolutions] == [
+        ("fta_procedure", "origin_certificate"),
+        ("fta_procedure", "preference_procedure"),
     ]
+    assert len(calls) == 2
+    assert calls[1]["expected_snapshot_id"] == "dev-fixture-kr-trade-v2"
+
+
+def test_v2_follow_up_uses_the_backend_persisted_snapshot_for_both_scopes(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    """A follow-up cannot silently fall back to a newly activated V2 snapshot."""
+
+    calls: list[dict[str, Any]] = []
+    expected_snapshot_id = "krtrade-v2-history-one"
+
+    def guidance(
+        _self: ProfileEvidenceRetriever, request: dict[str, Any], **_kwargs: Any
+    ) -> dict[str, Any]:
+        calls.append(deepcopy(request))
+        response = _stub_guidance_v2(None, request)
+        response["snapshot_id"] = expected_snapshot_id
+        return response
+
+    monkeypatch.setattr(ProfileEvidenceRetriever, "guidance_query", guidance)
+    runtime = ProfileRuntime(_settings())
+    question = "HS 품목분류와 수입 관세를 함께 알려 주세요."
+    answer = runtime.knowledge_answer_json(
+        json.dumps(
+            {
+                "schema_version": "1.0",
+                "conversation_id": "knowledge-v2-pinned-follow-up",
+                "question": question,
+                "trade_type": "both",
+                "as_of": "2026-08-05",
+                "recent_turns": [],
+                "expected_snapshot_id": expected_snapshot_id,
+            }
+        ).encode()
+    )
+
+    assert answer.answer_scope == "general_customs_guidance"
+    assert answer.snapshot_id == expected_snapshot_id
+    assert answer.guidance_resolutions is not None
+    assert {item.snapshot_id for item in answer.guidance_resolutions} == {expected_snapshot_id}
+    assert len(calls) == 2
+    for request in calls:
+        assert request["expected_snapshot_id"] == expected_snapshot_id
+        assert set(request).isdisjoint({"question", "recent_turns", "review_result", "documents"})
+        assert request["query"] != question
+
+
+def test_v2_multi_scope_partial_response_stops_the_synthesis(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    """One incomplete scope must not leave a partially combined guidance answer."""
+
+    calls: list[dict[str, Any]] = []
+
+    def guidance(
+        _self: ProfileEvidenceRetriever, request: dict[str, Any], **_kwargs: Any
+    ) -> dict[str, Any]:
+        calls.append(deepcopy(request))
+        response = _stub_guidance_v2(None, request)
+        if len(calls) == 2:
+            response.update(
+                {
+                    "status": "partial",
+                    "coverage": "partial",
+                    "errors": [
+                        {
+                            "code": "source_bundle_partial",
+                            "message": "일부 공식 자료를 확인할 수 없습니다.",
+                            "retryable": False,
+                        }
+                    ],
+                }
+            )
+        return response
+
+    monkeypatch.setattr(ProfileEvidenceRetriever, "guidance_query", guidance)
+    runtime = ProfileRuntime(_settings())
+    answer = runtime.knowledge_answer_json(
+        json.dumps(
+            {
+                "schema_version": "1.0",
+                "conversation_id": "knowledge-v2-partial-compound",
+                "question": "HS 품목분류와 수입 관세를 함께 알려 주세요.",
+                "trade_type": "both",
+                "as_of": "2026-08-05",
+                "recent_turns": [],
+            }
+        ).encode()
+    )
+
+    assert answer.answer_scope == "insufficient_evidence"
+    assert answer.answer_format == "multi_scope_checklist"
+    assert answer.citations == []
+    assert answer.answer_sections == []
+    assert answer.guidance_resolutions is not None
+    assert [item.coverage for item in answer.guidance_resolutions] == ["covered", "partial"]
+    assert "1." in answer.direct_answer and "2." in answer.direct_answer
+    assert len(calls) == 2
+    assert calls[1]["expected_snapshot_id"] == "dev-fixture-kr-trade-v2"
+
+
+def test_case_two_v2_scopes_use_the_fixed_four_section_checklist(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    """A Case answer combines neither source until both scopes and Case evidence validate."""
+
+    calls: list[dict[str, Any]] = []
+
+    def guidance(
+        _self: ProfileEvidenceRetriever, request: dict[str, Any], **_kwargs: Any
+    ) -> dict[str, Any]:
+        calls.append(deepcopy(request))
+        return _stub_guidance_v2(None, request)
+
+    class UnexpectedResponder:
+        def respond(self, *_args: Any, **_kwargs: Any) -> dict[str, Any]:
+            raise AssertionError("multi-scope checklist must not call Claude")
+
+    monkeypatch.setattr(ProfileEvidenceRetriever, "retrieve", _stub_retrieve)
+    monkeypatch.setattr(ProfileEvidenceRetriever, "guidance_query", guidance)
+    runtime = ProfileRuntime(_settings())
+    runtime._grounded_responder = UnexpectedResponder()  # type: ignore[assignment]
+    result = runtime.review_v3_json(json.dumps(_review_payload()).encode())
+    question = "현재 사건에서 HS 품목분류와 수입 관세를 함께 적용해 확인할 항목을 알려 주세요."
+
+    answer = runtime.assistant_answer_json(_answer_payload(result, question=question))
+
+    assert answer.answer_scope == "case_grounded"
+    assert answer.answer_format == "multi_scope_checklist"
+    assert answer.guidance_resolution is None
+    assert answer.guidance_resolutions is not None
+    assert [section.kind for section in answer.answer_sections] == [
+        "case_analysis",
+        "general_guidance",
+        "general_guidance",
+        "case_application",
+    ]
+    assert [section.resolution_index for section in answer.answer_sections] == [None, 0, 1, None]
+    assert {citation.resolution_index for citation in answer.citations if hasattr(citation, "source_id")} == {
+        0,
+        1,
+    }
+    assert {citation.kind for citation in answer.answer_sections[-1].citations} == {
+        "comparison",
+        "guidance_evidence",
+    }
+    assert len(calls) == 2
+    assert calls[1]["expected_snapshot_id"] == "dev-fixture-kr-trade-v2"
+    for request in calls:
+        assert set(request).isdisjoint({"question", "recent_turns", "review_result", "documents"})
+        assert request["query"] != question
+
+
+def test_three_v2_scopes_remain_a_clarification_without_data_dispatch(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    def guidance(*_args: Any, **_kwargs: Any) -> dict[str, Any]:
+        raise AssertionError("three independent scopes must not query Data")
+
+    monkeypatch.setattr(ProfileEvidenceRetriever, "guidance_query", guidance)
+    runtime = ProfileRuntime(_settings())
+    answer = runtime.knowledge_answer_json(
+        json.dumps(
+            {
+                "schema_version": "1.0",
+                "conversation_id": "knowledge-v2-three-scopes",
+                "question": "HS 품목분류와 수입 관세와 B/L을 함께 알려 주세요.",
+                "trade_type": "both",
+                "as_of": "2026-08-05",
+                "recent_turns": [],
+            }
+        ).encode()
+    )
+
+    assert answer.answer_scope == "clarification_needed"
+    assert answer.guidance_resolution is None
+    assert answer.guidance_resolutions is None
+    assert answer.answer_format is None
+
+
+def test_v1_rejects_a_persisted_v2_snapshot_before_data_dispatch(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    def guidance(*_args: Any, **_kwargs: Any) -> dict[str, Any]:
+        raise AssertionError("a V1 peer must not receive a V2 snapshot pin")
+
+    monkeypatch.setattr(ProfileEvidenceRetriever, "guidance_query", guidance)
+    runtime = ProfileRuntime(
+        _settings(
+            guidance_base_url="http://127.0.0.1:18093",
+            guidance_service_token=SecretStr(_TOKEN),
+            guidance_registry_version="1.0",
+        )
+    )
+
+    with pytest.raises(RuntimeInputError) as raised:
+        runtime.knowledge_answer_json(
+            json.dumps(
+                {
+                    "schema_version": "1.0",
+                    "conversation_id": "knowledge-v1-reject-v2-pin",
+                    "question": "수입 통관 절차를 알려 주세요.",
+                    "trade_type": "import",
+                    "as_of": "2026-08-05",
+                    "recent_turns": [],
+                    "expected_snapshot_id": "krtrade-v2-history-one",
+                }
+            ).encode()
+        )
+    assert raised.value.code == "guidance_snapshot_pin_unsupported"
 
 
 def test_standalone_export_requirements_narrows_both_to_export_guidance(
