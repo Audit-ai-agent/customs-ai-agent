@@ -107,6 +107,9 @@ class GuidanceCitationV1(AssistantWireModel):
     as_of: date
     snapshot_id: str = Field(min_length=1, max_length=512)
     coverage: Literal["covered", "no_coverage", "partial", "unavailable"]
+    # A two-scope answer labels each official citation with its independently
+    # resolved scope.  ``None`` preserves the original single-scope contract.
+    resolution_index: int | None = Field(default=None, ge=0, le=1)
 
 
 AssistantAnswerCitationV1 = AssistantCitationV1 | GuidanceCitationV1
@@ -116,17 +119,22 @@ class AssistantAnswerSectionV1(AssistantWireModel):
     """A user-facing case, guidance, or evidence-linked application section.
 
     Sections are additive to the legacy ``direct_answer`` field so old
-    persisted conversations remain readable.  New replies use at most one
+    persisted conversations remain readable.  Legacy replies use at most one
     case section, one general-guidance section, and one deterministic
-    application section.  The application section never adds a new legal
-    claim: it only identifies a next check from citations already present in
-    the case and guidance sections.
+    application section.  A verified V2 two-scope checklist instead has one
+    case section, two independently indexed general-guidance sections, and
+    one deterministic application section.  The application section never
+    adds a new legal claim: it only identifies a next check from citations
+    already present in the case and guidance sections.
     """
 
     kind: Literal["case_analysis", "general_guidance", "case_application"]
     title: str = Field(min_length=1, max_length=200)
     content: str = Field(min_length=1, max_length=4_000)
     citations: list[AssistantAnswerCitationV1] = Field(default_factory=list, max_length=100)
+    # Case analysis and the final cross-scope checklist intentionally have no
+    # single resolution owner.  Each general-guidance section has index 0 or 1.
+    resolution_index: int | None = Field(default=None, ge=0, le=1)
 
     @model_validator(mode="after")
     def _section_has_its_own_grounding(self) -> "AssistantAnswerSectionV1":
@@ -207,6 +215,14 @@ class AssistantAnswerRequestV1(AssistantWireModel):
     review_result: ReviewRunResultV3
     question: str = Field(min_length=1, max_length=4000)
     recent_turns: list[AssistantRecentTurnV1] = Field(default_factory=list, max_length=8)
+    # Backend owns durable conversation state.  It sends this only on a V2
+    # follow-up after storing the immutable snapshot ID returned by Agent.
+    expected_snapshot_id: str | None = Field(
+        default=None,
+        min_length=3,
+        max_length=81,
+        pattern=r"^[a-z0-9][a-z0-9-]{2,80}$",
+    )
 
     @model_validator(mode="after")
     def _snapshot_matches_route_identity(self) -> "AssistantAnswerRequestV1":
@@ -235,10 +251,18 @@ class AssistantAnswerResponseV1(AssistantWireModel):
     # ``answer_sections`` is additive and gives mixed case/general replies an
     # explicit visual boundary.  The legacy top-level fields still carry the
     # primary answer and its citations for unchanged consumers.
-    answer_sections: list[AssistantAnswerSectionV1] = Field(default_factory=list, max_length=3)
+    answer_sections: list[AssistantAnswerSectionV1] = Field(default_factory=list, max_length=4)
     suggested_questions: list[str] = Field(default_factory=list, max_length=3)
     correction_draft: AssistantCorrectionDraftV1 | None = None
     guidance_resolution: GuidanceResolutionV1 | None = None
+    # Additive two-scope resolution surface.  It is XOR with the legacy
+    # singular field, and always retains the classifier's deterministic order.
+    guidance_resolutions: list[GuidanceResolutionV1] | None = Field(
+        default=None,
+        min_length=2,
+        max_length=2,
+    )
+    answer_format: Literal["multi_scope_checklist"] | None = None
     # Internal Agent→Backend provenance only.  Backend validates and removes
     # it before message persistence or user-facing serialization.
     guidance_registry_sha256: str | None = Field(
@@ -250,6 +274,11 @@ class AssistantAnswerResponseV1(AssistantWireModel):
 
     @model_validator(mode="after")
     def _grounded_scopes_have_citations(self) -> "AssistantAnswerResponseV1":
+        if self.guidance_resolutions is not None:
+            _validate_assistant_multi_scope_answer(self)
+            return self
+        if self.answer_format is not None:
+            raise ValueError("single-scope answers must not claim a multi-scope format")
         if self.answer_scope in {"case_grounded", "evidence_grounded"} and not self.citations:
             raise ValueError("grounded assistant answers require a citation")
         case_citations = [
@@ -266,6 +295,10 @@ class AssistantAnswerResponseV1(AssistantWireModel):
         ]
         if len(identities) != len(set(identities)):
             raise ValueError("assistant citations must be unique")
+        if any(citation.resolution_index is not None for citation in guidance_citations):
+            raise ValueError("single-scope guidance citations must not carry a resolution index")
+        if any(section.resolution_index is not None for section in self.answer_sections):
+            raise ValueError("single-scope answer sections must not carry a resolution index")
         if self.answer_scope == "case_grounded" and not any(
             citation.kind in {"fact", "comparison"} for citation in case_citations
         ):
@@ -378,6 +411,12 @@ class KnowledgeAnswerRequestV1(AssistantWireModel):
     trade_type: Literal["import", "export", "both"] = "both"
     as_of: date
     recent_turns: list[AssistantRecentTurnV1] = Field(default_factory=list, max_length=8)
+    expected_snapshot_id: str | None = Field(
+        default=None,
+        min_length=3,
+        max_length=81,
+        pattern=r"^[a-z0-9][a-z0-9-]{2,80}$",
+    )
 
 
 class KnowledgeAnswerResponseV1(AssistantWireModel):
@@ -399,6 +438,12 @@ class KnowledgeAnswerResponseV1(AssistantWireModel):
     snapshot_id: str | None = Field(default=None, max_length=512)
     as_of: date
     guidance_resolution: GuidanceResolutionV1 | None = None
+    guidance_resolutions: list[GuidanceResolutionV1] | None = Field(
+        default=None,
+        min_length=2,
+        max_length=2,
+    )
+    answer_format: Literal["multi_scope_checklist"] | None = None
     guidance_registry_sha256: str | None = Field(
         default=None,
         pattern=r"^[a-f0-9]{64}$",
@@ -407,6 +452,11 @@ class KnowledgeAnswerResponseV1(AssistantWireModel):
 
     @model_validator(mode="after")
     def _official_claims_are_cited(self) -> "KnowledgeAnswerResponseV1":
+        if self.guidance_resolutions is not None:
+            _validate_knowledge_multi_scope_answer(self)
+            return self
+        if self.answer_format is not None:
+            raise ValueError("single-scope answers must not claim a multi-scope format")
         if self.answer_scope == "general_customs_guidance":
             if not self.citations or self.coverage not in {"covered", "partial"}:
                 raise ValueError("general guidance requires covered official evidence")
@@ -430,6 +480,10 @@ class KnowledgeAnswerResponseV1(AssistantWireModel):
             citation_source_ids = {citation.source_id for citation in self.citations}
             if not section_source_ids or not section_source_ids.issubset(citation_source_ids):
                 raise ValueError("knowledge section citations must be exposed at the top level")
+        if any(citation.resolution_index is not None for citation in self.citations):
+            raise ValueError("single-scope guidance citations must not carry a resolution index")
+        if any(section.resolution_index is not None for section in self.answer_sections):
+            raise ValueError("single-scope answer sections must not carry a resolution index")
         if self.guidance_resolution is None and self.guidance_registry_sha256 is not None:
             raise ValueError("guidance registry hash requires a guidance resolution")
         if self.guidance_resolution is not None and self.guidance_registry_sha256 is None:
@@ -441,6 +495,214 @@ class KnowledgeAnswerResponseV1(AssistantWireModel):
             if any(citation.registry_source_id is None for citation in self.citations):
                 raise ValueError("v2 guidance citations require registry source identity")
         return self
+
+
+def _multi_scope_resolution_indexes(
+    resolutions: list[GuidanceResolutionV1] | None,
+) -> tuple[GuidanceResolutionV1, GuidanceResolutionV1]:
+    """Validate the fixed two-target public contract once for both routes."""
+
+    if resolutions is None or len(resolutions) != 2:
+        raise ValueError("multi-scope answers require exactly two guidance resolutions")
+    first, second = resolutions
+    if first.registry_version != "2.0" or second.registry_version != "2.0":
+        raise ValueError("multi-scope answers require the V2 guidance registry")
+    if (first.topic, first.scope) == (second.topic, second.scope):
+        raise ValueError("multi-scope answers require independent guidance scopes")
+    return first, second
+
+
+def _multi_guidance_citation_identity(citation: GuidanceCitationV1) -> tuple[str, int | None]:
+    return citation.source_id, citation.resolution_index
+
+
+def _validate_assistant_multi_scope_answer(answer: AssistantAnswerResponseV1) -> None:
+    """Keep a multi-scope case checklist partitioned and non-conclusive.
+
+    The Agent may report two unavailable/partial resolutions, but it may only
+    emit the four-section checklist if both verified V2 scopes are covered and
+    the supplied immutable Case review result contributes its own citation.
+    """
+
+    resolutions = _multi_scope_resolution_indexes(answer.guidance_resolutions)
+    if answer.guidance_resolution is not None:
+        raise ValueError("multi-scope answers are XOR with guidance_resolution")
+    if answer.answer_format != "multi_scope_checklist":
+        raise ValueError("multi-scope answers require the multi-scope format")
+    if answer.guidance_registry_sha256 is None:
+        raise ValueError("multi-scope answers require an internal registry hash")
+    if answer.case_input_notice is not None:
+        raise ValueError("case input notice cannot claim a multi-scope lookup")
+    if answer.correction_draft is not None:
+        raise ValueError("multi-scope checklists must not contain correction drafts")
+
+    case_citations = [
+        citation for citation in answer.citations if isinstance(citation, AssistantCitationV1)
+    ]
+    guidance_citations = [
+        citation for citation in answer.citations if isinstance(citation, GuidanceCitationV1)
+    ]
+    identities = [
+        (citation.kind, citation.reference_id)
+        if isinstance(citation, AssistantCitationV1)
+        else (citation.kind, citation.source_id, citation.resolution_index)
+        for citation in answer.citations
+    ]
+    if len(identities) != len(set(identities)):
+        raise ValueError("assistant citations must be unique")
+
+    # A missing scope never leaks the other scope's citations or a partial
+    # synthetic application.  The two resolution records explain exactly what
+    # was available without pretending it is a combined answer.
+    if answer.answer_scope == "insufficient_evidence":
+        if answer.citations or answer.answer_sections:
+            raise ValueError("incomplete multi-scope answers must not expose citations or sections")
+        return
+    if answer.answer_scope not in {"case_grounded", "evidence_grounded"}:
+        raise ValueError("multi-scope checklist requires a case-grounded answer")
+    if any(resolution.coverage != "covered" for resolution in resolutions):
+        raise ValueError("multi-scope checklist requires both scopes covered")
+    snapshot_ids = {resolution.snapshot_id for resolution in resolutions}
+    if None in snapshot_ids or len(snapshot_ids) != 1:
+        raise ValueError("multi-scope checklist requires one immutable snapshot")
+    if not case_citations or not guidance_citations:
+        raise ValueError("multi-scope checklist requires case and guidance citations")
+    if answer.answer_scope == "case_grounded" and not any(
+        citation.kind in {"fact", "comparison"} for citation in case_citations
+    ):
+        raise ValueError("case-grounded answers require a fact or comparison citation")
+    if answer.answer_scope == "evidence_grounded" and not any(
+        citation.kind == "evidence" for citation in case_citations
+    ):
+        raise ValueError("evidence-grounded answers require an evidence citation")
+
+    citation_indexes = {citation.resolution_index for citation in guidance_citations}
+    if citation_indexes != {0, 1}:
+        raise ValueError("multi-scope guidance citations require both resolution indexes")
+    for index, resolution in enumerate(resolutions):
+        scoped = [item for item in guidance_citations if item.resolution_index == index]
+        if not scoped:
+            raise ValueError("each multi-scope resolution requires a citation")
+        if any(
+            item.snapshot_id != resolution.snapshot_id
+            or item.as_of != resolution.as_of
+            or item.coverage != "covered"
+            or item.registry_source_id is None
+            for item in scoped
+        ):
+            raise ValueError("multi-scope guidance citation provenance mismatch")
+
+    expected_sections = (
+        ("case_analysis", None),
+        ("general_guidance", 0),
+        ("general_guidance", 1),
+        ("case_application", None),
+    )
+    actual_sections = tuple(
+        (section.kind, section.resolution_index) for section in answer.answer_sections
+    )
+    if actual_sections != expected_sections:
+        raise ValueError("multi-scope checklist must use the fixed four-section order")
+    case_section, first_guidance, second_guidance, application = answer.answer_sections
+    if not case_section.citations or any(
+        not isinstance(item, AssistantCitationV1) for item in case_section.citations
+    ):
+        raise ValueError("multi-scope case analysis requires only case citations")
+    for index, section in enumerate((first_guidance, second_guidance)):
+        if not section.citations or any(
+            not isinstance(item, GuidanceCitationV1) or item.resolution_index != index
+            for item in section.citations
+        ):
+            raise ValueError("each multi-scope guidance section requires its own citations")
+    application_guidance_indexes = {
+        item.resolution_index
+        for item in application.citations
+        if isinstance(item, GuidanceCitationV1)
+    }
+    if not any(isinstance(item, AssistantCitationV1) for item in application.citations) or (
+        application_guidance_indexes != {0, 1}
+    ):
+        raise ValueError("multi-scope application requires case and both guidance citations")
+
+    top_case_ids = {(item.kind, item.reference_id) for item in case_citations}
+    top_guidance_ids = {_multi_guidance_citation_identity(item) for item in guidance_citations}
+    section_case_ids = {
+        (item.kind, item.reference_id)
+        for section in (case_section, application)
+        for item in section.citations
+        if isinstance(item, AssistantCitationV1)
+    }
+    section_guidance_ids = {
+        _multi_guidance_citation_identity(item)
+        for section in (first_guidance, second_guidance, application)
+        for item in section.citations
+        if isinstance(item, GuidanceCitationV1)
+    }
+    if not section_case_ids.issubset(top_case_ids) or not section_guidance_ids.issubset(
+        top_guidance_ids
+    ):
+        raise ValueError("multi-scope section citations must be exposed at the top level")
+
+
+def _validate_knowledge_multi_scope_answer(answer: KnowledgeAnswerResponseV1) -> None:
+    """Validate a standalone two-topic synthesis without Case application."""
+
+    resolutions = _multi_scope_resolution_indexes(answer.guidance_resolutions)
+    if answer.guidance_resolution is not None:
+        raise ValueError("multi-scope answers are XOR with guidance_resolution")
+    if answer.answer_format != "multi_scope_checklist":
+        raise ValueError("multi-scope answers require the multi-scope format")
+    if answer.guidance_registry_sha256 is None:
+        raise ValueError("multi-scope answers require an internal registry hash")
+    if answer.answer_scope == "insufficient_evidence":
+        if answer.citations or answer.answer_sections:
+            raise ValueError("incomplete multi-scope answers must not expose citations or sections")
+        return
+    if answer.answer_scope != "general_customs_guidance":
+        raise ValueError("multi-scope knowledge answer requires official guidance scope")
+    if any(resolution.coverage != "covered" for resolution in resolutions):
+        raise ValueError("multi-scope knowledge answer requires both scopes covered")
+    snapshot_ids = {resolution.snapshot_id for resolution in resolutions}
+    if None in snapshot_ids or len(snapshot_ids) != 1 or answer.snapshot_id not in snapshot_ids:
+        raise ValueError("multi-scope knowledge answer requires one immutable snapshot")
+    if answer.coverage != "covered" or GENERAL_GUIDANCE_DISCLAIMER not in answer.direct_answer:
+        raise ValueError("multi-scope knowledge answer requires covered official guidance")
+    if len(answer.answer_sections) != 2 or tuple(
+        (section.kind, section.resolution_index) for section in answer.answer_sections
+    ) != (("general_guidance", 0), ("general_guidance", 1)):
+        raise ValueError("multi-scope knowledge answer requires two indexed guidance sections")
+    identities = [_multi_guidance_citation_identity(item) for item in answer.citations]
+    if len(identities) != len(set(identities)):
+        raise ValueError("knowledge guidance citations must be unique")
+    if {item.resolution_index for item in answer.citations} != {0, 1}:
+        raise ValueError("multi-scope guidance citations require both resolution indexes")
+    top_ids = set(identities)
+    for index, (resolution, section) in enumerate(zip(resolutions, answer.answer_sections)):
+        scoped = [item for item in answer.citations if item.resolution_index == index]
+        if (
+            not scoped
+            or not section.citations
+            or any(
+                not isinstance(item, GuidanceCitationV1) or item.resolution_index != index
+                for item in section.citations
+            )
+        ):
+            raise ValueError("each multi-scope knowledge section requires its own citations")
+        if any(
+            item.snapshot_id != resolution.snapshot_id
+            or item.as_of != resolution.as_of
+            or item.coverage != "covered"
+            or item.registry_source_id is None
+            for item in scoped
+        ):
+            raise ValueError("multi-scope guidance citation provenance mismatch")
+        section_ids = {
+            _multi_guidance_citation_identity(item)
+            for item in section.citations
+            if isinstance(item, GuidanceCitationV1)
+        }
+        if not section_ids or not section_ids.issubset(top_ids):
+            raise ValueError("knowledge section citations must be exposed at the top level")
 
 
 __all__ = [
