@@ -13,6 +13,9 @@ _TOKEN = re.compile(r"^[\x21-\x7e]{43,512}$")
 _B64_TOKEN = re.compile(r"^[A-Za-z0-9\-._~+/]{43,504}={0,8}$")
 _LOG_LEVELS = frozenset({"CRITICAL", "ERROR", "WARNING", "INFO"})
 _MAX_BODY_BYTES = 2 * 1024 * 1024
+_MAX_DOCUMENT_BYTES = 16 * 1024 * 1024
+_MAX_DOCUMENT_PAGES = 50
+_MAX_DOCUMENT_IMAGE_PIXELS = 40_000_000
 _MAX_DOCUMENTS = 20
 _MAX_TEXT_CHARACTERS = 500_000
 ServiceMode = Literal["local-development", "functional-uat"]
@@ -93,6 +96,12 @@ class ServiceSettings:
     # Windows-reserved 80xx range while remaining loopback-only.
     port: int = 18090
     max_body_bytes: int = _MAX_BODY_BYTES
+    # The preview endpoint has an isolated binary budget.  It is intentionally
+    # separate from the small JSON text-review budget so enabling preview never
+    # broadens the review request surface.
+    max_document_bytes: int = _MAX_DOCUMENT_BYTES
+    max_document_pages: int = _MAX_DOCUMENT_PAGES
+    max_document_image_pixels: int = _MAX_DOCUMENT_IMAGE_PIXELS
     max_documents: int = _MAX_DOCUMENTS
     max_text_characters: int = _MAX_TEXT_CHARACTERS
     body_read_timeout_seconds: float = 15.0
@@ -158,6 +167,12 @@ class ServiceSettings:
             raise ServiceConfigurationError("customs_agent_port_invalid")
         if not 1_024 <= self.max_body_bytes <= 32 * 1024 * 1024:
             raise ServiceConfigurationError("customs_agent_max_body_bytes_invalid")
+        if not 1_024 <= self.max_document_bytes <= 32 * 1024 * 1024:
+            raise ServiceConfigurationError("customs_agent_max_document_bytes_invalid")
+        if not 1 <= self.max_document_pages <= 1_000:
+            raise ServiceConfigurationError("customs_agent_max_document_pages_invalid")
+        if not 1_000_000 <= self.max_document_image_pixels <= 100_000_000:
+            raise ServiceConfigurationError("customs_agent_max_document_image_pixels_invalid")
         if not 1 <= self.max_documents <= _MAX_DOCUMENTS:
             raise ServiceConfigurationError("customs_agent_max_documents_invalid")
         if not 1 <= self.max_text_characters <= _MAX_TEXT_CHARACTERS:
@@ -247,6 +262,27 @@ class ServiceSettings:
             port=_integer(source, "CUSTOMS_AGENT_PORT", 18090, 1, 65_535),
             max_body_bytes=_integer(
                 source, "CUSTOMS_AGENT_MAX_BODY_BYTES", _MAX_BODY_BYTES, 1_024, 32 * 1024 * 1024
+            ),
+            max_document_bytes=_integer(
+                source,
+                "CUSTOMS_AGENT_MAX_DOCUMENT_BYTES",
+                _MAX_DOCUMENT_BYTES,
+                1_024,
+                32 * 1024 * 1024,
+            ),
+            max_document_pages=_integer(
+                source,
+                "CUSTOMS_AGENT_MAX_DOCUMENT_PAGES",
+                _MAX_DOCUMENT_PAGES,
+                1,
+                1_000,
+            ),
+            max_document_image_pixels=_integer(
+                source,
+                "CUSTOMS_AGENT_MAX_DOCUMENT_IMAGE_PIXELS",
+                _MAX_DOCUMENT_IMAGE_PIXELS,
+                1_000_000,
+                100_000_000,
             ),
             max_documents=_integer(
                 source, "CUSTOMS_AGENT_MAX_DOCUMENTS", _MAX_DOCUMENTS, 1, _MAX_DOCUMENTS

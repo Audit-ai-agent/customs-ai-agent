@@ -18,6 +18,7 @@ def test_openapi_exposes_only_active_backend_surface() -> None:
         "/health/ready",
         "/internal/agent/v2/metadata",
         "/internal/agent/v2/reviews",
+        "/internal/agent/v2/document-extractions",
         "/internal/agent/v2/assistant/answers",
         "/internal/agent/v2/knowledge/answers",
     }

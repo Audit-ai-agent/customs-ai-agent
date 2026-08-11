@@ -10,7 +10,7 @@
 | `local-development` | 팀의 기본 전체 개발 | 없음. Data의 합성 Evidence와 결정론 분석기를 사용합니다. |
 | `functional-uat` | 실제 법령 Evidence·Data·Claude 흐름을 한 번 확인 | 개인 Law API 권한, `ANTHROPIC_API_KEY`, Data의 로컬 모델 캐시 |
 
-두 방식 모두 텍스트만 처리하고 결과를 항상 `human_review_required`로 반환합니다. 자동완료나 배포 판단 기능은 없습니다.
+두 방식의 **심사**는 텍스트만 처리하고 결과를 항상 `human_review_required`로 반환합니다. 별도 문서 미리보기 경로는 PDF/JPEG/PNG의 사람 검수용 추출 후보만 만들며 기본적으로 비활성화되어 있습니다. 미리보기 결과는 사람이 확인해 텍스트로 확정하기 전까지 심사·Finding·통관 결론에 사용되지 않습니다. 자동완료나 배포 판단 기능은 없습니다.
 
 ## 설치
 
@@ -214,24 +214,41 @@ Data profile을 같은 PC에서 병렬로 띄울 때에는 각 Data peer를 다�
 
 ## HTTP 계약
 
-Backend가 사용하는 경로는 아래 여섯 개뿐입니다.
+Backend가 사용하는 경로는 아래 일곱 개뿐입니다.
 
 ```text
 GET  /health/live
 GET  /health/ready
 GET  /internal/agent/v2/metadata
 POST /internal/agent/v2/reviews
+POST /internal/agent/v2/document-extractions
 POST /internal/agent/v2/assistant/answers
 POST /internal/agent/v2/knowledge/answers
 ```
 
 `POST /internal/agent/v2/reviews`는 텍스트 문서, Case ID, 실행 ID, 기준일, 무역 유형, `KR`만 받습니다. 상업송장·포장명세서·B/L·AWB·원산지증명서·수출신고서·보완 증빙 문서를 받아 수입 또는 수출 심사를 수행합니다. V3.2 응답은 사람 검토 상태와 함께 실제 workflow 단계, 최대 2 cycle·6 action의 제한된 계획 trace, 문서별 추출 사실과 원문 인용, 코드 기반 비교 결과, Evidence에 연결된 finding·담당자 조치, 8구역 근거 보고서를 담습니다. 이력 Evidence가 사용된 경우에는 법령·HSK·요건의 기준일만 담은 nullable `temporal_context`도 추가됩니다. 승인된 사람 수정은 원문을 덮어쓰지 않고 `human_provided` 사실로 별도 표시합니다. 수량·금액·원산지·문서 식별자 판정은 LLM이 아니라 코드가 수행하며, 결과는 언제나 자동완료 대상이 아닙니다.
 
+`POST /internal/agent/v2/document-extractions`는 `/reviews`와 분리된 binary boundary입니다. `Content-Type`은 `application/pdf`·`image/jpeg`·`image/png` 중 하나이고, body에는 identity-encoded raw bytes만 담습니다. Backend는 `X-Document-Asset-ID`, `X-Extraction-Request-ID`, `X-Document-SHA256`을 함께 보내며 Agent는 size·streaming SHA-256·magic·PDF page hint·image pixel limit을 독립 확인합니다. 응답에는 asset/request ID, hash, adapter revision, page/span/normalized bbox, canonical text hash와 content-free warning만 있으며 raw bytes·base64·filename·Case ID는 없습니다. span text는 검수 화면 표시용 후보일 뿐이며 Agent의 일반 로그·scenario transcript·review contract에는 들어가지 않습니다. 기본 preview engine은 `unavailable`을 반환하고, 측정·승인된 pinned local adapter를 명시적으로 주입한 경우에만 추출 후보를 만듭니다.
+
 `POST /internal/agent/v2/assistant/answers`는 Backend가 저장한 Review Run snapshot, 질문, 최근 검증 대화 최대 8턴만 받습니다. 답변은 `현재 사건 기준`·`일반 통관 안내`·명시적으로 적용을 물었을 때만 `사건 적용·다음 확인`의 최대 세 구역으로 나뉩니다. 세 번째 구역은 첫 두 구역의 citation을 함께 가리키는 결정론 확인 목록일 뿐 법적 결론·승인·통관 결과를 만들지 않습니다. 문서 본문처럼 보이는 다줄 붙여넣기는 새 심사 근거가 아니며 Agent·Data·Claude·transcript에 전달하지 않고 문서 등록 또는 교체 후 재심사를 안내합니다. 이 호출은 Case, 문서, finding, 수정 제안을 직접 바꾸지 않습니다.
 
 `POST /internal/agent/v2/knowledge/answers`는 사건·문서 원문을 받지 않는 별도 통관 지식 도우미 경로입니다. Backend가 대화 ID, 질문, 수출입 방향, 기준일, 최근 대화 최대 8턴만 전달합니다. Agent 코드는 질문을 하나의 `주제+세부범위`로만 분류해 질문당 한 번 조회합니다. 독립 범위가 둘 이상이면 first-match하지 않고 선택형 추가 질문을 요청합니다. coverage가 없거나 출처·version·hash가 맞지 않으면 모델 지식으로 채우지 않습니다. V2 조합 profile은 readiness-gated guidance URL·token·registry version으로만 이 호출을 보냅니다. Claude는 제한된 표현 선택에만 쓰며, 웹 검색·임의 URL·DB·파일 접근·네이티브 Tool Calling은 사용하지 않습니다.
 
 패키지 안 `src/customs_ai_agent/contracts/schemas/backend/v3/`가 유일한 Agent HTTP 계약 원본입니다. Backend 소비자는 이 schema bytes를 자신의 저장소에 갱신해 사용합니다. Data Evidence 계약은 Data 저장소가 소유하며, Agent는 실행에 필요한 Data V3 schema bytes만 package에 두고 Harness가 sibling 바이트를 비교합니다.
+
+## OCR Gold 준비만 하는 도구
+
+`tools/create_document_dataset_receipt.py`는 PDF·JPEG·PNG·JSON 원본을 **그 자리에서** SHA-256으로 읽고, 원문·텍스트·절대경로 없이 `dataset-receipt.json`만 `_local/data/`에 만듭니다. JSON은 `structured_reference`로 기록되어 OCR 점수 대상이 되지 않습니다. `tools/prepare_document_preview_gold_packet.py`는 이 receipt에서 정확히 개발 60개와 봉인 20개를 결정론적으로 골라 `awaiting_human_adjudication` draft packet만 만듭니다. 두 도구 모두 OCR 실행·원본 복사·사람 승인·성능 pass를 수행하지 않습니다.
+
+```powershell
+uv run --locked --no-sync --group dev python tools/create_document_dataset_receipt.py `
+  --source-directory <local-source> --dataset-id <id> --dataset-revision <revision> `
+  --received-as-of 2026-08-11 --output-directory <workspace>/_local/data/receipts/<id>/<revision>
+
+uv run --locked --no-sync --group dev python tools/prepare_document_preview_gold_packet.py `
+  --receipt <workspace>/_local/data/receipts/<id>/<revision>/dataset-receipt.json `
+  --as-of 2026-08-11 --output-directory <workspace>/_local/data/evaluation/<id>/<revision>
+```
 
 ## 확인
 
