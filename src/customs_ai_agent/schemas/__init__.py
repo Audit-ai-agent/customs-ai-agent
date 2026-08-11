@@ -18,6 +18,16 @@ from customs_ai_agent.schemas.assistant import (
     KnowledgeAnswerResponseV1,
 )
 from customs_ai_agent.schemas.v3 import ReviewRunResultV3, ServiceReviewRunRequestV3
+from customs_ai_agent.schemas.document_extraction import (
+    BoundingBoxV1,
+    DocumentExtractionRequestMetadataV1,
+    DocumentExtractionResultV1,
+    DocumentExtractionWarningV1,
+    DocumentPreviewPageV1,
+    DocumentSpanV1,
+    PreviewCandidateV1,
+    PreviewInputV1,
+)
 
 __all__ = [
     "ClaudeDocumentCandidate",
@@ -35,4 +45,12 @@ __all__ = [
     "KnowledgeAnswerResponseV1",
     "ReviewRunResultV3",
     "ServiceReviewRunRequestV3",
+    "BoundingBoxV1",
+    "DocumentExtractionRequestMetadataV1",
+    "DocumentExtractionResultV1",
+    "DocumentExtractionWarningV1",
+    "DocumentPreviewPageV1",
+    "DocumentSpanV1",
+    "PreviewCandidateV1",
+    "PreviewInputV1",
 ]

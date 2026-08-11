@@ -9,6 +9,8 @@ def test_only_live_http_schema_bytes_are_packaged() -> None:
     assert available_schemas() == (
         ("backend", "v3", "assistant-answer-request"),
         ("backend", "v3", "assistant-answer-response"),
+        ("backend", "v3", "document-extraction-request"),
+        ("backend", "v3", "document-extraction-result"),
         ("backend", "v3", "knowledge-answer-request"),
         ("backend", "v3", "knowledge-answer-response"),
         ("backend", "v3", "review-request"),
@@ -59,6 +61,21 @@ def test_optional_correction_targets_are_omittable_or_null_in_models_and_schema(
         "hsk_snapshot_as_of",
         "requirements_snapshot_as_of",
     ]
+    extraction_request_schema = get_schema("backend", "v3", "document-extraction-request")
+    extraction_result_schema = get_schema("backend", "v3", "document-extraction-result")
+    assert extraction_request_schema["required"] == [
+        "document_asset_id",
+        "extraction_request_id",
+        "source_sha256",
+        "media_type",
+    ]
+    assert extraction_result_schema["properties"]["status"]["enum"] == [
+        "preview_ready",
+        "needs_review",
+        "unavailable",
+    ]
+    assert "base64" not in extraction_request_schema["properties"]
+    assert "base64" not in extraction_result_schema["properties"]
     assert "case_input_notice" in response_schema["properties"]
     assert "guidance_resolution" in knowledge_response_schema["properties"]
     assert knowledge_response_schema["properties"]["guidance_registry_sha256"] == {

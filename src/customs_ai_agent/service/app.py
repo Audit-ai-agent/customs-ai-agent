@@ -19,6 +19,14 @@ from fastapi.responses import JSONResponse
 from customs_ai_agent.contracts import get_schema
 from customs_ai_agent.service.auth import bearer_authorized
 from customs_ai_agent.service.controller import AgentServiceController, ServiceRuntime
+from customs_ai_agent.service.document_extraction import (
+    DisabledDocumentPreviewEngine,
+    DocumentPreviewExecutionError,
+    DocumentPreviewInputError,
+    LocalDocumentPreviewEngine,
+    extract_document_preview,
+)
+from customs_ai_agent.service.document_input import read_bounded_document_body
 from customs_ai_agent.service.errors import ServiceHttpError
 from customs_ai_agent.service.input import (
     ERROR_RESPONSE_SCHEMA,
@@ -137,8 +145,9 @@ def create_app(
     *,
     runtime_factory: Callable[[ServiceSettings], ServiceRuntime] | None = None,
     readiness_probe_factory: Callable[[ServiceSettings], Callable[[], object]] | None = None,
+    document_preview_engine: LocalDocumentPreviewEngine | None = None,
 ) -> FastAPI:
-    """Create the minimal text-only internal Agent service."""
+    """Create the text-review service plus its isolated preview boundary."""
 
     active_settings = settings or ServiceSettings.from_environment()
     review_request_schema = get_schema("backend", "v3", "review-request")
@@ -147,8 +156,11 @@ def create_app(
     assistant_response_schema = get_schema("backend", "v3", "assistant-answer-response")
     knowledge_request_schema = get_schema("backend", "v3", "knowledge-answer-request")
     knowledge_response_schema = get_schema("backend", "v3", "knowledge-answer-response")
+    document_extraction_request_schema = get_schema("backend", "v3", "document-extraction-request")
+    document_extraction_result_schema = get_schema("backend", "v3", "document-extraction-result")
     make_runtime = runtime_factory or _profile_runtime
     make_readiness_probe = readiness_probe_factory or _profile_readiness_probe
+    active_document_preview_engine = document_preview_engine or DisabledDocumentPreviewEngine()
 
     @asynccontextmanager
     async def lifespan(app: FastAPI) -> AsyncIterator[None]:
@@ -174,6 +186,7 @@ def create_app(
         )
         app.state.controller = controller
         app.state.body_admission = asyncio.Semaphore(active_settings.max_concurrency)
+        app.state.document_preview_admission = asyncio.Semaphore(active_settings.max_concurrency)
         safe_log(LOGGER, logging.INFO, "service_started")
         try:
             yield
@@ -211,6 +224,66 @@ def create_app(
             return await read_bounded_json_body(request, active_settings)
         finally:
             admission.release()
+
+    async def admitted_document(request: Request) -> object:
+        """Read raw bytes only at the dedicated preview boundary."""
+
+        admission: asyncio.Semaphore = request.app.state.body_admission
+        try:
+            await asyncio.wait_for(admission.acquire(), timeout=active_settings.queue_wait_seconds)
+        except TimeoutError:
+            raise ServiceHttpError(
+                "service_busy",
+                503,
+                retryable=True,
+                retry_after_seconds=max(1, round(active_settings.queue_wait_seconds)),
+            ) from None
+        try:
+            return await read_bounded_document_body(request, active_settings)
+        finally:
+            admission.release()
+
+    async def execute_document_preview(admitted: object) -> dict[str, Any]:
+        """Run only an injected local adapter under the normal capacity bound."""
+
+        # Keep the binary value in this narrow function and avoid propagating
+        # it into the review controller, transcript code, or structured logs.
+        from customs_ai_agent.service.document_input import InspectedDocumentExtractionRequest
+
+        if not isinstance(admitted, InspectedDocumentExtractionRequest):
+            raise ServiceHttpError("internal_error", 500)
+        capacity: asyncio.Semaphore = app.state.document_preview_admission
+        try:
+            await asyncio.wait_for(capacity.acquire(), timeout=active_settings.queue_wait_seconds)
+        except TimeoutError:
+            raise ServiceHttpError(
+                "service_busy",
+                503,
+                retryable=True,
+                retry_after_seconds=max(1, round(active_settings.queue_wait_seconds)),
+            ) from None
+        try:
+            result = await asyncio.wait_for(
+                asyncio.to_thread(
+                    extract_document_preview,
+                    active_document_preview_engine,
+                    preview_input=admitted.preview_input,
+                    structure=admitted.structure,
+                    settings=active_settings,
+                ),
+                timeout=active_settings.run_timeout_seconds,
+            )
+        except TimeoutError:
+            raise ServiceHttpError("document_preview_timeout", 504, retryable=True) from None
+        except DocumentPreviewInputError:
+            raise ServiceHttpError("document_decode_invalid", 422) from None
+        except DocumentPreviewExecutionError:
+            raise ServiceHttpError("document_preview_failed", 502, retryable=True) from None
+        except Exception:
+            raise ServiceHttpError("document_preview_failed", 502, retryable=True) from None
+        finally:
+            capacity.release()
+        return result.model_dump(mode="json", warnings=False)
 
     @app.middleware("http")
     async def request_identity(request: Request, call_next: Callable[..., Any]) -> Any:
@@ -317,6 +390,70 @@ def create_app(
                 "X-Idempotent-Replay": "true" if replayed else "false",
             },
             content=outcome.result,
+        )
+
+    @app.post(
+        "/internal/agent/v2/document-extractions",
+        summary="Create one human-review-only local document extraction preview",
+        openapi_extra={
+            "security": _BEARER_SECURITY,
+            "parameters": [
+                {
+                    "in": "header",
+                    "name": "X-Document-Asset-ID",
+                    "required": True,
+                    "schema": document_extraction_request_schema["properties"]["document_asset_id"],
+                },
+                {
+                    "in": "header",
+                    "name": "X-Extraction-Request-ID",
+                    "required": True,
+                    "schema": document_extraction_request_schema["properties"][
+                        "extraction_request_id"
+                    ],
+                },
+                {
+                    "in": "header",
+                    "name": "X-Document-SHA256",
+                    "required": True,
+                    "schema": document_extraction_request_schema["properties"]["source_sha256"],
+                },
+            ],
+            "requestBody": {
+                "required": True,
+                "description": (
+                    "Identity-encoded raw bytes only. Content-Type must be application/pdf, "
+                    "image/jpeg, or image/png; multipart, JSON, and base64 are rejected."
+                ),
+                "content": {
+                    "application/pdf": {"schema": {"type": "string", "format": "binary"}},
+                    "image/jpeg": {"schema": {"type": "string", "format": "binary"}},
+                    "image/png": {"schema": {"type": "string", "format": "binary"}},
+                },
+            },
+            "x-customs-request-metadata-schema": document_extraction_request_schema,
+        },
+        responses={
+            200: {"content": {"application/json": {"schema": document_extraction_result_schema}}},
+            400: {"content": {"application/json": {"schema": ERROR_RESPONSE_SCHEMA}}},
+            401: {"content": {"application/json": {"schema": ERROR_RESPONSE_SCHEMA}}},
+            403: {"content": {"application/json": {"schema": ERROR_RESPONSE_SCHEMA}}},
+            408: {"content": {"application/json": {"schema": ERROR_RESPONSE_SCHEMA}}},
+            413: {"content": {"application/json": {"schema": ERROR_RESPONSE_SCHEMA}}},
+            415: {"content": {"application/json": {"schema": ERROR_RESPONSE_SCHEMA}}},
+            422: {"content": {"application/json": {"schema": ERROR_RESPONSE_SCHEMA}}},
+            502: {"content": {"application/json": {"schema": ERROR_RESPONSE_SCHEMA}}},
+            503: {"content": {"application/json": {"schema": ERROR_RESPONSE_SCHEMA}}},
+            504: {"content": {"application/json": {"schema": ERROR_RESPONSE_SCHEMA}}},
+        },
+    )
+    async def document_extraction(request: Request) -> JSONResponse:
+        _authorize(request, active_settings)
+        admitted = await admitted_document(request)
+        return JSONResponse(
+            status_code=200,
+            headers=_NO_STORE_HEADERS,
+            content=await execute_document_preview(admitted),
         )
 
     @app.post(

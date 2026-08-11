@@ -35,9 +35,13 @@ def build_metadata(settings: ServiceSettings) -> dict[str, Any]:
             "grounded_assistant",
             "official_trade_guidance",
             "profile_mode_handshake",
+            "human_review_document_preview",
         ],
         "limits": {
             "max_body_bytes": settings.max_body_bytes,
+            "max_document_bytes": settings.max_document_bytes,
+            "max_document_pages": settings.max_document_pages,
+            "max_document_image_pixels": settings.max_document_image_pixels,
             "max_documents": settings.max_documents,
             "max_text_characters": settings.max_text_characters,
         },
@@ -56,6 +60,12 @@ def build_metadata(settings: ServiceSettings) -> dict[str, Any]:
             ),
             "knowledge_answer_response_v1_sha256": schema_sha256(
                 "backend", "v3", "knowledge-answer-response"
+            ),
+            "document_extraction_request_v1_sha256": schema_sha256(
+                "backend", "v3", "document-extraction-request"
+            ),
+            "document_extraction_result_v1_sha256": schema_sha256(
+                "backend", "v3", "document-extraction-result"
             ),
             "evidence_retrieval_v3_sha256": schema_sha256("evidence", "v3", "rag-retrieval"),
             "evidence_guidance_query_v3_sha256": schema_sha256("evidence", "v3", "guidance-query"),
