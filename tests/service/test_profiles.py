@@ -139,7 +139,10 @@ def test_temporal_coverage_is_atomic_and_never_inferred_from_snapshot_dates() ->
     assert coverage.requirements == "unavailable"
     with pytest.raises(RetrievalError, match="temporal coverage is invalid"):
         _temporal_coverage_from_data(
-            {"temporal_context": response["temporal_context"], "temporal_coverage": {"law": "covered"}},
+            {
+                "temporal_context": response["temporal_context"],
+                "temporal_coverage": {"law": "covered"},
+            },
             required=True,
         )
     with pytest.raises(RetrievalError, match="temporal coverage requires temporal context"):

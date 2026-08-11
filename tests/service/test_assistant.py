@@ -1244,7 +1244,9 @@ def test_case_two_v2_scopes_use_the_fixed_four_section_checklist(
         "case_application",
     ]
     assert [section.resolution_index for section in answer.answer_sections] == [None, 0, 1, None]
-    assert {citation.resolution_index for citation in answer.citations if hasattr(citation, "source_id")} == {
+    assert {
+        citation.resolution_index for citation in answer.citations if hasattr(citation, "source_id")
+    } == {
         0,
         1,
     }

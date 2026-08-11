@@ -679,9 +679,13 @@ def _validate_knowledge_multi_scope_answer(answer: KnowledgeAnswerResponseV1) ->
     top_ids = set(identities)
     for index, (resolution, section) in enumerate(zip(resolutions, answer.answer_sections)):
         scoped = [item for item in answer.citations if item.resolution_index == index]
-        if not scoped or not section.citations or any(
-            not isinstance(item, GuidanceCitationV1) or item.resolution_index != index
-            for item in section.citations
+        if (
+            not scoped
+            or not section.citations
+            or any(
+                not isinstance(item, GuidanceCitationV1) or item.resolution_index != index
+                for item in section.citations
+            )
         ):
             raise ValueError("each multi-scope knowledge section requires its own citations")
         if any(

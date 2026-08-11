@@ -409,7 +409,9 @@ def deterministic_assistant_answer(
                 f"현재 사건의 관련 비교 결과는 ‘{comparison.message}’입니다. "
                 "이 결과는 자동 결론이 아니며, 공식 안내와 원문을 담당자가 함께 확인해야 합니다."
             ),
-            citations=[AssistantCitationV1(kind="comparison", reference_id=comparison.comparison_id)],
+            citations=[
+                AssistantCitationV1(kind="comparison", reference_id=comparison.comparison_id)
+            ],
             suggestions=["현재 사건에서 추가로 확인할 문서 비교 항목은 무엇인가요?"],
         )
     if policy.scope == "general_customs_guidance":
@@ -1513,7 +1515,12 @@ def _multi_scope_unavailable_text(resolutions: list[GuidanceResolutionV1]) -> st
     lines = [
         "두 공식 안내를 함께 종합할 수 있는 근거가 충분하지 않아 사건 적용 또는 결론을 만들지 않았습니다."
     ]
-    labels = {"covered": "확인됨", "no_coverage": "등록 자료 없음", "partial": "자료 범위 일부", "unavailable": "snapshot을 사용할 수 없음"}
+    labels = {
+        "covered": "확인됨",
+        "no_coverage": "등록 자료 없음",
+        "partial": "자료 범위 일부",
+        "unavailable": "snapshot을 사용할 수 없음",
+    }
     for index, resolution in enumerate(resolutions, start=1):
         label = _guidance_scope_label(
             resolution.topic,

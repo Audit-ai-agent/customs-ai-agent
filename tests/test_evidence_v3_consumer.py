@@ -57,9 +57,12 @@ def test_data_contract_resources_are_the_only_packaged_evidence_contracts() -> N
         "enum"
     ] == ["import", "export", "both"]
     assert "scope_hint" in guidance["$defs"]["GeneralGuidanceQueryRequestV3"]["properties"]
-    assert guidance["$defs"]["GeneralGuidanceQueryRequestV3"]["properties"][
-        "expected_snapshot_id"
-    ]["anyOf"][0]["pattern"] == "^[a-z0-9][a-z0-9-]{2,80}$"
+    assert (
+        guidance["$defs"]["GeneralGuidanceQueryRequestV3"]["properties"]["expected_snapshot_id"][
+            "anyOf"
+        ][0]["pattern"]
+        == "^[a-z0-9][a-z0-9-]{2,80}$"
+    )
     response = guidance["$defs"]["GeneralGuidanceQueryResponseV3"]
     source = guidance["$defs"]["GuidanceSourceV3"]
     assert response["properties"]["registry_sha256"]["pattern"] == "^[a-f0-9]{64}$"

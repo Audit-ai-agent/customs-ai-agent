@@ -1041,9 +1041,7 @@ def _guidance_query_request(
         expected_snapshot_id is not None
         and _GUIDANCE_SNAPSHOT_ID.fullmatch(expected_snapshot_id) is None
     ):
-        raise RuntimeInputError(
-            "guidance_snapshot_pin_invalid", "guidance snapshot pin is invalid"
-        )
+        raise RuntimeInputError("guidance_snapshot_pin_invalid", "guidance snapshot pin is invalid")
     if registry_version == "1.0":
         if expected_snapshot_id is not None:
             raise RuntimeInputError(
@@ -1783,7 +1781,11 @@ class ProfileRuntime:
             except (RetrievalError, ValueError):
                 context = None
             contexts.append(context)
-            if selected_snapshot_id is None and context is not None and context.snapshot_id is not None:
+            if (
+                selected_snapshot_id is None
+                and context is not None
+                and context.snapshot_id is not None
+            ):
                 selected_snapshot_id = context.snapshot_id
         return contexts[0], contexts[1]
 
