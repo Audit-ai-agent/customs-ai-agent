@@ -13,6 +13,8 @@ REPORT_PROMPT_ID = "customs_grounded_review_report"
 REPORT_PROMPT_VERSION = "1.0.3"
 KNOWLEDGE_PROMPT_ID = "customs_official_trade_guidance"
 KNOWLEDGE_PROMPT_VERSION = "1.1.0"
+EVIDENCE_RELEVANCE_PROMPT_ID = "customs_evidence_relevance"
+EVIDENCE_RELEVANCE_PROMPT_VERSION = "1.0.0"
 
 
 def load_document_analysis_system_prompt() -> str:
@@ -39,6 +41,14 @@ def load_grounded_report_system_prompt() -> str:
     )
 
 
+def load_evidence_relevance_system_prompt() -> str:
+    return (
+        files("customs_ai_agent.prompts")
+        .joinpath("evidence_relevance_v1.txt")
+        .read_text(encoding="utf-8")
+    )
+
+
 def load_official_guidance_system_prompt() -> str:
     return (
         files("customs_ai_agent.prompts")
@@ -56,7 +66,10 @@ __all__ = [
     "REPORT_PROMPT_VERSION",
     "KNOWLEDGE_PROMPT_ID",
     "KNOWLEDGE_PROMPT_VERSION",
+    "EVIDENCE_RELEVANCE_PROMPT_ID",
+    "EVIDENCE_RELEVANCE_PROMPT_VERSION",
     "load_document_analysis_system_prompt",
+    "load_evidence_relevance_system_prompt",
     "load_grounded_assistant_system_prompt",
     "load_grounded_report_system_prompt",
     "load_official_guidance_system_prompt",

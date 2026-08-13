@@ -14,6 +14,7 @@ from pydantic import BaseModel, ConfigDict, Field, SecretStr, ValidationError, f
 from customs_ai_agent.prompts import (
     load_document_analysis_system_prompt,
     load_grounded_assistant_system_prompt,
+    load_evidence_relevance_system_prompt,
     load_grounded_report_system_prompt,
     load_official_guidance_system_prompt,
 )
@@ -285,6 +286,7 @@ class ClaudeGroundedResponder:
         self._system_prompt = load_grounded_assistant_system_prompt()
         self._report_system_prompt = load_grounded_report_system_prompt()
         self._guidance_system_prompt = load_official_guidance_system_prompt()
+        self._evidence_relevance_system_prompt = load_evidence_relevance_system_prompt()
 
     @classmethod
     def from_settings(cls, settings: ClaudeSettings) -> "ClaudeGroundedResponder":
@@ -318,12 +320,18 @@ class ClaudeGroundedResponder:
     ) -> dict[str, Any]:
         """Make exactly one direct provider call and return its JSON object."""
 
-        if purpose not in {"assistant_answer", "review_report", "knowledge_answer"}:
+        if purpose not in {
+            "assistant_answer",
+            "review_report",
+            "knowledge_answer",
+            "evidence_relevance",
+        }:
             raise LLMOutputValidationError("Claude response purpose is invalid.")
         system_prompt = {
             "review_report": self._report_system_prompt,
             "assistant_answer": self._system_prompt,
             "knowledge_answer": self._guidance_system_prompt,
+            "evidence_relevance": self._evidence_relevance_system_prompt,
         }[purpose]
         user_message = json.dumps(payload, ensure_ascii=False, separators=(",", ":"), default=str)
         request_payload = {

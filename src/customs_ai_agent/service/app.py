@@ -7,6 +7,8 @@ human correction decisions.
 
 from __future__ import annotations
 
+import re
+
 import asyncio
 import logging
 from contextlib import asynccontextmanager
@@ -29,6 +31,7 @@ from customs_ai_agent.service.document_extraction import (
 from customs_ai_agent.service.document_input import read_bounded_document_body
 from customs_ai_agent.service.document_preview_runtime import resolve_document_preview_engine
 from customs_ai_agent.service.errors import ServiceHttpError
+from customs_ai_agent.service.progress import PROGRESS
 from customs_ai_agent.service.input import (
     ERROR_RESPONSE_SCHEMA,
     inspect_assistant_request,
@@ -49,6 +52,7 @@ from customs_ai_agent.service.telemetry import safe_log
 
 
 LOGGER = logging.getLogger("customs_ai_agent.service")
+_SAFE_PROGRESS_RUN_ID = re.compile(r"^[A-Za-z0-9][A-Za-z0-9._:-]{0,127}$")
 _NO_STORE_HEADERS = {
     "Cache-Control": "no-store",
     "X-Content-Type-Options": "nosniff",
@@ -424,6 +428,25 @@ def create_app(
             },
             content=outcome.result,
         )
+
+    @app.get(
+        "/internal/agent/v3/reviews/{review_run_id}/progress",
+        summary="Read display-only live progress for one in-flight review",
+        openapi_extra={"security": _BEARER_SECURITY},
+        responses={
+            401: {"content": {"application/json": {"schema": ERROR_RESPONSE_SCHEMA}}},
+            403: {"content": {"application/json": {"schema": ERROR_RESPONSE_SCHEMA}}},
+            404: {"content": {"application/json": {"schema": ERROR_RESPONSE_SCHEMA}}},
+        },
+    )
+    async def review_progress(request: Request, review_run_id: str) -> JSONResponse:
+        _authorize(request, active_settings)
+        if not _SAFE_PROGRESS_RUN_ID.fullmatch(review_run_id):
+            raise ServiceHttpError("request_invalid", 422)
+        snapshot = PROGRESS.snapshot(review_run_id)
+        if snapshot is None:
+            raise ServiceHttpError("review_progress_not_found", 404)
+        return JSONResponse(status_code=200, headers=_NO_STORE_HEADERS, content=snapshot)
 
     @app.post(
         "/internal/agent/v2/document-extractions",
