@@ -1017,6 +1017,44 @@ def _chunks(text: str, *, size: int = 8_000) -> list[str]:
     return [normalized[index : index + size] for index in range(0, len(normalized), size)]
 
 
+def _docling_preview_pages(
+    *, page_numbers: Sequence[int], markdown_text: str
+) -> list[DocumentPreviewPageV1]:
+    """Preserve every bounded Docling markdown chunk without inventing pages.
+
+    ``export_to_markdown`` is document-global in the pinned Docling API, so it
+    does not safely expose a page boundary for every chunk.  Assigning all
+    chunks to the first admitted page is conservative and retains the complete
+    candidate text; assigning later chunks to guessed pages would corrupt
+    page/span provenance.  Table cells remain unavailable until an adapter
+    exposes real structured coordinates.
+    """
+
+    chunks = _chunks(markdown_text)
+    return [
+        DocumentPreviewPageV1(
+            page_number=page_number,
+            width=1,
+            height=1,
+            coordinate_unit="pdf_points",
+            spans=(
+                [
+                    DocumentSpanV1(
+                        span_id=f"page-1-span-{ordinal}",
+                        ordinal=ordinal,
+                        reading_order=ordinal,
+                        text=chunk,
+                    )
+                    for ordinal, chunk in enumerate(chunks, start=1)
+                ]
+                if page_number == 1
+                else []
+            ),
+        )
+        for page_number in page_numbers
+    ]
+
+
 def _pdf_page_dimensions(page: object) -> tuple[int, int]:
     try:
         mediabox = getattr(page, "mediabox")
@@ -1300,28 +1338,10 @@ class DoclingPdfPreviewAdapter:
             document = result.document
             page_values = getattr(document, "pages", {})
             page_numbers = sorted(int(number) for number in page_values) if page_values else [1]
-            text = str(document.export_to_markdown()).strip()
-            pages = [
-                DocumentPreviewPageV1(
-                    page_number=index,
-                    width=1,
-                    height=1,
-                    coordinate_unit="pdf_points",
-                    spans=(
-                        [
-                            DocumentSpanV1(
-                                span_id="page-1-span-1",
-                                ordinal=1,
-                                reading_order=1,
-                                text=chunk,
-                            )
-                        ]
-                        if index == 1 and (chunk := _chunks(text)[0] if _chunks(text) else "")
-                        else []
-                    ),
-                )
-                for index in page_numbers
-            ]
+            pages = _docling_preview_pages(
+                page_numbers=page_numbers,
+                markdown_text=str(document.export_to_markdown()),
+            )
         except DocumentPreviewUnavailable:
             raise
         except Exception as error:

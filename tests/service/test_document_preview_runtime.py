@@ -19,6 +19,7 @@ from customs_ai_agent.service.document_extraction import DocumentPreviewUnavaila
 from customs_ai_agent.service.document_preview_runtime import (
     ApprovedPdfOnlyPreviewEngine,
     DocumentPreviewRuntimeError,
+    _docling_preview_pages,
     load_approved_pdf_preview_binding,
     local_files_only,
     parse_sealed_evaluation_result,
@@ -293,3 +294,12 @@ def test_settings_expose_only_paired_local_approval_opt_in(tmp_path: Path) -> No
 def test_local_adapter_network_guard_blocks_socket_connection() -> None:
     with local_files_only(), pytest.raises(OSError, match="forbids network access"):
         socket.create_connection(("127.0.0.1", 9), timeout=0.01)
+
+
+def test_docling_markdown_preview_keeps_every_bounded_chunk_without_guessing_pages() -> None:
+    markdown = "A" * 8_000 + "B" * 19
+
+    pages = _docling_preview_pages(page_numbers=[1, 2], markdown_text=markdown)
+
+    assert [span.text for span in pages[0].spans] == ["A" * 8_000, "B" * 19]
+    assert pages[1].spans == []

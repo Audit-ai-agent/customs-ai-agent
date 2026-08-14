@@ -781,6 +781,145 @@ class CandidateOutputBundleV1(_WireModel):
         return self
 
 
+CandidateProfileMode = Literal["offline_synthetic_pdf_evaluation"]
+
+
+class SyntheticPdfCandidateOutputBundleV1(_WireModel):
+    """Immutable provenance wrapper emitted only by the local candidate runner.
+
+    ``CandidateOutputBundleV1`` remains a small generic scorer input for the
+    existing unit-level evaluator.  This wrapper is the production-quality
+    local artifact: it prevents a result from being relabelled as a different
+    engine/configuration after OCR bytes have been produced.  It deliberately
+    has no Gold receipt, review status, or approval field; candidate extraction
+    must happen without reading Gold.
+    """
+
+    schema_version: Literal["1.0"] = "1.0"
+    artifact_kind: Literal["synthetic_pdf_candidate_output"] = "synthetic_pdf_candidate_output"
+    profile_mode: CandidateProfileMode = "offline_synthetic_pdf_evaluation"
+    parser_revision: str = Field(min_length=1, max_length=128, pattern=_IDENTIFIER)
+    dataset_id: str = Field(min_length=1, max_length=128, pattern=_IDENTIFIER)
+    dataset_revision: str = Field(min_length=1, max_length=128, pattern=_IDENTIFIER)
+    packet_receipt_sha256: str = Field(pattern=_SHA256)
+    engine_kind: EngineKind
+    extractor_revision: str = Field(min_length=1, max_length=128, pattern=_IDENTIFIER)
+    configuration_sha256: str = Field(pattern=_SHA256)
+    model_inventory_sha256: str = Field(pattern=_SHA256)
+    documents: list[CandidateDocumentOutputV1] = Field(min_length=1, max_length=100_000)
+    candidate_bundle_sha256: str = Field(pattern=_SHA256)
+
+    @model_validator(mode="after")
+    def _bundle_is_unique_and_bound(self) -> "SyntheticPdfCandidateOutputBundleV1":
+        asset_ids = [document.asset_id for document in self.documents]
+        if len(asset_ids) != len(set(asset_ids)):
+            raise ValueError("synthetic candidate output asset IDs must be unique")
+        if self.candidate_bundle_sha256 != candidate_bundle_sha256(self):
+            raise ValueError("synthetic candidate output bundle SHA-256 mismatch")
+        return self
+
+
+def _candidate_bundle_digest_payload(
+    bundle: SyntheticPdfCandidateOutputBundleV1 | Mapping[str, object],
+) -> dict[str, object]:
+    payload = (
+        bundle.model_dump(mode="json", warnings=False)
+        if isinstance(bundle, SyntheticPdfCandidateOutputBundleV1)
+        else dict(bundle)
+    )
+    payload.pop("candidate_bundle_sha256", None)
+    return payload
+
+
+def candidate_bundle_sha256(
+    bundle: SyntheticPdfCandidateOutputBundleV1 | Mapping[str, object],
+) -> str:
+    """Return the semantic digest used by the local raw-candidate artifact."""
+
+    return sha256_bytes(canonical_json_bytes(_candidate_bundle_digest_payload(bundle)))
+
+
+def candidate_output_from_synthetic_bundle(
+    bundle: SyntheticPdfCandidateOutputBundleV1,
+) -> CandidateOutputBundleV1:
+    """Project a provenance-bound local artifact to the legacy scorer shape."""
+
+    return CandidateOutputBundleV1(
+        dataset_id=bundle.dataset_id,
+        dataset_revision=bundle.dataset_revision,
+        packet_receipt_sha256=bundle.packet_receipt_sha256,
+        documents=bundle.documents,
+    )
+
+
+def validate_synthetic_candidate_output_provenance(
+    *,
+    candidate_output: SyntheticPdfCandidateOutputBundleV1,
+    packet: EvaluationPacketV2,
+    engine_kind: EngineKind,
+    extractor_revision: str,
+    configuration_sha256: str,
+    model_inventory_sha256: str,
+    parser_revision: str,
+) -> None:
+    """Require the externally verified profile to match every candidate byte.
+
+    The caller obtains the expected values from local runtime configuration and
+    inventory sidecars, rather than trusting a CLI label.  This prevents a
+    generated candidate bundle from being scored under another engine, model,
+    parser, or configuration identity.
+    """
+
+    if (
+        candidate_output.dataset_id != packet.dataset_id
+        or candidate_output.dataset_revision != packet.dataset_revision
+        or candidate_output.packet_receipt_sha256 != packet.packet_receipt_sha256
+        or candidate_output.engine_kind != engine_kind
+        or candidate_output.extractor_revision != extractor_revision
+        or candidate_output.configuration_sha256 != configuration_sha256
+        or candidate_output.model_inventory_sha256 != model_inventory_sha256
+        or candidate_output.parser_revision != parser_revision
+    ):
+        raise ValueError(
+            "synthetic candidate output provenance does not match the evaluation profile"
+        )
+
+
+def score_synthetic_pdf_candidate_output(
+    *,
+    receipt: DatasetReceiptV1,
+    packet: EvaluationPacketV2,
+    gold_packet: GoldPacketV2,
+    candidate_output: SyntheticPdfCandidateOutputBundleV1,
+    engine_kind: EngineKind,
+    extractor_revision: str,
+    configuration_sha256: str,
+    model_inventory_sha256: str,
+    parser_revision: str,
+) -> OcrEvaluationResultV1:
+    """Score only a provenance-bound local synthetic-PDF candidate bundle."""
+
+    validate_synthetic_candidate_output_provenance(
+        candidate_output=candidate_output,
+        packet=packet,
+        engine_kind=engine_kind,
+        extractor_revision=extractor_revision,
+        configuration_sha256=configuration_sha256,
+        model_inventory_sha256=model_inventory_sha256,
+        parser_revision=parser_revision,
+    )
+    return score_candidate_output(
+        receipt=receipt,
+        packet=packet,
+        gold_packet=gold_packet,
+        candidate_output=candidate_output_from_synthetic_bundle(candidate_output),
+        engine_kind=engine_kind,
+        extractor_revision=extractor_revision,
+        configuration_sha256=configuration_sha256,
+        model_inventory_sha256=model_inventory_sha256,
+    )
+
+
 class OcrQualityMetricsV1(_WireModel):
     field_exact_match: float = Field(ge=0, le=1)
     ocr_cer: float = Field(ge=0, le=1)
@@ -949,7 +1088,12 @@ def score_candidate_output(
 def select_best_development_result(
     results: Sequence[OcrEvaluationResultV1],
 ) -> OcrEvaluationResultV1:
-    """Choose exactly one passing development candidate with deterministic ties."""
+    """Choose one passing candidate only after all three engines were measured.
+
+    A partial comparison can make a convenient engine look like the winner.
+    Development selection therefore requires exactly one result for each
+    supported engine, all bound to the same immutable packet and Gold receipt.
+    """
 
     if not results:
         raise ValueError("at least one development evaluation result is required")
@@ -974,6 +1118,12 @@ def select_best_development_result(
             != identity
         ):
             raise ValueError("development candidates must share one exact packet and Gold receipt")
+    expected_engines = {"pdf_text_layer", "paddleocr", "docling"}
+    actual_engines = [result.engine_kind for result in results]
+    if len(results) != len(expected_engines) or set(actual_engines) != expected_engines:
+        raise ValueError(
+            "no development OCR candidate set contains exactly one result for every engine"
+        )
     passing = [result for result in results if result.passed]
     if not passing:
         raise ValueError("no development OCR candidate passed every fixed release gate")
@@ -1334,6 +1484,7 @@ def build_synthetic_pdf_draft_gold(
 __all__ = [
     "CandidateDocumentOutputV1",
     "CandidateFieldV1",
+    "CandidateProfileMode",
     "CandidateOutputBundleV1",
     "CandidateSpanV1",
     "CandidateTableCellV1",
@@ -1351,12 +1502,15 @@ __all__ = [
     "ReviewerApprovalV1",
     "SourceGroundTruthAttestationV1",
     "StratifiedPacketItemV2",
+    "SyntheticPdfCandidateOutputBundleV1",
     "SyntheticDocumentType",
     "approve_gold_record",
     "build_draft_gold_record",
     "build_gold_packet",
     "build_stratified_pdf_gold_packets",
     "build_synthetic_pdf_draft_gold",
+    "candidate_bundle_sha256",
+    "candidate_output_from_synthetic_bundle",
     "canonical_json_bytes",
     "canonical_json_file_bytes",
     "canonical_span_text",
@@ -1371,10 +1525,12 @@ __all__ = [
     "read_canonical_evaluation_result",
     "receipt_sha256",
     "score_candidate_output",
+    "score_synthetic_pdf_candidate_output",
     "select_best_development_result",
     "sha256_file",
     "validate_evaluation_run_state",
     "validate_gold_packet_for_evaluation",
+    "validate_synthetic_candidate_output_provenance",
     "verify_receipt_source_assets",
     "write_evaluation_result",
 ]
