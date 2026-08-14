@@ -2,6 +2,7 @@ from __future__ import annotations
 
 import hashlib
 import json
+from datetime import datetime, timezone
 from pathlib import Path
 
 from fastapi.testclient import TestClient
@@ -13,6 +14,18 @@ from customs_ai_agent.evaluation.document_gold import (
     EvaluationPacketItemV1,
     EvaluationPacketV1,
     receipt_sha256,
+)
+from customs_ai_agent.evaluation.document_ocr_quality import (
+    EvaluationPacketV2,
+    GoldFieldV2,
+    GoldSpanV2,
+    GoldTableCellV2,
+    SourceGroundTruthAttestationV1,
+    approve_gold_record,
+    build_draft_gold_record,
+    build_gold_packet,
+    canonical_json_file_bytes,
+    ground_truth_receipt_sha256,
 )
 from tools.review_document_gold import (
     ReviewContext,
@@ -123,13 +136,40 @@ def _submission(source_sha256: str) -> dict[str, object]:
         "table_cells": [
             {
                 "page_number": 1,
-                "table_index": 0,
+                "table_index": 1,
                 "row_index": 0,
                 "column_index": 0,
                 "text": "Widget",
             }
         ],
     }
+
+
+def _seeded_gold_draft(context: ReviewContext, packet_path: Path, output: Path) -> Path:
+    """Create a minimal source-attested v2 draft solely for loopback UI tests."""
+
+    packet = EvaluationPacketV2.model_validate_json(packet_path.read_bytes())
+    item = packet.items[0]
+    attestation_payload: dict[str, object] = {
+        "source_kind": "synthetic_pdf_manifest_v1",
+        "clean_manifest_sha256": "c" * 64,
+        "error_labels_sha256": "e" * 64,
+        "source_set_id": item.set_id,
+        "error_label_sha256s": [],
+    }
+    attestation_payload["ground_truth_receipt_sha256"] = ground_truth_receipt_sha256(
+        attestation_payload
+    )
+    record = build_draft_gold_record(
+        packet=packet,
+        item=item,
+        fields=[GoldFieldV2(field_name="inv_no", value="INV-001", normalizer="identifier-v1")],
+        source_attestation=SourceGroundTruthAttestationV1.model_validate(attestation_payload),
+    )
+    gold = build_gold_packet(packet=packet, records=[record])
+    path = output.parent / "seeded-gold.json"
+    path.write_bytes(canonical_json_file_bytes(gold.model_dump(mode="json")))
+    return path
 
 
 def test_loopback_review_serves_only_bound_pdf_and_saves_local_intermediate_draft(
@@ -174,6 +214,95 @@ def test_loopback_review_serves_only_bound_pdf_and_saves_local_intermediate_draf
     assert exported["approval_id"] == "approval-001"
     assert exported["packet_receipt_sha256"] == context.packet.packet_receipt_sha256
     assert "adjudication_status" not in exported
+
+
+def test_review_prefills_exact_source_attested_fields_without_approving_gold(
+    tmp_path: Path,
+) -> None:
+    context, source, packet_path, output = _context(tmp_path)
+    gold_path = _seeded_gold_draft(context, packet_path, output)
+    prefilled_context = ReviewContext.from_paths(
+        receipt_path=context.receipt_path,
+        packet_path=packet_path,
+        dataset_root=context.dataset_root,
+        output_directory=output,
+        gold_draft_path=gold_path,
+    )
+    app = create_review_app(prefilled_context)
+
+    with TestClient(app, raise_server_exceptions=False) as client:
+        response = client.get("/api/drafts/asset-001")
+
+    assert response.status_code == 200
+    draft = response.json()["draft"]
+    assert draft["review_status"] == "draft"
+    assert draft["review_origin"] == "loopback_review_v1"
+    assert draft["fields"] == [{"field_name": "inv_no", "value": "INV-001", "page_number": None}]
+    assert draft["spans"] == []
+    assert not (output / "drafts" / "asset-001.json").exists()
+
+
+def test_review_rejects_an_approved_or_mixed_gold_packet_as_prefill(tmp_path: Path) -> None:
+    context, _, packet_path, output = _context(tmp_path)
+    draft_path = _seeded_gold_draft(context, packet_path, output)
+    packet = EvaluationPacketV2.model_validate_json(packet_path.read_bytes())
+    draft_gold = build_gold_packet(
+        packet=packet,
+        records=[
+            approve_gold_record(
+                build_draft_gold_record(
+                    packet=packet,
+                    item=packet.items[0],
+                    fields=[
+                        GoldFieldV2(
+                            field_name="inv_no", value="INV-001", normalizer="identifier-v1"
+                        )
+                    ],
+                    spans=[GoldSpanV2(page_number=1, text="INV-001", reading_order=1)],
+                    table_cells=[
+                        GoldTableCellV2(
+                            page_number=1,
+                            table_index=1,
+                            row_index=0,
+                            column_index=0,
+                            text="Widget",
+                        )
+                    ],
+                    source_attestation=SourceGroundTruthAttestationV1.model_validate(
+                        {
+                            "source_kind": "synthetic_pdf_manifest_v1",
+                            "clean_manifest_sha256": "c" * 64,
+                            "error_labels_sha256": "e" * 64,
+                            "source_set_id": "set-001",
+                            "error_label_sha256s": [],
+                            "ground_truth_receipt_sha256": ground_truth_receipt_sha256(
+                                {
+                                    "source_kind": "synthetic_pdf_manifest_v1",
+                                    "clean_manifest_sha256": "c" * 64,
+                                    "error_labels_sha256": "e" * 64,
+                                    "source_set_id": "set-001",
+                                    "error_label_sha256s": [],
+                                }
+                            ),
+                        }
+                    ),
+                ),
+                approval_id="approval-001",
+                reviewer_id_sha256=hashlib.sha256(b"reviewer-001").hexdigest(),
+                approved_at=datetime(2026, 8, 14, tzinfo=timezone.utc),
+            )
+        ],
+    )
+    draft_path.write_bytes(canonical_json_file_bytes(draft_gold.model_dump(mode="json")))
+
+    with pytest.raises(ReviewToolError, match="gold_draft_binding_invalid"):
+        ReviewContext.from_paths(
+            receipt_path=context.receipt_path,
+            packet_path=packet_path,
+            dataset_root=context.dataset_root,
+            output_directory=output,
+            gold_draft_path=draft_path,
+        )
 
 
 def test_review_refuses_source_change_and_never_exposes_source_text_in_error(

@@ -26,11 +26,18 @@ uv run --locked --no-sync --group dev python tools/review_document_gold.py `
   --receipt <workspace>/_local/data/receipts/<dataset>/<revision>/dataset-receipt.json `
   --packet <workspace>/_local/data/evaluation/<dataset>/<revision>/document-preview-development-stratified-v2.json `
   --dataset-root <workspace>/_local/data/document-preview/<pdf-dataset> `
-  --output-directory <workspace>/_local/data/gold-review/<dataset>/<revision>
+  --output-directory <workspace>/_local/data/gold-review/<dataset>/<revision> `
+  --gold-draft <workspace>/_local/data/document-preview/gold/<seeded-draft>.json
 ```
 
 브라우저는 도구가 표시한 loopback 주소에서만 연다. 장기 실행 server나 외부 OCR
 model 다운로드를 이 도구가 수행하지 않는다.
+
+`--gold-draft`는 선택 사항이다. 지정하면 source-attested **draft** Gold의 field
+값만 화면의 초기 후보로 채운다. receipt·dataset revision·packet receipt·각 PDF
+source SHA·exact asset coverage가 모두 같고 Gold 상태가 `draft`일 때만 허용한다.
+이 경우에도 span/table cell, 검수자 식별자, 제출 상태는 사람이 직접 확인·입력해야
+하며, 화면은 `human_adjudicated`로 바꾸지 않는다.
 
 ## stratified-v2 입력과 handoff
 
@@ -60,3 +67,29 @@ dataset/revision + receipt SHA + packet receipt SHA + packet kind/split
 이 handoff에는 `human_adjudicated`가 없으며, Gold pipeline이 source SHA, packet
 coverage, dataset revision, approval ID를 다시 검증한 뒤에만 최종 Gold로 승격할 수
 있다.
+
+## 사람 승인 Gold 확정
+
+`tools/finalize_synthetic_pdf_ocr_gold.py`가 이 별도 승격 단계다. PDF 원본·Gold·검수
+draft는 모두 `_local/data/` 아래에 있어야 하며, 이 명령은 네트워크·OCR·서버 실행을
+하지 않는다.
+
+```powershell
+uv run --locked --no-sync --group dev python tools/finalize_synthetic_pdf_ocr_gold.py `
+  --receipt <workspace>/_local/data/receipts/<dataset>/<revision>/dataset-receipt.json `
+  --packet <workspace>/_local/data/evaluation/<dataset>/<revision>/document-preview-development-stratified-v2.json `
+  --seeded-gold <workspace>/_local/data/document-preview/gold/<seeded-draft>.json `
+  --source-directory <workspace>/_local/data/document-preview/<pdf-dataset> `
+  --review-draft-directory <workspace>/_local/data/gold-review/<dataset>/<revision>/drafts `
+  --output-directory <workspace>/_local/data/document-preview/gold-approved `
+  --approval-id <opaque-approval-id> `
+  --reviewer-id <opaque-reviewer-id> `
+  --confirm-human-adjudication
+```
+
+`--confirm-human-adjudication`은 실제 렌더링 PDF를 검수한 사람이 실행할 때만
+지정한다. 선택된 **모든** asset에 대해 `loopback_review_v1` origin,
+`reviewer_submitted`, 동일한 reviewer/approval ID, nonempty field/span/table cell,
+receipt·packet·source SHA 결속이 있어야 한다. 하나라도 누락·중복·혼합·변조되면
+fail-closed한다. 최종 Gold에는 reviewer ID 원문 대신 SHA-256만 저장하고, 명령 출력도
+원문 field/OCR text/사람 식별자를 포함하지 않는다.

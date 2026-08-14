@@ -31,6 +31,12 @@ from customs_ai_agent.evaluation.document_gold import (
     EvaluationPacketV1,
     receipt_sha256,
 )
+from customs_ai_agent.evaluation.document_ocr_quality import (
+    EvaluationPacketV2,
+    GoldPacketV2,
+    build_gold_packet,
+    canonical_json_file_bytes,
+)
 from customs_ai_agent.schemas.document_extraction import BoundingBoxV1
 
 
@@ -113,7 +119,11 @@ class LocalReviewSpanV1(_LocalReviewModel):
 
 class LocalReviewTableCellV1(_LocalReviewModel):
     page_number: int = Field(ge=1, le=1_000)
-    table_index: int = Field(ge=0, le=10_000)
+    # The immutable OCR-Gold and candidate contracts use one-based table
+    # indexes.  Keep the local reviewer on that same representation so a
+    # later finalizer never has to guess whether an edited cell was zero- or
+    # one-based.
+    table_index: int = Field(ge=1, le=10_000)
     row_index: int = Field(ge=0, le=100_000)
     column_index: int = Field(ge=0, le=10_000)
     text: str = Field(max_length=32_000)
@@ -155,6 +165,10 @@ class LocalGoldReviewDraftV1(_LocalReviewModel):
     """Local intermediate only; the Gold pipeline owns final adjudication."""
 
     schema_version: Literal["local-gold-review-draft-v1"] = "local-gold-review-draft-v1"
+    # This is emitted only by the loopback CLI.  The finalizer requires the
+    # marker instead of accepting arbitrary JSON that merely resembles a
+    # reviewer handoff.
+    review_origin: Literal["loopback_review_v1"]
     dataset_id: str = Field(min_length=1, max_length=128, pattern=_IDENTIFIER)
     dataset_revision: str = Field(min_length=1, max_length=128, pattern=_IDENTIFIER)
     receipt_sha256: str = Field(pattern=r"^[a-f0-9]{64}$")
@@ -169,6 +183,14 @@ class LocalGoldReviewDraftV1(_LocalReviewModel):
     fields: list[LocalReviewFieldV1] = Field(default_factory=list, max_length=10_000)
     spans: list[LocalReviewSpanV1] = Field(default_factory=list, max_length=100_000)
     table_cells: list[LocalReviewTableCellV1] = Field(default_factory=list, max_length=100_000)
+
+    @model_validator(mode="after")
+    def _submitted_draft_keeps_its_human_handoff_identity(self) -> "LocalGoldReviewDraftV1":
+        if self.review_status == "reviewer_submitted" and (
+            self.reviewer_id is None or self.approval_id is None
+        ):
+            raise ValueError("reviewer_submitted requires reviewer_id and approval_id")
+        return self
 
 
 @dataclass(frozen=True)
@@ -272,22 +294,85 @@ def _parse_packet(raw: dict[str, object]) -> ReviewPacket:
     return ReviewPacket(
         packet_kind="legacy-v1",
         split=parsed_v1.split,
-            dataset_id=parsed_v1.dataset_id,
-            dataset_revision=parsed_v1.dataset_revision,
-            receipt_sha256=parsed_v1.receipt_sha256,
-            packet_receipt_sha256=_sha256_bytes(_canonical_json_bytes(raw)),
-            items=tuple(
-                ReviewPacketItemV2(
-                    asset_id=item.asset_id,
-                    source_sha256=item.source_sha256,
-                    media_type=item.media_type,
-                    fixture_kind="clean",
-                    document_type="invoice",
-                    set_id="legacy-v1",
+        dataset_id=parsed_v1.dataset_id,
+        dataset_revision=parsed_v1.dataset_revision,
+        receipt_sha256=parsed_v1.receipt_sha256,
+        packet_receipt_sha256=_sha256_bytes(_canonical_json_bytes(raw)),
+        items=tuple(
+            ReviewPacketItemV2(
+                asset_id=item.asset_id,
+                source_sha256=item.source_sha256,
+                media_type=item.media_type,
+                fixture_kind="clean",
+                document_type="invoice",
+                set_id="legacy-v1",
             )
             for item in parsed_v1.items
         ),
     )
+
+
+def _load_seeded_gold_fields(
+    *,
+    gold_draft_path: Path,
+    packet_raw: dict[str, object],
+    packet: ReviewPacket,
+    receipt: DatasetReceiptV1,
+) -> tuple[Path, str, dict[str, tuple[LocalReviewFieldV1, ...]]]:
+    """Read one immutable v2 Gold draft for UI field prefill.
+
+    The review server never trusts a field list by itself.  It first requires
+    the full source-attested Gold packet to be a byte-canonical local draft,
+    then rebuilds the packet against the exact evaluation packet.  This keeps
+    a stale or mixed draft from appearing in a different PDF review session.
+    """
+
+    if packet.packet_kind != "stratified-v2":
+        raise ReviewToolError("gold_draft_requires_stratified_packet")
+    safe_gold_draft_path = _require_local_file(gold_draft_path)
+    gold_raw, gold_draft_file_sha = _read_json_file(safe_gold_draft_path, code="gold_draft_invalid")
+    try:
+        typed_packet = EvaluationPacketV2.model_validate(packet_raw)
+        gold_packet = GoldPacketV2.model_validate(gold_raw)
+    except ValidationError as error:
+        raise ReviewToolError("gold_draft_invalid") from error
+    if gold_raw != gold_packet.model_dump(mode="json", warnings=False):
+        # ``model_dump`` only verifies semantic shape.  The file itself still
+        # has to use the one local immutable representation before it can seed
+        # a reviewer-facing candidate.
+        raise ReviewToolError("gold_draft_invalid")
+    # Gold seed files are intentionally pretty/canonical rather than compact
+    # review handoffs.  Compare canonical bytes separately so formatting-only
+    # tampering cannot silently become a different control artifact.
+    if safe_gold_draft_path.read_bytes() != canonical_json_file_bytes(
+        gold_packet.model_dump(mode="json", warnings=False)
+    ):
+        raise ReviewToolError("gold_draft_invalid")
+    if (
+        gold_packet.status != "draft"
+        or gold_packet.packet_split != typed_packet.split
+        or gold_packet.dataset_id != receipt.dataset_id
+        or gold_packet.dataset_revision != receipt.dataset_revision
+        or gold_packet.packet_receipt_sha256 != typed_packet.packet_receipt_sha256
+    ):
+        raise ReviewToolError("gold_draft_binding_invalid")
+    try:
+        rebuilt = build_gold_packet(packet=typed_packet, records=gold_packet.records)
+    except ValueError as error:
+        raise ReviewToolError("gold_draft_binding_invalid") from error
+    if rebuilt.gold_receipt_sha256 != gold_packet.gold_receipt_sha256:
+        raise ReviewToolError("gold_draft_binding_invalid")
+    initial_fields: dict[str, tuple[LocalReviewFieldV1, ...]] = {}
+    for record in gold_packet.records:
+        if record.adjudication_status != "draft" or not record.fields:
+            raise ReviewToolError("gold_draft_binding_invalid")
+        initial_fields[record.asset_id] = tuple(
+            LocalReviewFieldV1(field_name=field.field_name, value=field.value)
+            for field in record.fields
+        )
+    if set(initial_fields) != set(item.asset_id for item in packet.items):
+        raise ReviewToolError("gold_draft_binding_invalid")
+    return safe_gold_draft_path, gold_draft_file_sha, initial_fields
 
 
 def _validate_loopback_host(host: str) -> str:
@@ -309,10 +394,13 @@ class ReviewContext:
     draft_directory: Path
     receipt_file_sha256: str
     packet_file_sha256: str
+    gold_draft_path: Path | None
+    gold_draft_file_sha256: str | None
     receipt: DatasetReceiptV1
     packet: ReviewPacket
     assets: dict[str, DatasetAssetReceiptV1]
     packet_items: dict[str, ReviewPacketItemV2]
+    initial_fields: dict[str, tuple[LocalReviewFieldV1, ...]]
 
     @classmethod
     def from_paths(
@@ -322,6 +410,7 @@ class ReviewContext:
         packet_path: Path,
         dataset_root: Path,
         output_directory: Path,
+        gold_draft_path: Path | None = None,
     ) -> "ReviewContext":
         safe_receipt_path = _require_local_file(receipt_path)
         safe_packet_path = _require_local_file(packet_path)
@@ -340,8 +429,9 @@ class ReviewContext:
             or packet.receipt_sha256 != receipt_sha256(receipt)
         ):
             raise ReviewToolError("packet_receipt_mismatch")
-        if packet.packet_kind == "stratified-v2" and packet.packet_receipt_sha256 != _packet_receipt_sha256(
-            packet_raw
+        if (
+            packet.packet_kind == "stratified-v2"
+            and packet.packet_receipt_sha256 != _packet_receipt_sha256(packet_raw)
         ):
             raise ReviewToolError("packet_receipt_mismatch")
         assets = {asset.asset_id: asset for asset in receipt.assets}
@@ -352,6 +442,20 @@ class ReviewContext:
                 raise ReviewToolError("packet_asset_mismatch")
             if asset.media_type != "application/pdf" or item.media_type != "application/pdf":
                 raise ReviewToolError("pdf_packet_required")
+        safe_gold_draft_path: Path | None = None
+        gold_draft_file_sha: str | None = None
+        initial_fields: dict[str, tuple[LocalReviewFieldV1, ...]] = {}
+        if gold_draft_path is not None:
+            (
+                safe_gold_draft_path,
+                gold_draft_file_sha,
+                initial_fields,
+            ) = _load_seeded_gold_fields(
+                gold_draft_path=gold_draft_path,
+                packet_raw=packet_raw,
+                packet=packet,
+                receipt=receipt,
+            )
         return cls(
             receipt_path=safe_receipt_path,
             packet_path=safe_packet_path,
@@ -360,10 +464,13 @@ class ReviewContext:
             draft_directory=safe_output_directory / "drafts",
             receipt_file_sha256=receipt_file_sha,
             packet_file_sha256=packet_file_sha,
+            gold_draft_path=safe_gold_draft_path,
+            gold_draft_file_sha256=gold_draft_file_sha,
             receipt=receipt,
             packet=packet,
             assets=assets,
             packet_items=packet_items,
+            initial_fields=initial_fields,
         )
 
     def _assert_control_files_unchanged(self) -> None:
@@ -374,6 +481,13 @@ class ReviewContext:
             raise ReviewToolError("control_file_unavailable") from error
         if receipt_sha != self.receipt_file_sha256 or packet_sha != self.packet_file_sha256:
             raise ReviewToolError("control_file_changed")
+        if self.gold_draft_path is not None:
+            try:
+                gold_draft_sha = _sha256_file(self.gold_draft_path)
+            except OSError as error:
+                raise ReviewToolError("control_file_unavailable") from error
+            if gold_draft_sha != self.gold_draft_file_sha256:
+                raise ReviewToolError("control_file_changed")
 
     def asset(self, asset_id: str) -> tuple[DatasetAssetReceiptV1, ReviewPacketItemV2]:
         self._assert_control_files_unchanged()
@@ -397,7 +511,11 @@ class ReviewContext:
             source_sha = _sha256_file(path)
         except OSError as error:
             raise ReviewToolError("source_unavailable") from error
-        if byte_size != asset.byte_size or source_sha != asset.sha256 or source_sha != item.source_sha256:
+        if (
+            byte_size != asset.byte_size
+            or source_sha != asset.sha256
+            or source_sha != item.source_sha256
+        ):
             raise ReviewToolError("source_sha_mismatch")
         return path
 
@@ -460,7 +578,7 @@ class ReviewContext:
         self.verify_submission_source(asset_id, self.asset(asset_id)[0].sha256)
         path = self.draft_path(asset_id)
         if not path.exists():
-            return None
+            return self._seeded_initial_draft(asset_id)
         try:
             raw = json.loads(path.read_text(encoding="utf-8"))
         except (OSError, UnicodeDecodeError, json.JSONDecodeError) as error:
@@ -469,6 +587,31 @@ class ReviewContext:
             raise ReviewToolError("draft_invalid")
         return self._bound_draft(asset_id, raw)
 
+    def _seeded_initial_draft(self, asset_id: str) -> LocalGoldReviewDraftV1 | None:
+        """Expose source-attested draft fields as an editable local candidate.
+
+        This does not create a handoff on disk and deliberately carries no
+        reviewer or approval identity.  The reviewer still has to submit the
+        rendered spans/table cells and explicitly mark the result submitted.
+        """
+
+        fields = self.initial_fields.get(asset_id)
+        if fields is None:
+            return None
+        asset, _ = self.asset(asset_id)
+        return LocalGoldReviewDraftV1(
+            review_origin="loopback_review_v1",
+            dataset_id=self.receipt.dataset_id,
+            dataset_revision=self.receipt.dataset_revision,
+            receipt_sha256=receipt_sha256(self.receipt),
+            packet_receipt_sha256=self.packet.packet_receipt_sha256,
+            packet_kind=self.packet.packet_kind,
+            packet_split=self.packet.split,
+            asset_id=asset_id,
+            source_sha256=asset.sha256,
+            fields=list(fields),
+        )
+
     def save_draft(self, asset_id: str, raw_submission: object) -> LocalGoldReviewDraftV1:
         try:
             submission = LocalReviewSubmissionV1.model_validate(raw_submission)
@@ -476,6 +619,7 @@ class ReviewContext:
             raise ReviewToolError("submission_invalid") from error
         asset = self.verify_submission_source(asset_id, submission.source_sha256)
         draft = LocalGoldReviewDraftV1(
+            review_origin="loopback_review_v1",
             dataset_id=self.receipt.dataset_id,
             dataset_revision=self.receipt.dataset_revision,
             receipt_sha256=receipt_sha256(self.receipt),
@@ -528,6 +672,7 @@ class ReviewContext:
             raise ReviewToolError("draft_unavailable")
         return {
             "schema_version": "local-gold-review-handoff-v1",
+            "review_origin": draft.review_origin,
             "handoff_status": "reviewer_submitted"
             if draft.review_status == "reviewer_submitted"
             else "draft",
@@ -636,7 +781,9 @@ def create_review_app(context: ReviewContext) -> FastAPI:
     @app.exception_handler(ReviewToolError)
     async def _review_error(_: Request, error: ReviewToolError) -> JSONResponse:
         status_code = 404 if error.code in {"asset_not_in_packet", "draft_unavailable"} else 409
-        return JSONResponse(status_code=status_code, content={"status": "failed", "code": error.code})
+        return JSONResponse(
+            status_code=status_code, content={"status": "failed", "code": error.code}
+        )
 
     @app.get("/", response_class=HTMLResponse)
     async def index() -> HTMLResponse:
@@ -673,7 +820,10 @@ def create_review_app(context: ReviewContext) -> FastAPI:
 
     @app.post("/api/drafts/{asset_id}")
     async def save_draft(asset_id: str, request: Request) -> dict[str, object]:
-        if request.headers.get("content-type", "").split(";", 1)[0].casefold() != "application/json":
+        if (
+            request.headers.get("content-type", "").split(";", 1)[0].casefold()
+            != "application/json"
+        ):
             raise ReviewToolError("submission_invalid")
         try:
             payload = await request.json()
@@ -700,6 +850,11 @@ def _parser() -> argparse.ArgumentParser:
     parser.add_argument("--packet", type=Path, required=True)
     parser.add_argument("--dataset-root", type=Path, required=True)
     parser.add_argument("--output-directory", type=Path, required=True)
+    parser.add_argument(
+        "--gold-draft",
+        type=Path,
+        help="Optional local-only source-attested draft Gold used solely to prefill fields.",
+    )
     parser.add_argument("--host", default="127.0.0.1")
     parser.add_argument("--port", type=int, default=8787)
     return parser
@@ -716,13 +871,22 @@ def main(argv: Sequence[str] | None = None) -> int:
             packet_path=arguments.packet,
             dataset_root=arguments.dataset_root,
             output_directory=arguments.output_directory,
+            gold_draft_path=arguments.gold_draft,
         )
     except (OSError, ReviewToolError, ValueError):
         # Do not expose local paths, source text, PDF bytes, or validation details.
-        print(json.dumps({"status": "failed", "code": "configuration_invalid"}, separators=(",", ":")))
+        print(
+            json.dumps({"status": "failed", "code": "configuration_invalid"}, separators=(",", ":"))
+        )
         return 2
     print(json.dumps({"status": "ready", "listen": "loopback"}, separators=(",", ":")))
-    uvicorn.run(create_review_app(context), host=host, port=arguments.port, access_log=False, log_level="warning")
+    uvicorn.run(
+        create_review_app(context),
+        host=host,
+        port=arguments.port,
+        access_log=False,
+        log_level="warning",
+    )
     return 0
 
 
