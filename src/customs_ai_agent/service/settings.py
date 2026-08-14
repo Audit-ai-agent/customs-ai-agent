@@ -5,6 +5,7 @@ from __future__ import annotations
 import os
 import re
 from dataclasses import dataclass
+from pathlib import Path
 from typing import Literal, Mapping, cast
 
 from pydantic import SecretStr
@@ -18,6 +19,7 @@ _MAX_DOCUMENT_PAGES = 50
 _MAX_DOCUMENT_IMAGE_PIXELS = 40_000_000
 _MAX_DOCUMENTS = 20
 _MAX_TEXT_CHARACTERS = 500_000
+_SHA256 = re.compile(r"^[a-f0-9]{64}$")
 ServiceMode = Literal["local-development", "functional-uat"]
 GuidanceRegistryVersion = Literal["1.0", "2.0"]
 # This is intentionally the Data-owned local profile name, rather than an
@@ -70,6 +72,26 @@ def _number(
     return value
 
 
+def _document_preview_approval_path(value: str) -> Path:
+    """Accept only the fixed Git-excluded active-pointer location.
+
+    The runtime repeats this check with symlink and regular-file validation.
+    Settings deliberately do not require the file to exist, so an unavailable
+    optional preview profile cannot stop the ordinary text-only service.
+    """
+
+    path = Path(value)
+    if (
+        not path.is_absolute()
+        or path.name != "pdf-preview-active.json"
+        or path.parent.name != "approvals"
+        or tuple(part.casefold() for part in path.parent.parent.parts[-3:])
+        != ("_local", "data", "document-preview")
+    ):
+        raise ServiceConfigurationError("customs_agent_document_preview_approval_path_invalid")
+    return path
+
+
 @dataclass(frozen=True, slots=True)
 class ServiceSettings:
     """All service traffic stays on loopback and uses one peer-mode handshake.
@@ -102,6 +124,11 @@ class ServiceSettings:
     max_document_bytes: int = _MAX_DOCUMENT_BYTES
     max_document_pages: int = _MAX_DOCUMENT_PAGES
     max_document_image_pixels: int = _MAX_DOCUMENT_IMAGE_PIXELS
+    # The sole production opt-in for document previews.  Both values are
+    # required; there is intentionally no environment setting for an engine,
+    # executable, model path, network source, or automatic fallback.
+    document_preview_approval_path: Path | None = None
+    document_preview_approval_sha256: str | None = None
     max_documents: int = _MAX_DOCUMENTS
     max_text_characters: int = _MAX_TEXT_CHARACTERS
     body_read_timeout_seconds: float = 15.0
@@ -133,6 +160,16 @@ class ServiceSettings:
             raise ServiceConfigurationError("evidence_service_token_weak")
         if self.evidence_profile not in {None, *_EVIDENCE_PROFILES}:
             raise ServiceConfigurationError("customs_agent_evidence_profile_invalid")
+        has_preview_approval_path = self.document_preview_approval_path is not None
+        has_preview_approval_sha256 = self.document_preview_approval_sha256 is not None
+        if has_preview_approval_path != has_preview_approval_sha256:
+            raise ServiceConfigurationError("customs_agent_document_preview_approval_incomplete")
+        if has_preview_approval_path:
+            assert self.document_preview_approval_path is not None
+            assert self.document_preview_approval_sha256 is not None
+            _document_preview_approval_path(str(self.document_preview_approval_path))
+            if _SHA256.fullmatch(self.document_preview_approval_sha256) is None:
+                raise ServiceConfigurationError("customs_agent_document_preview_approval_sha256_invalid")
         if has_guidance_base_url != has_guidance_token:
             raise ServiceConfigurationError("guidance_service_peer_incomplete")
         if has_guidance_registry_version and not has_guidance_base_url:
@@ -227,14 +264,20 @@ class ServiceSettings:
         has_guidance_base_url = "GUIDANCE_SERVICE_BASE_URL" in source
         has_guidance_token = "GUIDANCE_SERVICE_TOKEN" in source
         has_guidance_registry_version = "GUIDANCE_SERVICE_REGISTRY_VERSION" in source
+        has_preview_approval_path = "CUSTOMS_AGENT_DOCUMENT_PREVIEW_APPROVAL_PATH" in source
+        has_preview_approval_sha256 = "CUSTOMS_AGENT_DOCUMENT_PREVIEW_APPROVAL_SHA256" in source
         if has_guidance_base_url != has_guidance_token:
             raise ServiceConfigurationError("guidance_service_peer_incomplete")
         if has_guidance_registry_version != has_guidance_base_url:
             raise ServiceConfigurationError("guidance_registry_version_peer_incomplete")
+        if has_preview_approval_path != has_preview_approval_sha256:
+            raise ServiceConfigurationError("customs_agent_document_preview_approval_incomplete")
         guidance_base_url: str | None = None
         guidance_service_token: SecretStr | None = None
         guidance_registry_version: GuidanceRegistryVersion | None = None
         evidence_profile: EvidenceProfile | None = None
+        document_preview_approval_path: Path | None = None
+        document_preview_approval_sha256: str | None = None
         if "CUSTOMS_AGENT_EVIDENCE_PROFILE" in source:
             configured_evidence_profile = _required(source, "CUSTOMS_AGENT_EVIDENCE_PROFILE")
             if configured_evidence_profile not in _EVIDENCE_PROFILES:
@@ -249,6 +292,13 @@ class ServiceSettings:
             if configured_registry_version not in {"1.0", "2.0"}:
                 raise ServiceConfigurationError("guidance_registry_version_invalid")
             guidance_registry_version = cast(GuidanceRegistryVersion, configured_registry_version)
+        if has_preview_approval_path:
+            document_preview_approval_path = _document_preview_approval_path(
+                _required(source, "CUSTOMS_AGENT_DOCUMENT_PREVIEW_APPROVAL_PATH")
+            )
+            document_preview_approval_sha256 = _required(
+                source, "CUSTOMS_AGENT_DOCUMENT_PREVIEW_APPROVAL_SHA256"
+            )
         return cls(
             bearer_token=SecretStr(_required(source, "CUSTOMS_AGENT_SERVICE_BEARER_TOKEN")),
             evidence_base_url=_required(source, "EVIDENCE_SERVICE_BASE_URL"),
@@ -284,6 +334,8 @@ class ServiceSettings:
                 1_000_000,
                 100_000_000,
             ),
+            document_preview_approval_path=document_preview_approval_path,
+            document_preview_approval_sha256=document_preview_approval_sha256,
             max_documents=_integer(
                 source, "CUSTOMS_AGENT_MAX_DOCUMENTS", _MAX_DOCUMENTS, 1, _MAX_DOCUMENTS
             ),
