@@ -45,11 +45,13 @@ source SHA·exact asset coverage가 모두 같고 Gold 상태가 `draft`일 때�
 
 ```text
 schema_version=2.0, packet_kind=stratified-v2, split,
-dataset_id, dataset_revision, receipt_sha256, packet_receipt_sha256,
+dataset_id, dataset_revision, receipt_sha256, error_labels_sha256, packet_receipt_sha256,
 prepared_as_of, items, required_gates, release_thresholds
 ```
 
 `packet_receipt_sha256`는 자신을 제외한 canonical JSON의 SHA-256이어야 한다.
+`error_labels_sha256`는 실제 오류 PDF만 error strata에 넣은 원본 오류 label CSV의
+SHA-256이다. 이 필드가 없거나 바뀌면 구판 packet으로 간주해 열지 않는다.
 item에는 asset ID, source SHA, PDF MIME, fixture kind, document type, set ID가
 있어야 한다. 이전 v1 packet은 기존 schema를 완전히 만족할 때만 읽기 호환으로
 열 수 있다.
