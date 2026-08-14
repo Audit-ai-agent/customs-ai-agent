@@ -254,6 +254,36 @@ uv run --locked --no-sync --group dev python tools/prepare_document_preview_gold
   --as-of 2026-08-11 --output-directory <workspace>/_local/data/evaluation/<id>/<revision>
 ```
 
+위의 v1 packet 도구는 기존 호환용이다. 현재 첫 승인 대상인 **합성 PDF 2,000세트**에는
+반드시 `stratified-v2` 흐름을 사용한다. 이 흐름은 정상/실제 오류 × B/L·Invoice·Packing
+List의 여섯 strata를 development 60개(각 10개), sealed 20개(각 최소 3개와 SHA 순위
+추가 2개)로 고정한다. 오류 directory만으로 고르지 않고 `error_labels.csv`에서 같은
+`E####`·문서 유형의 nonblank `wrong_value`가 있는 PDF만 오류 표본으로 인정한다.
+
+```powershell
+uv run --locked --no-sync --group dev python tools/prepare_stratified_synthetic_pdf_gold_packet.py `
+  --receipt <dataset>/metadata/dataset-receipt.json `
+  --error-labels <dataset>/error_labels.csv `
+  --output-directory <workspace>/_local/data/document-preview/ocr-gold/<dataset>/<revision>/packets `
+  --as-of 2026-08-15
+
+uv run --locked --no-sync --group dev python tools/seed_synthetic_pdf_ocr_gold.py `
+  --receipt <dataset>/metadata/dataset-receipt.json `
+  --packet <development-or-sealed-stratified-v2-packet> `
+  --source-directory <dataset> --clean-manifest <dataset>/clean_manifest.csv `
+  --error-labels <dataset>/error_labels.csv `
+  --output-directory <workspace>/_local/data/document-preview/ocr-gold/<dataset>/<revision>/drafts
+```
+
+두 명령은 SHA-결속 packet과 field Gold **초안**만 만든다. PDF 렌더링을 확인한 검수자가
+loopback 검수 UI에서 span/table cell을 보완하고 제출한 뒤에만
+`tools/finalize_synthetic_pdf_ocr_gold.py --confirm-human-adjudication`으로
+`human_adjudicated` Gold를 만들 수 있다. 상세 검수·handoff 절차는
+[`docs/LOCAL_PDF_GOLD_REVIEW.md`](docs/LOCAL_PDF_GOLD_REVIEW.md), 세 OCR 후보의
+offline 실행·평가·봉인 reservation 절차는
+[`docs/LOCAL_SYNTHETIC_PDF_CANDIDATE_RUNNER.md`](docs/LOCAL_SYNTHETIC_PDF_CANDIDATE_RUNNER.md)에
+있다. 이때도 OCR 결과는 자동 심사 입력이 아니다.
+
 OCR preview engine은 Gold 평가와 사람 승인을 거치기 전에는 켜지지 않습니다. runtime이 읽는 모든 파일은 workspace의 Git 제외 경로 한 곳에만 둡니다.
 
 ```text
