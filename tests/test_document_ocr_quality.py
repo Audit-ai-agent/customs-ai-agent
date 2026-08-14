@@ -237,7 +237,9 @@ def test_stratified_v2_packet_is_exact_and_deterministic(tmp_path: Path) -> None
     assert development.packet_kind == sealed.packet_kind == "stratified-v2"
     assert len(development.items) == 60
     assert len(sealed.items) == 20
-    assert {item.asset_id for item in development.items}.isdisjoint(item.asset_id for item in sealed.items)
+    assert {item.asset_id for item in development.items}.isdisjoint(
+        item.asset_id for item in sealed.items
+    )
     assert set(
         {
             (item.fixture_kind, item.document_type): sum(
@@ -251,14 +253,9 @@ def test_stratified_v2_packet_is_exact_and_deterministic(tmp_path: Path) -> None
     ) == {10}
     sealed_counts = {
         stratum: sum(
-            1
-            for item in sealed.items
-            if (item.fixture_kind, item.document_type) == stratum
+            1 for item in sealed.items if (item.fixture_kind, item.document_type) == stratum
         )
-        for stratum in {
-            (item.fixture_kind, item.document_type)
-            for item in sealed.items
-        }
+        for stratum in {(item.fixture_kind, item.document_type) for item in sealed.items}
     }
     assert sorted(sealed_counts.values()) == [3, 3, 3, 3, 4, 4]
     again = build_stratified_pdf_gold_packets(
@@ -266,7 +263,9 @@ def test_stratified_v2_packet_is_exact_and_deterministic(tmp_path: Path) -> None
         prepared_as_of=date(2026, 8, 14),
         error_labels_path=labels,
     )
-    assert [item.asset_id for item in again[0].items] == [item.asset_id for item in development.items]
+    assert [item.asset_id for item in again[0].items] == [
+        item.asset_id for item in development.items
+    ]
     assert [item.asset_id for item in again[1].items] == [item.asset_id for item in sealed.items]
 
 
@@ -312,15 +311,15 @@ def test_error_strata_include_only_actually_labeled_error_documents(tmp_path: Pa
     )
 
     selected_error_ids = {
-        item.set_id
-        for item in [*development.items, *sealed.items]
-        if item.fixture_kind == "error"
+        item.set_id for item in [*development.items, *sealed.items] if item.fixture_kind == "error"
     }
     assert "E0014" not in selected_error_ids
     assert selected_error_ids <= {f"E{index:04}" for index in range(1, 14)}
 
 
-def test_source_attested_draft_applies_error_wrong_value_and_requires_review(tmp_path: Path) -> None:
+def test_source_attested_draft_applies_error_wrong_value_and_requires_review(
+    tmp_path: Path,
+) -> None:
     receipt = _receipt()
     clean, labels = _write_ground_truth(tmp_path)
     development, _ = build_stratified_pdf_gold_packets(
@@ -344,10 +343,13 @@ def test_source_attested_draft_applies_error_wrong_value_and_requires_review(tmp
         if record.fixture_kind == "error" and record.document_type == "invoice"
     )
     assert error_record.adjudication_status == "draft"
-    assert next(field for field in error_record.fields if field.field_name == "amount").value.startswith(
-        "wrong-"
+    assert next(
+        field for field in error_record.fields if field.field_name == "amount"
+    ).value.startswith("wrong-")
+    assert (
+        error_record.source_attestation.clean_manifest_sha256
+        == hashlib.sha256(clean.read_bytes()).hexdigest()
     )
-    assert error_record.source_attestation.clean_manifest_sha256 == hashlib.sha256(clean.read_bytes()).hexdigest()
     with pytest.raises(ValueError, match="requires reviewed fields, spans, and table cells"):
         from customs_ai_agent.evaluation.document_ocr_quality import approve_gold_record
 
@@ -397,7 +399,9 @@ def test_approved_gold_scoring_and_sealed_result_are_fail_closed(tmp_path: Path)
     assert read_canonical_evaluation_result(path) == result
     with pytest.raises(ValueError, match="sealed evaluation already recorded"):
         write_evaluation_result(result=result, output_directory=output)
-    path.write_bytes(canonical_json_file_bytes(result.model_dump(mode="json", warnings=False)) + b" ")
+    path.write_bytes(
+        canonical_json_file_bytes(result.model_dump(mode="json", warnings=False)) + b" "
+    )
     with pytest.raises(ValueError, match="not canonical"):
         read_canonical_evaluation_result(path)
 
@@ -437,7 +441,9 @@ def test_candidate_and_gold_source_drift_fail_closed(tmp_path: Path) -> None:
 
 
 def test_development_selection_uses_fixed_metric_order_and_rejects_no_pass() -> None:
-    def result(*, engine_kind: str, field: float, cer: float, table: float) -> OcrEvaluationResultV1:
+    def result(
+        *, engine_kind: str, field: float, cer: float, table: float
+    ) -> OcrEvaluationResultV1:
         payload: dict[str, object] = {
             "schema_version": "1.0",
             "dataset_id": "synthetic-pdf",
@@ -479,7 +485,9 @@ def test_packet_and_gold_tools_write_only_local_metadata(tmp_path: Path) -> None
     clean, labels = _write_ground_truth(workspace)
     receipt_path = workspace / "receipt.json"
     receipt_path.parent.mkdir(parents=True, exist_ok=True)
-    receipt_path.write_bytes(canonical_json_file_bytes(receipt.model_dump(mode="json", warnings=False)))
+    receipt_path.write_bytes(
+        canonical_json_file_bytes(receipt.model_dump(mode="json", warnings=False))
+    )
     packet_output = workspace / "_local" / "data" / "document-preview" / "gold-packets"
     summary = prepare_stratified_packets(
         receipt_path=receipt_path,
@@ -501,10 +509,14 @@ def test_packet_and_gold_tools_write_only_local_metadata(tmp_path: Path) -> None
         content = f"{asset.asset_id}:{asset.relative_path}".encode("utf-8")
         path.write_bytes(content)
         assets.append(
-            asset.model_copy(update={"byte_size": len(content), "sha256": hashlib.sha256(content).hexdigest()})
+            asset.model_copy(
+                update={"byte_size": len(content), "sha256": hashlib.sha256(content).hexdigest()}
+            )
         )
     physical_receipt = receipt.model_copy(update={"assets": assets})
-    receipt_path.write_bytes(canonical_json_file_bytes(physical_receipt.model_dump(mode="json", warnings=False)))
+    receipt_path.write_bytes(
+        canonical_json_file_bytes(physical_receipt.model_dump(mode="json", warnings=False))
+    )
     packet_path.write_bytes(
         canonical_json_file_bytes(
             build_stratified_pdf_gold_packets(

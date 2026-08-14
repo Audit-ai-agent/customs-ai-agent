@@ -245,11 +245,14 @@ def _synthetic_pdf_item(asset: DatasetAssetReceiptV1) -> StratifiedPacketItemV2:
         raise ValueError("synthetic PDF record prefix does not match clean/error directory")
     if record[1:] != set_number:
         raise ValueError("synthetic PDF record ID does not match directory set ID")
-    document_type = cast(SyntheticDocumentType, {
-        "BL": "bill_of_lading",
-        "INV": "invoice",
-        "PL": "packing_list",
-    }[matched.group("document")])
+    document_type = cast(
+        SyntheticDocumentType,
+        {
+            "BL": "bill_of_lading",
+            "INV": "invoice",
+            "PL": "packing_list",
+        }[matched.group("document")],
+    )
     return StratifiedPacketItemV2(
         asset_id=asset.asset_id,
         source_sha256=asset.sha256,
@@ -292,7 +295,10 @@ def build_stratified_pdf_gold_packets(
             if asset.media_type != "application/pdf":
                 raise ValueError("synthetic PDF receipt contains a non-PDF preview candidate")
             item = _synthetic_pdf_item(asset)
-            if item.fixture_kind == "error" and (item.set_id, item.document_type) not in labels_by_key:
+            if (
+                item.fixture_kind == "error"
+                and (item.set_id, item.document_type) not in labels_by_key
+            ):
                 # Error-set siblings without a matching affected_doc label are
                 # rendered clean and must not claim error-stratum coverage.
                 continue
@@ -320,7 +326,9 @@ def build_stratified_pdf_gold_packets(
         sealed.extend(ordered[10:13])
         remaining.extend(ordered[13:])
     if len(remaining) < 2:
-        raise ValueError("synthetic PDF receipt has no eligible assets for sealed SHA-ranked extras")
+        raise ValueError(
+            "synthetic PDF receipt has no eligible assets for sealed SHA-ranked extras"
+        )
     sealed.extend(sorted(remaining, key=lambda item: _rank_item(digest, item))[:2])
 
     development_ids = {item.asset_id for item in development}
@@ -498,8 +506,15 @@ class DocumentExtractionGoldV2(_WireModel):
             if self.reviewer_approval is not None:
                 raise ValueError("draft Gold must not carry a reviewer approval")
             return self
-        if not self.fields or not self.spans or not self.table_cells or self.reviewer_approval is None:
-            raise ValueError("human-adjudicated Gold requires fields, spans, table cells, and approval")
+        if (
+            not self.fields
+            or not self.spans
+            or not self.table_cells
+            or self.reviewer_approval is None
+        ):
+            raise ValueError(
+                "human-adjudicated Gold requires fields, spans, table cells, and approval"
+            )
         approval = self.reviewer_approval
         if (
             approval.source_sha256 != self.source_sha256
@@ -510,7 +525,9 @@ class DocumentExtractionGoldV2(_WireModel):
         return self
 
 
-def _gold_digest_payload(record: DocumentExtractionGoldV2 | Mapping[str, object]) -> dict[str, object]:
+def _gold_digest_payload(
+    record: DocumentExtractionGoldV2 | Mapping[str, object],
+) -> dict[str, object]:
     payload = (
         record.model_dump(mode="json", warnings=False)
         if isinstance(record, DocumentExtractionGoldV2)
@@ -643,7 +660,9 @@ def build_gold_packet(
     if set(packet_items) != {record.asset_id for record in records}:
         raise ValueError("Gold records must cover exactly the selected evaluation packet")
     for record in records:
-        _validate_gold_record_against_item(record=record, packet=packet, item=packet_items[record.asset_id])
+        _validate_gold_record_against_item(
+            record=record, packet=packet, item=packet_items[record.asset_id]
+        )
     status: Literal["draft", "human_adjudicated"] = (
         "human_adjudicated"
         if all(record.adjudication_status == "human_adjudicated" for record in records)
@@ -705,10 +724,16 @@ def validate_gold_packet_for_evaluation(
         raise ValueError("Gold packet does not cover exactly the evaluation packet")
     for asset_id, item in packet_items.items():
         asset = receipt_assets.get(asset_id)
-        if asset is None or asset.sha256 != item.source_sha256 or asset.media_type != "application/pdf":
+        if (
+            asset is None
+            or asset.sha256 != item.source_sha256
+            or asset.media_type != "application/pdf"
+        ):
             raise ValueError("packet source asset is missing or drifted from the dataset receipt")
     for record in gold_packet.records:
-        _validate_gold_record_against_item(record=record, packet=packet, item=packet_items[record.asset_id])
+        _validate_gold_record_against_item(
+            record=record, packet=packet, item=packet_items[record.asset_id]
+        )
         if record.adjudication_status != "human_adjudicated":
             raise ValueError("unapproved Gold cannot enter OCR scoring")
 
@@ -733,7 +758,9 @@ class CandidateDocumentOutputV1(_WireModel):
             for cell in self.table_cells
         ]
         if len(cell_keys) != len(set(cell_keys)):
-            raise ValueError("candidate table cells must have unique page/table/row/column coordinates")
+            raise ValueError(
+                "candidate table cells must have unique page/table/row/column coordinates"
+            )
         return self
 
 
@@ -788,7 +815,9 @@ class OcrEvaluationResultV1(_WireModel):
             and self.metrics.table_cell_f1 >= thresholds.table_cell_f1_min
         )
         if self.passed != expected_passed:
-            raise ValueError("evaluation result pass flag does not match fixed OCR release thresholds")
+            raise ValueError(
+                "evaluation result pass flag does not match fixed OCR release thresholds"
+            )
         return self
 
 
@@ -808,7 +837,9 @@ def evaluation_result_sha256(result: OcrEvaluationResultV1 | Mapping[str, object
     return sha256_bytes(canonical_json_bytes(_evaluation_result_payload(result)))
 
 
-def _table_cell_set(cells: Iterable[GoldTableCellV2 | CandidateTableCellV1]) -> set[tuple[int, int, int, int, str]]:
+def _table_cell_set(
+    cells: Iterable[GoldTableCellV2 | CandidateTableCellV1],
+) -> set[tuple[int, int, int, int, str]]:
     return {
         (
             cell.page_number,
@@ -932,12 +963,16 @@ def select_best_development_result(
         first.gold_receipt_sha256,
     )
     for result in results:
-        if result.packet_kind != "development" or (
-            result.dataset_id,
-            result.dataset_revision,
-            result.packet_receipt_sha256,
-            result.gold_receipt_sha256,
-        ) != identity:
+        if (
+            result.packet_kind != "development"
+            or (
+                result.dataset_id,
+                result.dataset_revision,
+                result.packet_receipt_sha256,
+                result.gold_receipt_sha256,
+            )
+            != identity
+        ):
             raise ValueError("development candidates must share one exact packet and Gold receipt")
     passing = [result for result in results if result.passed]
     if not passing:
@@ -987,7 +1022,9 @@ def write_evaluation_result(
     resolved = output_directory.resolve()
     parts = [part.casefold() for part in resolved.parts]
     if not any(parts[index : index + 2] == ["_local", "data"] for index in range(len(parts) - 1)):
-        raise ValueError("evaluation output directory must be below the local-only _local/data boundary")
+        raise ValueError(
+            "evaluation output directory must be below the local-only _local/data boundary"
+        )
     resolved.mkdir(parents=True, exist_ok=True)
     result_path = resolved / f"{result.evaluation_result_sha256}.json"
     payload = result.model_dump(mode="json", warnings=False)
@@ -1108,7 +1145,9 @@ def _read_csv_rows(path: Path, expected_headers: set[str]) -> list[dict[str, str
         if reader.fieldnames is None or set(reader.fieldnames) != expected_headers:
             raise ValueError("synthetic ground-truth CSV headers are malformed")
         rows = [dict(row) for row in reader]
-    if not rows or any(set(row) != expected_headers or any(value is None for value in row.values()) for row in rows):
+    if not rows or any(
+        set(row) != expected_headers or any(value is None for value in row.values()) for row in rows
+    ):
         raise ValueError("synthetic ground-truth CSV contains malformed rows")
     return rows
 
@@ -1174,7 +1213,11 @@ def load_synthetic_error_labels(
         canonical_field = _ERROR_FIELD_NAME.get((document_type, row["field"]))
         if canonical_field is None:
             raise ValueError("error label has an unsupported field mapping")
-        if not row["set_id"].startswith("E") or not row["correct_value"].strip() or not row["wrong_value"].strip():
+        if (
+            not row["set_id"].startswith("E")
+            or not row["correct_value"].strip()
+            or not row["wrong_value"].strip()
+        ):
             raise ValueError("error label has an invalid set ID or missing source value")
         unique_key = (row["set_id"], document_type, canonical_field)
         if unique_key in seen_error_fields:
@@ -1263,7 +1306,9 @@ def build_synthetic_pdf_draft_gold(
                 canonical_field = _ERROR_FIELD_NAME[(item.document_type, label["field"])]
                 existing = fields.get(canonical_field)
                 if existing is None:
-                    raise ValueError("error label field is outside the selected document Gold mapping")
+                    raise ValueError(
+                        "error label field is outside the selected document Gold mapping"
+                    )
                 fields[canonical_field] = GoldFieldV2(
                     field_name=canonical_field,
                     value=_field_value(label["wrong_value"]),

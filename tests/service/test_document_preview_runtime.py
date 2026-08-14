@@ -251,7 +251,9 @@ def test_sealed_evaluation_must_be_canonical_passing_and_bound() -> None:
     unsigned = dict(value)
     unsigned.pop("evaluation_result_sha256")
     value["evaluation_result_sha256"] = hashlib.sha256(_canonical(unsigned)).hexdigest()
-    with pytest.raises(DocumentPreviewRuntimeError, match="document_preview_evaluation_gate_failed"):
+    with pytest.raises(
+        DocumentPreviewRuntimeError, match="document_preview_evaluation_gate_failed"
+    ):
         parse_sealed_evaluation_result(_canonical(value, newline=True))
 
 

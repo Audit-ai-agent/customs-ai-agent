@@ -176,7 +176,9 @@ def test_loopback_review_serves_only_bound_pdf_and_saves_local_intermediate_draf
     assert "adjudication_status" not in exported
 
 
-def test_review_refuses_source_change_and_never_exposes_source_text_in_error(tmp_path: Path) -> None:
+def test_review_refuses_source_change_and_never_exposes_source_text_in_error(
+    tmp_path: Path,
+) -> None:
     context, source, _, _ = _context(tmp_path)
     source_sha = hashlib.sha256(source.read_bytes()).hexdigest()
     source.write_bytes(b"%PDF-1.7\nchanged\n%%EOF\n")

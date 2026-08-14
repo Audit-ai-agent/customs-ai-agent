@@ -217,7 +217,10 @@ def _assert_no_symlink(path: Path, *, code: str) -> None:
 
 
 def _assert_document_preview_root(root: Path, *, must_exist: bool) -> Path:
-    if not root.is_absolute() or tuple(part.casefold() for part in root.parts[-3:]) != _PREVIEW_ROOT_PARTS:
+    if (
+        not root.is_absolute()
+        or tuple(part.casefold() for part in root.parts[-3:]) != _PREVIEW_ROOT_PARTS
+    ):
         raise DocumentPreviewRuntimeError("document_preview_local_root_invalid")
     _assert_no_symlink(root, code="document_preview_local_root_invalid")
     try:
@@ -432,7 +435,10 @@ def _parse_options(value: object, *, kind: ApprovedPdfEngineKind) -> Mapping[str
             "language",
             "use_angle_cls",
         }
-        if not {"det_model_directory", "rec_model_directory"}.issubset(options) or set(options) - allowed:
+        if (
+            not {"det_model_directory", "rec_model_directory"}.issubset(options)
+            or set(options) - allowed
+        ):
             raise DocumentPreviewRuntimeError("document_preview_configuration_invalid")
         normalized: dict[str, object] = {
             "det_model_directory": _relative_model_path(
@@ -450,10 +456,7 @@ def _parse_options(value: object, *, kind: ApprovedPdfEngineKind) -> Mapping[str
             )
         if "language" in options:
             language = options["language"]
-            if (
-                not isinstance(language, str)
-                or not re.fullmatch(r"[a-z]{2,16}", language)
-            ):
+            if not isinstance(language, str) or not re.fullmatch(r"[a-z]{2,16}", language):
                 raise DocumentPreviewRuntimeError("document_preview_configuration_invalid")
             normalized["language"] = language
         if "use_angle_cls" in options:
@@ -518,7 +521,9 @@ def _parse_package(value: object) -> ModelPackageV1:
         name=name,
         version=version,
         license_id=_identifier(item["license_id"], code="document_preview_inventory_invalid"),
-        source_uri=_validate_https_source(item["source_uri"], code="document_preview_inventory_invalid"),
+        source_uri=_validate_https_source(
+            item["source_uri"], code="document_preview_inventory_invalid"
+        ),
     )
 
 
@@ -532,7 +537,11 @@ def _parse_artifact(value: object) -> ModelArtifactV1:
         code="document_preview_inventory_invalid",
     )
     byte_size = item["byte_size"]
-    if isinstance(byte_size, bool) or not isinstance(byte_size, int) or not 1 <= byte_size <= 8 * 1024**3:
+    if (
+        isinstance(byte_size, bool)
+        or not isinstance(byte_size, int)
+        or not 1 <= byte_size <= 8 * 1024**3
+    ):
         raise DocumentPreviewRuntimeError("document_preview_inventory_invalid")
     return ModelArtifactV1(
         artifact_id=_identifier(item["artifact_id"], code="document_preview_inventory_invalid"),
@@ -542,7 +551,9 @@ def _parse_artifact(value: object) -> ModelArtifactV1:
         sha256=_sha256(item["sha256"], code="document_preview_inventory_invalid"),
         byte_size=byte_size,
         license_id=_identifier(item["license_id"], code="document_preview_inventory_invalid"),
-        source_uri=_validate_https_source(item["source_uri"], code="document_preview_inventory_invalid"),
+        source_uri=_validate_https_source(
+            item["source_uri"], code="document_preview_inventory_invalid"
+        ),
     )
 
 
@@ -553,8 +564,10 @@ def parse_model_inventory(raw: bytes) -> ModelInventoryV1:
         {"schema_version", "engine_kind", "packages", "artifacts"},
         code="document_preview_inventory_invalid",
     )
-    if value["schema_version"] != "1.0" or not isinstance(value["packages"], list) or not isinstance(
-        value["artifacts"], list
+    if (
+        value["schema_version"] != "1.0"
+        or not isinstance(value["packages"], list)
+        or not isinstance(value["artifacts"], list)
     ):
         raise DocumentPreviewRuntimeError("document_preview_inventory_invalid")
     packages = tuple(_parse_package(item) for item in value["packages"])
@@ -564,9 +577,11 @@ def parse_model_inventory(raw: bytes) -> ModelInventoryV1:
     names = [item.name.casefold().replace("_", "-") for item in packages]
     artifact_ids = [item.artifact_id for item in artifacts]
     artifact_paths = [item.relative_path for item in artifacts]
-    if len(names) != len(set(names)) or len(artifact_ids) != len(set(artifact_ids)) or len(
-        artifact_paths
-    ) != len(set(artifact_paths)):
+    if (
+        len(names) != len(set(names))
+        or len(artifact_ids) != len(set(artifact_ids))
+        or len(artifact_paths) != len(set(artifact_paths))
+    ):
         raise DocumentPreviewRuntimeError("document_preview_inventory_invalid")
     return ModelInventoryV1(
         engine_kind=_engine_kind(value["engine_kind"], code="document_preview_inventory_invalid"),
@@ -582,7 +597,11 @@ def parse_pdf_preview_approval(raw: bytes) -> PdfPreviewApprovalV1:
         {"schema_version", "approval_id", "status", "media_type", "engine", "evaluation"},
         code="document_preview_approval_invalid",
     )
-    if value["schema_version"] != "1.0" or value["status"] != "approved" or value["media_type"] != "application/pdf":
+    if (
+        value["schema_version"] != "1.0"
+        or value["status"] != "approved"
+        or value["media_type"] != "application/pdf"
+    ):
         raise DocumentPreviewRuntimeError("document_preview_approval_invalid")
     engine_value = value["engine"]
     evaluation_value = value["evaluation"]
@@ -651,7 +670,11 @@ def parse_sealed_evaluation_result(raw: bytes) -> SealedEvaluationResultV1:
         },
         code="document_preview_evaluation_invalid",
     )
-    if value["schema_version"] != "1.0" or value["packet_kind"] != "sealed" or value["passed"] is not True:
+    if (
+        value["schema_version"] != "1.0"
+        or value["packet_kind"] != "sealed"
+        or value["passed"] is not True
+    ):
         raise DocumentPreviewRuntimeError("document_preview_evaluation_invalid")
     metrics_value = value["metrics"]
     if not isinstance(metrics_value, dict):
@@ -789,9 +812,13 @@ def verify_inventory_packages(
         try:
             installed = package_version_reader(item.name)
         except importlib.metadata.PackageNotFoundError as error:
-            raise DocumentPreviewRuntimeError("document_preview_runtime_dependency_unavailable") from error
+            raise DocumentPreviewRuntimeError(
+                "document_preview_runtime_dependency_unavailable"
+            ) from error
         except Exception as error:
-            raise DocumentPreviewRuntimeError("document_preview_runtime_dependency_unavailable") from error
+            raise DocumentPreviewRuntimeError(
+                "document_preview_runtime_dependency_unavailable"
+            ) from error
         if installed != item.version:
             raise DocumentPreviewRuntimeError("document_preview_runtime_dependency_unavailable")
 
@@ -870,9 +897,10 @@ class ApprovedPdfPreviewBinding:
             limit=_MAX_POINTER_BYTES,
             code="document_preview_approval_runtime_changed",
         )
-        if _sha256_bytes(approval_raw) != self.approval_sha256 or parse_pdf_preview_approval(
-            approval_raw
-        ) != self.approval:
+        if (
+            _sha256_bytes(approval_raw) != self.approval_sha256
+            or parse_pdf_preview_approval(approval_raw) != self.approval
+        ):
             raise DocumentPreviewRuntimeError("document_preview_approval_runtime_changed")
         configuration_raw = _read_regular_file(
             self.configuration_path,
@@ -906,7 +934,9 @@ class ApprovedPdfPreviewBinding:
             try:
                 metadata = fingerprint.path.stat()
             except OSError as error:
-                raise DocumentPreviewRuntimeError("document_preview_model_runtime_changed") from error
+                raise DocumentPreviewRuntimeError(
+                    "document_preview_model_runtime_changed"
+                ) from error
             if (
                 not stat.S_ISREG(metadata.st_mode)
                 or metadata.st_size != fingerprint.byte_size
@@ -938,9 +968,7 @@ def load_approved_pdf_preview_binding(
         root, "runtime-configurations", approval.configuration_sha256
     )
     inventory_path = _sidecar_path(root, "model-inventories", approval.model_inventory_sha256)
-    evaluation_path = _sidecar_path(
-        root, "evaluation-results", approval.evaluation_result_sha256
-    )
+    evaluation_path = _sidecar_path(root, "evaluation-results", approval.evaluation_result_sha256)
     configuration_raw = _read_regular_file(
         configuration_path,
         limit=_MAX_SIDECAR_BYTES,
@@ -1066,8 +1094,11 @@ def _normalized_bbox(points: object, *, width: int, height: int) -> dict[str, fl
         if not isinstance(point, Sequence) or isinstance(point, (str, bytes)) or len(point) != 2:
             return None
         x, y = point
-        if isinstance(x, bool) or isinstance(y, bool) or not isinstance(x, (int, float)) or not isinstance(
-            y, (int, float)
+        if (
+            isinstance(x, bool)
+            or isinstance(y, bool)
+            or not isinstance(x, (int, float))
+            or not isinstance(y, (int, float))
         ):
             return None
         coordinates.append((float(x), float(y)))
@@ -1102,8 +1133,12 @@ class PaddleOcrPdfPreviewAdapter:
                 raise DocumentPreviewUnavailable("PaddleOCR is not provisioned") from error
             try:
                 kwargs: dict[str, object] = {
-                    "det_model_dir": str(self.model_root / str(self.options["det_model_directory"])),
-                    "rec_model_dir": str(self.model_root / str(self.options["rec_model_directory"])),
+                    "det_model_dir": str(
+                        self.model_root / str(self.options["det_model_directory"])
+                    ),
+                    "rec_model_dir": str(
+                        self.model_root / str(self.options["rec_model_directory"])
+                    ),
                     "lang": self.options["language"],
                     "use_angle_cls": self.options["use_angle_cls"],
                     "show_log": False,
@@ -1117,7 +1152,9 @@ class PaddleOcrPdfPreviewAdapter:
                 with local_files_only():
                     self._engine = PaddleOCR(**kwargs)
             except Exception as error:
-                raise DocumentPreviewUnavailable("PaddleOCR local model cannot be loaded") from error
+                raise DocumentPreviewUnavailable(
+                    "PaddleOCR local model cannot be loaded"
+                ) from error
             return self._engine
 
     def extract_raster_or_image(self, preview_input: PreviewInputV1) -> PreviewCandidateV1:
@@ -1148,7 +1185,11 @@ class PaddleOcrPdfPreviewAdapter:
                     if not isinstance(line, Sequence) or len(line) < 2:
                         continue
                     result = line[1]
-                    if not isinstance(result, Sequence) or not result or not isinstance(result[0], str):
+                    if (
+                        not isinstance(result, Sequence)
+                        or not result
+                        or not isinstance(result[0], str)
+                    ):
                         continue
                     text = result[0].strip()
                     if not text:
@@ -1230,7 +1271,9 @@ class DoclingPdfPreviewAdapter:
                 with local_files_only():
                     self._converter = (
                         DocumentConverter(
-                            format_options={InputFormat.PDF: PdfFormatOption(pipeline_options=pipeline)}
+                            format_options={
+                                InputFormat.PDF: PdfFormatOption(pipeline_options=pipeline)
+                            }
                         ),
                         DocumentStream,
                     )
@@ -1250,7 +1293,9 @@ class DoclingPdfPreviewAdapter:
         try:
             with local_files_only():
                 result = converter.convert(
-                    document_stream_type(name="document.pdf", stream=io.BytesIO(preview_input.content))
+                    document_stream_type(
+                        name="document.pdf", stream=io.BytesIO(preview_input.content)
+                    )
                 )
             document = result.document
             page_values = getattr(document, "pages", {})
@@ -1316,7 +1361,9 @@ class _AdapterFactory(Protocol):
     def __call__(self, binding: ApprovedPdfPreviewBinding) -> LocalDocumentPreviewEngine: ...
 
 
-def build_default_pdf_preview_adapter(binding: ApprovedPdfPreviewBinding) -> LocalDocumentPreviewEngine:
+def build_default_pdf_preview_adapter(
+    binding: ApprovedPdfPreviewBinding,
+) -> LocalDocumentPreviewEngine:
     """Build exactly one approved PDF profile; there is no environment fallback."""
 
     revision = binding.approval.extractor_revision
@@ -1384,10 +1431,13 @@ def resolve_approved_pdf_preview_engine(
             package_version_reader=package_version_reader,
         )
         return DocumentPreviewEngineResolution(
-            ApprovedPdfOnlyPreviewEngine(binding=binding, delegate=adapter_factory(binding)), "approved"
+            ApprovedPdfOnlyPreviewEngine(binding=binding, delegate=adapter_factory(binding)),
+            "approved",
         )
     except DocumentPreviewRuntimeError as error:
-        return DocumentPreviewEngineResolution(DisabledDocumentPreviewEngine(), "disabled", error.code)
+        return DocumentPreviewEngineResolution(
+            DisabledDocumentPreviewEngine(), "disabled", error.code
+        )
 
 
 def write_runtime_sidecars(
@@ -1444,7 +1494,9 @@ def write_approved_pdf_preview_pointer(
     )
     try:
         (root / "evaluation-results").mkdir(parents=True, exist_ok=True)
-        _assert_no_symlink(root / "evaluation-results", code="document_preview_approval_write_failed")
+        _assert_no_symlink(
+            root / "evaluation-results", code="document_preview_approval_write_failed"
+        )
     except OSError as error:
         raise DocumentPreviewRuntimeError("document_preview_approval_write_failed") from error
     configuration_path = _sidecar_path(root, "runtime-configurations", configuration_sha256)
@@ -1459,9 +1511,10 @@ def write_approved_pdf_preview_pointer(
         limit=_MAX_SIDECAR_BYTES,
         code="document_preview_inventory_invalid",
     )
-    if _sha256_bytes(configuration_raw) != configuration_sha256 or _sha256_bytes(
-        inventory_raw
-    ) != model_inventory_sha256:
+    if (
+        _sha256_bytes(configuration_raw) != configuration_sha256
+        or _sha256_bytes(inventory_raw) != model_inventory_sha256
+    ):
         raise DocumentPreviewRuntimeError("document_preview_approval_binding_mismatch")
     configuration = parse_runtime_configuration(configuration_raw)
     inventory = parse_model_inventory(inventory_raw)
@@ -1478,7 +1531,8 @@ def write_approved_pdf_preview_pointer(
     ):
         raise DocumentPreviewRuntimeError("document_preview_approval_binding_mismatch")
     normalized_evaluation_raw = _canonical_json_bytes(
-        _strict_json_object(evaluation_raw, code="document_preview_evaluation_invalid"), trailing_newline=True
+        _strict_json_object(evaluation_raw, code="document_preview_evaluation_invalid"),
+        trailing_newline=True,
     )
     evaluation_path = root / "evaluation-results" / f"{evaluation.evaluation_result_sha256}.json"
     _write_exact_immutable_bytes(
@@ -1487,11 +1541,14 @@ def write_approved_pdf_preview_pointer(
         limit=_MAX_EVALUATION_BYTES,
         code="document_preview_approval_write_failed",
     )
-    if _read_regular_file(
-        evaluation_path,
-        limit=_MAX_EVALUATION_BYTES,
-        code="document_preview_approval_write_failed",
-    ) != normalized_evaluation_raw:
+    if (
+        _read_regular_file(
+            evaluation_path,
+            limit=_MAX_EVALUATION_BYTES,
+            code="document_preview_approval_write_failed",
+        )
+        != normalized_evaluation_raw
+    ):
         raise DocumentPreviewRuntimeError("document_preview_approval_write_failed")
     approval_value: dict[str, object] = {
         "schema_version": "1.0",

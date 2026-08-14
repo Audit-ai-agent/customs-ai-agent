@@ -169,7 +169,9 @@ class ServiceSettings:
             assert self.document_preview_approval_sha256 is not None
             _document_preview_approval_path(str(self.document_preview_approval_path))
             if _SHA256.fullmatch(self.document_preview_approval_sha256) is None:
-                raise ServiceConfigurationError("customs_agent_document_preview_approval_sha256_invalid")
+                raise ServiceConfigurationError(
+                    "customs_agent_document_preview_approval_sha256_invalid"
+                )
         if has_guidance_base_url != has_guidance_token:
             raise ServiceConfigurationError("guidance_service_peer_incomplete")
         if has_guidance_registry_version and not has_guidance_base_url:
