@@ -75,6 +75,11 @@ class ReviewPacketV2(_LocalReviewModel):
     dataset_id: str = Field(min_length=1, max_length=128, pattern=_IDENTIFIER)
     dataset_revision: str = Field(min_length=1, max_length=128, pattern=_IDENTIFIER)
     receipt_sha256: str = Field(pattern=r"^[a-f0-9]{64}$")
+    # A v2 error stratum is only meaningful when the immutable error-label
+    # source used to select it remains part of the packet identity.  The UI
+    # does not interpret labels, but it must reject packets that omit this
+    # binding rather than silently accepting an older receipt-only shape.
+    error_labels_sha256: str = Field(pattern=r"^[a-f0-9]{64}$")
     packet_receipt_sha256: str = Field(pattern=r"^[a-f0-9]{64}$")
     prepared_as_of: date
     items: list[ReviewPacketItemV2] = Field(min_length=1, max_length=100_000)

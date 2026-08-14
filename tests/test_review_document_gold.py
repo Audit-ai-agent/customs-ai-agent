@@ -40,6 +40,7 @@ def _v2_packet(receipt: DatasetReceiptV1, source_sha256: str) -> dict[str, objec
         "dataset_id": receipt.dataset_id,
         "dataset_revision": receipt.dataset_revision,
         "receipt_sha256": receipt_sha256(receipt),
+        "error_labels_sha256": "e" * 64,
         "packet_receipt_sha256": "0" * 64,
         "prepared_as_of": "2026-08-14",
         "items": [
@@ -240,6 +241,22 @@ def test_packet_receipt_or_source_binding_mismatch_refuses_start(tmp_path: Path)
     _write_json(packet_path, packet)
 
     with pytest.raises(ReviewToolError, match="packet_asset_mismatch"):
+        ReviewContext.from_paths(
+            receipt_path=context.receipt_path,
+            packet_path=packet_path,
+            dataset_root=source.parent.parent,
+            output_directory=output,
+        )
+
+
+def test_v2_packet_without_error_label_receipt_is_rejected(tmp_path: Path) -> None:
+    context, source, packet_path, output = _context(tmp_path)
+    packet = json.loads(packet_path.read_text(encoding="utf-8"))
+    packet.pop("error_labels_sha256")
+    packet["packet_receipt_sha256"] = _packet_receipt_sha256(packet)
+    _write_json(packet_path, packet)
+
+    with pytest.raises(ReviewToolError, match="packet_invalid"):
         ReviewContext.from_paths(
             receipt_path=context.receipt_path,
             packet_path=packet_path,
