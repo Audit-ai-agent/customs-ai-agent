@@ -54,7 +54,7 @@ uv run python tools/run_synthetic_pdf_ocr_candidate.py `
 
 - engine kind와 extractor revision
 - configuration SHA-256와 model inventory SHA-256
-- `synthetic-pdf-label-normalizer-v1` parser revision
+- `synthetic-pdf-label-normalizer-v2` parser revision
 - `offline_synthetic_pdf_evaluation` profile mode
 - 모든 위 값과 candidate document를 묶은 `candidate_bundle_sha256`
 
@@ -80,17 +80,29 @@ uv run python tools/evaluate_synthetic_pdf_ocr.py `
 
 ## field와 table의 제한
 
-`synthetic-pdf-label-normalizer-v1`은 문서 유형(B/L, Invoice, Packing
+`synthetic-pdf-label-normalizer-v2`은 문서 유형(B/L, Invoice, Packing
 List)별 고정 label과 `:`/`#`/명시적 dash 구분자를 가진 span만 읽습니다.
 값이 없거나 충돌하면 field를 비워 둡니다. Gold나 CSV 값으로 빈 field를
 채우지 않습니다.
 
 현재 runtime preview adapter는 structured table cell을 공개하지 않습니다.
 실제 adapter가 `CandidateExtractionV1.table_cells`를 제공하면 실행기는
-그 값을 그대로 보존하지만, 그렇지 않으면 빈 목록입니다. 특히 현재
-Docling Markdown 경로는 모든 텍스트 chunk를 보존하지만 진짜 table
-coordinate를 만들지 않습니다. 이 경우 table-cell F1 Gate는 자연스럽게
-실패하며, table adapter를 구현하기 전에는 통과했다고 주장할 수 없습니다.
+그 값을 그대로 보존합니다. 현 Docling 후보는 예외적으로 page-1 Markdown
+span 안의 **명시적 pipe table**만 고정 문법으로 읽을 수 있습니다.
+
+- header row → `| --- |` separator row → 최소 한 개의 같은 폭 data row가
+  모두 있어야 table로 인정합니다.
+- page number는 1, Markdown 순서의 table index는 1부터, header row index는
+  0, data row는 1부터, column index는 0부터입니다. separator row는 cell로
+  기록하지 않습니다.
+- Gold 검수자도 위 좌표 규칙으로 table cell을 확인해야 합니다. Gold나 CSV
+  값, bbox, 추정한 행·열 경계로 빈 cell을 채우지 않습니다.
+
+Pdf text layer와 PaddleOCR가 structured cell을 내지 않으면 빈 목록이며 F1
+Gate를 통과하지 못합니다. Docling도 pipe table을 내지 않거나 Markdown이
+깨져 있으면 동일하게 실패합니다. 따라서 이 추가 parser는 합성 PDF의
+명시적 Markdown table 범위에서만 Gate를 가능하게 하며, 일반 문서 table
+품질을 주장하는 기능이 아닙니다.
 
 ## 봉인 평가
 

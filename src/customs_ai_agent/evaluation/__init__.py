@@ -30,6 +30,7 @@ from customs_ai_agent.evaluation.synthetic_pdf_candidate_runner import (
     CandidateExtractionV1,
     EvaluationRuntimeProfileV1,
     SyntheticPdfCandidateRunnerError,
+    normalize_synthetic_pdf_docling_table_cells,
     normalize_synthetic_pdf_fields,
     run_synthetic_pdf_ocr_candidate,
 )
@@ -56,6 +57,7 @@ __all__ = [
     "read_canonical_evaluation_result",
     "receipt_sha256",
     "normalize_synthetic_pdf_fields",
+    "normalize_synthetic_pdf_docling_table_cells",
     "run_synthetic_pdf_ocr_candidate",
     "score_candidate_output",
 ]

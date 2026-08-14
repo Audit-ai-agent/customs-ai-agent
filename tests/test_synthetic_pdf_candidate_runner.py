@@ -29,6 +29,7 @@ from customs_ai_agent.evaluation.synthetic_pdf_candidate_runner import (
     EvaluationRuntimeProfileV1,
     SyntheticPdfCandidateRunnerError,
     build_default_synthetic_pdf_candidate_adapter,
+    normalize_synthetic_pdf_docling_table_cells,
     normalize_synthetic_pdf_fields,
     run_synthetic_pdf_ocr_candidate,
 )
@@ -241,20 +242,18 @@ def _fixture(
 class _FakeAdapter:
     calls: int = 0
     try_network: bool = False
+    include_table_cells: bool = True
+    markdown_table: bool = False
 
     def extract_pdf(self, _preview_input) -> CandidateExtractionV1:  # type: ignore[no-untyped-def]
         self.calls += 1
         if self.try_network:
             socket.create_connection(("127.0.0.1", 9), timeout=0.01)
-        return CandidateExtractionV1(
-            spans=(
-                CandidateSpanV1(
-                    page_number=1,
-                    reading_order=1,
-                    text="Invoice No: INV-001\nAmount: 10.00\nTOTAL: 10.00",
-                ),
-            ),
-            table_cells=(
+        text = "Invoice No: INV-001\nAmount: 10.00\nTOTAL: 10.00"
+        if self.markdown_table:
+            text += "\n\n| Item | Qty |\n| --- | ---: |\n| Widget | 2 |"
+        table_cells = (
+            (
                 CandidateTableCellV1(
                     page_number=1,
                     table_index=1,
@@ -262,7 +261,19 @@ class _FakeAdapter:
                     column_index=0,
                     text="Widget",
                 ),
+            )
+            if self.include_table_cells
+            else ()
+        )
+        return CandidateExtractionV1(
+            spans=(
+                CandidateSpanV1(
+                    page_number=1,
+                    reading_order=1,
+                    text=text,
+                ),
             ),
+            table_cells=table_cells,
         )
 
 
@@ -308,7 +319,7 @@ def test_runner_binds_every_engine_profile_and_preserves_adapter_cells(
     assert bundle.extractor_revision == summary["extractor_revision"]
     assert bundle.configuration_sha256 == summary["configuration_sha256"]
     assert bundle.model_inventory_sha256 == summary["model_inventory_sha256"]
-    assert bundle.parser_revision == "synthetic-pdf-label-normalizer-v1"
+    assert bundle.parser_revision == "synthetic-pdf-label-normalizer-v2"
     assert [field.field_name for field in bundle.documents[0].fields] == [
         "inv_no",
         "amount",
@@ -378,6 +389,71 @@ def test_normalizer_uses_only_explicit_labelled_candidate_spans() -> None:
         ("inv_no", "INV-9"),
         ("qty", "4 PCS"),
         ("net_gross_weight", "3 / 4 KG"),
+    ]
+
+
+def test_docling_markdown_table_normalizer_keeps_multiple_explicit_tables() -> None:
+    cells = normalize_synthetic_pdf_docling_table_cells(
+        spans=[
+            CandidateSpanV1(
+                page_number=1,
+                reading_order=1,
+                text="Before\n| Item | Qty |\n| --- | ---: |\n| Widget",
+            ),
+            CandidateSpanV1(
+                page_number=1,
+                reading_order=2,
+                text=(" | 2 |\n| Screw \\| bolt | 3 |\n\n| Country |\n| :--- |\n| KR |\nAfter"),
+            ),
+        ]
+    )
+
+    assert [
+        (cell.page_number, cell.table_index, cell.row_index, cell.column_index, cell.text)
+        for cell in cells
+    ] == [
+        (1, 1, 0, 0, "Item"),
+        (1, 1, 0, 1, "Qty"),
+        (1, 1, 1, 0, "Widget"),
+        (1, 1, 1, 1, "2"),
+        (1, 1, 2, 0, "Screw | bolt"),
+        (1, 1, 2, 1, "3"),
+        (1, 2, 0, 0, "Country"),
+        (1, 2, 1, 0, "KR"),
+    ]
+
+
+@pytest.mark.parametrize(
+    "text",
+    [
+        "No Markdown table here",
+        "| Item | Qty |\n| --- | --- |\n| Widget |",
+        "```\n| Item | Qty |\n| --- | --- |\n| Widget | 2 |\n```",
+    ],
+)
+def test_docling_markdown_table_normalizer_rejects_no_or_malformed_table(text: str) -> None:
+    assert (
+        normalize_synthetic_pdf_docling_table_cells(
+            spans=[CandidateSpanV1(page_number=1, reading_order=1, text=text)]
+        )
+        == []
+    )
+
+
+def test_docling_runner_derives_table_cells_only_from_explicit_markdown(tmp_path: Path) -> None:
+    fixture = _fixture(tmp_path, engine_kind="docling")
+    summary = _run(fixture, _FakeAdapter(include_table_cells=False, markdown_table=True))
+    output = fixture["output_directory"] / summary["candidate_file"]  # type: ignore[operator]
+    bundle = SyntheticPdfCandidateOutputBundleV1.model_validate_json(output.read_bytes())
+
+    assert [
+        (cell.table_index, cell.row_index, cell.column_index, cell.text)
+        for cell in bundle.documents[0].table_cells
+    ] == [
+        (1, 0, 0, "Item"),
+        (1, 0, 1, "Qty"),
+        (1, 1, 0, "Widget"),
+        (1, 1, 1, "2"),
     ]
 
 

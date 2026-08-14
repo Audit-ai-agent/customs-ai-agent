@@ -67,7 +67,10 @@ _SHA256 = re.compile(r"^[a-f0-9]{64}$")
 _MAX_JSON_BYTES = 1 * 1024 * 1024
 _MAX_SOURCE_BYTES = 32 * 1024 * 1024
 _PROFILE_MODE: Literal["offline_synthetic_pdf_evaluation"] = "offline_synthetic_pdf_evaluation"
-SYNTHETIC_PDF_LABEL_NORMALIZER_REVISION = "synthetic-pdf-label-normalizer-v1"
+# v2 adds an explicit Markdown-pipe-table transform for the local Docling
+# candidate only.  It is part of the candidate provenance so an old field-only
+# output cannot be relabelled as a table-capable one.
+SYNTHETIC_PDF_LABEL_NORMALIZER_REVISION = "synthetic-pdf-label-normalizer-v2"
 
 
 class SyntheticPdfCandidateRunnerError(ValueError):
@@ -538,6 +541,120 @@ def normalize_synthetic_pdf_fields(
     return fields
 
 
+def _markdown_pipe_cells(line: str) -> list[str] | None:
+    """Parse one complete Markdown pipe row without inferring table geometry."""
+
+    stripped = line.strip()
+    if len(stripped) < 3 or not stripped.startswith("|") or not stripped.endswith("|"):
+        return None
+    cells: list[str] = []
+    current: list[str] = []
+    escaped = False
+    for character in stripped[1:-1]:
+        if escaped:
+            if character == "|":
+                current.append(character)
+            else:
+                current.extend(("\\", character))
+            escaped = False
+            continue
+        if character == "\\":
+            escaped = True
+        elif character == "|":
+            cells.append("".join(current).strip())
+            current = []
+        else:
+            current.append(character)
+    if escaped:
+        current.append("\\")
+    cells.append("".join(current).strip())
+    if not cells or any(not cell for cell in cells):
+        return None
+    return cells
+
+
+def _is_markdown_separator_row(cells: Sequence[str]) -> bool:
+    return bool(cells) and all(re.fullmatch(r":?-{3,}:?", cell.replace(" ", "")) for cell in cells)
+
+
+def normalize_synthetic_pdf_docling_table_cells(
+    *, spans: Sequence[CandidateSpanV1]
+) -> list[CandidateTableCellV1]:
+    """Extract only explicit Docling Markdown pipe tables from page-one spans.
+
+    The pinned runtime's Docling adapter exports one document-global Markdown
+    stream and conservatively places every chunk on page 1.  Rejoining those
+    chunks exactly restores that stream even when a 8,000-character boundary
+    splits a row.  The parser emits a cell only for a complete header +
+    separator + at least one equally wide data row.  It never uses Gold, CSV,
+    coordinates, or a guessed table boundary.
+
+    Coordinate convention shared with the local Gold reviewer:
+    ``page_number=1``; ``table_index`` starts at 1 in Markdown order;
+    ``row_index=0`` is the header, data rows follow at 1; ``column_index`` is
+    zero-based.  The Markdown separator row is not a cell.
+    """
+
+    markdown = "".join(
+        span.text
+        for span in sorted(spans, key=lambda span: (span.page_number, span.reading_order))
+        if span.page_number == 1
+    )
+    if not markdown:
+        return []
+    lines = markdown.replace("\r\n", "\n").replace("\r", "\n").split("\n")
+    cells: list[CandidateTableCellV1] = []
+    line_index = 0
+    table_index = 0
+    in_fenced_code = False
+    while line_index + 1 < len(lines):
+        line = lines[line_index]
+        if line.strip().startswith("```"):
+            in_fenced_code = not in_fenced_code
+            line_index += 1
+            continue
+        if in_fenced_code:
+            line_index += 1
+            continue
+        header = _markdown_pipe_cells(line)
+        separator = _markdown_pipe_cells(lines[line_index + 1])
+        if (
+            header is None
+            or separator is None
+            or len(header) != len(separator)
+            or not _is_markdown_separator_row(separator)
+        ):
+            line_index += 1
+            continue
+        data_rows: list[list[str]] = []
+        next_index = line_index + 2
+        while next_index < len(lines):
+            row = _markdown_pipe_cells(lines[next_index])
+            if row is None or len(row) != len(header):
+                break
+            data_rows.append(row)
+            next_index += 1
+        # Header-only or malformed blocks are intentionally ignored.  A
+        # reviewer cannot verify a table body that the candidate did not emit.
+        if not data_rows:
+            line_index += 1
+            continue
+        table_index += 1
+        for row_index, row in enumerate([header, *data_rows]):
+            for column_index, text in enumerate(row):
+                cells.append(
+                    CandidateTableCellV1(
+                        page_number=1,
+                        table_index=table_index,
+                        row_index=row_index,
+                        column_index=column_index,
+                        text=text,
+                    )
+                )
+        line_index = next_index
+    return cells
+
+
 def _build_candidate_bundle(
     *,
     packet: EvaluationPacketV2,
@@ -720,13 +837,20 @@ def run_synthetic_pdf_ocr_candidate(
         fields = normalize_synthetic_pdf_fields(
             document_type=item.document_type, spans=extracted.spans
         )
+        # Preserve a future adapter's explicit structured cells.  The current
+        # Docling adapter has only Markdown spans, so use its strict synthetic
+        # pipe-table parser as the sole fallback.  PDF text/PaddleOCR are not
+        # assigned guessed cells and consequently fail F1 when they emit none.
+        table_cells = list(extracted.table_cells)
+        if not table_cells and profile.engine_kind == "docling":
+            table_cells = normalize_synthetic_pdf_docling_table_cells(spans=extracted.spans)
         documents.append(
             CandidateDocumentOutputV1(
                 asset_id=item.asset_id,
                 source_sha256=item.source_sha256,
                 fields=fields,
                 spans=list(extracted.spans),
-                table_cells=list(extracted.table_cells),
+                table_cells=table_cells,
             )
         )
     bundle = _build_candidate_bundle(packet=packet, profile=profile, documents=documents)
@@ -758,6 +882,7 @@ __all__ = [
     "SyntheticPdfCandidateRunnerError",
     "build_default_synthetic_pdf_candidate_adapter",
     "load_unapproved_local_candidate_profile",
+    "normalize_synthetic_pdf_docling_table_cells",
     "normalize_synthetic_pdf_fields",
     "reserve_sealed_candidate_run",
     "run_synthetic_pdf_ocr_candidate",
