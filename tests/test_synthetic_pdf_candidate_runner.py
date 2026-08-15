@@ -11,6 +11,7 @@ from datetime import date
 from pathlib import Path
 import pytest
 
+import customs_ai_agent.service.document_preview_runtime as runtime_module
 from customs_ai_agent.evaluation.document_gold import (
     DatasetAssetReceiptV1,
     DatasetReceiptV1,
@@ -99,6 +100,46 @@ _DOCLING_EXECUTION_PACKAGE_NAMES = (
 )
 
 
+_PADDLE_EXECUTION_PACKAGE_NAMES = (
+    "albucore",
+    "albumentations",
+    "beautifulsoup4",
+    "cython",
+    "fire",
+    "fonttools",
+    "imgaug",
+    "lmdb",
+    "numpy",
+    "opencv-contrib-python",
+    "opencv-python",
+    "opencv-python-headless",
+    "paddleocr",
+    "paddlepaddle",
+    "pillow",
+    "pyclipper",
+    "pypdf",
+    "pypdfium2",
+    "python-docx",
+    "pyyaml",
+    "rapidfuzz",
+    "requests",
+    "scikit-image",
+    "shapely",
+    "tqdm",
+)
+
+
+@pytest.fixture(autouse=True)
+def _isolate_paddle_wheel_record_verifier(monkeypatch: pytest.MonkeyPatch) -> None:
+    """Candidate profile fixtures do not install the real Paddle wheel set."""
+
+    monkeypatch.setattr(
+        runtime_module,
+        "_recorded_cv2_tree_matches_designated_provider",
+        lambda: None,
+    )
+
+
 def _profile_sidecars(root: Path, engine_kind: str) -> tuple[Path, Path]:
     if engine_kind == "pdf_text_layer":
         configuration = {
@@ -146,12 +187,7 @@ def _profile_sidecars(root: Path, engine_kind: str) -> tuple[Path, Path]:
         inventory = {
             "schema_version": "1.0",
             "engine_kind": engine_kind,
-            "packages": [
-                _package("pypdf"),
-                _package("paddleocr"),
-                _package("paddlepaddle"),
-                _package("pypdfium2"),
-            ],
+            "packages": [_package(name) for name in _PADDLE_EXECUTION_PACKAGE_NAMES],
             "artifacts": artifacts,
         }
     else:
@@ -510,6 +546,30 @@ def test_runner_binds_every_engine_profile_and_preserves_adapter_cells(
     ]
     assert bundle.documents[0].table_cells[0].text == "Widget"
     assert adapter.calls == 1
+
+
+def test_candidate_profile_rejects_missing_paddle_postprocess_package(tmp_path: Path) -> None:
+    fixture = _fixture(tmp_path, engine_kind="paddleocr")
+    root = fixture["root"]
+    configuration_path = fixture["configuration_path"]
+    inventory_path = fixture["inventory_path"]
+    assert isinstance(root, Path)
+    assert isinstance(configuration_path, Path)
+    assert isinstance(inventory_path, Path)
+    invalid_inventory = json.loads(inventory_path.read_text(encoding="utf-8"))
+    invalid_inventory["packages"] = [
+        package for package in invalid_inventory["packages"] if package["name"] != "pyclipper"
+    ]
+    invalid_path = _write_sidecar(root, "model-inventories", invalid_inventory)
+
+    with pytest.raises(SyntheticPdfCandidateRunnerError, match="candidate_runtime_profile_invalid"):
+        load_unapproved_local_candidate_profile(
+            document_preview_root=root,
+            configuration_path=configuration_path,
+            inventory_path=invalid_path,
+            engine_kind="paddleocr",
+            package_version_reader=lambda _name: "test-v1",
+        )
 
 
 def test_runner_v3_full_invoice_fake_adapter_uses_visible_candidate_output_only(

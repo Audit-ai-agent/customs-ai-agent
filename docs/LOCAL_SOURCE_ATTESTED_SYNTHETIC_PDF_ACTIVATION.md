@@ -70,7 +70,12 @@ provenance field, 다른 scope/kind는 이 경로에서 모두 거부된다. 반
 
 모델과 package는 여전히 별도 명시 provisioning으로 local-only inventory에
 기록해야 한다. Docling은 본체만이 아니라 layout/table/GLM 실행에 실제로 관여하는
-고정 dependency closure의 package version도 inventory에 기록해야 한다. PaddleOCR/Docling은 설정된 model directory 아래의 모든 regular
+고정 dependency closure의 package version도 inventory에 기록해야 한다. PaddleOCR의 25개
+package는 pinned `uv.lock`의 direct profile dependency boundary와 adapter 직접 의존성일
+뿐, 전체 Python import closure가 아니다. `cv2`를 제공할 수 있는 세 OpenCV 배포본의
+version도 모두 기록해야 한다. runtime은 실제 `cv2` tree의 regular file 집합·hash·size가
+designated `opencv-contrib-python` wheel `RECORD`와 맞지 않으면 provisioning·activation·
+engine binding load를 거부한다. PaddleOCR/Docling은 설정된 model directory 아래의 모든 regular
 file을 inventory의 path·size·SHA-256으로 선언해야 하며, extra·누락 file 또는
 symlink/Windows junction(reparse point)은 activation과 runtime 모두에서 거부된다.
 이 활성화 명령은 다운로드, network fallback, model 설치를 수행하지 않는다.

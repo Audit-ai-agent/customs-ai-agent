@@ -1,8 +1,10 @@
 from __future__ import annotations
 
+import base64
 import hashlib
 import json
 import socket
+import stat
 import sys
 from pathlib import Path
 from types import ModuleType, SimpleNamespace
@@ -38,6 +40,9 @@ from customs_ai_agent.service.document_preview_runtime import (
     write_source_attested_synthetic_pdf_preview_pointer,
 )
 from customs_ai_agent.service.settings import ServiceConfigurationError, ServiceSettings
+
+
+_REPARSE_POINT_ATTRIBUTE = getattr(stat, "FILE_ATTRIBUTE_REPARSE_POINT", 0)
 
 
 @pytest.fixture(autouse=True)
@@ -105,6 +110,35 @@ _DOCLING_EXECUTION_PACKAGE_NAMES = (
 )
 
 
+_PADDLE_EXECUTION_PACKAGE_NAMES = (
+    "albucore",
+    "albumentations",
+    "beautifulsoup4",
+    "cython",
+    "fire",
+    "fonttools",
+    "imgaug",
+    "lmdb",
+    "numpy",
+    "opencv-contrib-python",
+    "opencv-python",
+    "opencv-python-headless",
+    "paddleocr",
+    "paddlepaddle",
+    "pillow",
+    "pyclipper",
+    "pypdf",
+    "pypdfium2",
+    "python-docx",
+    "pyyaml",
+    "rapidfuzz",
+    "requests",
+    "scikit-image",
+    "shapely",
+    "tqdm",
+)
+
+
 def _docling_execution_packages() -> list[dict[str, str]]:
     return [
         {
@@ -115,6 +149,44 @@ def _docling_execution_packages() -> list[dict[str, str]]:
         }
         for name in _DOCLING_EXECUTION_PACKAGE_NAMES
     ]
+
+
+def _paddle_execution_packages(*, omitted: str | None = None) -> list[dict[str, str]]:
+    return [
+        {
+            "name": name,
+            "version": "test-v1",
+            "license_id": "test-license",
+            "source_uri": "https://example.test/paddleocr/",
+        }
+        for name in _PADDLE_EXECUTION_PACKAGE_NAMES
+        if name != omitted
+    ]
+
+
+def _paddle_configuration() -> dict[str, object]:
+    return {
+        "schema_version": "1.0",
+        "engine_kind": "paddleocr",
+        "extractor_revision": "paddle-test-v1",
+        "options": {
+            "det_model_directory": "models/paddle/det",
+            "rec_model_directory": "models/paddle/rec",
+            "cls_model_directory": "models/paddle/cls",
+            "ocr_version": "PP-OCRv4",
+            "use_gpu": False,
+            "cpu_threads": 1,
+        },
+    }
+
+
+def _paddle_inventory(*, omitted: str | None = None) -> dict[str, object]:
+    return {
+        "schema_version": "1.0",
+        "engine_kind": "paddleocr",
+        "packages": _paddle_execution_packages(omitted=omitted),
+        "artifacts": [],
+    }
 
 
 def _configuration() -> dict[str, object]:
@@ -140,6 +212,63 @@ def _inventory() -> dict[str, object]:
         ],
         "artifacts": [],
     }
+
+
+def _write_hash_named_sidecar(root: Path, directory: str, value: dict[str, object]) -> str:
+    raw = _canonical(value, newline=True)
+    digest = hashlib.sha256(raw).hexdigest()
+    path = root / directory / f"{digest}.json"
+    path.parent.mkdir(parents=True, exist_ok=True)
+    path.write_bytes(raw)
+    return digest
+
+
+def _fake_cv2_tree(tmp_path: Path) -> tuple[Path, Path]:
+    site_packages = tmp_path / "site-packages"
+    cv2_root = site_packages / "cv2"
+    for relative_path, content in {
+        "__init__.py": b"fake cv2 init\n",
+        "cv2.pyd": b"fake native extension\n",
+        "data/haarcascade.xml": b"fake cascade\n",
+    }.items():
+        path = cv2_root / relative_path
+        path.parent.mkdir(parents=True, exist_ok=True)
+        path.write_bytes(content)
+    return site_packages, cv2_root
+
+
+def _fake_cv2_record(cv2_root: Path, *, hash_overrides: dict[str, str] | None = None) -> str:
+    overrides = hash_overrides or {}
+    rows: list[str] = []
+    for path in sorted(cv2_root.rglob("*"), key=lambda candidate: candidate.as_posix()):
+        if not path.is_file():
+            continue
+        relative_path = path.relative_to(cv2_root).as_posix()
+        digest = (
+            base64.urlsafe_b64encode(hashlib.sha256(path.read_bytes()).digest())
+            .decode("ascii")
+            .rstrip("=")
+        )
+        rows.append(
+            ",".join(
+                (
+                    f"cv2/{relative_path}",
+                    f"sha256={overrides.get(relative_path, digest)}",
+                    str(path.stat().st_size),
+                )
+            )
+        )
+    return "\n".join(rows) + "\n"
+
+
+def _fake_cv2_distribution(site_packages: Path, record: str) -> SimpleNamespace:
+    def locate_file(relative_path: str) -> Path:
+        return site_packages / relative_path
+
+    def read_text(filename: str) -> str | None:
+        return record if filename == "RECORD" else None
+
+    return SimpleNamespace(locate_file=locate_file, read_text=read_text)
 
 
 def _evaluation(
@@ -1227,6 +1356,203 @@ def test_docling_inventory_requires_every_output_affecting_execution_package() -
         DocumentPreviewRuntimeError, match="document_preview_inventory_packages_invalid"
     ):
         runtime_module.verify_inventory_packages(inventory, package_version_reader=_package_version)
+
+
+def test_paddle_inventory_requires_the_pinned_direct_execution_closure() -> None:
+    expected = set(_PADDLE_EXECUTION_PACKAGE_NAMES)
+    assert runtime_module._required_packages("paddleocr") == expected
+    inventory = runtime_module.parse_model_inventory(
+        _canonical(_paddle_inventory(omitted="pyclipper"), newline=True)
+    )
+
+    with pytest.raises(
+        DocumentPreviewRuntimeError, match="document_preview_inventory_packages_invalid"
+    ):
+        runtime_module.verify_inventory_packages(inventory, package_version_reader=_package_version)
+
+
+def test_cv2_record_verifier_accepts_exact_provider_tree_inside_local_files_only(
+    tmp_path: Path,
+) -> None:
+    site_packages, cv2_root = _fake_cv2_tree(tmp_path)
+    distribution = _fake_cv2_distribution(site_packages, _fake_cv2_record(cv2_root))
+    original_dont_write_bytecode = sys.dont_write_bytecode
+
+    def importer(name: str) -> SimpleNamespace:
+        assert name == "cv2"
+        assert sys.dont_write_bytecode is True
+        with pytest.raises(OSError, match="local preview runtime forbids network access"):
+            socket.create_connection(("127.0.0.1", 9), timeout=0.01)
+        return SimpleNamespace(__file__=str(cv2_root / "__init__.py"))
+
+    runtime_module._recorded_cv2_tree_matches_designated_provider(
+        distribution_reader=lambda name: distribution,
+        module_importer=importer,
+    )
+    assert sys.dont_write_bytecode is original_dont_write_bytecode
+
+
+def test_cv2_record_verifier_rejects_hash_mismatch(tmp_path: Path) -> None:
+    site_packages, cv2_root = _fake_cv2_tree(tmp_path)
+    distribution = _fake_cv2_distribution(
+        site_packages,
+        _fake_cv2_record(cv2_root, hash_overrides={"cv2.pyd": "0" * 43}),
+    )
+
+    with pytest.raises(
+        DocumentPreviewRuntimeError, match="document_preview_runtime_dependency_unavailable"
+    ):
+        runtime_module._recorded_cv2_tree_matches_designated_provider(
+            distribution_reader=lambda name: distribution,
+            module_importer=lambda name: SimpleNamespace(__file__=str(cv2_root / "__init__.py")),
+        )
+
+
+@pytest.mark.parametrize(
+    "record",
+    [
+        "cv2/__init__.py,sha256=bad\n",
+        "cv2/__init__.py,sha256=bad,1,unexpected\n",
+        "cv2/../outside.py,sha256=bad,1\n",
+    ],
+)
+def test_cv2_record_verifier_rejects_malformed_record(tmp_path: Path, record: str) -> None:
+    site_packages, cv2_root = _fake_cv2_tree(tmp_path)
+    distribution = _fake_cv2_distribution(site_packages, record)
+
+    with pytest.raises(
+        DocumentPreviewRuntimeError, match="document_preview_runtime_dependency_unavailable"
+    ):
+        runtime_module._recorded_cv2_tree_matches_designated_provider(
+            distribution_reader=lambda name: distribution,
+            module_importer=lambda name: SimpleNamespace(__file__=str(cv2_root / "__init__.py")),
+        )
+
+
+def test_cv2_record_verifier_rejects_provider_mismatch(tmp_path: Path) -> None:
+    site_packages, cv2_root = _fake_cv2_tree(tmp_path)
+    other_root = site_packages / "other-cv2"
+    other_root.mkdir()
+    (other_root / "__init__.py").write_bytes(b"other provider\n")
+    distribution = _fake_cv2_distribution(site_packages, _fake_cv2_record(cv2_root))
+
+    with pytest.raises(
+        DocumentPreviewRuntimeError, match="document_preview_runtime_dependency_unavailable"
+    ):
+        runtime_module._recorded_cv2_tree_matches_designated_provider(
+            distribution_reader=lambda name: distribution,
+            module_importer=lambda name: SimpleNamespace(__file__=str(other_root / "__init__.py")),
+        )
+
+
+@pytest.mark.parametrize("mutation", ["extra", "missing"])
+def test_cv2_record_verifier_rejects_non_exact_regular_file_set(
+    tmp_path: Path, mutation: str
+) -> None:
+    site_packages, cv2_root = _fake_cv2_tree(tmp_path)
+    record = _fake_cv2_record(cv2_root)
+    if mutation == "extra":
+        (cv2_root / "untracked.py").write_bytes(b"untracked\n")
+    else:
+        (cv2_root / "data" / "haarcascade.xml").unlink()
+    distribution = _fake_cv2_distribution(site_packages, record)
+
+    with pytest.raises(
+        DocumentPreviewRuntimeError, match="document_preview_runtime_dependency_unavailable"
+    ):
+        runtime_module._recorded_cv2_tree_matches_designated_provider(
+            distribution_reader=lambda name: distribution,
+            module_importer=lambda name: SimpleNamespace(__file__=str(cv2_root / "__init__.py")),
+        )
+
+
+@pytest.mark.parametrize(
+    ("entry_mode", "entry_attributes"),
+    [
+        (stat.S_IFLNK, 0),
+        pytest.param(
+            stat.S_IFREG,
+            _REPARSE_POINT_ATTRIBUTE,
+            marks=pytest.mark.skipif(
+                _REPARSE_POINT_ATTRIBUTE == 0,
+                reason="Windows reparse metadata is unavailable on this platform",
+            ),
+        ),
+    ],
+)
+def test_cv2_record_verifier_rejects_link_or_reparse_entry(
+    tmp_path: Path,
+    monkeypatch: pytest.MonkeyPatch,
+    entry_mode: int,
+    entry_attributes: int,
+) -> None:
+    site_packages, cv2_root = _fake_cv2_tree(tmp_path)
+    record = _fake_cv2_record(cv2_root)
+    redirected = cv2_root / "redirected.py"
+    redirected.write_bytes(b"placeholder\n")
+    path_type = type(redirected)
+    original_lstat = path_type.lstat
+
+    def fake_lstat(path: Path) -> object:
+        if path == redirected:
+            return SimpleNamespace(st_mode=entry_mode, st_file_attributes=entry_attributes)
+        return original_lstat(path)
+
+    monkeypatch.setattr(path_type, "lstat", fake_lstat)
+    distribution = _fake_cv2_distribution(site_packages, record)
+
+    with pytest.raises(
+        DocumentPreviewRuntimeError, match="document_preview_runtime_dependency_unavailable"
+    ):
+        runtime_module._recorded_cv2_tree_matches_designated_provider(
+            distribution_reader=lambda name: distribution,
+            module_importer=lambda name: SimpleNamespace(__file__=str(cv2_root / "__init__.py")),
+        )
+
+
+def test_paddle_missing_postprocess_package_rejects_provision_and_activation(
+    tmp_path: Path,
+) -> None:
+    """A candidate cannot be registered or activated without pyclipper."""
+
+    root = _root(tmp_path)
+    root.mkdir(parents=True)
+    configuration_value = _paddle_configuration()
+    inventory_value = _paddle_inventory(omitted="pyclipper")
+
+    with pytest.raises(
+        DocumentPreviewRuntimeError, match="document_preview_inventory_packages_invalid"
+    ):
+        write_runtime_sidecars(
+            document_preview_root=root,
+            configuration_value=configuration_value,
+            inventory_value=inventory_value,
+            package_version_reader=_package_version,
+        )
+
+    # The activation writer receives content-addressed sidecars from a prior
+    # provisioning attempt, so exercise that independent gate directly.
+    configuration_sha256 = _write_hash_named_sidecar(
+        root, "runtime-configurations", configuration_value
+    )
+    inventory_sha256 = _write_hash_named_sidecar(root, "model-inventories", inventory_value)
+    with pytest.raises(
+        DocumentPreviewRuntimeError, match="document_preview_inventory_packages_invalid"
+    ):
+        write_approved_pdf_preview_pointer(
+            document_preview_root=root,
+            approval_id="human-approval-1",
+            evaluation_raw=_evaluation(
+                configuration_sha256,
+                inventory_sha256,
+                engine_kind="paddleocr",
+                extractor_revision="paddle-test-v1",
+            ),
+            configuration_sha256=configuration_sha256,
+            model_inventory_sha256=inventory_sha256,
+            package_version_reader=_package_version,
+        )
+    assert not (root / "approvals" / "pdf-preview-active.json").exists()
 
 
 def test_runtime_profiles_accept_only_the_explicit_offline_options() -> None:

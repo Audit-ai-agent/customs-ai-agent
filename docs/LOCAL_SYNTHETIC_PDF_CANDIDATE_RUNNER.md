@@ -33,8 +33,13 @@
    누락 file, symlink 또는 Windows junction(reparse point)은 후보 실행 전에
    fail-closed 합니다. Docling inventory에는 패키지 본체뿐 아니라 layout/table/GLM
    실행 closure의 고정 version도 포함해야 하므로, 평가 후 전이 의존성 교체도
-   fail-closed 합니다. active pointer는 필요하지 않습니다. 평가는 승인보다 먼저
-   수행되기 때문입니다.
+   fail-closed 합니다. PaddleOCR inventory의 25개는 pinned `uv.lock`의 2.9.1
+   direct profile dependency boundary와 adapter의 `paddlepaddle`·`pypdf`·
+   `pypdfium2`이며, 전체 Python import closure는 아니다. 특히 세
+   OpenCV 배포본이 공존할 수 있으므로 `opencv-contrib-python`·`opencv-python`·
+   `opencv-python-headless`를 빠짐없이 선언하고, 실제 `cv2` 파일이 designated
+   contrib wheel `RECORD`의 regular file 집합·hash·size와 일치하지 않으면 후보 실행을 거부한다. active pointer는
+   필요하지 않습니다. 평가는 승인보다 먼저 수행되기 때문입니다.
 
 ## 개발 평가 실행
 
