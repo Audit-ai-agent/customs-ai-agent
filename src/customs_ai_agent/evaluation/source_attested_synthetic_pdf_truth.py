@@ -89,11 +89,11 @@ SOURCE_LAYOUT_TRUTH_KIND: Final[Literal["pdf_content_stream_layout_v1"]] = (
     "pdf_content_stream_layout_v1"
 )
 SOURCE_LAYOUT_COMPILER_REVISION: Final[
-    Literal["synthetic-pdf-content-stream-layout-compiler-v1"]
-] = "synthetic-pdf-content-stream-layout-compiler-v1"
+    Literal["synthetic-pdf-content-stream-layout-compiler-v2"]
+] = "synthetic-pdf-content-stream-layout-compiler-v2"
 SOURCE_LAYOUT_PARSER_SPEC_REVISION: Final[
-    Literal["synthetic-pdf-content-stream-parser-spec-v1"]
-] = "synthetic-pdf-content-stream-parser-spec-v1"
+    Literal["synthetic-pdf-content-stream-parser-spec-v2"]
+] = "synthetic-pdf-content-stream-parser-spec-v2"
 
 # This automatic path has one deliberately narrow approval target.  These
 # values are a compact identity for the existing human-checked, 2,000-set PDF
@@ -190,13 +190,30 @@ class _ParsedContentStream:
     media_box: tuple[float, float, float, float]
 
 
+SourceLayoutValueTransform = Literal[
+    "raw-v1",
+    "single-numeric-token-v1",
+    "single-alpha-token-v1",
+    "join-slash-v1",
+]
+
+
+@dataclass(frozen=True, slots=True)
+class _FieldRunAnchor:
+    """One fixed run, or one fixed table-column range, in the pinned PDF."""
+
+    reading_order: int
+    y: float
+    x_values: tuple[float, ...] = ()
+    x_range: tuple[float, float] | None = None
+
+
 @dataclass(frozen=True, slots=True)
 class _FieldSlot:
     field_name: str
     normalizer: Literal["text-v1", "numeric-v1", "identifier-v1"]
-    reading_order: int
-    x: float | tuple[float, ...]
-    y: float
+    source_runs: tuple[_FieldRunAnchor, ...]
+    value_transform: SourceLayoutValueTransform = "raw-v1"
 
 
 @dataclass(frozen=True, slots=True)
@@ -215,13 +232,14 @@ class _TemplateProfile:
     table: _TableSlot
 
 
-# The automatic field gate must cover the same semantic field universe as the
-# original synthetic-PDF contract.  A visible table cell alone is not a
-# substitute for a required structured field: otherwise an extractor could
-# emit no ``gross_weight``/``amount``/``cartons`` field and still claim a
-# perfect field score.  The source parser therefore needs an explicit,
-# unambiguous content-stream mapping for every entry below.  Missing mappings
-# fail closed rather than falling back to clean_manifest.csv or error labels.
+# The automatic field gate covers the fields actually rendered by each final
+# synthetic PDF template.  A visible table cell alone is not a substitute for
+# a structured field: every entry below has a direct, pinned content-stream
+# mapping.  Packing List deliberately has 12 fields: its final template has no
+# semantic ``containers`` label/value slot.  The older manifest's non-rendered
+# ``containers`` column is not inferred from a carton value, a B/L sibling, or
+# CSV ground truth.  Missing mappings fail closed rather than falling back to
+# clean_manifest.csv or error labels.
 SOURCE_ATTESTED_REQUIRED_FIELDS: Final[
     Mapping[
         SyntheticDocumentType,
@@ -269,13 +287,43 @@ SOURCE_ATTESTED_REQUIRED_FIELDS: Final[
         ("unit", "text-v1"),
         ("qty", "numeric-v1"),
         ("cartons", "numeric-v1"),
-        ("containers", "numeric-v1"),
         ("net_weight", "numeric-v1"),
         ("gross_weight", "numeric-v1"),
         ("cbm", "numeric-v1"),
         ("net_gross_weight", "text-v1"),
     ),
 }
+
+
+def _fixed_field_run(reading_order: int, x: float, y: float) -> _FieldRunAnchor:
+    return _FieldRunAnchor(reading_order=reading_order, y=y, x_values=(x,))
+
+
+def _variable_field_run(
+    reading_order: int, x_min: float, x_max: float, y: float
+) -> _FieldRunAnchor:
+    return _FieldRunAnchor(
+        reading_order=reading_order,
+        y=y,
+        x_range=(x_min, x_max),
+    )
+
+
+def _field_slot(
+    field_name: str,
+    normalizer: Literal["text-v1", "numeric-v1", "identifier-v1"],
+    *source_runs: _FieldRunAnchor,
+    value_transform: SourceLayoutValueTransform = "raw-v1",
+) -> _FieldSlot:
+    if not source_runs:
+        raise ValueError("source-layout field slot requires a source run")
+    return _FieldSlot(
+        field_name=field_name,
+        normalizer=normalizer,
+        source_runs=source_runs,
+        value_transform=value_transform,
+    )
+
 
 # ``error_labels.csv`` has a human-facing field caption.  The compiler never
 # copies either CSV value into source truth; this small fixed mapping is used
@@ -297,6 +345,24 @@ _SOURCE_ERROR_LABEL_FIELDS: Final[dict[tuple[SyntheticDocumentType, str], str]] 
     ("packing_list", "To Applicant / Consignee"): "consignee",
 }
 
+# Error labels are an independent mutation assertion, not a source of Gold
+# values.  Some rendered table cells express a numeric value with a document
+# unit while the label expresses the same quantity with another fixed unit
+# caption.  These projections verify the visible number(s) only for that
+# assertion; the returned Gold field remains the direct PDF value above.
+_SOURCE_ERROR_LABEL_PROJECTIONS: Final[
+    dict[
+        tuple[SyntheticDocumentType, str], Literal["normalized-v1", "numeric-v1", "numeric-pair-v1"]
+    ]
+] = {
+    ("bill_of_lading", "gross_weight"): "numeric-v1",
+    ("invoice", "amount"): "numeric-v1",
+    ("invoice", "total"): "numeric-v1",
+    ("packing_list", "cartons"): "numeric-v1",
+    ("packing_list", "qty"): "numeric-v1",
+    ("packing_list", "net_gross_weight"): "numeric-pair-v1",
+}
+
 
 # These are positions and field identifiers, not copied document text.  The
 # positions were profiled from the final fixture's stable content-stream shape.
@@ -307,17 +373,27 @@ _TEMPLATE_PROFILES: dict[SyntheticDocumentType, _TemplateProfile] = {
         text_run_count=90,
         rectangle_count=42,
         field_slots=(
-            _FieldSlot("exporter_name", "text-v1", 4, 44.0, 755.8898),
-            _FieldSlot("consignee", "text-v1", 11, 44.0, 709.8898),
-            _FieldSlot("bl_no", "identifier-v1", 8, 324.0, 755.8898),
-            _FieldSlot("vessel", "text-v1", 22, 44.0, 612.8898),
-            _FieldSlot("voyage", "identifier-v1", 25, 184.0, 612.8898),
-            _FieldSlot("load_port", "text-v1", 31, 44.0, 585.8898),
-            _FieldSlot("disch_port", "text-v1", 34, 172.8189, 585.8898),
-            _FieldSlot("final_dest", "text-v1", 40, 430.4567, 585.8898),
-            _FieldSlot("container_no", "identifier-v1", 54, 43.0, 537.8898),
-            _FieldSlot("seal_no", "identifier-v1", 55, 121.0, 537.8898),
-            _FieldSlot("good", "text-v1", 61, 278.0, 537.8898),
+            _field_slot("exporter_name", "text-v1", _fixed_field_run(4, 44.0, 755.8898)),
+            _field_slot("consignee", "text-v1", _fixed_field_run(11, 44.0, 709.8898)),
+            _field_slot("load_port", "text-v1", _fixed_field_run(31, 44.0, 585.8898)),
+            _field_slot("disch_port", "text-v1", _fixed_field_run(34, 172.8189, 585.8898)),
+            _field_slot("final_dest", "text-v1", _fixed_field_run(40, 430.4567, 585.8898)),
+            _field_slot("vessel", "text-v1", _fixed_field_run(22, 44.0, 612.8898)),
+            _field_slot("voyage", "identifier-v1", _fixed_field_run(25, 184.0, 612.8898)),
+            _field_slot("bl_no", "identifier-v1", _fixed_field_run(8, 324.0, 755.8898)),
+            _field_slot("container_no", "identifier-v1", _fixed_field_run(54, 43.0, 537.8898)),
+            _field_slot("seal_no", "identifier-v1", _fixed_field_run(55, 121.0, 537.8898)),
+            _field_slot("good", "text-v1", _fixed_field_run(61, 278.0, 537.8898)),
+            _field_slot(
+                "gross_weight",
+                "numeric-v1",
+                _variable_field_run(63, 400.0, 485.0, 537.8898),
+            ),
+            _field_slot(
+                "containers",
+                "numeric-v1",
+                _variable_field_run(59, 190.0, 275.0, 537.8898),
+            ),
         ),
         table=_TableSlot(
             tuple(range(16, 22)),
@@ -344,22 +420,42 @@ _TEMPLATE_PROFILES: dict[SyntheticDocumentType, _TemplateProfile] = {
         text_run_count=41,
         rectangle_count=23,
         field_slots=(
-            _FieldSlot("exporter_name", "text-v1", 3, 49.0, 743.8898),
-            _FieldSlot("consignee", "text-v1", 9, 49.0, 673.8898),
-            _FieldSlot("inv_no", "identifier-v1", 6, 301.6378, 743.8898),
-            _FieldSlot("inv_date", "identifier-v1", 7, 301.6378, 734.3898),
-            _FieldSlot("lc_no", "identifier-v1", 13, 301.6378, 664.3898),
-            _FieldSlot("importer_name", "text-v1", 15, 49.0, 609.8898),
-            _FieldSlot("load_port", "text-v1", 17, 49.0, 572.8898),
-            _FieldSlot("disch_port", "text-v1", 19, 175.3189, 572.8898),
-            _FieldSlot("vessel", "text-v1", 24, 49.0, 550.8898),
-            _FieldSlot("good", "text-v1", 35, 153.0, 513.8898),
-            _FieldSlot(
-                "total",
+            _field_slot("exporter_name", "text-v1", _fixed_field_run(3, 49.0, 743.8898)),
+            _field_slot("importer_name", "text-v1", _fixed_field_run(15, 49.0, 609.8898)),
+            _field_slot("consignee", "text-v1", _fixed_field_run(9, 49.0, 673.8898)),
+            _field_slot("load_port", "text-v1", _fixed_field_run(17, 49.0, 572.8898)),
+            _field_slot("disch_port", "text-v1", _fixed_field_run(19, 175.3189, 572.8898)),
+            _field_slot("vessel", "text-v1", _fixed_field_run(24, 49.0, 550.8898)),
+            _field_slot("inv_no", "identifier-v1", _fixed_field_run(6, 301.6378, 743.8898)),
+            _field_slot("inv_date", "identifier-v1", _fixed_field_run(7, 301.6378, 734.3898)),
+            _field_slot("lc_no", "identifier-v1", _fixed_field_run(12, 301.6378, 673.8898)),
+            _field_slot("good", "text-v1", _fixed_field_run(35, 153.0, 513.8898)),
+            _field_slot(
+                "unit",
                 "text-v1",
-                40,
-                (480.4596, 487.1316, 491.5796, 496.0276, 502.6996),
-                362.8898,
+                _variable_field_run(36, 320.0, 400.0, 513.8898),
+                value_transform="single-alpha-token-v1",
+            ),
+            _field_slot(
+                "qty",
+                "numeric-v1",
+                _variable_field_run(36, 320.0, 400.0, 513.8898),
+                value_transform="single-numeric-token-v1",
+            ),
+            _field_slot(
+                "unit_price",
+                "numeric-v1",
+                _variable_field_run(37, 400.0, 480.0, 513.8898),
+            ),
+            _field_slot(
+                "amount",
+                "numeric-v1",
+                _variable_field_run(38, 480.0, 550.27559, 513.8898),
+            ),
+            _field_slot(
+                "total",
+                "numeric-v1",
+                _variable_field_run(40, 480.0, 550.27559, 362.8898),
             ),
         ),
         table=_TableSlot(
@@ -385,13 +481,46 @@ _TEMPLATE_PROFILES: dict[SyntheticDocumentType, _TemplateProfile] = {
         text_run_count=51,
         rectangle_count=21,
         field_slots=(
-            _FieldSlot("exporter_name", "text-v1", 3, 49.0, 753.8898),
-            _FieldSlot("inv_no", "identifier-v1", 6, 324.0, 753.8898),
-            _FieldSlot("lc_no", "identifier-v1", 9, 324.0, 717.8898),
-            _FieldSlot("good", "text-v1", 42, 178.0, 563.8898),
-            _FieldSlot("net_weight", "text-v1", 48, (346.31, 350.202, 356.04), 437.8898),
-            _FieldSlot("gross_weight", "text-v1", 49, (421.31, 425.202, 431.04), 437.8898),
-            _FieldSlot("cbm", "text-v1", 50, (514.7686, 518.6606), 437.8898),
+            _field_slot("exporter_name", "text-v1", _fixed_field_run(3, 49.0, 753.8898)),
+            _field_slot("consignee", "text-v1", _fixed_field_run(12, 49.0, 717.8898)),
+            _field_slot("inv_no", "identifier-v1", _fixed_field_run(6, 324.0, 753.8898)),
+            _field_slot("lc_no", "identifier-v1", _fixed_field_run(9, 324.0, 717.8898)),
+            _field_slot("good", "text-v1", _fixed_field_run(42, 178.0, 563.8898)),
+            _field_slot(
+                "unit",
+                "text-v1",
+                _fixed_field_run(43, 178.0, 554.3898),
+                value_transform="single-alpha-token-v1",
+            ),
+            _field_slot(
+                "qty",
+                "numeric-v1",
+                _fixed_field_run(43, 178.0, 554.3898),
+                value_transform="single-numeric-token-v1",
+            ),
+            _field_slot("cartons", "numeric-v1", _fixed_field_run(41, 48.0, 535.3898)),
+            _field_slot(
+                "net_weight",
+                "numeric-v1",
+                _variable_field_run(44, 315.0, 390.0, 563.8898),
+            ),
+            _field_slot(
+                "gross_weight",
+                "numeric-v1",
+                _variable_field_run(45, 390.0, 465.0, 563.8898),
+            ),
+            _field_slot(
+                "cbm",
+                "numeric-v1",
+                _variable_field_run(46, 465.0, 550.27559, 563.8898),
+            ),
+            _field_slot(
+                "net_gross_weight",
+                "text-v1",
+                _variable_field_run(44, 315.0, 390.0, 563.8898),
+                _variable_field_run(45, 390.0, 465.0, 563.8898),
+                value_transform="join-slash-v1",
+            ),
         ),
         table=_TableSlot(
             tuple(range(11, 16)),
@@ -438,9 +567,18 @@ def _parser_spec_payload() -> dict[str, object]:
                     {
                         "field_name": slot.field_name,
                         "normalizer": slot.normalizer,
-                        "reading_order": slot.reading_order,
-                        "x_values": list(slot.x) if isinstance(slot.x, tuple) else [slot.x],
-                        "y": slot.y,
+                        "value_transform": slot.value_transform,
+                        "source_runs": [
+                            {
+                                "reading_order": anchor.reading_order,
+                                "x_values": list(anchor.x_values),
+                                "x_range": (
+                                    list(anchor.x_range) if anchor.x_range is not None else None
+                                ),
+                                "y": anchor.y,
+                            }
+                            for anchor in slot.source_runs
+                        ],
                     }
                     for slot in profile.field_slots
                 ],
@@ -525,7 +663,7 @@ class SourceAttestedSyntheticLayoutTruthV1(_WireModel):
         SOURCE_ATTESTED_EVALUATION_SCOPE
     )
     layout_truth_kind: Literal["pdf_content_stream_layout_v1"] = SOURCE_LAYOUT_TRUTH_KIND
-    compiler_revision: Literal["synthetic-pdf-content-stream-layout-compiler-v1"] = (
+    compiler_revision: Literal["synthetic-pdf-content-stream-layout-compiler-v2"] = (
         SOURCE_LAYOUT_COMPILER_REVISION
     )
     parser_spec_sha256: str = Field(pattern=_SHA256)
@@ -1075,19 +1213,32 @@ def _require_profile(
             for observed, target in zip(actual, expected, strict=True)
         ):
             raise SourceAttestedSyntheticPdfTruthError("source_layout_template_profile_mismatch")
-    if any(
-        slot.reading_order < 1 or slot.reading_order > len(parsed.text_runs)
-        for slot in profile.field_slots
-    ):
-        raise SourceAttestedSyntheticPdfTruthError("source_layout_template_profile_invalid")
     for slot in profile.field_slots:
-        run = parsed.text_runs[slot.reading_order - 1]
-        x_values = slot.x if isinstance(slot.x, tuple) else (slot.x,)
+        source_indices = [anchor.reading_order for anchor in slot.source_runs]
         if (
-            not any(abs(run.x - expected_x) <= 0.0001 for expected_x in x_values)
-            or abs(run.y - slot.y) > 0.0001
+            not source_indices
+            or len(source_indices) != len(set(source_indices))
+            or any(index < 1 or index > len(parsed.text_runs) for index in source_indices)
         ):
-            raise SourceAttestedSyntheticPdfTruthError("source_layout_template_profile_mismatch")
+            raise SourceAttestedSyntheticPdfTruthError("source_layout_template_profile_invalid")
+        for anchor in slot.source_runs:
+            if bool(anchor.x_values) == (anchor.x_range is not None):
+                raise SourceAttestedSyntheticPdfTruthError("source_layout_template_profile_invalid")
+            if anchor.x_range is not None and anchor.x_range[0] > anchor.x_range[1]:
+                raise SourceAttestedSyntheticPdfTruthError("source_layout_template_profile_invalid")
+            run = parsed.text_runs[anchor.reading_order - 1]
+            x_matches = (
+                any(abs(run.x - expected_x) <= 0.0001 for expected_x in anchor.x_values)
+                if anchor.x_values
+                else (
+                    anchor.x_range is not None
+                    and anchor.x_range[0] - 0.0001 <= run.x <= anchor.x_range[1] + 0.0001
+                )
+            )
+            if not x_matches or abs(run.y - anchor.y) > 0.0001:
+                raise SourceAttestedSyntheticPdfTruthError(
+                    "source_layout_template_profile_mismatch"
+                )
     _validate_required_field_schema(
         document_type=document_type,
         fields=[
@@ -1145,15 +1296,50 @@ def _table_cells_from_profile(
     return cells
 
 
+_SOURCE_NUMERIC_TOKEN_RE = re.compile(
+    r"(?<![A-Za-z0-9])(?:\d{1,3}(?:,\d{3})*|\d+)(?:\.\d+)?(?![A-Za-z0-9])"
+)
+_SOURCE_ALPHA_TOKEN_RE = re.compile(r"[A-Za-z]+")
+
+
+def _source_field_value(
+    *, source_values: Sequence[str], value_transform: SourceLayoutValueTransform
+) -> str:
+    if not source_values or any(not value.strip() for value in source_values):
+        raise SourceAttestedSyntheticPdfTruthError("source_layout_field_ambiguous")
+    if value_transform == "raw-v1":
+        if len(source_values) != 1:
+            raise SourceAttestedSyntheticPdfTruthError("source_layout_field_transform_invalid")
+        return source_values[0].strip()
+    if value_transform == "join-slash-v1":
+        if len(source_values) < 2:
+            raise SourceAttestedSyntheticPdfTruthError("source_layout_field_transform_invalid")
+        return " / ".join(value.strip() for value in source_values)
+    if len(source_values) != 1:
+        raise SourceAttestedSyntheticPdfTruthError("source_layout_field_transform_invalid")
+    source_value = source_values[0]
+    if value_transform == "single-numeric-token-v1":
+        tokens = _SOURCE_NUMERIC_TOKEN_RE.findall(source_value)
+    elif value_transform == "single-alpha-token-v1":
+        tokens = _SOURCE_ALPHA_TOKEN_RE.findall(source_value)
+    else:
+        raise SourceAttestedSyntheticPdfTruthError("source_layout_field_transform_invalid")
+    if len(tokens) != 1 or not tokens[0].strip():
+        raise SourceAttestedSyntheticPdfTruthError("source_layout_field_ambiguous")
+    return tokens[0].strip()
+
+
 def _fields_from_profile(
     *, parsed: _ParsedContentStream, profile: _TemplateProfile
 ) -> list[GoldFieldV2]:
     fields: list[GoldFieldV2] = []
     for slot in profile.field_slots:
-        run = parsed.text_runs[slot.reading_order - 1]
-        value = run.text.strip()
-        if not value:
-            raise SourceAttestedSyntheticPdfTruthError("source_layout_field_ambiguous")
+        value = _source_field_value(
+            source_values=[
+                parsed.text_runs[anchor.reading_order - 1].text for anchor in slot.source_runs
+            ],
+            value_transform=slot.value_transform,
+        )
         fields.append(
             GoldFieldV2(
                 field_name=slot.field_name,
@@ -1243,6 +1429,46 @@ def _read_verified_source_pdf(*, source_directory: Path, asset: DatasetAssetRece
     return pdf_bytes
 
 
+def _error_label_projection(
+    *,
+    document_type: SyntheticDocumentType,
+    field_name: str,
+    value: str,
+    normalizer: Literal["text-v1", "numeric-v1", "identifier-v1"],
+) -> tuple[str, ...] | None:
+    projection = _SOURCE_ERROR_LABEL_PROJECTIONS.get((document_type, field_name), "normalized-v1")
+    if projection == "normalized-v1":
+        return (normalize_field_value(value, normalizer),)
+    tokens = _SOURCE_NUMERIC_TOKEN_RE.findall(value)
+    expected_count = 1 if projection == "numeric-v1" else 2
+    if len(tokens) != expected_count:
+        return None
+    return tuple(normalize_field_value(token, "numeric-v1") for token in tokens)
+
+
+def _error_label_rendering_matches(
+    *,
+    document_type: SyntheticDocumentType,
+    field_name: str,
+    rendered_value: str,
+    label_value: str,
+    normalizer: Literal["text-v1", "numeric-v1", "identifier-v1"],
+) -> bool:
+    rendered = _error_label_projection(
+        document_type=document_type,
+        field_name=field_name,
+        value=rendered_value,
+        normalizer=normalizer,
+    )
+    label = _error_label_projection(
+        document_type=document_type,
+        field_name=field_name,
+        value=label_value,
+        normalizer=normalizer,
+    )
+    return rendered is not None and rendered == label
+
+
 def _require_error_content_stream_difference(
     *,
     item: StratifiedPacketItemV2,
@@ -1303,21 +1529,53 @@ def _require_error_content_stream_difference(
         field_name = _SOURCE_ERROR_LABEL_FIELDS.get((item.document_type, label["field"]))
         error_rendered = error_rendered_fields.get(field_name)
         clean_rendered = clean_rendered_fields.get(field_name)
+        if field_name is None or error_rendered is None or clean_rendered is None:
+            continue
+        wrong_projection = _error_label_projection(
+            document_type=item.document_type,
+            field_name=field_name,
+            value=label["wrong_value"],
+            normalizer=error_rendered.normalizer,
+        )
+        correct_projection = _error_label_projection(
+            document_type=item.document_type,
+            field_name=field_name,
+            value=label["correct_value"],
+            normalizer=clean_rendered.normalizer,
+        )
         if (
-            field_name is None
-            or error_rendered is None
-            or clean_rendered is None
-            or normalize_field_value(label["wrong_value"], error_rendered.normalizer)
-            == normalize_field_value(label["correct_value"], clean_rendered.normalizer)
+            wrong_projection is None
+            or correct_projection is None
+            or wrong_projection == correct_projection
         ):
             continue
         if (
-            normalize_field_value(error_rendered.value, error_rendered.normalizer)
-            == normalize_field_value(label["wrong_value"], error_rendered.normalizer)
-            and normalize_field_value(clean_rendered.value, clean_rendered.normalizer)
-            == normalize_field_value(label["correct_value"], clean_rendered.normalizer)
-            and normalize_field_value(error_rendered.value, error_rendered.normalizer)
-            != normalize_field_value(clean_rendered.value, clean_rendered.normalizer)
+            _error_label_rendering_matches(
+                document_type=item.document_type,
+                field_name=field_name,
+                rendered_value=error_rendered.value,
+                label_value=label["wrong_value"],
+                normalizer=error_rendered.normalizer,
+            )
+            and _error_label_rendering_matches(
+                document_type=item.document_type,
+                field_name=field_name,
+                rendered_value=clean_rendered.value,
+                label_value=label["correct_value"],
+                normalizer=clean_rendered.normalizer,
+            )
+            and _error_label_projection(
+                document_type=item.document_type,
+                field_name=field_name,
+                value=error_rendered.value,
+                normalizer=error_rendered.normalizer,
+            )
+            != _error_label_projection(
+                document_type=item.document_type,
+                field_name=field_name,
+                value=clean_rendered.value,
+                normalizer=clean_rendered.normalizer,
+            )
         ):
             mutation_rendered = True
             break
@@ -1682,10 +1940,51 @@ def validate_source_attested_synthetic_candidate_execution(
         )
 
 
+class SourceAttestedSyntheticFieldMetricDenominatorV1(_WireModel):
+    """Content-free field-gate denominator for one rendered document type."""
+
+    document_type: SyntheticDocumentType
+    document_count: int = Field(ge=1, le=100_000)
+    fields_per_document: int = Field(ge=1, le=1_000)
+    total_fields: int = Field(ge=1, le=100_000_000)
+
+    @model_validator(mode="after")
+    def _total_is_derived(self) -> "SourceAttestedSyntheticFieldMetricDenominatorV1":
+        if self.total_fields != self.document_count * self.fields_per_document:
+            raise ValueError("source-attested field denominator is not derived")
+        return self
+
+
 class SourceAttestedSyntheticOcrMetricsV1(_WireModel):
     field_exact_match: float = Field(ge=0, le=1)
+    field_exact_match_count: int = Field(ge=0, le=100_000_000)
+    field_exact_match_total: int = Field(ge=1, le=100_000_000)
+    field_exact_match_denominators: list[SourceAttestedSyntheticFieldMetricDenominatorV1] = Field(
+        min_length=1, max_length=3
+    )
     ocr_cer: float = Field(ge=0, le=1)
     table_cell_f1: float = Field(ge=0, le=1)
+
+    @model_validator(mode="after")
+    def _field_ratio_and_denominator_are_derived(self) -> "SourceAttestedSyntheticOcrMetricsV1":
+        if self.field_exact_match_count > self.field_exact_match_total:
+            raise ValueError("source-attested field match count exceeds denominator")
+        types = [item.document_type for item in self.field_exact_match_denominators]
+        if (
+            len(types) != len(set(types))
+            or sum(item.total_fields for item in self.field_exact_match_denominators)
+            != self.field_exact_match_total
+        ):
+            raise ValueError("source-attested field denominator coverage is invalid")
+        if (
+            abs(
+                self.field_exact_match
+                - (self.field_exact_match_count / self.field_exact_match_total)
+            )
+            > 1e-12
+        ):
+            raise ValueError("source-attested field exact match ratio is not derived")
+        return self
 
 
 class SourceAttestedSyntheticOcrEvaluationResultV1(_WireModel):
@@ -1992,6 +2291,8 @@ def _score_source_attested_candidate_against_layout_truth(
 
     exact_fields = 0
     total_fields = 0
+    field_counts_by_document_type: dict[SyntheticDocumentType, int] = {}
+    document_counts_by_document_type: dict[SyntheticDocumentType, int] = {}
     total_distance = 0
     total_reference_characters = 0
     source_cells: set[tuple[str, int, int, int, int, str]] = set()
@@ -2001,6 +2302,14 @@ def _score_source_attested_candidate_against_layout_truth(
         if output.source_sha256 != source.source_sha256:
             raise SourceAttestedSyntheticPdfTruthError("source_layout_candidate_source_mismatch")
         candidate_fields = {field.field_name: field.value for field in output.fields}
+        source_field_count = len(source.fields)
+        prior_field_count = field_counts_by_document_type.get(source.document_type)
+        if prior_field_count is not None and prior_field_count != source_field_count:
+            raise SourceAttestedSyntheticPdfTruthError("source_layout_field_schema_inconsistent")
+        field_counts_by_document_type[source.document_type] = source_field_count
+        document_counts_by_document_type[source.document_type] = (
+            document_counts_by_document_type.get(source.document_type, 0) + 1
+        )
         for field in source.fields:
             total_fields += 1
             if field.field_name in candidate_fields and normalize_field_value(
@@ -2027,6 +2336,20 @@ def _score_source_attested_candidate_against_layout_truth(
     denominator = len(source_cells) + len(candidate_cells)
     return SourceAttestedSyntheticOcrMetricsV1(
         field_exact_match=exact_fields / total_fields,
+        field_exact_match_count=exact_fields,
+        field_exact_match_total=total_fields,
+        field_exact_match_denominators=[
+            SourceAttestedSyntheticFieldMetricDenominatorV1(
+                document_type=document_type,
+                document_count=document_counts_by_document_type[document_type],
+                fields_per_document=field_counts_by_document_type[document_type],
+                total_fields=(
+                    document_counts_by_document_type[document_type]
+                    * field_counts_by_document_type[document_type]
+                ),
+            )
+            for document_type in sorted(field_counts_by_document_type)
+        ],
         ocr_cer=min(1.0, total_distance / total_reference_characters),
         table_cell_f1=0.0 if denominator == 0 else (2.0 * true_positive) / denominator,
     )
@@ -2970,6 +3293,7 @@ __all__ = [
     "SourceAttestedSyntheticGoldRecordV1",
     "SourceAttestedSyntheticLayoutTruthV1",
     "SourceAttestedSyntheticDevelopmentSelectionV1",
+    "SourceAttestedSyntheticFieldMetricDenominatorV1",
     "SourceAttestedSyntheticOcrEvaluationResultV1",
     "SourceAttestedSyntheticOcrMetricsV1",
     "SourceAttestedSyntheticPdfTruthError",

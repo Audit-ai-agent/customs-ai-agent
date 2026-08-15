@@ -33,6 +33,7 @@ from customs_ai_agent.evaluation.source_attested_synthetic_pdf_truth import (
     SourceAttestedSyntheticDatasetScopeV1,
     SourceAttestedSyntheticOcrEvaluationResultV1,
     SourceAttestedSyntheticPdfTruthError,
+    SOURCE_ATTESTED_REQUIRED_FIELDS,
     build_source_attested_synthetic_candidate_execution,
     build_source_attested_synthetic_development_selection,
     build_source_attested_synthetic_sealed_run,
@@ -118,16 +119,20 @@ _BODY_RECTS = (
 
 _TEST_INVOICE_REQUIRED_FIELDS = (
     ("exporter_name", "text-v1"),
-    ("consignee", "text-v1"),
-    ("inv_no", "identifier-v1"),
-    ("inv_date", "identifier-v1"),
-    ("lc_no", "identifier-v1"),
     ("importer_name", "text-v1"),
+    ("consignee", "text-v1"),
     ("load_port", "text-v1"),
     ("disch_port", "text-v1"),
     ("vessel", "text-v1"),
+    ("inv_no", "identifier-v1"),
+    ("inv_date", "identifier-v1"),
+    ("lc_no", "identifier-v1"),
     ("good", "text-v1"),
-    ("total", "text-v1"),
+    ("unit", "text-v1"),
+    ("qty", "numeric-v1"),
+    ("unit_price", "numeric-v1"),
+    ("amount", "numeric-v1"),
+    ("total", "numeric-v1"),
 )
 _TEST_REQUIRED_FIELD_SCHEMA = {"invoice": _TEST_INVOICE_REQUIRED_FIELDS}
 
@@ -156,7 +161,7 @@ def _invoice_pdf(*, text_prefix: str, total: str, shift_header: bool = False) ->
         6: (301.6378, 743.8898),
         7: (301.6378, 734.3898),
         9: (49.0, 673.8898),
-        13: (301.6378, 664.3898),
+        12: (301.6378, 673.8898),
         15: (49.0, 609.8898),
         17: (49.0, 572.8898),
         19: (175.3189, 572.8898),
@@ -184,7 +189,12 @@ def _invoice_pdf(*, text_prefix: str, total: str, shift_header: bool = False) ->
     lines.extend(("BT", "/F1 10 Tf", "12 TL"))
     for reading_order, (x, y) in enumerate(positions, start=1):
         lines.append(f"1 0 0 1 {x} {y} Tm")
-        rendered = total if reading_order == 40 else f"{text_prefix}-{reading_order}"
+        rendered = {
+            36: "2 PCS",
+            37: "5.00",
+            38: "10.00",
+            40: total,
+        }.get(reading_order, f"{text_prefix}-{reading_order}")
         lines.append(f"({rendered}) Tj")
     lines.append("ET")
     compressed = zlib.compress("\n".join(lines).encode("ascii"))
@@ -548,21 +558,34 @@ def test_automatic_scope_rejects_a_small_or_wrong_packet_fixture(tmp_path: Path)
         )
 
 
-def test_default_full_field_universe_fails_closed_for_partial_source_profile(
+def test_default_full_field_universe_matches_the_rendered_invoice_profile(
     tmp_path: Path,
 ) -> None:
     fixture = _fixture(tmp_path)
-    with pytest.raises(
-        SourceAttestedSyntheticPdfTruthError, match="required_field_mapping_missing"
-    ):
-        compile_source_attested_synthetic_pdf_layout_truth(
-            receipt=fixture["receipt"],  # type: ignore[arg-type]
-            packet=fixture["development_packet"],  # type: ignore[arg-type]
-            source_directory=fixture["dataset_root"],  # type: ignore[arg-type]
-            clean_manifest_path=fixture["clean_manifest"],  # type: ignore[arg-type]
-            error_labels_path=fixture["error_labels"],  # type: ignore[arg-type]
-            expected_dataset_scope=_test_scope(fixture),
-        )
+    truth = compile_source_attested_synthetic_pdf_layout_truth(
+        receipt=fixture["receipt"],  # type: ignore[arg-type]
+        packet=fixture["development_packet"],  # type: ignore[arg-type]
+        source_directory=fixture["dataset_root"],  # type: ignore[arg-type]
+        clean_manifest_path=fixture["clean_manifest"],  # type: ignore[arg-type]
+        error_labels_path=fixture["error_labels"],  # type: ignore[arg-type]
+        expected_dataset_scope=_test_scope(fixture),
+    )
+    assert {field.field_name for field in truth.records[0].fields} == {
+        name for name, _normalizer in SOURCE_ATTESTED_REQUIRED_FIELDS["invoice"]
+    }
+    assert len(truth.records[0].fields) == 15
+
+
+def test_rendered_field_contract_exposes_bl13_invoice15_and_pl12() -> None:
+    counts = {
+        document_type: len(fields)
+        for document_type, fields in SOURCE_ATTESTED_REQUIRED_FIELDS.items()
+    }
+
+    assert counts == {"bill_of_lading": 13, "invoice": 15, "packing_list": 12}
+    assert "containers" not in {
+        field_name for field_name, _normalizer in SOURCE_ATTESTED_REQUIRED_FIELDS["packing_list"]
+    }
 
 
 def test_error_label_must_match_a_rendered_source_mutation(tmp_path: Path) -> None:
@@ -608,6 +631,18 @@ def test_raw_candidate_rescore_and_execution_receipt_are_replay_bound(tmp_path: 
     assert rescore.candidate_bundle_sha256 == candidate.candidate_bundle_sha256
     assert rescore.candidate_output_sha256 == _sha(raw)
     assert rescore.metrics == result.metrics
+    assert rescore.metrics.field_exact_match_count == 30
+    assert rescore.metrics.field_exact_match_total == 30
+    assert [
+        item.model_dump(mode="json") for item in rescore.metrics.field_exact_match_denominators
+    ] == [
+        {
+            "document_type": "invoice",
+            "document_count": 2,
+            "fields_per_document": 15,
+            "total_fields": 30,
+        }
+    ]
     verify_source_attested_synthetic_pdf_evaluation_replay(
         result=result,
         receipt=fixture["receipt"],  # type: ignore[arg-type]
@@ -640,7 +675,10 @@ def test_raw_candidate_rescore_and_execution_receipt_are_replay_bound(tmp_path: 
             required_field_schema=_TEST_REQUIRED_FIELD_SCHEMA,
         )
     forged_payload = result.model_dump(mode="json")
-    forged_payload["metrics"] = dict(forged_payload["metrics"]) | {"field_exact_match": 0.0}
+    forged_payload["metrics"] = dict(forged_payload["metrics"]) | {
+        "field_exact_match": 0.0,
+        "field_exact_match_count": 0,
+    }
     forged_payload["passed"] = False
     forged_payload["evaluation_result_sha256"] = source_attested_evaluation_result_sha256(
         forged_payload

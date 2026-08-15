@@ -19,16 +19,24 @@ content stream을 독립적인 pinned parser와 template profile로 읽어 만�
   6,000 PDF(정상 3,000/오류 3,000)와 그 receipt SHA, 그리고 고정된 개발 60개·봉인
   20개 packet receipt만 받는다. 같은 이름의 작은 샘플·임의 packet은 평가 증거가
   될 수 없다.
-- field gate는 B/L 13개, Invoice 15개, Packing List 13개의 전체 구조화 field
-  mapping을 요구한다. source parser가 어느 하나라도 모호하게만 읽을 수 있으면
-  manifest/CSV로 보완하지 않고 PDF preview를 `unavailable`로 남긴다.
-  현재 pinned profile은 각각 11/11/7 mapping만 명시돼 있으므로, 전체 mapping을
-  source content stream에서 안전하게 확정하기 전까지 기본 compiler/activation은
-  의도적으로 이 fail-closed 상태다.
+- field gate는 실제 최종 PDF에 렌더링된 구조화 field를 모두 요구한다. 문서 한 장당
+  B/L 13개, Invoice 15개, Packing List 12개이며, evaluator result에는 문서 유형별
+  `document_count × fields_per_document = total_fields` denominator도 함께 기록한다.
+  Packing List의 이전 manifest `containers` 열은 최종 PDF에 label/value/table slot으로
+  렌더링돼 있지 않으므로 12개 계약에 포함하지 않는다. carton 값, 같은 set의 B/L,
+  manifest/CSV로 이를 추론하거나 보완하지 않는다.
+- 각 mapping은 source stream의 고정 run 또는 고정 table column에 결속한다. Invoice와
+  Packing List의 `qty`/`unit`은 같은 visible run에서 정확히 하나인 수치 token과 영문
+  unit token을 분리하고, Packing List `net_gross_weight`는 visible net/gross 두 slot을
+  고정 `" / "` 구분자로 결합한다. 이 변환 규칙도 parser-spec self-hash에 포함된다.
+  run 수·좌표·table geometry·token 개수가 달라져 모호해지면 PDF preview는
+  `unavailable`로 남는다.
 - `error` stratum은 error label만으로 인정하지 않는다. 같은 set/document의
   clean sibling과 decoded content stream이 실제로 달라야 하며, label의
   `correct_value → wrong_value`가 해당 source field에 실제로 렌더링된 것도
-  확인해야 한다.
+  확인해야 한다. 표기 단위만 다른 numeric/table label은 값 하나 또는 net/gross
+  값쌍의 fixed numeric projection으로 mutation만 검증한다. 이 projection은 source
+  truth 값을 만들지 않으며, source truth에는 여전히 PDF에서 읽은 원문 slot 값만 쓴다.
 - `clean_manifest.csv`와 `error_labels.csv`는 dataset 결속, strata와 compact
   mismatch receipt용이다. PDF에 실제로 그려진 값을 조용히 고치거나 OCR 후보
   출력으로 정답을 만들지 않는다.
