@@ -74,7 +74,7 @@ provenance field, 다른 scope/kind는 이 경로에서 모두 거부된다. 반
 
 ## 활성화
 
-source-attested evaluator가 `evaluation-results/` 아래에 passing sealed result를
+source-attested evaluator가 `source-attested-evaluation-results/` 아래에 passing sealed result를
 기록한 뒤, evaluator/orchestrator의 명시적
 `--auto-activate-source-attested-synthetic` switch는 아래 runtime helper를 같은
 local workflow에서 호출한다. 개발 평가, 실패한 sealed 평가, switch가 없는 일반
@@ -85,7 +85,7 @@ local workflow에서 호출한다. 개발 평가, 실패한 sealed 평가, switc
 ```powershell
 uv run --locked --no-sync --group dev python tools/activate_source_attested_synthetic_pdf_preview.py `
   --document-preview-root <workspace>/_local/data/document-preview `
-  --evaluation-result <workspace>/_local/data/document-preview/evaluation-results/<result-sha>.json `
+  --evaluation-result <workspace>/_local/data/document-preview/source-attested-evaluation-results/<result-sha>.json `
   --configuration-sha256 <configuration-sha> `
   --model-inventory-sha256 <inventory-sha>
 ```

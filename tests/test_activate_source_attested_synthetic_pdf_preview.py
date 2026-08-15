@@ -26,6 +26,12 @@ def _canonical(value: object, *, newline: bool = False) -> bytes:
     return encoded + (b"\n" if newline else b"")
 
 
+def _canonical_source_artifact(value: object) -> bytes:
+    return (
+        json.dumps(value, ensure_ascii=False, allow_nan=False, indent=2, sort_keys=True) + "\n"
+    ).encode("utf-8")
+
+
 def _package_version(_name: str) -> str:
     return "test-v1"
 
@@ -99,11 +105,11 @@ def test_activation_tool_rejects_missing_local_evidence_chain(tmp_path: Path) ->
     )
     raw = _result(configuration_sha256, inventory_sha256)
     result_sha256 = json.loads(raw)["evaluation_result_sha256"]
-    result_path = root / "evaluation-results" / f"{result_sha256}.json"
+    result_path = root / "source-attested-evaluation-results" / f"{result_sha256}.json"
     result_path.parent.mkdir(parents=True)
-    result_path.write_bytes(raw)
+    result_path.write_bytes(_canonical_source_artifact(json.loads(raw)))
 
-    with pytest.raises(DocumentPreviewRuntimeError):
+    with pytest.raises(DocumentPreviewRuntimeError) as error:
         activate_source_attested_synthetic_runtime(
             document_preview_root=root,
             evaluation_result_path=result_path,
@@ -112,4 +118,45 @@ def test_activation_tool_rejects_missing_local_evidence_chain(tmp_path: Path) ->
             package_version_reader=_package_version,
         )
 
+    assert error.value.code != "document_preview_source_attested_activation_input_invalid"
     assert not (root / "approvals" / "pdf-preview-active.json").exists()
+
+
+def test_activation_tool_rejects_generic_human_evaluation_directory(tmp_path: Path) -> None:
+    root = tmp_path / "_local" / "data" / "document-preview"
+    root.mkdir(parents=True)
+    generic_result = root / "evaluation-results" / ("a" * 64 + ".json")
+    generic_result.parent.mkdir()
+    generic_result.write_bytes(b"{}\n")
+
+    with pytest.raises(
+        DocumentPreviewRuntimeError,
+        match="document_preview_source_attested_activation_input_invalid",
+    ):
+        activate_source_attested_synthetic_runtime(
+            document_preview_root=root,
+            evaluation_result_path=generic_result,
+            configuration_sha256="b" * 64,
+            model_inventory_sha256="c" * 64,
+            package_version_reader=_package_version,
+        )
+
+
+def test_activation_tool_rejects_non_hash_named_source_result(tmp_path: Path) -> None:
+    root = tmp_path / "_local" / "data" / "document-preview"
+    root.mkdir(parents=True)
+    source_result = root / "source-attested-evaluation-results" / "not-a-result.json"
+    source_result.parent.mkdir()
+    source_result.write_bytes(_canonical_source_artifact(json.loads(_result("b" * 64, "c" * 64))))
+
+    with pytest.raises(
+        DocumentPreviewRuntimeError,
+        match="document_preview_source_attested_activation_input_invalid",
+    ):
+        activate_source_attested_synthetic_runtime(
+            document_preview_root=root,
+            evaluation_result_path=source_result,
+            configuration_sha256="b" * 64,
+            model_inventory_sha256="c" * 64,
+            package_version_reader=_package_version,
+        )

@@ -17,6 +17,7 @@ from typing import Callable, Sequence
 
 from customs_ai_agent.service.document_preview_runtime import (
     DocumentPreviewRuntimeError,
+    parse_source_attested_synthetic_sealed_evaluation_result,
     validate_document_preview_root,
     write_source_attested_synthetic_pdf_preview_pointer,
 )
@@ -37,7 +38,14 @@ def activate_source_attested_synthetic_runtime(
         if evaluation_result_path.is_symlink():
             raise OSError("evaluation result path is a link")
         source = evaluation_result_path.resolve(strict=True)
-        source.relative_to(root / "evaluation-results")
+        # Source-attested sealed results are deliberately kept apart from the
+        # human-Gold evaluator's generic ``evaluation-results`` sidecars.
+        # The runtime reloads this same immutable source artifact during its
+        # evidence-chain verification, so accepting the generic directory here
+        # would produce a pointer that can never be safely resolved.
+        expected_directory = (root / "source-attested-evaluation-results").resolve(strict=True)
+        if source.parent != expected_directory:
+            raise OSError("evaluation result path is outside the source-attested result directory")
         if not source.is_file() or source.is_symlink():
             raise OSError("evaluation result is not a regular file")
         raw = source.read_bytes()
@@ -45,6 +53,9 @@ def activate_source_attested_synthetic_runtime(
         raise DocumentPreviewRuntimeError(
             "document_preview_source_attested_activation_input_invalid"
         ) from error
+    evaluation = parse_source_attested_synthetic_sealed_evaluation_result(raw)
+    if source.name != f"{evaluation.evaluation_result_sha256}.json":
+        raise DocumentPreviewRuntimeError("document_preview_source_attested_activation_input_invalid")
     activation_sha256, _activation = write_source_attested_synthetic_pdf_preview_pointer(
         document_preview_root=root,
         evaluation_raw=raw,

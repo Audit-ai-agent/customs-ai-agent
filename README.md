@@ -293,6 +293,7 @@ OCR preview engine은 human-Gold 경로에서는 Gold 평가와 사람 승인을
   runtime-configurations/<SHA>.json
   model-inventories/<SHA>.json
   evaluation-results/<SHA>.json   # sealed evaluator의 canonical 결과
+  source-attested-evaluation-results/<SHA>.json  # source-attested sealed 결과
   approvals/pdf-preview-active.json
 ```
 
