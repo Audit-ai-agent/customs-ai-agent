@@ -133,12 +133,22 @@ def _provenance(root: Path, engine_kind: str, configuration: dict[str, object]) 
 def test_builds_exact_runtime_inventory_for_every_supported_engine(
     tmp_path: Path,
     engine_kind: str,
+    monkeypatch: pytest.MonkeyPatch,
 ) -> None:
     root = _root(tmp_path)
     configuration_path, configuration_value = _configuration(root, engine_kind)
     _write_model_files(root, configuration_value)
     provenance_path = _provenance(root, engine_kind, configuration_value)
     original_configuration = configuration_path.read_bytes()
+    if engine_kind == "paddleocr":
+        # This builder test supplies synthetic package versions and a synthetic
+        # model tree, not a real locked OpenCV installation.  Dedicated runtime
+        # tests exercise the RECORD-backed cv2 verifier directly.
+        monkeypatch.setattr(
+            runtime_module,
+            "_recorded_cv2_tree_matches_designated_provider",
+            lambda: None,
+        )
 
     inventory_value, configuration_sha256 = build_runtime_inventory(
         document_preview_root=root,
@@ -201,11 +211,20 @@ def test_rejects_extra_artifact_directory_provenance(tmp_path: Path) -> None:
         )
 
 
-def test_runtime_rejects_an_extra_file_added_after_inventory_build(tmp_path: Path) -> None:
+def test_runtime_rejects_an_extra_file_added_after_inventory_build(
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+) -> None:
     root = _root(tmp_path)
     configuration_path, configuration_value = _configuration(root, "paddleocr")
     _write_model_files(root, configuration_value)
     provenance_path = _provenance(root, "paddleocr", configuration_value)
+    # The synthetic inventory build cannot resolve the real OpenCV wheel in
+    # the default CI profile; direct runtime tests cover that exact boundary.
+    monkeypatch.setattr(
+        runtime_module,
+        "_recorded_cv2_tree_matches_designated_provider",
+        lambda: None,
+    )
     inventory_value, _ = build_runtime_inventory(
         document_preview_root=root,
         configuration_path=configuration_path,
