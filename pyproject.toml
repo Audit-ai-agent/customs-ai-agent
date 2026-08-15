@@ -29,6 +29,12 @@ document-preview-paddleocr = [
 ]
 document-preview-docling = [
   "docling==2.15.1",
+  # Docling 2.15.1 uses the legacy BoundingBox API.  Its broad upstream
+  # ranges otherwise resolve to newer incompatible package lines.
+  "docling-core[chunking]==2.13.1",
+  "docling-ibm-models==3.1.0",
+  "docling-parse==3.0.0",
+  "pillow==10.4.0",
   "pypdf==5.3.1",
 ]
 
