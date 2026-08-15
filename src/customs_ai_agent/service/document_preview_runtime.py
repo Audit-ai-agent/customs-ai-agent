@@ -419,6 +419,56 @@ class SealedEvaluationResultV1:
     table_cell_f1: float
 
 
+@dataclass(frozen=True, slots=True)
+class SourceAttestedSyntheticPdfPreviewActivationV1:
+    """One automatic activation bound only to synthetic layout truth.
+
+    This is intentionally a separate wire shape from ``PdfPreviewApprovalV1``:
+    it has no reviewer identity, approval ID, or human Gold receipt.  The
+    exact-key parser below makes a mixed human/source-attested pointer
+    invalid, rather than allowing either provenance claim to be silently
+    substituted for the other.
+    """
+
+    engine_kind: ApprovedPdfEngineKind
+    extractor_revision: str
+    configuration_sha256: str
+    model_inventory_sha256: str
+    dataset_id: str
+    dataset_revision: str
+    packet_receipt_sha256: str
+    evaluation_scope: Literal["synthetic_content_stream_compatibility"]
+    layout_truth_kind: Literal["pdf_content_stream_layout_v1"]
+    layout_truth_receipt_sha256: str
+    evaluation_result_sha256: str
+
+
+@dataclass(frozen=True, slots=True)
+class SourceAttestedSyntheticSealedEvaluationResultV1:
+    """Canonical passing result for the synthetic source-attested path only."""
+
+    dataset_id: str
+    dataset_revision: str
+    packet_receipt_sha256: str
+    evaluation_scope: Literal["synthetic_content_stream_compatibility"]
+    layout_truth_kind: Literal["pdf_content_stream_layout_v1"]
+    layout_truth_receipt_sha256: str
+    engine_kind: ApprovedPdfEngineKind
+    extractor_revision: str
+    configuration_sha256: str
+    model_inventory_sha256: str
+    evaluation_result_sha256: str
+    field_exact_match: float
+    ocr_cer: float
+    table_cell_f1: float
+
+
+PdfPreviewActivationV1 = PdfPreviewApprovalV1 | SourceAttestedSyntheticPdfPreviewActivationV1
+PdfPreviewEvaluationResultV1 = (
+    SealedEvaluationResultV1 | SourceAttestedSyntheticSealedEvaluationResultV1
+)
+
+
 def _parse_options(value: object, *, kind: ApprovedPdfEngineKind) -> Mapping[str, object]:
     if not isinstance(value, dict):
         raise DocumentPreviewRuntimeError("document_preview_configuration_invalid")
@@ -645,6 +695,92 @@ def parse_pdf_preview_approval(raw: bytes) -> PdfPreviewApprovalV1:
     )
 
 
+def parse_source_attested_synthetic_pdf_preview_activation(
+    raw: bytes,
+) -> SourceAttestedSyntheticPdfPreviewActivationV1:
+    """Parse the non-human, synthetic-layout activation pointer exactly.
+
+    The automatic path is deliberately unable to carry a manual approval ID
+    or a human Gold receipt.  Conversely, its source-layout receipt and
+    explicit evaluation basis are mandatory.  This makes provenance mixing a
+    parse error before an adapter can be constructed.
+    """
+
+    code = "document_preview_source_attested_activation_invalid"
+    value = _strict_json_object(raw, code=code)
+    _require_exact_keys(
+        value,
+        {"schema_version", "activation_kind", "status", "media_type", "engine", "evaluation"},
+        code=code,
+    )
+    if (
+        value["schema_version"] != "1.0"
+        or value["activation_kind"] != "source_attested_synthetic"
+        or value["status"] != "activated"
+        or value["media_type"] != "application/pdf"
+    ):
+        raise DocumentPreviewRuntimeError(code)
+    engine_value = value["engine"]
+    evaluation_value = value["evaluation"]
+    if not isinstance(engine_value, dict) or not isinstance(evaluation_value, dict):
+        raise DocumentPreviewRuntimeError(code)
+    engine = cast(dict[str, object], engine_value)
+    evaluation = cast(dict[str, object], evaluation_value)
+    _require_exact_keys(
+        engine,
+        {"kind", "extractor_revision", "configuration_sha256", "model_inventory_sha256"},
+        code=code,
+    )
+    _require_exact_keys(
+        evaluation,
+        {
+            "dataset_id",
+            "dataset_revision",
+            "packet_kind",
+            "packet_receipt_sha256",
+            "evaluation_scope",
+            "layout_truth_kind",
+            "layout_truth_receipt_sha256",
+            "evaluation_basis",
+            "evaluation_result_sha256",
+        },
+        code=code,
+    )
+    if (
+        evaluation["packet_kind"] != "sealed"
+        or evaluation["evaluation_basis"] != "source_attested_synthetic"
+        or evaluation["evaluation_scope"] != "synthetic_content_stream_compatibility"
+        or evaluation["layout_truth_kind"] != "pdf_content_stream_layout_v1"
+    ):
+        raise DocumentPreviewRuntimeError(code)
+    return SourceAttestedSyntheticPdfPreviewActivationV1(
+        engine_kind=_engine_kind(engine["kind"], code=code),
+        extractor_revision=_identifier(engine["extractor_revision"], code=code),
+        configuration_sha256=_sha256(engine["configuration_sha256"], code=code),
+        model_inventory_sha256=_sha256(engine["model_inventory_sha256"], code=code),
+        dataset_id=_identifier(evaluation["dataset_id"], code=code),
+        dataset_revision=_identifier(evaluation["dataset_revision"], code=code),
+        packet_receipt_sha256=_sha256(evaluation["packet_receipt_sha256"], code=code),
+        evaluation_scope=cast(
+            Literal["synthetic_content_stream_compatibility"], evaluation["evaluation_scope"]
+        ),
+        layout_truth_kind=cast(
+            Literal["pdf_content_stream_layout_v1"], evaluation["layout_truth_kind"]
+        ),
+        layout_truth_receipt_sha256=_sha256(evaluation["layout_truth_receipt_sha256"], code=code),
+        evaluation_result_sha256=_sha256(evaluation["evaluation_result_sha256"], code=code),
+    )
+
+
+def parse_pdf_preview_activation(raw: bytes) -> PdfPreviewActivationV1:
+    """Parse one of the two non-interchangeable local activation pointers."""
+
+    value = _strict_json_object(raw, code="document_preview_approval_invalid")
+    if "activation_kind" in value:
+        return parse_source_attested_synthetic_pdf_preview_activation(raw)
+    return parse_pdf_preview_approval(raw)
+
+
 def parse_sealed_evaluation_result(raw: bytes) -> SealedEvaluationResultV1:
     """Validate Gold evaluator's exact canonical sealed-result contract."""
 
@@ -731,6 +867,104 @@ def parse_sealed_evaluation_result(raw: bytes) -> SealedEvaluationResultV1:
         ocr_cer=ocr_cer,
         table_cell_f1=table_cell_f1,
     )
+
+
+def parse_source_attested_synthetic_sealed_evaluation_result(
+    raw: bytes,
+) -> SourceAttestedSyntheticSealedEvaluationResultV1:
+    """Validate a passing result that uses PDF content-stream layout truth, not Gold.
+
+    The evaluator must emit this distinct canonical shape when its reference
+    text and table cells were derived from the synthetic PDF's immutable
+    authored content stream.  A human Gold receipt is intentionally not an
+    accepted substitute on this path.
+    """
+
+    code = "document_preview_source_attested_evaluation_invalid"
+    value = _strict_json_object(raw, code=code)
+    if raw != _canonical_json_bytes(value, trailing_newline=True):
+        raise DocumentPreviewRuntimeError(code)
+    _require_exact_keys(
+        value,
+        {
+            "schema_version",
+            "evaluation_basis",
+            "dataset_id",
+            "dataset_revision",
+            "packet_kind",
+            "packet_receipt_sha256",
+            "evaluation_scope",
+            "layout_truth_kind",
+            "layout_truth_receipt_sha256",
+            "engine_kind",
+            "extractor_revision",
+            "configuration_sha256",
+            "model_inventory_sha256",
+            "evaluation_result_sha256",
+            "passed",
+            "metrics",
+        },
+        code=code,
+    )
+    if (
+        value["schema_version"] != "1.0"
+        or value["evaluation_basis"] != "source_attested_synthetic"
+        or value["packet_kind"] != "sealed"
+        or value["evaluation_scope"] != "synthetic_content_stream_compatibility"
+        or value["layout_truth_kind"] != "pdf_content_stream_layout_v1"
+        or value["passed"] is not True
+    ):
+        raise DocumentPreviewRuntimeError(code)
+    metrics_value = value["metrics"]
+    if not isinstance(metrics_value, dict):
+        raise DocumentPreviewRuntimeError(code)
+    metrics = cast(dict[str, object], metrics_value)
+    _require_exact_keys(
+        metrics,
+        {"field_exact_match", "ocr_cer", "table_cell_f1"},
+        code=code,
+    )
+    embedded_sha = _sha256(value["evaluation_result_sha256"], code=code)
+    unsigned = dict(value)
+    unsigned.pop("evaluation_result_sha256")
+    if _sha256_bytes(_canonical_json_bytes(unsigned)) != embedded_sha:
+        raise DocumentPreviewRuntimeError(code)
+    field_exact_match = _finite_number(metrics["field_exact_match"], code=code)
+    ocr_cer = _finite_number(metrics["ocr_cer"], code=code)
+    table_cell_f1 = _finite_number(metrics["table_cell_f1"], code=code)
+    if (
+        field_exact_match < _FIELD_EXACT_MATCH_MIN
+        or ocr_cer > _OCR_CER_MAX
+        or table_cell_f1 < _TABLE_CELL_F1_MIN
+    ):
+        raise DocumentPreviewRuntimeError("document_preview_source_attested_evaluation_gate_failed")
+    return SourceAttestedSyntheticSealedEvaluationResultV1(
+        dataset_id=_identifier(value["dataset_id"], code=code),
+        dataset_revision=_identifier(value["dataset_revision"], code=code),
+        packet_receipt_sha256=_sha256(value["packet_receipt_sha256"], code=code),
+        evaluation_scope=cast(
+            Literal["synthetic_content_stream_compatibility"], value["evaluation_scope"]
+        ),
+        layout_truth_kind=cast(Literal["pdf_content_stream_layout_v1"], value["layout_truth_kind"]),
+        layout_truth_receipt_sha256=_sha256(value["layout_truth_receipt_sha256"], code=code),
+        engine_kind=_engine_kind(value["engine_kind"], code=code),
+        extractor_revision=_identifier(value["extractor_revision"], code=code),
+        configuration_sha256=_sha256(value["configuration_sha256"], code=code),
+        model_inventory_sha256=_sha256(value["model_inventory_sha256"], code=code),
+        evaluation_result_sha256=embedded_sha,
+        field_exact_match=field_exact_match,
+        ocr_cer=ocr_cer,
+        table_cell_f1=table_cell_f1,
+    )
+
+
+def parse_pdf_preview_evaluation_result(raw: bytes) -> PdfPreviewEvaluationResultV1:
+    """Parse exactly one sealed evaluation basis; never infer or convert it."""
+
+    value = _strict_json_object(raw, code="document_preview_evaluation_invalid")
+    if "evaluation_basis" in value:
+        return parse_source_attested_synthetic_sealed_evaluation_result(raw)
+    return parse_sealed_evaluation_result(raw)
 
 
 def _artifact_path(root: Path, relative_path: str) -> Path:
@@ -847,14 +1081,36 @@ def _configuration_directories_exist(
 
 
 def _check_evaluation_binding(
-    approval: PdfPreviewApprovalV1,
-    evaluation: SealedEvaluationResultV1,
+    approval: PdfPreviewActivationV1,
+    evaluation: PdfPreviewEvaluationResultV1,
     configuration: RuntimeConfigurationV1,
     inventory: ModelInventoryV1,
 ) -> None:
+    if isinstance(approval, PdfPreviewApprovalV1) and isinstance(
+        evaluation, SealedEvaluationResultV1
+    ):
+        provenance_matches = (
+            approval.dataset_revision == evaluation.dataset_revision
+            and approval.gold_receipt_sha256 == evaluation.gold_receipt_sha256
+        )
+    elif isinstance(approval, SourceAttestedSyntheticPdfPreviewActivationV1) and isinstance(
+        evaluation, SourceAttestedSyntheticSealedEvaluationResultV1
+    ):
+        provenance_matches = (
+            approval.dataset_id == evaluation.dataset_id
+            and approval.dataset_revision == evaluation.dataset_revision
+            and approval.packet_receipt_sha256 == evaluation.packet_receipt_sha256
+            and approval.evaluation_scope == evaluation.evaluation_scope
+            and approval.layout_truth_kind == evaluation.layout_truth_kind
+            and approval.layout_truth_receipt_sha256 == evaluation.layout_truth_receipt_sha256
+        )
+    else:
+        # A human-reviewed result can never activate the source-attested
+        # pointer (or the other way around), even when every engine hash is
+        # coincidentally identical.
+        raise DocumentPreviewRuntimeError("document_preview_approval_binding_mismatch")
     if (
-        approval.dataset_revision != evaluation.dataset_revision
-        or approval.gold_receipt_sha256 != evaluation.gold_receipt_sha256
+        not provenance_matches
         or approval.evaluation_result_sha256 != evaluation.evaluation_result_sha256
         or approval.engine_kind != evaluation.engine_kind
         or approval.extractor_revision != evaluation.extractor_revision
@@ -874,13 +1130,13 @@ class ApprovedPdfPreviewBinding:
     root: Path
     approval_path: Path
     approval_sha256: str
-    approval: PdfPreviewApprovalV1
+    approval: PdfPreviewActivationV1
     configuration_path: Path
     inventory_path: Path
     evaluation_path: Path
     configuration: RuntimeConfigurationV1
     inventory: ModelInventoryV1
-    evaluation: SealedEvaluationResultV1
+    evaluation: PdfPreviewEvaluationResultV1
     artifact_fingerprints: tuple[_ArtifactFingerprint, ...]
 
     def verify_runtime_state(self) -> None:
@@ -899,7 +1155,7 @@ class ApprovedPdfPreviewBinding:
         )
         if (
             _sha256_bytes(approval_raw) != self.approval_sha256
-            or parse_pdf_preview_approval(approval_raw) != self.approval
+            or parse_pdf_preview_activation(approval_raw) != self.approval
         ):
             raise DocumentPreviewRuntimeError("document_preview_approval_runtime_changed")
         configuration_raw = _read_regular_file(
@@ -927,7 +1183,7 @@ class ApprovedPdfPreviewBinding:
             limit=_MAX_EVALUATION_BYTES,
             code="document_preview_evaluation_runtime_changed",
         )
-        if parse_sealed_evaluation_result(evaluation_raw) != self.evaluation:
+        if parse_pdf_preview_evaluation_result(evaluation_raw) != self.evaluation:
             raise DocumentPreviewRuntimeError("document_preview_evaluation_runtime_changed")
         for fingerprint in self.artifact_fingerprints:
             _assert_no_symlink(fingerprint.path, code="document_preview_model_runtime_changed")
@@ -963,7 +1219,7 @@ def load_approved_pdf_preview_binding(
     )
     if _sha256_bytes(approval_raw) != approval_sha256:
         raise DocumentPreviewRuntimeError("document_preview_approval_hash_mismatch")
-    approval = parse_pdf_preview_approval(approval_raw)
+    approval = parse_pdf_preview_activation(approval_raw)
     configuration_path = _sidecar_path(
         root, "runtime-configurations", approval.configuration_sha256
     )
@@ -990,7 +1246,7 @@ def load_approved_pdf_preview_binding(
         raise DocumentPreviewRuntimeError("document_preview_inventory_hash_mismatch")
     configuration = parse_runtime_configuration(configuration_raw)
     inventory = parse_model_inventory(inventory_raw)
-    evaluation = parse_sealed_evaluation_result(evaluation_raw)
+    evaluation = parse_pdf_preview_evaluation_result(evaluation_raw)
     _check_evaluation_binding(approval, evaluation, configuration, inventory)
     verify_inventory_packages(inventory, package_version_reader=package_version_reader)
     _configuration_directories_exist(root, configuration, inventory)
@@ -1612,6 +1868,132 @@ def write_approved_pdf_preview_pointer(
     return _sha256_bytes(approval_raw), approval
 
 
+def write_source_attested_synthetic_pdf_preview_pointer(
+    *,
+    document_preview_root: Path,
+    evaluation_raw: bytes,
+    configuration_sha256: str,
+    model_inventory_sha256: str,
+    package_version_reader: Callable[[str], str] = importlib.metadata.version,
+) -> tuple[str, SourceAttestedSyntheticPdfPreviewActivationV1]:
+    """Atomically activate one passing source-attested synthetic result.
+
+    This is not a shortcut around the human-approved path.  It accepts only a
+    distinct, canonical sealed result that is bound to the synthetic PDF
+    content-stream layout receipt.  A manual Gold result, a mixed provenance
+    result, or any failed threshold remains unable to write the active pointer.
+    """
+
+    code = "document_preview_source_attested_activation_write_failed"
+    root = validate_document_preview_root(document_preview_root, create=True)
+    configuration_sha256 = _sha256(
+        configuration_sha256, code="document_preview_source_attested_activation_arguments_invalid"
+    )
+    model_inventory_sha256 = _sha256(
+        model_inventory_sha256,
+        code="document_preview_source_attested_activation_arguments_invalid",
+    )
+    try:
+        (root / "evaluation-results").mkdir(parents=True, exist_ok=True)
+        _assert_no_symlink(root / "evaluation-results", code=code)
+    except OSError as error:
+        raise DocumentPreviewRuntimeError(code) from error
+    configuration_path = _sidecar_path(root, "runtime-configurations", configuration_sha256)
+    inventory_path = _sidecar_path(root, "model-inventories", model_inventory_sha256)
+    configuration_raw = _read_regular_file(
+        configuration_path,
+        limit=_MAX_SIDECAR_BYTES,
+        code="document_preview_configuration_invalid",
+    )
+    inventory_raw = _read_regular_file(
+        inventory_path,
+        limit=_MAX_SIDECAR_BYTES,
+        code="document_preview_inventory_invalid",
+    )
+    if (
+        _sha256_bytes(configuration_raw) != configuration_sha256
+        or _sha256_bytes(inventory_raw) != model_inventory_sha256
+    ):
+        raise DocumentPreviewRuntimeError("document_preview_approval_binding_mismatch")
+    configuration = parse_runtime_configuration(configuration_raw)
+    inventory = parse_model_inventory(inventory_raw)
+    verify_inventory_packages(inventory, package_version_reader=package_version_reader)
+    _configuration_directories_exist(root, configuration, inventory)
+    _verify_inventory_artifacts(root, inventory)
+    evaluation = parse_source_attested_synthetic_sealed_evaluation_result(evaluation_raw)
+    if (
+        configuration.engine_kind != evaluation.engine_kind
+        or configuration.extractor_revision != evaluation.extractor_revision
+        or inventory.engine_kind != evaluation.engine_kind
+        or configuration_sha256 != evaluation.configuration_sha256
+        or model_inventory_sha256 != evaluation.model_inventory_sha256
+    ):
+        raise DocumentPreviewRuntimeError("document_preview_approval_binding_mismatch")
+    normalized_evaluation_raw = _canonical_json_bytes(
+        _strict_json_object(
+            evaluation_raw, code="document_preview_source_attested_evaluation_invalid"
+        ),
+        trailing_newline=True,
+    )
+    evaluation_path = root / "evaluation-results" / f"{evaluation.evaluation_result_sha256}.json"
+    _write_exact_immutable_bytes(
+        evaluation_path,
+        normalized_evaluation_raw,
+        limit=_MAX_EVALUATION_BYTES,
+        code=code,
+    )
+    if (
+        _read_regular_file(evaluation_path, limit=_MAX_EVALUATION_BYTES, code=code)
+        != normalized_evaluation_raw
+    ):
+        raise DocumentPreviewRuntimeError(code)
+    activation_value: dict[str, object] = {
+        "schema_version": "1.0",
+        "activation_kind": "source_attested_synthetic",
+        "status": "activated",
+        "media_type": "application/pdf",
+        "engine": {
+            "kind": evaluation.engine_kind,
+            "extractor_revision": evaluation.extractor_revision,
+            "configuration_sha256": configuration_sha256,
+            "model_inventory_sha256": model_inventory_sha256,
+        },
+        "evaluation": {
+            "dataset_id": evaluation.dataset_id,
+            "dataset_revision": evaluation.dataset_revision,
+            "packet_kind": "sealed",
+            "packet_receipt_sha256": evaluation.packet_receipt_sha256,
+            "evaluation_scope": "synthetic_content_stream_compatibility",
+            "layout_truth_kind": "pdf_content_stream_layout_v1",
+            "layout_truth_receipt_sha256": evaluation.layout_truth_receipt_sha256,
+            "evaluation_basis": "source_attested_synthetic",
+            "evaluation_result_sha256": evaluation.evaluation_result_sha256,
+        },
+    }
+    activation_raw = _canonical_json_bytes(activation_value, trailing_newline=True)
+    activation = parse_source_attested_synthetic_pdf_preview_activation(activation_raw)
+    _check_evaluation_binding(activation, evaluation, configuration, inventory)
+    destination = root / "approvals" / _APPROVAL_FILENAME
+    try:
+        destination.parent.mkdir(parents=True, exist_ok=True)
+        _assert_no_symlink(destination.parent, code=code)
+        temporary = destination.parent / f".{destination.name}.{os.getpid()}.tmp"
+        with temporary.open("xb") as stream:
+            stream.write(activation_raw)
+            stream.flush()
+            os.fsync(stream.fileno())
+        os.replace(temporary, destination)
+    except OSError as error:
+        raise DocumentPreviewRuntimeError(code) from error
+    finally:
+        try:
+            if "temporary" in locals() and temporary.exists():
+                temporary.unlink(missing_ok=True)
+        except OSError:
+            pass
+    return _sha256_bytes(activation_raw), activation
+
+
 __all__ = [
     "ApprovedPdfOnlyPreviewEngine",
     "ApprovedPdfPreviewBinding",
@@ -1622,21 +2004,30 @@ __all__ = [
     "ModelInventoryV1",
     "ModelPackageV1",
     "PaddleOcrPdfPreviewAdapter",
+    "PdfPreviewActivationV1",
     "PdfPreviewApprovalV1",
+    "PdfPreviewEvaluationResultV1",
     "PdfTextLayerPreviewAdapter",
     "RuntimeConfigurationV1",
     "SealedEvaluationResultV1",
+    "SourceAttestedSyntheticPdfPreviewActivationV1",
+    "SourceAttestedSyntheticSealedEvaluationResultV1",
     "build_default_pdf_preview_adapter",
     "load_approved_pdf_preview_binding",
     "local_files_only",
     "parse_model_inventory",
+    "parse_pdf_preview_activation",
     "parse_pdf_preview_approval",
+    "parse_pdf_preview_evaluation_result",
     "parse_runtime_configuration",
     "parse_sealed_evaluation_result",
+    "parse_source_attested_synthetic_pdf_preview_activation",
+    "parse_source_attested_synthetic_sealed_evaluation_result",
     "resolve_approved_pdf_preview_engine",
     "validate_approval_pointer_path",
     "validate_document_preview_root",
     "verify_inventory_packages",
     "write_approved_pdf_preview_pointer",
     "write_runtime_sidecars",
+    "write_source_attested_synthetic_pdf_preview_pointer",
 ]

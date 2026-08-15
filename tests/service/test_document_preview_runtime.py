@@ -22,10 +22,13 @@ from customs_ai_agent.service.document_preview_runtime import (
     _docling_preview_pages,
     load_approved_pdf_preview_binding,
     local_files_only,
+    parse_source_attested_synthetic_pdf_preview_activation,
+    parse_source_attested_synthetic_sealed_evaluation_result,
     parse_sealed_evaluation_result,
     resolve_approved_pdf_preview_engine,
     write_approved_pdf_preview_pointer,
     write_runtime_sidecars,
+    write_source_attested_synthetic_pdf_preview_pointer,
 )
 from customs_ai_agent.service.settings import ServiceConfigurationError, ServiceSettings
 
@@ -100,6 +103,40 @@ def _evaluation(configuration_sha256: str, inventory_sha256: str) -> bytes:
     return _canonical(value, newline=True)
 
 
+def _source_attested_evaluation(
+    configuration_sha256: str,
+    inventory_sha256: str,
+    *,
+    evaluation_scope: str = "synthetic_content_stream_compatibility",
+) -> bytes:
+    unsigned: dict[str, object] = {
+        "schema_version": "1.0",
+        "evaluation_basis": "source_attested_synthetic",
+        "dataset_id": "synthetic-pdf",
+        "dataset_revision": "synthetic-pdf-r1",
+        "packet_kind": "sealed",
+        "packet_receipt_sha256": "a" * 64,
+        "evaluation_scope": evaluation_scope,
+        "layout_truth_kind": "pdf_content_stream_layout_v1",
+        "layout_truth_receipt_sha256": "c" * 64,
+        "engine_kind": "pdf_text_layer",
+        "extractor_revision": "pdf-text-test-v1",
+        "configuration_sha256": configuration_sha256,
+        "model_inventory_sha256": inventory_sha256,
+        "passed": True,
+        "metrics": {
+            "field_exact_match": 0.99,
+            "ocr_cer": 0.01,
+            "table_cell_f1": 0.98,
+        },
+    }
+    value = {
+        **unsigned,
+        "evaluation_result_sha256": hashlib.sha256(_canonical(unsigned)).hexdigest(),
+    }
+    return _canonical(value, newline=True)
+
+
 def _approved(tmp_path: Path) -> tuple[Path, str]:
     root = _root(tmp_path)
     root.mkdir(parents=True)
@@ -124,6 +161,26 @@ def _approved(tmp_path: Path) -> tuple[Path, str]:
         package_version_reader=_package_version,
     )
     return root / "approvals" / "pdf-preview-active.json", approval_sha256
+
+
+def _source_attested_activated(tmp_path: Path) -> tuple[Path, str]:
+    root = _root(tmp_path)
+    root.mkdir(parents=True)
+    configuration_sha256, inventory_sha256 = write_runtime_sidecars(
+        document_preview_root=root,
+        configuration_value=_configuration(),
+        inventory_value=_inventory(),
+        package_version_reader=_package_version,
+    )
+    evaluation = _source_attested_evaluation(configuration_sha256, inventory_sha256)
+    activation_sha256, _activation = write_source_attested_synthetic_pdf_preview_pointer(
+        document_preview_root=root,
+        evaluation_raw=evaluation,
+        configuration_sha256=configuration_sha256,
+        model_inventory_sha256=inventory_sha256,
+        package_version_reader=_package_version,
+    )
+    return root / "approvals" / "pdf-preview-active.json", activation_sha256
 
 
 class _FakePdfEngine:
@@ -218,6 +275,108 @@ def test_runtime_pointer_drift_fails_closed_without_calling_adapter(tmp_path: Pa
         engine.extract(_pdf_input())
 
     assert fake.calls == 0
+
+
+def test_source_attested_synthetic_pointer_activates_pdf_only_without_human_gold(
+    tmp_path: Path,
+) -> None:
+    activation_path, activation_sha256 = _source_attested_activated(tmp_path)
+    binding = load_approved_pdf_preview_binding(
+        approval_path=activation_path,
+        approval_sha256=activation_sha256,
+        package_version_reader=_package_version,
+    )
+
+    assert binding.approval.__class__.__name__ == "SourceAttestedSyntheticPdfPreviewActivationV1"
+    assert (
+        binding.evaluation.__class__.__name__ == "SourceAttestedSyntheticSealedEvaluationResultV1"
+    )
+    fake = _FakePdfEngine(binding.approval.extractor_revision)
+    resolution = resolve_approved_pdf_preview_engine(
+        approval_path=activation_path,
+        approval_sha256=activation_sha256,
+        adapter_factory=lambda _binding: fake,
+        package_version_reader=_package_version,
+    )
+
+    assert resolution.status == "approved"
+    assert resolution.engine.extract(_pdf_input()).extractor_revision == "pdf-text-test-v1"
+    with pytest.raises(DocumentPreviewUnavailable):
+        resolution.engine.extract(_jpeg_input())
+    assert fake.calls == 1
+
+
+def test_source_attested_parser_rejects_missing_scope_and_mixed_human_provenance() -> None:
+    raw = _source_attested_evaluation("c" * 64, "d" * 64)
+    assert (
+        parse_source_attested_synthetic_sealed_evaluation_result(raw).layout_truth_kind
+        == "pdf_content_stream_layout_v1"
+    )
+
+    missing_scope = json.loads(raw)
+    missing_scope.pop("evaluation_scope")
+    unsigned = dict(missing_scope)
+    unsigned.pop("evaluation_result_sha256")
+    missing_scope["evaluation_result_sha256"] = hashlib.sha256(_canonical(unsigned)).hexdigest()
+    with pytest.raises(
+        DocumentPreviewRuntimeError, match="document_preview_source_attested_evaluation_invalid"
+    ):
+        parse_source_attested_synthetic_sealed_evaluation_result(
+            _canonical(missing_scope, newline=True)
+        )
+
+    with pytest.raises(
+        DocumentPreviewRuntimeError, match="document_preview_source_attested_evaluation_invalid"
+    ):
+        parse_source_attested_synthetic_sealed_evaluation_result(
+            _source_attested_evaluation(
+                "c" * 64,
+                "d" * 64,
+                evaluation_scope="synthetic_optical_ocr",
+            )
+        )
+
+    mixed = json.loads(raw)
+    mixed["gold_receipt_sha256"] = "e" * 64
+    unsigned = dict(mixed)
+    unsigned.pop("evaluation_result_sha256")
+    mixed["evaluation_result_sha256"] = hashlib.sha256(_canonical(unsigned)).hexdigest()
+    with pytest.raises(
+        DocumentPreviewRuntimeError, match="document_preview_source_attested_evaluation_invalid"
+    ):
+        parse_source_attested_synthetic_sealed_evaluation_result(_canonical(mixed, newline=True))
+
+
+def test_source_attested_pointer_parser_rejects_human_approval_fields(tmp_path: Path) -> None:
+    activation_path, _activation_sha256 = _source_attested_activated(tmp_path)
+    pointer = json.loads(activation_path.read_bytes())
+    pointer["approval_id"] = "human-approval-1"
+    with pytest.raises(
+        DocumentPreviewRuntimeError, match="document_preview_source_attested_activation_invalid"
+    ):
+        parse_source_attested_synthetic_pdf_preview_activation(_canonical(pointer, newline=True))
+
+
+def test_source_attested_writer_rejects_manual_human_evaluation(tmp_path: Path) -> None:
+    root = _root(tmp_path)
+    root.mkdir(parents=True)
+    configuration_sha256, inventory_sha256 = write_runtime_sidecars(
+        document_preview_root=root,
+        configuration_value=_configuration(),
+        inventory_value=_inventory(),
+        package_version_reader=_package_version,
+    )
+
+    with pytest.raises(
+        DocumentPreviewRuntimeError, match="document_preview_source_attested_evaluation_invalid"
+    ):
+        write_source_attested_synthetic_pdf_preview_pointer(
+            document_preview_root=root,
+            evaluation_raw=_evaluation(configuration_sha256, inventory_sha256),
+            configuration_sha256=configuration_sha256,
+            model_inventory_sha256=inventory_sha256,
+            package_version_reader=_package_version,
+        )
 
 
 def test_resolution_is_disabled_for_missing_or_mismatched_approval(tmp_path: Path) -> None:
