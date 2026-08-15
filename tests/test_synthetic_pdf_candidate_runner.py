@@ -95,7 +95,7 @@ def _profile_sidecars(root: Path, engine_kind: str) -> tuple[Path, Path]:
         }
     elif engine_kind == "paddleocr":
         artifacts = []
-        for name in ("det", "rec"):
+        for name in ("det", "rec", "cls"):
             path = root / "models" / name / "model.bin"
             path.parent.mkdir(parents=True, exist_ok=True)
             raw = f"{engine_kind}:{name}".encode("utf-8")
@@ -117,6 +117,10 @@ def _profile_sidecars(root: Path, engine_kind: str) -> tuple[Path, Path]:
             "options": {
                 "det_model_directory": "models/det",
                 "rec_model_directory": "models/rec",
+                "cls_model_directory": "models/cls",
+                "ocr_version": "PP-OCRv4",
+                "use_gpu": False,
+                "cpu_threads": 1,
             },
         }
         inventory = {
@@ -139,7 +143,14 @@ def _profile_sidecars(root: Path, engine_kind: str) -> tuple[Path, Path]:
             "schema_version": "1.0",
             "engine_kind": engine_kind,
             "extractor_revision": "docling-test-v1",
-            "options": {"artifacts_directory": "models/docling", "ocr_enabled": True},
+            "options": {
+                "artifacts_directory": "models/docling",
+                "ocr_enabled": False,
+                "device": "cpu",
+                "num_threads": 1,
+                "do_table_structure": True,
+                "table_structure_mode": "fast",
+            },
         }
         inventory = {
             "schema_version": "1.0",

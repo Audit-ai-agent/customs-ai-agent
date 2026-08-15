@@ -789,13 +789,29 @@ def _parse_options(value: object, *, kind: ApprovedPdfEngineKind) -> Mapping[str
             "det_model_directory",
             "rec_model_directory",
             "cls_model_directory",
+            "ocr_version",
+            "use_gpu",
+            "cpu_threads",
             "language",
             "use_angle_cls",
         }
         if (
-            not {"det_model_directory", "rec_model_directory"}.issubset(options)
+            not {
+                "det_model_directory",
+                "rec_model_directory",
+                "cls_model_directory",
+                "ocr_version",
+                "use_gpu",
+                "cpu_threads",
+            }.issubset(options)
             or set(options) - allowed
         ):
+            raise DocumentPreviewRuntimeError("document_preview_configuration_invalid")
+        if options["ocr_version"] != "PP-OCRv4":
+            raise DocumentPreviewRuntimeError("document_preview_configuration_invalid")
+        if options["use_gpu"] is not False:
+            raise DocumentPreviewRuntimeError("document_preview_configuration_invalid")
+        if options["cpu_threads"] != 1:
             raise DocumentPreviewRuntimeError("document_preview_configuration_invalid")
         normalized: dict[str, object] = {
             "det_model_directory": _relative_model_path(
@@ -804,13 +820,18 @@ def _parse_options(value: object, *, kind: ApprovedPdfEngineKind) -> Mapping[str
             "rec_model_directory": _relative_model_path(
                 options["rec_model_directory"], code="document_preview_configuration_invalid"
             ),
+            # PaddleOCR 2.9.1 initializes its classifier model even when
+            # angle classification is disabled.  Require an explicit local
+            # directory so it cannot choose and download a default one.
+            "cls_model_directory": _relative_model_path(
+                options["cls_model_directory"], code="document_preview_configuration_invalid"
+            ),
+            "ocr_version": "PP-OCRv4",
+            "use_gpu": False,
+            "cpu_threads": 1,
             "language": "en",
             "use_angle_cls": False,
         }
-        if "cls_model_directory" in options:
-            normalized["cls_model_directory"] = _relative_model_path(
-                options["cls_model_directory"], code="document_preview_configuration_invalid"
-            )
         if "language" in options:
             language = options["language"]
             if not isinstance(language, str) or not re.fullmatch(r"[a-z]{2,16}", language):
@@ -822,17 +843,47 @@ def _parse_options(value: object, *, kind: ApprovedPdfEngineKind) -> Mapping[str
             normalized["use_angle_cls"] = options["use_angle_cls"]
         return normalized
     if kind == "docling":
-        allowed = {"artifacts_directory", "ocr_enabled"}
-        if "artifacts_directory" not in options or set(options) - allowed:
+        allowed = {
+            "artifacts_directory",
+            "ocr_enabled",
+            "device",
+            "num_threads",
+            "do_table_structure",
+            "table_structure_mode",
+        }
+        if (
+            not {
+                "artifacts_directory",
+                "ocr_enabled",
+                "device",
+                "num_threads",
+                "do_table_structure",
+                "table_structure_mode",
+            }.issubset(options)
+            or set(options) - allowed
+        ):
             raise DocumentPreviewRuntimeError("document_preview_configuration_invalid")
-        ocr_enabled = options.get("ocr_enabled", True)
-        if not isinstance(ocr_enabled, bool):
+        # Docling 2.15.1's OCR-enabled pipeline constructs EasyOCR with a
+        # downloader/cache outside our inventory boundary.  This profile is a
+        # pinned local PDF structure/table parser, not an optical OCR engine,
+        # so only the explicitly offline mode is admissible.
+        if (
+            options["ocr_enabled"] is not False
+            or options["device"] != "cpu"
+            or options["num_threads"] != 1
+            or options["do_table_structure"] is not True
+            or options["table_structure_mode"] != "fast"
+        ):
             raise DocumentPreviewRuntimeError("document_preview_configuration_invalid")
         return {
             "artifacts_directory": _relative_model_path(
                 options["artifacts_directory"], code="document_preview_configuration_invalid"
             ),
-            "ocr_enabled": ocr_enabled,
+            "ocr_enabled": False,
+            "device": "cpu",
+            "num_threads": 1,
+            "do_table_structure": True,
+            "table_structure_mode": "fast",
         }
     raise DocumentPreviewRuntimeError("document_preview_configuration_invalid")
 
@@ -3453,14 +3504,16 @@ class PaddleOcrPdfPreviewAdapter:
                     "rec_model_dir": str(
                         self.model_root / str(self.options["rec_model_directory"])
                     ),
+                    "cls_model_dir": str(
+                        self.model_root / str(self.options["cls_model_directory"])
+                    ),
+                    "ocr_version": self.options["ocr_version"],
+                    "use_gpu": False,
+                    "cpu_threads": 1,
                     "lang": self.options["language"],
                     "use_angle_cls": self.options["use_angle_cls"],
                     "show_log": False,
                 }
-                if "cls_model_directory" in self.options:
-                    kwargs["cls_model_dir"] = str(
-                        self.model_root / str(self.options["cls_model_directory"])
-                    )
                 # Every model directory was inventory-hashed before this
                 # constructor is reached.  No default model path is accepted.
                 with local_files_only():
@@ -3564,7 +3617,12 @@ class DoclingPdfPreviewAdapter:
                 return self._converter
             try:
                 from docling.datamodel.base_models import DocumentStream, InputFormat  # type: ignore[import-not-found]
-                from docling.datamodel.pipeline_options import PdfPipelineOptions  # type: ignore[import-not-found]
+                from docling.datamodel.pipeline_options import (  # type: ignore[import-not-found]
+                    AcceleratorDevice,
+                    AcceleratorOptions,
+                    PdfPipelineOptions,
+                    TableFormerMode,
+                )
                 from docling.document_converter import (  # type: ignore[import-not-found]
                     DocumentConverter,
                     PdfFormatOption,
@@ -3573,7 +3631,16 @@ class DoclingPdfPreviewAdapter:
                 raise DocumentPreviewUnavailable("Docling is not provisioned") from error
             try:
                 pipeline = PdfPipelineOptions()
-                pipeline.do_ocr = bool(self.options["ocr_enabled"])
+                # The configuration parser permits only this fixed offline
+                # Docling structure/table profile.  Do not let its default
+                # EasyOCR cache or downloader escape the local inventory.
+                pipeline.do_ocr = False
+                pipeline.do_table_structure = True
+                pipeline.table_structure_options.mode = TableFormerMode.FAST
+                pipeline.table_structure_options.do_cell_matching = True
+                pipeline.accelerator_options = AcceleratorOptions(
+                    device=AcceleratorDevice.CPU, num_threads=1
+                )
                 # Current pinned Docling releases use this local artifact
                 # directory.  If a future pinned API removes it, activation
                 # fails closed instead of accepting a downloader default.
@@ -3660,30 +3727,40 @@ class _AdapterFactory(Protocol):
 def build_default_pdf_preview_adapter(
     binding: ApprovedPdfPreviewBinding,
 ) -> LocalDocumentPreviewEngine:
-    """Build exactly one approved PDF profile; there is no environment fallback."""
+    """Build exactly one approved PDF profile; there is no environment fallback.
+
+    The source-attested synthetic evaluator measures PaddleOCR and Docling as
+    *direct* profiles.  Serving such a pointer through the legacy text-layer
+    fallback would silently serve a different extractor for born-digital
+    PDFs, so that provenance is deliberately direct at runtime as well.
+    Human-approved pointers retain the historic text-layer-first behavior.
+    """
 
     revision = binding.approval.extractor_revision
     text_layer = PdfTextLayerPreviewAdapter(extractor_revision=revision)
+    direct_source_attested_profile = isinstance(
+        binding.approval, SourceAttestedSyntheticPdfPreviewActivationV1
+    )
     if binding.approval.engine_kind == "pdf_text_layer":
         return _PdfTextLayerEngine(text_layer)
     if binding.approval.engine_kind == "paddleocr":
-        return LayeredLocalPreviewEngine(
-            text_layer,
-            PaddleOcrPdfPreviewAdapter(
-                extractor_revision=revision,
-                model_root=binding.root,
-                options=binding.configuration.options,
-            ),
+        paddle = PaddleOcrPdfPreviewAdapter(
+            extractor_revision=revision,
+            model_root=binding.root,
+            options=binding.configuration.options,
         )
+        if direct_source_attested_profile:
+            return _DirectRasterOcrEngine(paddle)
+        return LayeredLocalPreviewEngine(text_layer, paddle)
     if binding.approval.engine_kind == "docling":
-        return LayeredLocalPreviewEngine(
-            text_layer,
-            DoclingPdfPreviewAdapter(
-                extractor_revision=revision,
-                model_root=binding.root,
-                options=binding.configuration.options,
-            ),
+        docling = DoclingPdfPreviewAdapter(
+            extractor_revision=revision,
+            model_root=binding.root,
+            options=binding.configuration.options,
         )
+        if direct_source_attested_profile:
+            return _DirectRasterOcrEngine(docling)
+        return LayeredLocalPreviewEngine(text_layer, docling)
     raise DocumentPreviewRuntimeError("document_preview_approval_binding_mismatch")
 
 
@@ -3696,6 +3773,16 @@ class _PdfTextLayerEngine:
         if candidate is None:
             raise DocumentPreviewUnavailable("PDF text layer is unavailable")
         return candidate
+
+
+@dataclass(frozen=True, slots=True)
+class _DirectRasterOcrEngine:
+    """Serve the exact direct PaddleOCR or Docling profile that was evaluated."""
+
+    adapter: PaddleOcrPdfPreviewAdapter | DoclingPdfPreviewAdapter
+
+    def extract(self, preview_input: PreviewInputV1) -> PreviewCandidateV1:
+        return self.adapter.extract_raster_or_image(preview_input)
 
 
 @dataclass(slots=True)
