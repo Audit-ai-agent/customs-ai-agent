@@ -4,7 +4,12 @@ import hashlib
 import json
 from pathlib import Path
 
-from customs_ai_agent.service.document_preview_runtime import write_runtime_sidecars
+import pytest
+
+from customs_ai_agent.service.document_preview_runtime import (
+    DocumentPreviewRuntimeError,
+    write_runtime_sidecars,
+)
 from tools.activate_source_attested_synthetic_pdf_preview import (
     activate_source_attested_synthetic_runtime,
 )
@@ -61,6 +66,9 @@ def _result(configuration_sha256: str, inventory_sha256: str) -> bytes:
         "evaluation_scope": "synthetic_content_stream_compatibility",
         "layout_truth_kind": "pdf_content_stream_layout_v1",
         "layout_truth_receipt_sha256": "b" * 64,
+        "layout_truth_parser_spec_sha256": "c" * 64,
+        "development_selection_receipt_sha256": "d" * 64,
+        "sealed_run_receipt_sha256": "e" * 64,
         "engine_kind": "pdf_text_layer",
         "extractor_revision": "pdf-text-test-v1",
         "configuration_sha256": configuration_sha256,
@@ -79,7 +87,7 @@ def _result(configuration_sha256: str, inventory_sha256: str) -> bytes:
     return _canonical(value, newline=True)
 
 
-def test_activation_tool_uses_only_local_source_attested_result(tmp_path: Path) -> None:
+def test_activation_tool_rejects_missing_local_evidence_chain(tmp_path: Path) -> None:
     root = tmp_path / "_local" / "data" / "document-preview"
     root.mkdir(parents=True)
     configuration_sha256, inventory_sha256 = write_runtime_sidecars(
@@ -94,17 +102,13 @@ def test_activation_tool_uses_only_local_source_attested_result(tmp_path: Path) 
     result_path.parent.mkdir(parents=True)
     result_path.write_bytes(raw)
 
-    activation_sha256 = activate_source_attested_synthetic_runtime(
-        document_preview_root=root,
-        evaluation_result_path=result_path,
-        configuration_sha256=configuration_sha256,
-        model_inventory_sha256=inventory_sha256,
-        package_version_reader=_package_version,
-    )
+    with pytest.raises(DocumentPreviewRuntimeError):
+        activate_source_attested_synthetic_runtime(
+            document_preview_root=root,
+            evaluation_result_path=result_path,
+            configuration_sha256=configuration_sha256,
+            model_inventory_sha256=inventory_sha256,
+            package_version_reader=_package_version,
+        )
 
-    pointer = json.loads((root / "approvals" / "pdf-preview-active.json").read_bytes())
-    assert activation_sha256 == hashlib.sha256(_canonical(pointer, newline=True)).hexdigest()
-    assert pointer["activation_kind"] == "source_attested_synthetic"
-    assert pointer["evaluation"]["evaluation_scope"] == "synthetic_content_stream_compatibility"
-    assert "approval_id" not in pointer
-    assert "gold_receipt_sha256" not in pointer["evaluation"]
+    assert not (root / "approvals" / "pdf-preview-active.json").exists()

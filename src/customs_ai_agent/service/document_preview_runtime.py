@@ -57,8 +57,14 @@ _ENGINE_KINDS = frozenset({"pdf_text_layer", "paddleocr", "docling"})
 _MAX_POINTER_BYTES = 64 * 1024
 _MAX_SIDECAR_BYTES = 1 * 1024 * 1024
 _MAX_EVALUATION_BYTES = 1 * 1024 * 1024
+_MAX_LAYOUT_TRUTH_RECEIPT_BYTES = 8 * 1024 * 1024
 _PREVIEW_ROOT_PARTS = ("_local", "data", "document-preview")
 _APPROVAL_FILENAME = "pdf-preview-active.json"
+_SOURCE_LAYOUT_TRUTH_DIRECTORY = "source-layout-truths"
+_SOURCE_DEVELOPMENT_SELECTION_DIRECTORY = "source-attested-development-selections"
+_SOURCE_SEALED_RUN_DIRECTORY = "source-attested-sealed-runs"
+_SEALED_RESERVATION_DIRECTORY = "candidate-run-reservations"
+_SOURCE_LAYOUT_RECORD_COUNTS: Mapping[str, int] = {"development": 60, "sealed": 20}
 _FIELD_EXACT_MATCH_MIN = 0.99
 _OCR_CER_MAX = 0.01
 _TABLE_CELL_F1_MIN = 0.98
@@ -294,6 +300,42 @@ def _read_regular_file(path: Path, *, limit: int, code: str) -> bytes:
     return raw
 
 
+def _read_canonical_hash_named_receipt(
+    *,
+    root: Path,
+    directory: str,
+    digest: str,
+    limit: int,
+    code: str,
+) -> tuple[Path, bytes, dict[str, object]]:
+    """Read a local receipt only from its hash-named, non-link sidecar path."""
+
+    path = _sidecar_path(root, directory, digest)
+    raw = _read_regular_file(path, limit=limit, code=code)
+    value = _strict_json_object(raw, code=code)
+    if raw != _canonical_json_bytes(value, trailing_newline=True):
+        raise DocumentPreviewRuntimeError(code)
+    return path, raw, value
+
+
+def _verify_self_excluding_receipt_digest(
+    *,
+    value: Mapping[str, object],
+    field_name: str,
+    expected_digest: str,
+    code: str,
+) -> None:
+    """Verify a canonical receipt's semantic self digest and filename digest."""
+
+    embedded = _sha256(value.get(field_name), code=code)
+    if embedded != expected_digest:
+        raise DocumentPreviewRuntimeError(code)
+    unsigned = dict(value)
+    unsigned.pop(field_name)
+    if _sha256_bytes(_canonical_json_bytes(unsigned)) != expected_digest:
+        raise DocumentPreviewRuntimeError(code)
+
+
 def _write_immutable_json(path: Path, value: Mapping[str, object], *, code: str) -> str:
     """Write canonical bytes once, never replacing a hash-named sidecar."""
 
@@ -440,6 +482,9 @@ class SourceAttestedSyntheticPdfPreviewActivationV1:
     evaluation_scope: Literal["synthetic_content_stream_compatibility"]
     layout_truth_kind: Literal["pdf_content_stream_layout_v1"]
     layout_truth_receipt_sha256: str
+    layout_truth_parser_spec_sha256: str
+    development_selection_receipt_sha256: str
+    sealed_run_receipt_sha256: str
     evaluation_result_sha256: str
 
 
@@ -453,6 +498,9 @@ class SourceAttestedSyntheticSealedEvaluationResultV1:
     evaluation_scope: Literal["synthetic_content_stream_compatibility"]
     layout_truth_kind: Literal["pdf_content_stream_layout_v1"]
     layout_truth_receipt_sha256: str
+    layout_truth_parser_spec_sha256: str
+    development_selection_receipt_sha256: str
+    sealed_run_receipt_sha256: str
     engine_kind: ApprovedPdfEngineKind
     extractor_revision: str
     configuration_sha256: str
@@ -461,6 +509,83 @@ class SourceAttestedSyntheticSealedEvaluationResultV1:
     field_exact_match: float
     ocr_cer: float
     table_cell_f1: float
+
+
+@dataclass(frozen=True, slots=True)
+class SourceAttestedLayoutRecordV1:
+    asset_id: str
+    source_sha256: str
+    fixture_kind: Literal["clean", "error"]
+    document_type: Literal["bill_of_lading", "invoice", "packing_list"]
+    set_id: str
+    content_stream_sha256: str
+    source_truth_record_sha256: str
+
+
+@dataclass(frozen=True, slots=True)
+class SourceAttestedLayoutTruthReceiptV1:
+    dataset_id: str
+    dataset_revision: str
+    dataset_receipt_sha256: str
+    packet_split: Literal["development", "sealed"]
+    packet_receipt_sha256: str
+    parser_spec_sha256: str
+    records: tuple[SourceAttestedLayoutRecordV1, ...]
+    receipt_sha256: str
+
+
+@dataclass(frozen=True, slots=True)
+class SourceAttestedDevelopmentCandidateResultV1:
+    engine_kind: ApprovedPdfEngineKind
+    extractor_revision: str
+    configuration_sha256: str
+    model_inventory_sha256: str
+    evaluation_result_sha256: str
+    passed: bool
+
+
+@dataclass(frozen=True, slots=True)
+class SourceAttestedDevelopmentSelectionReceiptV1:
+    dataset_id: str
+    dataset_revision: str
+    development_packet_receipt_sha256: str
+    layout_truth_receipt_sha256: str
+    layout_truth_parser_spec_sha256: str
+    candidate_results: tuple[SourceAttestedDevelopmentCandidateResultV1, ...]
+    selected: SourceAttestedDevelopmentCandidateResultV1
+    receipt_sha256: str
+
+
+@dataclass(frozen=True, slots=True)
+class SourceAttestedSealedRunReceiptV1:
+    dataset_id: str
+    dataset_revision: str
+    sealed_packet_receipt_sha256: str
+    layout_truth_receipt_sha256: str
+    layout_truth_parser_spec_sha256: str
+    development_selection_receipt_sha256: str
+    engine_kind: ApprovedPdfEngineKind
+    extractor_revision: str
+    configuration_sha256: str
+    model_inventory_sha256: str
+    selected_development_evaluation_result_sha256: str
+    candidate_bundle_sha256: str
+    candidate_parser_revision: str
+    sealed_candidate_reservation_sha256: str
+    receipt_sha256: str
+
+
+@dataclass(frozen=True, slots=True)
+class SourceAttestedSyntheticReceiptBindingV1:
+    development_layout_truth_path: Path
+    development_layout_truth: SourceAttestedLayoutTruthReceiptV1
+    layout_truth_path: Path
+    layout_truth: SourceAttestedLayoutTruthReceiptV1
+    development_selection_path: Path
+    development_selection: SourceAttestedDevelopmentSelectionReceiptV1
+    sealed_run_path: Path
+    sealed_run: SourceAttestedSealedRunReceiptV1
+    sealed_reservation_path: Path
 
 
 PdfPreviewActivationV1 = PdfPreviewApprovalV1 | SourceAttestedSyntheticPdfPreviewActivationV1
@@ -741,6 +866,9 @@ def parse_source_attested_synthetic_pdf_preview_activation(
             "evaluation_scope",
             "layout_truth_kind",
             "layout_truth_receipt_sha256",
+            "layout_truth_parser_spec_sha256",
+            "development_selection_receipt_sha256",
+            "sealed_run_receipt_sha256",
             "evaluation_basis",
             "evaluation_result_sha256",
         },
@@ -768,6 +896,13 @@ def parse_source_attested_synthetic_pdf_preview_activation(
             Literal["pdf_content_stream_layout_v1"], evaluation["layout_truth_kind"]
         ),
         layout_truth_receipt_sha256=_sha256(evaluation["layout_truth_receipt_sha256"], code=code),
+        layout_truth_parser_spec_sha256=_sha256(
+            evaluation["layout_truth_parser_spec_sha256"], code=code
+        ),
+        development_selection_receipt_sha256=_sha256(
+            evaluation["development_selection_receipt_sha256"], code=code
+        ),
+        sealed_run_receipt_sha256=_sha256(evaluation["sealed_run_receipt_sha256"], code=code),
         evaluation_result_sha256=_sha256(evaluation["evaluation_result_sha256"], code=code),
     )
 
@@ -896,6 +1031,9 @@ def parse_source_attested_synthetic_sealed_evaluation_result(
             "evaluation_scope",
             "layout_truth_kind",
             "layout_truth_receipt_sha256",
+            "layout_truth_parser_spec_sha256",
+            "development_selection_receipt_sha256",
+            "sealed_run_receipt_sha256",
             "engine_kind",
             "extractor_revision",
             "configuration_sha256",
@@ -932,6 +1070,10 @@ def parse_source_attested_synthetic_sealed_evaluation_result(
     field_exact_match = _finite_number(metrics["field_exact_match"], code=code)
     ocr_cer = _finite_number(metrics["ocr_cer"], code=code)
     table_cell_f1 = _finite_number(metrics["table_cell_f1"], code=code)
+    if not (
+        0.0 <= field_exact_match <= 1.0 and 0.0 <= ocr_cer <= 1.0 and 0.0 <= table_cell_f1 <= 1.0
+    ):
+        raise DocumentPreviewRuntimeError(code)
     if (
         field_exact_match < _FIELD_EXACT_MATCH_MIN
         or ocr_cer > _OCR_CER_MAX
@@ -947,6 +1089,13 @@ def parse_source_attested_synthetic_sealed_evaluation_result(
         ),
         layout_truth_kind=cast(Literal["pdf_content_stream_layout_v1"], value["layout_truth_kind"]),
         layout_truth_receipt_sha256=_sha256(value["layout_truth_receipt_sha256"], code=code),
+        layout_truth_parser_spec_sha256=_sha256(
+            value["layout_truth_parser_spec_sha256"], code=code
+        ),
+        development_selection_receipt_sha256=_sha256(
+            value["development_selection_receipt_sha256"], code=code
+        ),
+        sealed_run_receipt_sha256=_sha256(value["sealed_run_receipt_sha256"], code=code),
         engine_kind=_engine_kind(value["engine_kind"], code=code),
         extractor_revision=_identifier(value["extractor_revision"], code=code),
         configuration_sha256=_sha256(value["configuration_sha256"], code=code),
@@ -955,6 +1104,528 @@ def parse_source_attested_synthetic_sealed_evaluation_result(
         field_exact_match=field_exact_match,
         ocr_cer=ocr_cer,
         table_cell_f1=table_cell_f1,
+    )
+
+
+def _source_attested_layout_record(
+    value: object,
+) -> SourceAttestedLayoutRecordV1:
+    code = "document_preview_source_attested_layout_receipt_invalid"
+    if not isinstance(value, dict):
+        raise DocumentPreviewRuntimeError(code)
+    record = cast(dict[str, object], value)
+    _require_exact_keys(
+        record,
+        {
+            "asset_id",
+            "source_sha256",
+            "fixture_kind",
+            "document_type",
+            "set_id",
+            "content_stream_sha256",
+            "fields",
+            "spans",
+            "table_cells",
+            "source_truth_record_sha256",
+        },
+        code=code,
+    )
+    if (
+        not isinstance(record["fixture_kind"], str)
+        or record["fixture_kind"] not in {"clean", "error"}
+        or not isinstance(record["document_type"], str)
+        or record["document_type"] not in {"bill_of_lading", "invoice", "packing_list"}
+        or not isinstance(record["fields"], list)
+        or not isinstance(record["spans"], list)
+        or not isinstance(record["table_cells"], list)
+    ):
+        raise DocumentPreviewRuntimeError(code)
+    record_digest = _sha256(record["source_truth_record_sha256"], code=code)
+    unsigned = dict(record)
+    unsigned.pop("source_truth_record_sha256")
+    if _sha256_bytes(_canonical_json_bytes(unsigned)) != record_digest:
+        raise DocumentPreviewRuntimeError(code)
+    return SourceAttestedLayoutRecordV1(
+        asset_id=_identifier(record["asset_id"], code=code),
+        source_sha256=_sha256(record["source_sha256"], code=code),
+        fixture_kind=cast(Literal["clean", "error"], record["fixture_kind"]),
+        document_type=cast(
+            Literal["bill_of_lading", "invoice", "packing_list"], record["document_type"]
+        ),
+        set_id=_identifier(record["set_id"], code=code),
+        content_stream_sha256=_sha256(record["content_stream_sha256"], code=code),
+        source_truth_record_sha256=record_digest,
+    )
+
+
+def _validate_source_attested_layout_coverage(
+    *, records: tuple[SourceAttestedLayoutRecordV1, ...], packet_split: str, code: str
+) -> None:
+    """Require the fixed source-attested packet shape before activation.
+
+    The source-layout compiler owns deterministic selection.  Runtime does
+    not recreate that algorithm, but it does reject an incomplete or
+    cross-split packet: development must retain all 60 stratified examples;
+    sealed must retain 20 with at least three in every clean/error × document
+    type stratum.
+    """
+
+    expected_count = _SOURCE_LAYOUT_RECORD_COUNTS[packet_split]
+    if len(records) != expected_count:
+        raise DocumentPreviewRuntimeError(code)
+    asset_ids = [record.asset_id for record in records]
+    source_hashes = [record.source_sha256 for record in records]
+    if len(asset_ids) != len(set(asset_ids)) or len(source_hashes) != len(set(source_hashes)):
+        raise DocumentPreviewRuntimeError(code)
+    strata: dict[tuple[str, str], int] = {}
+    for record in records:
+        key = (record.fixture_kind, record.document_type)
+        strata[key] = strata.get(key, 0) + 1
+    expected_strata = {
+        (fixture_kind, document_type)
+        for fixture_kind in ("clean", "error")
+        for document_type in ("bill_of_lading", "invoice", "packing_list")
+    }
+    if set(strata) != expected_strata:
+        raise DocumentPreviewRuntimeError(code)
+    if packet_split == "development":
+        if any(count != 10 for count in strata.values()):
+            raise DocumentPreviewRuntimeError(code)
+    elif any(count < 3 for count in strata.values()):
+        raise DocumentPreviewRuntimeError(code)
+
+
+def _parse_source_attested_layout_truth_receipt(
+    *,
+    value: Mapping[str, object],
+    receipt_sha256: str,
+) -> SourceAttestedLayoutTruthReceiptV1:
+    code = "document_preview_source_attested_layout_receipt_invalid"
+    _require_exact_keys(
+        value,
+        {
+            "schema_version",
+            "artifact_kind",
+            "provenance_kind",
+            "evaluation_scope",
+            "layout_truth_kind",
+            "compiler_revision",
+            "parser_spec_sha256",
+            "dataset_id",
+            "dataset_revision",
+            "dataset_receipt_sha256",
+            "packet_kind",
+            "packet_split",
+            "packet_receipt_sha256",
+            "clean_manifest_sha256",
+            "error_labels_sha256",
+            "source_manifest_mismatch_count",
+            "source_manifest_mismatch_receipt_sha256",
+            "records",
+            "layout_truth_receipt_sha256",
+        },
+        code=code,
+    )
+    if (
+        value["schema_version"] != "1.0"
+        or value["artifact_kind"] != "source_attested_synthetic_pdf_layout_truth"
+        or value["provenance_kind"] != "source_attested_synthetic"
+        or value["evaluation_scope"] != "synthetic_content_stream_compatibility"
+        or value["layout_truth_kind"] != "pdf_content_stream_layout_v1"
+        or value["packet_kind"] != "stratified-v2"
+        or not isinstance(value["packet_split"], str)
+        or value["packet_split"] not in _SOURCE_LAYOUT_RECORD_COUNTS
+        or not isinstance(value["source_manifest_mismatch_count"], int)
+        or isinstance(value["source_manifest_mismatch_count"], bool)
+        or value["source_manifest_mismatch_count"] != 0
+        or not isinstance(value["records"], list)
+    ):
+        raise DocumentPreviewRuntimeError(code)
+    # These fields are only needed for the compiler's own provenance record,
+    # but accepting untyped values would let a malformed receipt masquerade
+    # as one produced by that compiler.
+    _identifier(value["compiler_revision"], code=code)
+    _sha256(value["dataset_receipt_sha256"], code=code)
+    _sha256(value["clean_manifest_sha256"], code=code)
+    _sha256(value["error_labels_sha256"], code=code)
+    _sha256(value["source_manifest_mismatch_receipt_sha256"], code=code)
+    _verify_self_excluding_receipt_digest(
+        value=value,
+        field_name="layout_truth_receipt_sha256",
+        expected_digest=receipt_sha256,
+        code=code,
+    )
+    records = tuple(_source_attested_layout_record(item) for item in value["records"])
+    packet_split = cast(Literal["development", "sealed"], value["packet_split"])
+    _validate_source_attested_layout_coverage(records=records, packet_split=packet_split, code=code)
+    return SourceAttestedLayoutTruthReceiptV1(
+        dataset_id=_identifier(value["dataset_id"], code=code),
+        dataset_revision=_identifier(value["dataset_revision"], code=code),
+        dataset_receipt_sha256=_sha256(value["dataset_receipt_sha256"], code=code),
+        packet_split=packet_split,
+        packet_receipt_sha256=_sha256(value["packet_receipt_sha256"], code=code),
+        parser_spec_sha256=_sha256(value["parser_spec_sha256"], code=code),
+        records=records,
+        receipt_sha256=receipt_sha256,
+    )
+
+
+def _source_attested_development_candidate(
+    value: object,
+) -> SourceAttestedDevelopmentCandidateResultV1:
+    code = "document_preview_source_attested_development_selection_invalid"
+    if not isinstance(value, dict):
+        raise DocumentPreviewRuntimeError(code)
+    candidate = cast(dict[str, object], value)
+    _require_exact_keys(
+        candidate,
+        {
+            "engine_kind",
+            "extractor_revision",
+            "configuration_sha256",
+            "model_inventory_sha256",
+            "evaluation_result_sha256",
+            "passed",
+        },
+        code=code,
+    )
+    if not isinstance(candidate["passed"], bool):
+        raise DocumentPreviewRuntimeError(code)
+    return SourceAttestedDevelopmentCandidateResultV1(
+        engine_kind=_engine_kind(candidate["engine_kind"], code=code),
+        extractor_revision=_identifier(candidate["extractor_revision"], code=code),
+        configuration_sha256=_sha256(candidate["configuration_sha256"], code=code),
+        model_inventory_sha256=_sha256(candidate["model_inventory_sha256"], code=code),
+        evaluation_result_sha256=_sha256(candidate["evaluation_result_sha256"], code=code),
+        passed=candidate["passed"],
+    )
+
+
+def _parse_source_attested_development_selection_receipt(
+    *,
+    value: Mapping[str, object],
+    receipt_sha256: str,
+) -> SourceAttestedDevelopmentSelectionReceiptV1:
+    code = "document_preview_source_attested_development_selection_invalid"
+    _require_exact_keys(
+        value,
+        {
+            "schema_version",
+            "artifact_kind",
+            "evaluation_basis",
+            "evaluation_scope",
+            "layout_truth_kind",
+            "dataset_id",
+            "dataset_revision",
+            "development_packet_receipt_sha256",
+            "layout_truth_receipt_sha256",
+            "layout_truth_parser_spec_sha256",
+            "candidate_results",
+            "selected_engine_kind",
+            "selected_extractor_revision",
+            "selected_configuration_sha256",
+            "selected_model_inventory_sha256",
+            "selected_evaluation_result_sha256",
+            "development_selection_receipt_sha256",
+        },
+        code=code,
+    )
+    if (
+        value["schema_version"] != "1.0"
+        or value["artifact_kind"] != "source_attested_synthetic_pdf_development_selection"
+        or value["evaluation_basis"] != "source_attested_synthetic"
+        or value["evaluation_scope"] != "synthetic_content_stream_compatibility"
+        or value["layout_truth_kind"] != "pdf_content_stream_layout_v1"
+        or not isinstance(value["candidate_results"], list)
+    ):
+        raise DocumentPreviewRuntimeError(code)
+    _verify_self_excluding_receipt_digest(
+        value=value,
+        field_name="development_selection_receipt_sha256",
+        expected_digest=receipt_sha256,
+        code=code,
+    )
+    # The development packet and its distinct layout receipt are loaded and
+    # cross-checked by the caller.  Validate their lexical form here so a
+    # selection cannot carry an arbitrary non-receipt value until then.
+    development_packet_receipt_sha256 = _sha256(
+        value["development_packet_receipt_sha256"], code=code
+    )
+    layout_truth_receipt_sha256 = _sha256(value["layout_truth_receipt_sha256"], code=code)
+    candidates = tuple(
+        _source_attested_development_candidate(item) for item in value["candidate_results"]
+    )
+    if (
+        len(candidates) != len(_ENGINE_KINDS)
+        or {item.engine_kind for item in candidates} != _ENGINE_KINDS
+    ):
+        raise DocumentPreviewRuntimeError(code)
+    selected = SourceAttestedDevelopmentCandidateResultV1(
+        engine_kind=_engine_kind(value["selected_engine_kind"], code=code),
+        extractor_revision=_identifier(value["selected_extractor_revision"], code=code),
+        configuration_sha256=_sha256(value["selected_configuration_sha256"], code=code),
+        model_inventory_sha256=_sha256(value["selected_model_inventory_sha256"], code=code),
+        evaluation_result_sha256=_sha256(value["selected_evaluation_result_sha256"], code=code),
+        passed=True,
+    )
+    if selected not in candidates:
+        raise DocumentPreviewRuntimeError(code)
+    return SourceAttestedDevelopmentSelectionReceiptV1(
+        dataset_id=_identifier(value["dataset_id"], code=code),
+        dataset_revision=_identifier(value["dataset_revision"], code=code),
+        development_packet_receipt_sha256=development_packet_receipt_sha256,
+        layout_truth_receipt_sha256=layout_truth_receipt_sha256,
+        layout_truth_parser_spec_sha256=_sha256(
+            value["layout_truth_parser_spec_sha256"], code=code
+        ),
+        candidate_results=candidates,
+        selected=selected,
+        receipt_sha256=receipt_sha256,
+    )
+
+
+def _parse_source_attested_sealed_run_receipt(
+    *,
+    value: Mapping[str, object],
+    receipt_sha256: str,
+) -> SourceAttestedSealedRunReceiptV1:
+    code = "document_preview_source_attested_sealed_run_invalid"
+    _require_exact_keys(
+        value,
+        {
+            "schema_version",
+            "artifact_kind",
+            "evaluation_basis",
+            "evaluation_scope",
+            "layout_truth_kind",
+            "dataset_id",
+            "dataset_revision",
+            "sealed_packet_receipt_sha256",
+            "layout_truth_receipt_sha256",
+            "layout_truth_parser_spec_sha256",
+            "development_selection_receipt_sha256",
+            "selected_engine_kind",
+            "selected_extractor_revision",
+            "selected_configuration_sha256",
+            "selected_model_inventory_sha256",
+            "selected_development_evaluation_result_sha256",
+            "candidate_bundle_sha256",
+            "candidate_parser_revision",
+            "sealed_candidate_reservation_sha256",
+            "sealed_run_receipt_sha256",
+        },
+        code=code,
+    )
+    if (
+        value["schema_version"] != "1.0"
+        or value["artifact_kind"] != "source_attested_synthetic_pdf_sealed_run"
+        or value["evaluation_basis"] != "source_attested_synthetic"
+        or value["evaluation_scope"] != "synthetic_content_stream_compatibility"
+        or value["layout_truth_kind"] != "pdf_content_stream_layout_v1"
+    ):
+        raise DocumentPreviewRuntimeError(code)
+    _verify_self_excluding_receipt_digest(
+        value=value,
+        field_name="sealed_run_receipt_sha256",
+        expected_digest=receipt_sha256,
+        code=code,
+    )
+    return SourceAttestedSealedRunReceiptV1(
+        dataset_id=_identifier(value["dataset_id"], code=code),
+        dataset_revision=_identifier(value["dataset_revision"], code=code),
+        sealed_packet_receipt_sha256=_sha256(value["sealed_packet_receipt_sha256"], code=code),
+        layout_truth_receipt_sha256=_sha256(value["layout_truth_receipt_sha256"], code=code),
+        layout_truth_parser_spec_sha256=_sha256(
+            value["layout_truth_parser_spec_sha256"], code=code
+        ),
+        development_selection_receipt_sha256=_sha256(
+            value["development_selection_receipt_sha256"], code=code
+        ),
+        engine_kind=_engine_kind(value["selected_engine_kind"], code=code),
+        extractor_revision=_identifier(value["selected_extractor_revision"], code=code),
+        configuration_sha256=_sha256(value["selected_configuration_sha256"], code=code),
+        model_inventory_sha256=_sha256(value["selected_model_inventory_sha256"], code=code),
+        selected_development_evaluation_result_sha256=_sha256(
+            value["selected_development_evaluation_result_sha256"], code=code
+        ),
+        candidate_bundle_sha256=_sha256(value["candidate_bundle_sha256"], code=code),
+        candidate_parser_revision=_identifier(value["candidate_parser_revision"], code=code),
+        sealed_candidate_reservation_sha256=_sha256(
+            value["sealed_candidate_reservation_sha256"], code=code
+        ),
+        receipt_sha256=receipt_sha256,
+    )
+
+
+def _sealed_candidate_reservation_path(root: Path, packet_receipt_sha256: str) -> Path:
+    destination = root / _SEALED_RESERVATION_DIRECTORY / f"sealed-{packet_receipt_sha256}.json"
+    _assert_no_symlink(destination, code="document_preview_source_attested_reservation_invalid")
+    try:
+        resolved_parent = destination.parent.resolve(strict=True)
+    except OSError as error:
+        raise DocumentPreviewRuntimeError(
+            "document_preview_source_attested_reservation_invalid"
+        ) from error
+    if resolved_parent != root / _SEALED_RESERVATION_DIRECTORY:
+        raise DocumentPreviewRuntimeError("document_preview_source_attested_reservation_invalid")
+    return destination
+
+
+def _verify_source_attested_sealed_reservation(
+    *,
+    root: Path,
+    sealed_run: SourceAttestedSealedRunReceiptV1,
+) -> Path:
+    code = "document_preview_source_attested_reservation_invalid"
+    path = _sealed_candidate_reservation_path(root, sealed_run.sealed_packet_receipt_sha256)
+    raw = _read_regular_file(path, limit=_MAX_SIDECAR_BYTES, code=code)
+    if _sha256_bytes(raw) != sealed_run.sealed_candidate_reservation_sha256:
+        raise DocumentPreviewRuntimeError(code)
+    value = _strict_json_object(raw, code=code)
+    if raw != _canonical_json_bytes(value, trailing_newline=True):
+        raise DocumentPreviewRuntimeError(code)
+    _require_exact_keys(
+        value,
+        {
+            "schema_version",
+            "artifact_kind",
+            "profile_mode",
+            "parser_revision",
+            "dataset_id",
+            "dataset_revision",
+            "packet_kind",
+            "packet_receipt_sha256",
+            "engine_kind",
+            "extractor_revision",
+            "configuration_sha256",
+            "model_inventory_sha256",
+        },
+        code=code,
+    )
+    if (
+        value["schema_version"] != "1.0"
+        or value["artifact_kind"] != "sealed_synthetic_pdf_candidate_reservation"
+        or value["profile_mode"] != "offline_synthetic_pdf_evaluation"
+        or value["packet_kind"] != "sealed"
+        or value["parser_revision"] != sealed_run.candidate_parser_revision
+        or _identifier(value["dataset_id"], code=code) != sealed_run.dataset_id
+        or _identifier(value["dataset_revision"], code=code) != sealed_run.dataset_revision
+        or _sha256(value["packet_receipt_sha256"], code=code)
+        != sealed_run.sealed_packet_receipt_sha256
+        or _engine_kind(value["engine_kind"], code=code) != sealed_run.engine_kind
+        or _identifier(value["extractor_revision"], code=code) != sealed_run.extractor_revision
+        or _sha256(value["configuration_sha256"], code=code) != sealed_run.configuration_sha256
+        or _sha256(value["model_inventory_sha256"], code=code) != sealed_run.model_inventory_sha256
+    ):
+        raise DocumentPreviewRuntimeError(code)
+    return path
+
+
+def load_source_attested_synthetic_receipt_binding(
+    *,
+    root: Path,
+    evaluation: SourceAttestedSyntheticSealedEvaluationResultV1,
+) -> SourceAttestedSyntheticReceiptBindingV1:
+    """Load the complete immutable evidence chain for automatic activation."""
+
+    layout_path, _layout_raw, layout_value = _read_canonical_hash_named_receipt(
+        root=root,
+        directory=_SOURCE_LAYOUT_TRUTH_DIRECTORY,
+        digest=evaluation.layout_truth_receipt_sha256,
+        limit=_MAX_LAYOUT_TRUTH_RECEIPT_BYTES,
+        code="document_preview_source_attested_layout_receipt_invalid",
+    )
+    layout_truth = _parse_source_attested_layout_truth_receipt(
+        value=layout_value,
+        receipt_sha256=evaluation.layout_truth_receipt_sha256,
+    )
+    selection_path, _selection_raw, selection_value = _read_canonical_hash_named_receipt(
+        root=root,
+        directory=_SOURCE_DEVELOPMENT_SELECTION_DIRECTORY,
+        digest=evaluation.development_selection_receipt_sha256,
+        limit=_MAX_SIDECAR_BYTES,
+        code="document_preview_source_attested_development_selection_invalid",
+    )
+    selection = _parse_source_attested_development_selection_receipt(
+        value=selection_value,
+        receipt_sha256=evaluation.development_selection_receipt_sha256,
+    )
+    development_layout_path, _development_layout_raw, development_layout_value = (
+        _read_canonical_hash_named_receipt(
+            root=root,
+            directory=_SOURCE_LAYOUT_TRUTH_DIRECTORY,
+            digest=selection.layout_truth_receipt_sha256,
+            limit=_MAX_LAYOUT_TRUTH_RECEIPT_BYTES,
+            code="document_preview_source_attested_layout_receipt_invalid",
+        )
+    )
+    development_layout_truth = _parse_source_attested_layout_truth_receipt(
+        value=development_layout_value,
+        receipt_sha256=selection.layout_truth_receipt_sha256,
+    )
+    sealed_run_path, _sealed_run_raw, sealed_run_value = _read_canonical_hash_named_receipt(
+        root=root,
+        directory=_SOURCE_SEALED_RUN_DIRECTORY,
+        digest=evaluation.sealed_run_receipt_sha256,
+        limit=_MAX_SIDECAR_BYTES,
+        code="document_preview_source_attested_sealed_run_invalid",
+    )
+    sealed_run = _parse_source_attested_sealed_run_receipt(
+        value=sealed_run_value,
+        receipt_sha256=evaluation.sealed_run_receipt_sha256,
+    )
+    if (
+        layout_truth.packet_split != "sealed"
+        or layout_truth.dataset_id != evaluation.dataset_id
+        or layout_truth.dataset_revision != evaluation.dataset_revision
+        or layout_truth.packet_receipt_sha256 != evaluation.packet_receipt_sha256
+        or layout_truth.parser_spec_sha256 != evaluation.layout_truth_parser_spec_sha256
+        or development_layout_truth.packet_split != "development"
+        or development_layout_truth.dataset_id != evaluation.dataset_id
+        or development_layout_truth.dataset_revision != evaluation.dataset_revision
+        or development_layout_truth.dataset_receipt_sha256 != layout_truth.dataset_receipt_sha256
+        or development_layout_truth.packet_receipt_sha256
+        != selection.development_packet_receipt_sha256
+        or development_layout_truth.parser_spec_sha256 != selection.layout_truth_parser_spec_sha256
+        or selection.dataset_id != evaluation.dataset_id
+        or selection.dataset_revision != evaluation.dataset_revision
+        or selection.layout_truth_parser_spec_sha256 != evaluation.layout_truth_parser_spec_sha256
+        or selection.selected.engine_kind != evaluation.engine_kind
+        or selection.selected.extractor_revision != evaluation.extractor_revision
+        or selection.selected.configuration_sha256 != evaluation.configuration_sha256
+        or selection.selected.model_inventory_sha256 != evaluation.model_inventory_sha256
+        or sealed_run.dataset_id != evaluation.dataset_id
+        or sealed_run.dataset_revision != evaluation.dataset_revision
+        or sealed_run.sealed_packet_receipt_sha256 != evaluation.packet_receipt_sha256
+        or sealed_run.layout_truth_receipt_sha256 != evaluation.layout_truth_receipt_sha256
+        or sealed_run.layout_truth_parser_spec_sha256 != evaluation.layout_truth_parser_spec_sha256
+        or sealed_run.development_selection_receipt_sha256
+        != evaluation.development_selection_receipt_sha256
+        or sealed_run.engine_kind != evaluation.engine_kind
+        or sealed_run.extractor_revision != evaluation.extractor_revision
+        or sealed_run.configuration_sha256 != evaluation.configuration_sha256
+        or sealed_run.model_inventory_sha256 != evaluation.model_inventory_sha256
+        or sealed_run.selected_development_evaluation_result_sha256
+        != selection.selected.evaluation_result_sha256
+        or {record.asset_id for record in development_layout_truth.records}
+        & {record.asset_id for record in layout_truth.records}
+        or {record.source_sha256 for record in development_layout_truth.records}
+        & {record.source_sha256 for record in layout_truth.records}
+    ):
+        raise DocumentPreviewRuntimeError(
+            "document_preview_source_attested_receipt_binding_mismatch"
+        )
+    reservation_path = _verify_source_attested_sealed_reservation(root=root, sealed_run=sealed_run)
+    return SourceAttestedSyntheticReceiptBindingV1(
+        development_layout_truth_path=development_layout_path,
+        development_layout_truth=development_layout_truth,
+        layout_truth_path=layout_path,
+        layout_truth=layout_truth,
+        development_selection_path=selection_path,
+        development_selection=selection,
+        sealed_run_path=sealed_run_path,
+        sealed_run=sealed_run,
+        sealed_reservation_path=reservation_path,
     )
 
 
@@ -1103,6 +1774,11 @@ def _check_evaluation_binding(
             and approval.evaluation_scope == evaluation.evaluation_scope
             and approval.layout_truth_kind == evaluation.layout_truth_kind
             and approval.layout_truth_receipt_sha256 == evaluation.layout_truth_receipt_sha256
+            and approval.layout_truth_parser_spec_sha256
+            == evaluation.layout_truth_parser_spec_sha256
+            and approval.development_selection_receipt_sha256
+            == evaluation.development_selection_receipt_sha256
+            and approval.sealed_run_receipt_sha256 == evaluation.sealed_run_receipt_sha256
         )
     else:
         # A human-reviewed result can never activate the source-attested
@@ -1137,6 +1813,7 @@ class ApprovedPdfPreviewBinding:
     configuration: RuntimeConfigurationV1
     inventory: ModelInventoryV1
     evaluation: PdfPreviewEvaluationResultV1
+    source_attested_receipt_binding: SourceAttestedSyntheticReceiptBindingV1 | None
     artifact_fingerprints: tuple[_ArtifactFingerprint, ...]
 
     def verify_runtime_state(self) -> None:
@@ -1185,6 +1862,21 @@ class ApprovedPdfPreviewBinding:
         )
         if parse_pdf_preview_evaluation_result(evaluation_raw) != self.evaluation:
             raise DocumentPreviewRuntimeError("document_preview_evaluation_runtime_changed")
+        if isinstance(self.evaluation, SourceAttestedSyntheticSealedEvaluationResultV1):
+            if (
+                self.source_attested_receipt_binding is None
+                or load_source_attested_synthetic_receipt_binding(
+                    root=self.root, evaluation=self.evaluation
+                )
+                != self.source_attested_receipt_binding
+            ):
+                raise DocumentPreviewRuntimeError(
+                    "document_preview_source_attested_receipts_runtime_changed"
+                )
+        elif self.source_attested_receipt_binding is not None:
+            raise DocumentPreviewRuntimeError(
+                "document_preview_source_attested_receipts_runtime_changed"
+            )
         for fingerprint in self.artifact_fingerprints:
             _assert_no_symlink(fingerprint.path, code="document_preview_model_runtime_changed")
             try:
@@ -1248,6 +1940,11 @@ def load_approved_pdf_preview_binding(
     inventory = parse_model_inventory(inventory_raw)
     evaluation = parse_pdf_preview_evaluation_result(evaluation_raw)
     _check_evaluation_binding(approval, evaluation, configuration, inventory)
+    source_attested_receipt_binding = (
+        load_source_attested_synthetic_receipt_binding(root=root, evaluation=evaluation)
+        if isinstance(evaluation, SourceAttestedSyntheticSealedEvaluationResultV1)
+        else None
+    )
     verify_inventory_packages(inventory, package_version_reader=package_version_reader)
     _configuration_directories_exist(root, configuration, inventory)
     fingerprints = _verify_inventory_artifacts(root, inventory)
@@ -1262,6 +1959,7 @@ def load_approved_pdf_preview_binding(
         configuration=configuration,
         inventory=inventory,
         evaluation=evaluation,
+        source_attested_receipt_binding=source_attested_receipt_binding,
         artifact_fingerprints=fingerprints,
     )
 
@@ -1929,6 +2627,11 @@ def write_source_attested_synthetic_pdf_preview_pointer(
         or model_inventory_sha256 != evaluation.model_inventory_sha256
     ):
         raise DocumentPreviewRuntimeError("document_preview_approval_binding_mismatch")
+    # The automatic path can write nothing until its full layout → development
+    # selection → sealed-run → one-shot-reservation evidence chain is present
+    # and mutually bound.  It is deliberately reloaded again by service
+    # startup and before every preview request.
+    load_source_attested_synthetic_receipt_binding(root=root, evaluation=evaluation)
     normalized_evaluation_raw = _canonical_json_bytes(
         _strict_json_object(
             evaluation_raw, code="document_preview_source_attested_evaluation_invalid"
@@ -1966,6 +2669,11 @@ def write_source_attested_synthetic_pdf_preview_pointer(
             "evaluation_scope": "synthetic_content_stream_compatibility",
             "layout_truth_kind": "pdf_content_stream_layout_v1",
             "layout_truth_receipt_sha256": evaluation.layout_truth_receipt_sha256,
+            "layout_truth_parser_spec_sha256": evaluation.layout_truth_parser_spec_sha256,
+            "development_selection_receipt_sha256": (
+                evaluation.development_selection_receipt_sha256
+            ),
+            "sealed_run_receipt_sha256": evaluation.sealed_run_receipt_sha256,
             "evaluation_basis": "source_attested_synthetic",
             "evaluation_result_sha256": evaluation.evaluation_result_sha256,
         },
@@ -2010,10 +2718,15 @@ __all__ = [
     "PdfTextLayerPreviewAdapter",
     "RuntimeConfigurationV1",
     "SealedEvaluationResultV1",
+    "SourceAttestedDevelopmentSelectionReceiptV1",
+    "SourceAttestedLayoutTruthReceiptV1",
+    "SourceAttestedSealedRunReceiptV1",
     "SourceAttestedSyntheticPdfPreviewActivationV1",
+    "SourceAttestedSyntheticReceiptBindingV1",
     "SourceAttestedSyntheticSealedEvaluationResultV1",
     "build_default_pdf_preview_adapter",
     "load_approved_pdf_preview_binding",
+    "load_source_attested_synthetic_receipt_binding",
     "local_files_only",
     "parse_model_inventory",
     "parse_pdf_preview_activation",
