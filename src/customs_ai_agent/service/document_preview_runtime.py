@@ -30,7 +30,7 @@ import threading
 from contextlib import contextmanager
 from dataclasses import dataclass, field
 from pathlib import Path
-from typing import Any, Callable, Iterator, Literal, Mapping, Protocol, Sequence, cast
+from typing import Any, Callable, Final, Iterator, Literal, Mapping, Protocol, Sequence, cast
 from urllib.parse import urlparse
 
 from pydantic import ValidationError
@@ -70,6 +70,9 @@ _SOURCE_CANDIDATE_EXECUTION_DIRECTORY = "source-attested-candidate-executions"
 _SOURCE_EVALUATION_RESULT_DIRECTORY = "source-attested-evaluation-results"
 _SOURCE_DEVELOPMENT_SELECTION_DIRECTORY = "source-attested-development-selections"
 _SOURCE_SEALED_RUN_DIRECTORY = "source-attested-sealed-runs"
+_SOURCE_ATTESTED_CANDIDATE_PARSER_REVISION: Final = (
+    "synthetic-pdf-visible-layout-normalizer-v3"
+)
 _SEALED_RESERVATION_DIRECTORY = "candidate-run-reservations"
 _SOURCE_LAYOUT_RECORD_COUNTS: Mapping[str, int] = {"development": 60, "sealed": 20}
 _MAX_SOURCE_DATASET_RECEIPT_BYTES = 8 * 1024 * 1024
@@ -760,10 +763,12 @@ class SourceAttestedSyntheticReceiptBindingV1:
     development_execution_paths: tuple[Path, ...]
     sealed_run_path: Path
     sealed_run: SourceAttestedSealedRunReceiptV1
+    sealed_run_state_path: Path
     sealed_candidate_path: Path
     sealed_candidate: SourceAttestedCandidateBundleV1
     sealed_execution_path: Path
     sealed_evaluation_path: Path
+    sealed_evaluation_state_path: Path
     sealed_reservation_path: Path
 
 
@@ -1189,6 +1194,21 @@ def _source_attested_nonnegative_int(value: object, *, code: str, maximum: int) 
     return value
 
 
+def _source_attested_candidate_parser_revision(value: object, *, code: str) -> str:
+    """Accept only the one reviewed visible-layout candidate parser revision.
+
+    Equality across receipts is necessary but not sufficient: a fully
+    self-consistent older parser could otherwise mint a new automatic pointer.
+    The v3 parser is the only candidate normalizer whose rendered 13/15/12
+    field contract has been accepted for this narrow synthetic scope.
+    """
+
+    revision = _identifier(value, code=code)
+    if revision != _SOURCE_ATTESTED_CANDIDATE_PARSER_REVISION:
+        raise DocumentPreviewRuntimeError(code)
+    return revision
+
+
 def _parse_source_attested_metrics(
     value: object,
     *,
@@ -1387,7 +1407,9 @@ def parse_source_attested_synthetic_sealed_evaluation_result(
             value["development_selection_receipt_sha256"], code=code
         ),
         sealed_run_receipt_sha256=_sha256(value["sealed_run_receipt_sha256"], code=code),
-        candidate_parser_revision=_identifier(value["candidate_parser_revision"], code=code),
+        candidate_parser_revision=_source_attested_candidate_parser_revision(
+            value["candidate_parser_revision"], code=code
+        ),
         candidate_bundle_sha256=_sha256(value["candidate_bundle_sha256"], code=code),
         candidate_execution_receipt_sha256=_sha256(
             value["candidate_execution_receipt_sha256"], code=code
@@ -1491,7 +1513,9 @@ def parse_source_attested_synthetic_development_evaluation_result(
         layout_truth_parser_spec_sha256=_sha256(
             value["layout_truth_parser_spec_sha256"], code=code
         ),
-        candidate_parser_revision=_identifier(value["candidate_parser_revision"], code=code),
+        candidate_parser_revision=_source_attested_candidate_parser_revision(
+            value["candidate_parser_revision"], code=code
+        ),
         candidate_bundle_sha256=_sha256(value["candidate_bundle_sha256"], code=code),
         candidate_execution_receipt_sha256=_sha256(
             value["candidate_execution_receipt_sha256"], code=code
@@ -1704,7 +1728,9 @@ def _source_attested_development_candidate(
         extractor_revision=_identifier(candidate["extractor_revision"], code=code),
         configuration_sha256=_sha256(candidate["configuration_sha256"], code=code),
         model_inventory_sha256=_sha256(candidate["model_inventory_sha256"], code=code),
-        candidate_parser_revision=_identifier(candidate["candidate_parser_revision"], code=code),
+        candidate_parser_revision=_source_attested_candidate_parser_revision(
+            candidate["candidate_parser_revision"], code=code
+        ),
         evaluation_result_sha256=_sha256(candidate["evaluation_result_sha256"], code=code),
         candidate_bundle_sha256=_sha256(candidate["candidate_bundle_sha256"], code=code),
         candidate_execution_receipt_sha256=_sha256(
@@ -1769,7 +1795,9 @@ def _parse_source_attested_development_selection_receipt(
     candidates = tuple(
         _source_attested_development_candidate(item) for item in value["candidate_results"]
     )
-    candidate_parser_revision = _identifier(value["candidate_parser_revision"], code=code)
+    candidate_parser_revision = _source_attested_candidate_parser_revision(
+        value["candidate_parser_revision"], code=code
+    )
     if (
         len(candidates) != len(_ENGINE_KINDS)
         or {item.engine_kind for item in candidates} != _ENGINE_KINDS
@@ -1876,7 +1904,9 @@ def _parse_source_attested_sealed_run_receipt(
             value["selected_development_evaluation_result_sha256"], code=code
         ),
         candidate_bundle_sha256=_sha256(value["candidate_bundle_sha256"], code=code),
-        candidate_parser_revision=_identifier(value["candidate_parser_revision"], code=code),
+        candidate_parser_revision=_source_attested_candidate_parser_revision(
+            value["candidate_parser_revision"], code=code
+        ),
         candidate_execution_receipt_sha256=_sha256(
             value["candidate_execution_receipt_sha256"], code=code
         ),
@@ -2027,7 +2057,9 @@ def _load_source_attested_candidate_bundle(
             dataset_id=_identifier(candidate.dataset_id, code=code),
             dataset_revision=_identifier(candidate.dataset_revision, code=code),
             packet_receipt_sha256=_sha256(candidate.packet_receipt_sha256, code=code),
-            parser_revision=_identifier(candidate.parser_revision, code=code),
+            parser_revision=_source_attested_candidate_parser_revision(
+                candidate.parser_revision, code=code
+            ),
             engine_kind=_engine_kind(candidate.engine_kind, code=code),
             extractor_revision=_identifier(candidate.extractor_revision, code=code),
             configuration_sha256=_sha256(candidate.configuration_sha256, code=code),
@@ -2262,6 +2294,102 @@ def _sealed_candidate_reservation_path(root: Path, packet_receipt_sha256: str) -
     return destination
 
 
+def _source_attested_state_path(
+    *, root: Path, directory: str, filename: str, code: str
+) -> Path:
+    """Resolve one deterministic create-only evaluator ledger path safely."""
+
+    destination = root / directory / filename
+    _assert_no_symlink(destination, code=code)
+    try:
+        resolved_parent = destination.parent.resolve(strict=True)
+    except OSError as error:
+        raise DocumentPreviewRuntimeError(code) from error
+    if resolved_parent != root / directory:
+        raise DocumentPreviewRuntimeError(code)
+    return destination
+
+
+def _sealed_run_state_path(root: Path, packet_receipt_sha256: str) -> Path:
+    return _source_attested_state_path(
+        root=root,
+        directory=_SOURCE_SEALED_RUN_DIRECTORY,
+        filename=f"sealed-run-state-{packet_receipt_sha256}.json",
+        code="document_preview_source_attested_sealed_run_state_invalid",
+    )
+
+
+def _sealed_evaluation_state_path(root: Path, packet_receipt_sha256: str) -> Path:
+    return _source_attested_state_path(
+        root=root,
+        directory=_SOURCE_EVALUATION_RESULT_DIRECTORY,
+        filename=f"sealed-evaluation-state-{packet_receipt_sha256}.json",
+        code="document_preview_source_attested_sealed_evaluation_state_invalid",
+    )
+
+
+def _verify_source_attested_sealed_run_state(
+    *, root: Path, sealed_run: SourceAttestedSealedRunReceiptV1
+) -> Path:
+    """Bind the pre-score, create-only sealed-run ledger to its receipt."""
+
+    code = "document_preview_source_attested_sealed_run_state_invalid"
+    path = _sealed_run_state_path(root, sealed_run.sealed_packet_receipt_sha256)
+    raw = _read_regular_file(path, limit=_MAX_SIDECAR_BYTES, code=code)
+    value = _strict_json_object(raw, code=code)
+    if raw != _canonical_local_artifact_file_bytes(value):
+        raise DocumentPreviewRuntimeError(code)
+    _require_exact_keys(
+        value,
+        {"schema_version", "sealed_packet_receipt_sha256", "sealed_run_receipt_sha256"},
+        code=code,
+    )
+    if (
+        value["schema_version"] != "1.0"
+        or _sha256(value["sealed_packet_receipt_sha256"], code=code)
+        != sealed_run.sealed_packet_receipt_sha256
+        or _sha256(value["sealed_run_receipt_sha256"], code=code) != sealed_run.receipt_sha256
+    ):
+        raise DocumentPreviewRuntimeError(code)
+    return path
+
+
+def _verify_source_attested_sealed_evaluation_state(
+    *, root: Path, evaluation: SourceAttestedSyntheticSealedEvaluationResultV1
+) -> Path:
+    """Bind the post-score, create-only evaluation ledger to the sealed result."""
+
+    code = "document_preview_source_attested_sealed_evaluation_state_invalid"
+    path = _sealed_evaluation_state_path(root, evaluation.packet_receipt_sha256)
+    raw = _read_regular_file(path, limit=_MAX_SIDECAR_BYTES, code=code)
+    value = _strict_json_object(raw, code=code)
+    if raw != _canonical_local_artifact_file_bytes(value):
+        raise DocumentPreviewRuntimeError(code)
+    _require_exact_keys(
+        value,
+        {
+            "schema_version",
+            "packet_kind",
+            "packet_receipt_sha256",
+            "layout_truth_receipt_sha256",
+            "evaluation_result_sha256",
+        },
+        code=code,
+    )
+    if (
+        value["schema_version"] != "1.0"
+        or value["packet_kind"] != "sealed"
+        or _sha256(value["packet_receipt_sha256"], code=code)
+        != evaluation.packet_receipt_sha256
+        or _sha256(value["layout_truth_receipt_sha256"], code=code)
+        != evaluation.layout_truth_receipt_sha256
+        or _sha256(value["evaluation_result_sha256"], code=code)
+        != evaluation.evaluation_result_sha256
+    ):
+        raise DocumentPreviewRuntimeError(code)
+    return path
+
+
 def _verify_source_attested_sealed_reservation(
     *,
     root: Path,
@@ -2298,7 +2426,8 @@ def _verify_source_attested_sealed_reservation(
         or value["artifact_kind"] != "sealed_synthetic_pdf_candidate_reservation"
         or value["profile_mode"] != "offline_synthetic_pdf_evaluation"
         or value["packet_kind"] != "sealed"
-        or value["parser_revision"] != sealed_run.candidate_parser_revision
+        or _source_attested_candidate_parser_revision(value["parser_revision"], code=code)
+        != sealed_run.candidate_parser_revision
         or _identifier(value["dataset_id"], code=code) != sealed_run.dataset_id
         or _identifier(value["dataset_revision"], code=code) != sealed_run.dataset_revision
         or _sha256(value["packet_receipt_sha256"], code=code)
@@ -2665,6 +2794,12 @@ def load_source_attested_synthetic_receipt_binding(
     ):
         raise DocumentPreviewRuntimeError(binding_code)
 
+    sealed_run_state_path = _verify_source_attested_sealed_run_state(
+        root=root, sealed_run=sealed_run
+    )
+    sealed_evaluation_state_path = _verify_source_attested_sealed_evaluation_state(
+        root=root, evaluation=evaluation
+    )
     reservation_path = _verify_source_attested_sealed_reservation(root=root, sealed_run=sealed_run)
     _verify_source_attested_synthetic_replay(
         dataset_receipt_raw=dataset_receipt_raw,
@@ -2701,10 +2836,12 @@ def load_source_attested_synthetic_receipt_binding(
         development_execution_paths=tuple(development_execution_paths),
         sealed_run_path=sealed_run_path,
         sealed_run=sealed_run,
+        sealed_run_state_path=sealed_run_state_path,
         sealed_candidate_path=sealed_candidate_path,
         sealed_candidate=sealed_candidate,
         sealed_execution_path=sealed_execution_path,
         sealed_evaluation_path=sealed_evaluation_path,
+        sealed_evaluation_state_path=sealed_evaluation_state_path,
         sealed_reservation_path=reservation_path,
     )
 

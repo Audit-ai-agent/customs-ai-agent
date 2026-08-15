@@ -33,6 +33,7 @@ from customs_ai_agent.evaluation.source_attested_synthetic_pdf_truth import (
     SourceAttestedSyntheticDatasetScopeV1,
     SourceAttestedSyntheticOcrEvaluationResultV1,
     SourceAttestedSyntheticPdfTruthError,
+    SOURCE_ATTESTED_CANDIDATE_PARSER_REVISION,
     SOURCE_ATTESTED_REQUIRED_FIELDS,
     build_source_attested_synthetic_candidate_execution,
     build_source_attested_synthetic_development_selection,
@@ -59,6 +60,7 @@ from customs_ai_agent.evaluation.source_attested_synthetic_pdf_truth import (
 )
 from customs_ai_agent.evaluation.synthetic_pdf_candidate_runner import (
     SYNTHETIC_PDF_LABEL_NORMALIZER_REVISION,
+    SyntheticPdfCandidateRunnerError,
 )
 from tools.evaluate_source_attested_synthetic_pdf import evaluate_source_attested_synthetic_pdf
 
@@ -586,6 +588,37 @@ def test_rendered_field_contract_exposes_bl13_invoice15_and_pl12() -> None:
     assert "containers" not in {
         field_name for field_name, _normalizer in SOURCE_ATTESTED_REQUIRED_FIELDS["packing_list"]
     }
+    assert SOURCE_ATTESTED_CANDIDATE_PARSER_REVISION == SYNTHETIC_PDF_LABEL_NORMALIZER_REVISION
+
+
+def test_source_truth_rejects_pre_v3_candidate_parser_even_for_test_scope(tmp_path: Path) -> None:
+    """A coherent older parser cannot create new source-attested evidence."""
+
+    fixture = _fixture(tmp_path)
+    truth = _truth(fixture, "development")
+    packet = fixture["development_packet"]
+    candidate = _matching_candidate(
+        packet=packet, truth=truth, engine_kind="pdf_text_layer"
+    )
+    extractor_revision, configuration_sha256, model_inventory_sha256 = _profile("pdf_text_layer")
+
+    with pytest.raises(
+        SourceAttestedSyntheticPdfTruthError,
+        match="candidate_parser_revision_invalid",
+    ):
+        recompute_source_attested_synthetic_pdf_candidate_metrics(
+            receipt=fixture["receipt"],  # type: ignore[arg-type]
+            packet=packet,
+            layout_truth=truth,
+            candidate_output_raw=_candidate_raw(candidate),
+            engine_kind="pdf_text_layer",
+            extractor_revision=extractor_revision,
+            configuration_sha256=configuration_sha256,
+            model_inventory_sha256=model_inventory_sha256,
+            parser_revision="synthetic-pdf-label-normalizer-v2",
+            expected_dataset_scope=_test_scope(fixture),
+            required_field_schema=_TEST_REQUIRED_FIELD_SCHEMA,
+        )
 
 
 def test_error_label_must_match_a_rendered_source_mutation(tmp_path: Path) -> None:
@@ -831,6 +864,31 @@ def test_selection_requires_all_three_engine_results(tmp_path: Path) -> None:
         SourceAttestedSyntheticPdfTruthError, match="development_result_set_invalid"
     ):
         build_source_attested_synthetic_development_selection(results=two_results)
+
+
+def test_source_evaluator_refuses_runner_parser_revision_drift(
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    """The CLI refuses before it can write local evidence with an unapproved parser."""
+
+    monkeypatch.setattr(
+        "tools.evaluate_source_attested_synthetic_pdf.SYNTHETIC_PDF_LABEL_NORMALIZER_REVISION",
+        "synthetic-pdf-label-normalizer-v2",
+    )
+    with pytest.raises(
+        SyntheticPdfCandidateRunnerError,
+        match="source_attested_candidate_parser_revision_invalid",
+    ):
+        evaluate_source_attested_synthetic_pdf(
+            receipt_path=tmp_path / "receipt.json",
+            packet_path=tmp_path / "packet.json",
+            layout_truth_path=tmp_path / "truth.json",
+            candidate_output_path=tmp_path / "candidate.json",
+            document_preview_root=tmp_path / "document-preview",
+            configuration_path=tmp_path / "configuration.json",
+            inventory_path=tmp_path / "inventory.json",
+            engine_kind="pdf_text_layer",
+        )
 
 
 def test_explicit_auto_activation_runs_only_after_a_passing_sealed_result(

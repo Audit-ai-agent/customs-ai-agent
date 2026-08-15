@@ -21,6 +21,7 @@ from customs_ai_agent.evaluation.document_ocr_quality import (
     canonical_json_file_bytes,
 )
 from customs_ai_agent.evaluation.source_attested_synthetic_pdf_truth import (
+    SOURCE_ATTESTED_CANDIDATE_PARSER_REVISION,
     SourceAttestedSyntheticPdfTruthError,
     build_source_attested_synthetic_candidate_execution,
     build_source_attested_synthetic_sealed_run,
@@ -127,6 +128,12 @@ def evaluate_source_attested_synthetic_pdf(
     sealed_run_output_directory: Path | None = None,
     auto_activate_source_attested_synthetic: bool = False,
 ) -> dict[str, object]:
+    # The candidate runner and the source-attested writer deliberately share
+    # one fixed rendered-layout parser revision.  Refuse before writing any
+    # local evidence if a future runner changes it without a new approval
+    # scope, parser spec, and runtime pin.
+    if SYNTHETIC_PDF_LABEL_NORMALIZER_REVISION != SOURCE_ATTESTED_CANDIDATE_PARSER_REVISION:
+        raise SyntheticPdfCandidateRunnerError("source_attested_candidate_parser_revision_invalid")
     profile = load_unapproved_local_candidate_profile(
         document_preview_root=document_preview_root,
         configuration_path=configuration_path,

@@ -94,6 +94,14 @@ SOURCE_LAYOUT_COMPILER_REVISION: Final[
 SOURCE_LAYOUT_PARSER_SPEC_REVISION: Final[
     Literal["synthetic-pdf-content-stream-parser-spec-v2"]
 ] = "synthetic-pdf-content-stream-parser-spec-v2"
+# This is intentionally fixed at the source-truth writer as well as at the
+# runtime boundary.  Merely requiring every receipt in a chain to agree would
+# let a coherent, older parser version create a new automatic approval.
+# Version 3 is the first normalizer that represents the complete rendered
+# B/L-13, Invoice-15, and Packing-list-12 field surface used by this scope.
+SOURCE_ATTESTED_CANDIDATE_PARSER_REVISION: Final[
+    Literal["synthetic-pdf-visible-layout-normalizer-v3"]
+] = "synthetic-pdf-visible-layout-normalizer-v3"
 
 # This automatic path has one deliberately narrow approval target.  These
 # values are a compact identity for the existing human-checked, 2,000-set PDF
@@ -160,6 +168,13 @@ EXPECTED_SOURCE_ATTESTED_SYNTHETIC_DATASET_SCOPE: Final = SourceAttestedSyntheti
 
 class SourceAttestedSyntheticPdfTruthError(ValueError):
     """A content-free error boundary for local source-truth processing."""
+
+
+def _require_source_attested_candidate_parser_revision(parser_revision: str) -> None:
+    if parser_revision != SOURCE_ATTESTED_CANDIDATE_PARSER_REVISION:
+        raise SourceAttestedSyntheticPdfTruthError(
+            "source_layout_candidate_parser_revision_invalid"
+        )
 
 
 class _WireModel(BaseModel):
@@ -1812,6 +1827,8 @@ class SourceAttestedSyntheticCandidateExecutionV1(_WireModel):
 
     @model_validator(mode="after")
     def _execution_is_hash_bound(self) -> "SourceAttestedSyntheticCandidateExecutionV1":
+        if self.candidate_parser_revision != SOURCE_ATTESTED_CANDIDATE_PARSER_REVISION:
+            raise ValueError("source-attested candidate parser revision is not approved")
         if self.candidate_execution_receipt_sha256 != candidate_execution_receipt_sha256(self):
             raise ValueError("source-attested candidate execution SHA-256 mismatch")
         return self
@@ -1863,6 +1880,7 @@ def build_source_attested_synthetic_candidate_execution(
 ) -> SourceAttestedSyntheticCandidateExecutionV1:
     """Bind an evaluated raw candidate file to its exact source-layout input."""
 
+    _require_source_attested_candidate_parser_revision(parser_revision)
     validate_source_attested_layout_truth_for_evaluation(
         receipt=receipt,
         packet=packet,
@@ -2021,6 +2039,8 @@ class SourceAttestedSyntheticOcrEvaluationResultV1(_WireModel):
     def _result_is_hash_bound_and_gate_derived(
         self,
     ) -> "SourceAttestedSyntheticOcrEvaluationResultV1":
+        if self.candidate_parser_revision != SOURCE_ATTESTED_CANDIDATE_PARSER_REVISION:
+            raise ValueError("source-attested candidate parser revision is not approved")
         if self.evaluation_result_sha256 != source_attested_evaluation_result_sha256(self):
             raise ValueError("source-attested evaluation result SHA-256 mismatch")
         if self.layout_truth_parser_spec_sha256 != source_layout_parser_spec_sha256():
@@ -2110,6 +2130,8 @@ class SourceAttestedSyntheticDevelopmentSelectionV1(_WireModel):
 
     @model_validator(mode="after")
     def _selection_is_complete_and_bound(self) -> "SourceAttestedSyntheticDevelopmentSelectionV1":
+        if self.candidate_parser_revision != SOURCE_ATTESTED_CANDIDATE_PARSER_REVISION:
+            raise ValueError("source-attested candidate parser revision is not approved")
         if self.layout_truth_parser_spec_sha256 != source_layout_parser_spec_sha256():
             raise ValueError("source-attested selection parser specification SHA-256 mismatch")
         expected_engines = {"pdf_text_layer", "paddleocr", "docling"}
@@ -2191,6 +2213,8 @@ class SourceAttestedSyntheticSealedRunV1(_WireModel):
 
     @model_validator(mode="after")
     def _sealed_run_is_bound(self) -> "SourceAttestedSyntheticSealedRunV1":
+        if self.candidate_parser_revision != SOURCE_ATTESTED_CANDIDATE_PARSER_REVISION:
+            raise ValueError("source-attested candidate parser revision is not approved")
         if self.layout_truth_parser_spec_sha256 != source_layout_parser_spec_sha256():
             raise ValueError("source-attested sealed run parser specification SHA-256 mismatch")
         if self.sealed_run_receipt_sha256 != sealed_run_receipt_sha256(self):
@@ -2383,6 +2407,7 @@ def recompute_source_attested_synthetic_pdf_candidate_metrics(
     source-layout chain and emits hashes plus metrics—not candidate contents.
     """
 
+    _require_source_attested_candidate_parser_revision(parser_revision)
     validate_source_attested_layout_truth_for_evaluation(
         receipt=receipt,
         packet=packet,
@@ -2439,6 +2464,7 @@ def score_source_attested_synthetic_pdf_candidate_output(
     not independent optical OCR evidence.
     """
 
+    _require_source_attested_candidate_parser_revision(parser_revision)
     candidate_output = _parse_canonical_synthetic_candidate_output_raw(candidate_output_raw)
     rescore = recompute_source_attested_synthetic_pdf_candidate_metrics(
         receipt=receipt,
@@ -2586,6 +2612,7 @@ def select_best_source_attested_synthetic_development_result(
     first = results[0] if results else None
     if first is None or first.packet_kind != "development":
         raise SourceAttestedSyntheticPdfTruthError("source_layout_development_result_set_invalid")
+    _require_source_attested_candidate_parser_revision(first.candidate_parser_revision)
     identity = (
         first.dataset_id,
         first.dataset_revision,
@@ -2628,6 +2655,7 @@ def build_source_attested_synthetic_development_selection(
     """Bind one deterministic winner to all three immutable development runs."""
 
     selected = select_best_source_attested_synthetic_development_result(results)
+    _require_source_attested_candidate_parser_revision(selected.candidate_parser_revision)
     identity = (
         selected.dataset_id,
         selected.dataset_revision,
@@ -2975,6 +3003,7 @@ def _sealed_candidate_reservation_sha256(
     model_inventory_sha256: str,
     parser_revision: str,
 ) -> str:
+    _require_source_attested_candidate_parser_revision(parser_revision)
     path = (
         document_preview_root
         / "candidate-run-reservations"
@@ -3020,6 +3049,7 @@ def _validate_development_selection_for_sealed(
     model_inventory_sha256: str,
     parser_revision: str,
 ) -> None:
+    _require_source_attested_candidate_parser_revision(parser_revision)
     if (
         selection.dataset_id != packet.dataset_id
         or selection.dataset_revision != packet.dataset_revision
@@ -3051,6 +3081,7 @@ def build_source_attested_synthetic_sealed_run(
     model_inventory_sha256: str,
     parser_revision: str,
 ) -> SourceAttestedSyntheticSealedRunV1:
+    _require_source_attested_candidate_parser_revision(parser_revision)
     if packet.split != "sealed":
         raise SourceAttestedSyntheticPdfTruthError("source_layout_sealed_run_packet_invalid")
     _validate_development_selection_for_sealed(
@@ -3190,6 +3221,7 @@ def _validate_sealed_run_binding(
     development_selection: SourceAttestedSyntheticDevelopmentSelectionV1,
     sealed_run: SourceAttestedSyntheticSealedRunV1,
 ) -> None:
+    _require_source_attested_candidate_parser_revision(parser_revision)
     _validate_development_selection_for_sealed(
         selection=development_selection,
         packet=packet,
@@ -3282,6 +3314,7 @@ def read_canonical_source_attested_synthetic_evaluation_result(
 
 
 __all__ = [
+    "SOURCE_ATTESTED_CANDIDATE_PARSER_REVISION",
     "SOURCE_ATTESTED_EVALUATION_BASIS",
     "SOURCE_ATTESTED_EVALUATION_SCOPE",
     "SOURCE_ATTESTED_REQUIRED_FIELDS",

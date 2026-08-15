@@ -151,7 +151,7 @@ def _source_attested_evaluation(
     layout_truth_parser_spec_sha256: str = "d" * 64,
     development_selection_receipt_sha256: str = "e" * 64,
     sealed_run_receipt_sha256: str = "f" * 64,
-    candidate_parser_revision: str = "synthetic-pdf-label-normalizer-v2",
+    candidate_parser_revision: str = "synthetic-pdf-visible-layout-normalizer-v3",
     candidate_bundle_sha256: str = "1" * 64,
     candidate_execution_receipt_sha256: str = "2" * 64,
     engine_kind: str = "pdf_text_layer",
@@ -223,6 +223,19 @@ def _rewrite_source_attested_evaluation(*, root: Path, value: dict[str, object])
     value["evaluation_result_sha256"] = _self_digest(value, "evaluation_result_sha256")
     raw = _canonical_local_artifact(value)
     _write_source_attested_evaluation_artifact(root=root, raw=raw)
+    packet_receipt_sha256 = str(value["packet_receipt_sha256"])
+    state = {
+        "schema_version": "1.0",
+        "packet_kind": "sealed",
+        "packet_receipt_sha256": packet_receipt_sha256,
+        "layout_truth_receipt_sha256": value["layout_truth_receipt_sha256"],
+        "evaluation_result_sha256": value["evaluation_result_sha256"],
+    }
+    (
+        root
+        / "source-attested-evaluation-results"
+        / f"sealed-evaluation-state-{packet_receipt_sha256}.json"
+    ).write_bytes(_canonical_local_artifact(state))
     return raw
 
 
@@ -231,7 +244,7 @@ def _write_source_attested_receipt_chain(
     root: Path,
     configuration_sha256: str,
     inventory_sha256: str,
-    candidate_parser_revision: str = "synthetic-pdf-label-normalizer-v2",
+    candidate_parser_revision: str = "synthetic-pdf-visible-layout-normalizer-v3",
 ) -> dict[str, str | bytes]:
     """Build a complete local source-attested chain, not hash-shaped placeholders."""
 
@@ -660,6 +673,16 @@ def _write_source_attested_receipt_chain(
     sealed_run_path = root / "source-attested-sealed-runs" / f"{sealed_run_sha256}.json"
     sealed_run_path.parent.mkdir(parents=True, exist_ok=True)
     sealed_run_path.write_bytes(_canonical_local_artifact(sealed_run))
+    sealed_run_state = {
+        "schema_version": "1.0",
+        "sealed_packet_receipt_sha256": sealed_packet_sha256,
+        "sealed_run_receipt_sha256": sealed_run_sha256,
+    }
+    (
+        root
+        / "source-attested-sealed-runs"
+        / f"sealed-run-state-{sealed_packet_sha256}.json"
+    ).write_bytes(_canonical_local_artifact(sealed_run_state))
     evaluation = _source_attested_evaluation(
         configuration_sha256,
         inventory_sha256,
@@ -673,6 +696,19 @@ def _write_source_attested_receipt_chain(
         candidate_execution_receipt_sha256=sealed_candidate_execution_sha256,
     )
     _write_source_attested_evaluation_artifact(root=root, raw=evaluation)
+    evaluation_value = json.loads(evaluation)
+    sealed_evaluation_state = {
+        "schema_version": "1.0",
+        "packet_kind": "sealed",
+        "packet_receipt_sha256": sealed_packet_sha256,
+        "layout_truth_receipt_sha256": layout_sha256,
+        "evaluation_result_sha256": evaluation_value["evaluation_result_sha256"],
+    }
+    (
+        root
+        / "source-attested-evaluation-results"
+        / f"sealed-evaluation-state-{sealed_packet_sha256}.json"
+    ).write_bytes(_canonical_local_artifact(sealed_evaluation_state))
     return {
         "dataset_receipt_sha256": dataset_receipt_sha256,
         "development_packet_receipt_sha256": development_packet_sha256,
@@ -1306,6 +1342,168 @@ def test_source_attested_reservation_tamper_stops_an_already_loaded_preview(tmp_
     assert fake.calls == 0
 
 
+@pytest.mark.parametrize(
+    ("state_directory", "state_prefix"),
+    [
+        ("source-attested-sealed-runs", "sealed-run-state-"),
+        ("source-attested-evaluation-results", "sealed-evaluation-state-"),
+    ],
+)
+def test_source_attested_create_only_state_tamper_stops_an_already_loaded_preview(
+    tmp_path: Path,
+    state_directory: str,
+    state_prefix: str,
+) -> None:
+    """A restart-bound pointer cannot keep serving after either ledger changes."""
+
+    activation_path, activation_sha256 = _source_attested_activated(tmp_path)
+    binding = load_approved_pdf_preview_binding(
+        approval_path=activation_path,
+        approval_sha256=activation_sha256,
+        package_version_reader=_package_version,
+    )
+    fake = _FakePdfEngine(binding.approval.extractor_revision)
+    engine = ApprovedPdfOnlyPreviewEngine(binding=binding, delegate=fake)
+    root = activation_path.parent.parent
+    packet_receipt_sha256 = binding.evaluation.packet_receipt_sha256
+    state_path = root / state_directory / f"{state_prefix}{packet_receipt_sha256}.json"
+    state_path.write_bytes(b"{}\n")
+
+    with pytest.raises(DocumentPreviewUnavailable):
+        engine.extract(_pdf_input())
+    assert fake.calls == 0
+
+
+@pytest.mark.parametrize(
+    ("state_directory", "state_prefix", "expected_code"),
+    [
+        (
+            "source-attested-sealed-runs",
+            "sealed-run-state-",
+            "document_preview_source_attested_sealed_run_state_invalid",
+        ),
+        (
+            "source-attested-evaluation-results",
+            "sealed-evaluation-state-",
+            "document_preview_source_attested_sealed_evaluation_state_invalid",
+        ),
+    ],
+)
+def test_source_attested_loader_rejects_missing_or_tampered_create_only_state(
+    tmp_path: Path,
+    state_directory: str,
+    state_prefix: str,
+    expected_code: str,
+) -> None:
+    """Both one-shot ledgers are required even after a result is hash-named."""
+
+    root = _root(tmp_path)
+    root.mkdir(parents=True)
+    configuration_sha256, inventory_sha256 = write_runtime_sidecars(
+        document_preview_root=root,
+        configuration_value=_configuration(),
+        inventory_value=_inventory(),
+        package_version_reader=_package_version,
+    )
+    chain = _write_source_attested_receipt_chain(
+        root=root,
+        configuration_sha256=configuration_sha256,
+        inventory_sha256=inventory_sha256,
+    )
+    packet_receipt_sha256 = str(chain["sealed_packet_receipt_sha256"])
+    state_path = root / state_directory / f"{state_prefix}{packet_receipt_sha256}.json"
+    state_path.unlink()
+    evaluation = chain["evaluation"]
+    assert isinstance(evaluation, bytes)
+
+    with pytest.raises(DocumentPreviewRuntimeError, match=expected_code):
+        load_source_attested_synthetic_receipt_binding(
+            root=root,
+            evaluation=parse_source_attested_synthetic_sealed_evaluation_result(evaluation),
+        )
+    with pytest.raises(DocumentPreviewRuntimeError, match=expected_code):
+        write_source_attested_synthetic_pdf_preview_pointer(
+            document_preview_root=root,
+            evaluation_raw=evaluation,
+            configuration_sha256=configuration_sha256,
+            model_inventory_sha256=inventory_sha256,
+            package_version_reader=_package_version,
+        )
+    assert not (root / "approvals" / "pdf-preview-active.json").exists()
+
+    # Recreating a malformed ledger at the deterministic path is no safer
+    # than omitting it: both cases fail before activation/runtime use.
+    state_path.write_bytes(b"{}\n")
+    with pytest.raises(DocumentPreviewRuntimeError, match=expected_code):
+        load_source_attested_synthetic_receipt_binding(
+            root=root,
+            evaluation=parse_source_attested_synthetic_sealed_evaluation_result(evaluation),
+        )
+    with pytest.raises(DocumentPreviewRuntimeError, match=expected_code):
+        write_source_attested_synthetic_pdf_preview_pointer(
+            document_preview_root=root,
+            evaluation_raw=evaluation,
+            configuration_sha256=configuration_sha256,
+            model_inventory_sha256=inventory_sha256,
+            package_version_reader=_package_version,
+        )
+    assert not (root / "approvals" / "pdf-preview-active.json").exists()
+
+
+@pytest.mark.parametrize(
+    ("state_directory", "state_prefix", "state_value", "expected_code"),
+    [
+        (
+            "source-attested-sealed-runs",
+            "sealed-run-state-",
+            {"schema_version": "1.0", "sealed_run_receipt_sha256": "0" * 64},
+            "document_preview_source_attested_sealed_run_state_invalid",
+        ),
+        (
+            "source-attested-evaluation-results",
+            "sealed-evaluation-state-",
+            {"schema_version": "1.0", "evaluation_result_sha256": "0" * 64},
+            "document_preview_source_attested_sealed_evaluation_state_invalid",
+        ),
+    ],
+)
+def test_source_attested_loader_rejects_create_only_state_binding_mismatch(
+    tmp_path: Path,
+    state_directory: str,
+    state_prefix: str,
+    state_value: dict[str, str],
+    expected_code: str,
+) -> None:
+    """A syntactically canonical ledger must still bind this run/result exactly."""
+
+    root = _root(tmp_path)
+    root.mkdir(parents=True)
+    configuration_sha256, inventory_sha256 = write_runtime_sidecars(
+        document_preview_root=root,
+        configuration_value=_configuration(),
+        inventory_value=_inventory(),
+        package_version_reader=_package_version,
+    )
+    chain = _write_source_attested_receipt_chain(
+        root=root,
+        configuration_sha256=configuration_sha256,
+        inventory_sha256=inventory_sha256,
+    )
+    packet_receipt_sha256 = str(chain["sealed_packet_receipt_sha256"])
+    state_path = root / state_directory / f"{state_prefix}{packet_receipt_sha256}.json"
+    state = json.loads(state_path.read_bytes())
+    state.update(state_value)
+    state_path.write_bytes(_canonical_local_artifact(state))
+    evaluation = chain["evaluation"]
+    assert isinstance(evaluation, bytes)
+
+    with pytest.raises(DocumentPreviewRuntimeError, match=expected_code):
+        load_source_attested_synthetic_receipt_binding(
+            root=root,
+            evaluation=parse_source_attested_synthetic_sealed_evaluation_result(evaluation),
+        )
+
+
 def test_source_attested_writer_rejects_a_valid_but_mismatched_sealed_run_receipt(
     tmp_path: Path,
 ) -> None:
@@ -1754,10 +1952,14 @@ def test_source_attested_loader_accepts_one_consistent_visible_layout_v3_chain(
     assert binding.sealed_run.candidate_parser_revision == (
         "synthetic-pdf-visible-layout-normalizer-v3"
     )
+    assert binding.sealed_run_state_path.name.startswith("sealed-run-state-")
+    assert binding.sealed_evaluation_state_path.name.startswith("sealed-evaluation-state-")
 
 
-def test_source_attested_loader_rejects_candidate_parser_revision_mismatch(tmp_path: Path) -> None:
-    """A pointer is pinned to the exact candidate parser revision, including v3."""
+def test_source_attested_loader_rejects_a_coherent_v2_candidate_parser_chain(
+    tmp_path: Path,
+) -> None:
+    """Equality alone cannot authorize a fully self-consistent old parser."""
 
     root = _root(tmp_path)
     root.mkdir(parents=True)
@@ -1771,19 +1973,16 @@ def test_source_attested_loader_rejects_candidate_parser_revision_mismatch(tmp_p
         root=root,
         configuration_sha256=configuration_sha256,
         inventory_sha256=inventory_sha256,
+        candidate_parser_revision="synthetic-pdf-label-normalizer-v2",
     )
-    result = json.loads(chain["evaluation"])
-    result["candidate_parser_revision"] = "synthetic-pdf-visible-layout-normalizer-v3"
-    rewritten = _rewrite_source_attested_evaluation(root=root, value=result)
+    evaluation = chain["evaluation"]
+    assert isinstance(evaluation, bytes)
 
     with pytest.raises(
         DocumentPreviewRuntimeError,
-        match="document_preview_source_attested_receipt_binding_mismatch",
+        match="document_preview_source_attested_evaluation_invalid",
     ):
-        load_source_attested_synthetic_receipt_binding(
-            root=root,
-            evaluation=parse_source_attested_synthetic_sealed_evaluation_result(rewritten),
-        )
+        parse_source_attested_synthetic_sealed_evaluation_result(evaluation)
 
 
 def test_source_attested_writer_rejects_manual_human_evaluation(tmp_path: Path) -> None:
