@@ -11,6 +11,7 @@ from datetime import date
 from pathlib import Path
 import pytest
 
+import customs_ai_agent.evaluation.synthetic_pdf_candidate_runner as candidate_runner_module
 import customs_ai_agent.service.document_preview_runtime as runtime_module
 from customs_ai_agent.evaluation.document_gold import (
     DatasetAssetReceiptV1,
@@ -546,6 +547,30 @@ def test_runner_binds_every_engine_profile_and_preserves_adapter_cells(
     ]
     assert bundle.documents[0].table_cells[0].text == "Widget"
     assert adapter.calls == 1
+
+
+def test_docling_runner_preflights_before_loading_a_selected_pdf(
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    fixture = _fixture(tmp_path, engine_kind="docling")
+
+    class FailingDoclingAdapter:
+        def preflight_native_runtime(self) -> None:
+            raise runtime_module.DocumentPreviewUnavailable(
+                "document_preview_docling_native_runtime_unavailable"
+            )
+
+        def extract_pdf(self, _preview_input: object) -> CandidateExtractionV1:
+            raise AssertionError("source PDF must not be passed to a failed adapter")
+
+    monkeypatch.setattr(
+        candidate_runner_module,
+        "_load_selected_pdf",
+        lambda **_kwargs: pytest.fail("source PDF must not be loaded before native preflight"),
+    )
+
+    with pytest.raises(SyntheticPdfCandidateRunnerError, match="candidate_adapter_unavailable"):
+        _run(fixture, FailingDoclingAdapter())  # type: ignore[arg-type]
 
 
 def test_candidate_profile_rejects_missing_paddle_postprocess_package(tmp_path: Path) -> None:

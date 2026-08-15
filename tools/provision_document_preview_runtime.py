@@ -16,6 +16,8 @@ from typing import Mapping, Sequence, cast
 
 from customs_ai_agent.service.document_preview_runtime import (
     DocumentPreviewRuntimeError,
+    parse_runtime_configuration,
+    preflight_provisioned_docling_native_runtime,
     validate_document_preview_root,
     write_runtime_sidecars,
 )
@@ -69,11 +71,28 @@ def provision_runtime(
         _check_free_space(cache, minimum_free_gib)
     configuration = _json_object(configuration_path, root=root)
     inventory = _json_object(inventory_path, root=root)
-    return write_runtime_sidecars(
+    configuration_sha256, model_inventory_sha256 = write_runtime_sidecars(
         document_preview_root=root,
         configuration_value=configuration,
         inventory_value=inventory,
     )
+    configuration_raw = (
+        json.dumps(
+            configuration,
+            ensure_ascii=False,
+            allow_nan=False,
+            separators=(",", ":"),
+            sort_keys=True,
+        ).encode("utf-8")
+        + b"\n"
+    )
+    parsed_configuration = parse_runtime_configuration(configuration_raw)
+    if parsed_configuration.engine_kind == "docling":
+        preflight_provisioned_docling_native_runtime(
+            document_preview_root=root,
+            configuration=parsed_configuration,
+        )
+    return configuration_sha256, model_inventory_sha256
 
 
 def _parser() -> argparse.ArgumentParser:
