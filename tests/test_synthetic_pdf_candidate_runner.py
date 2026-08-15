@@ -33,6 +33,7 @@ from customs_ai_agent.evaluation.synthetic_pdf_candidate_runner import (
     SyntheticPdfCandidateAdapter,
     SyntheticPdfCandidateRunnerError,
     build_default_synthetic_pdf_candidate_adapter,
+    load_local_synthetic_pdf_evaluation_inputs,
     load_unapproved_local_candidate_profile,
     normalize_synthetic_pdf_docling_table_cells,
     normalize_synthetic_pdf_fields,
@@ -958,6 +959,55 @@ def test_runner_rejects_packet_receipt_and_engine_profile_mismatches(tmp_path: P
     profile_mismatch["engine_kind"] = "pdf_text_layer"
     with pytest.raises(SyntheticPdfCandidateRunnerError, match="candidate_engine_profile_mismatch"):
         _run(profile_mismatch, _FakeAdapter())
+
+
+def test_local_receipt_loader_accepts_full_synthetic_inventory_and_stays_bounded(
+    tmp_path: Path,
+) -> None:
+    """The real 6,000-PDF receipt is larger than compact sidecars, not unbounded."""
+
+    local_data = tmp_path / "workspace" / "_local" / "data"
+    source_sha256 = _sha("full-synthetic-inventory")
+    assets = [
+        DatasetAssetReceiptV1(
+            asset_id=f"asset-{index:04}",
+            relative_path=f"clean_sets/set_{index:04}/C{index:04}_INV.pdf",
+            media_type="application/pdf",
+            byte_size=1,
+            sha256=source_sha256,
+            source_role="preview_candidate",
+        )
+        for index in range(6_000)
+    ]
+    receipt = DatasetReceiptV1(
+        dataset_id="synthetic-customs-pdf-2000",
+        dataset_revision="20260811-r1",
+        received_as_of=date(2026, 8, 11),
+        assets=assets,
+    )
+    packet = _packet(receipt=receipt, source_sha256=source_sha256)
+    receipt_path = local_data / "receipts" / "dataset-receipt.json"
+    packet_path = local_data / "packets" / "development.json"
+    receipt_path.parent.mkdir(parents=True)
+    packet_path.parent.mkdir(parents=True)
+    receipt_raw = canonical_json_file_bytes(receipt.model_dump(mode="json"))
+    receipt_path.write_bytes(receipt_raw)
+    packet_path.write_bytes(canonical_json_file_bytes(packet.model_dump(mode="json")))
+
+    assert 1 * 1024 * 1024 < len(receipt_raw) <= 8 * 1024 * 1024
+    loaded_receipt, loaded_packet = load_local_synthetic_pdf_evaluation_inputs(
+        receipt_path=receipt_path,
+        packet_path=packet_path,
+    )
+    assert receipt_sha256(loaded_receipt) == receipt_sha256(receipt)
+    assert loaded_packet.packet_receipt_sha256 == packet.packet_receipt_sha256
+
+    receipt_path.write_bytes(b"x" * (8 * 1024 * 1024 + 1))
+    with pytest.raises(SyntheticPdfCandidateRunnerError, match="candidate_receipt_invalid"):
+        load_local_synthetic_pdf_evaluation_inputs(
+            receipt_path=receipt_path,
+            packet_path=packet_path,
+        )
 
 
 def test_runner_blocks_network_and_keeps_content_out_of_failure(tmp_path: Path) -> None:
