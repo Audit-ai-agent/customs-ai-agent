@@ -401,6 +401,34 @@ class _FullInvoiceVisibleLayoutFakeAdapter:
         return _full_visible_layout_extraction("invoice")
 
 
+@dataclass
+class _FullInvoiceDoclingMarkdownFakeAdapter:
+    calls: int = 0
+
+    def extract_pdf(self, _preview_input) -> CandidateExtractionV1:  # type: ignore[no-untyped-def]
+        self.calls += 1
+        # The current pinned Docling boundary emits Markdown spans, not direct
+        # table cells.  This generic engine-shaped output exercises the sole
+        # allowed pipe-table fallback without consulting a local PDF or truth.
+        return CandidateExtractionV1(
+            spans=(
+                CandidateSpanV1(
+                    page_number=1,
+                    reading_order=1,
+                    text=(
+                        "Shipper\nSeller One\nNotify Party\nBuyer One\nConsignee\nReceiver One\n"
+                        "Port of Loading\nPort Alpha\nPort of Discharge\nPort Beta\n"
+                        "Vessel/Flight\nVessel Delta\nInvoice No.\nINV-001\n"
+                        "Invoice Date\n2026-01-01\nL/C No.\nLC-001\nTOTAL\n62.50\n\n"
+                        "| Marks/No. | Description of Goods | Quantity | Unit Price | Amount |\n"
+                        "| --- | --- | --- | ---: | ---: |\n"
+                        "| - | Widget | 5 PCS | 12.50 | 62.50 |"
+                    ),
+                ),
+            )
+        )
+
+
 def _run(
     fixture: dict[str, object],
     adapter: SyntheticPdfCandidateAdapter,
@@ -483,6 +511,37 @@ def test_runner_v3_full_invoice_fake_adapter_uses_visible_candidate_output_only(
         "amount",
         "total",
     ]
+    assert adapter.calls == 1
+
+
+def test_runner_v3_derives_full_docling_markdown_candidate_without_direct_table_cells(
+    tmp_path: Path,
+) -> None:
+    fixture = _fixture(tmp_path, engine_kind="docling")
+    adapter = _FullInvoiceDoclingMarkdownFakeAdapter()
+
+    summary = _run(fixture, adapter)
+
+    output = fixture["output_directory"] / summary["candidate_file"]  # type: ignore[operator]
+    bundle = SyntheticPdfCandidateOutputBundleV1.model_validate_json(output.read_bytes())
+    assert [field.field_name for field in bundle.documents[0].fields] == [
+        "exporter_name",
+        "importer_name",
+        "consignee",
+        "load_port",
+        "disch_port",
+        "vessel",
+        "inv_no",
+        "inv_date",
+        "lc_no",
+        "good",
+        "unit",
+        "qty",
+        "unit_price",
+        "amount",
+        "total",
+    ]
+    assert len(bundle.documents[0].table_cells) == 10
     assert adapter.calls == 1
 
 
