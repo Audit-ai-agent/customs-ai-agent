@@ -13,10 +13,8 @@ import json
 from pathlib import Path
 from typing import Sequence, cast
 
-from customs_ai_agent.evaluation.document_gold import DatasetReceiptV1
 from customs_ai_agent.evaluation.document_ocr_quality import (
     EngineKind,
-    EvaluationPacketV2,
     SyntheticPdfCandidateOutputBundleV1,
     canonical_json_file_bytes,
 )
@@ -38,6 +36,7 @@ from customs_ai_agent.evaluation.source_attested_synthetic_pdf_truth import (
 from customs_ai_agent.evaluation.synthetic_pdf_candidate_runner import (
     SYNTHETIC_PDF_LABEL_NORMALIZER_REVISION,
     SyntheticPdfCandidateRunnerError,
+    load_local_synthetic_pdf_evaluation_inputs,
     load_unapproved_local_candidate_profile,
 )
 
@@ -140,11 +139,13 @@ def evaluate_source_attested_synthetic_pdf(
         inventory_path=inventory_path,
         engine_kind=engine_kind,
     )
-    try:
-        receipt = DatasetReceiptV1.model_validate_json(receipt_path.read_bytes())
-        packet = EvaluationPacketV2.model_validate_json(packet_path.read_bytes())
-    except (OSError, ValueError) as error:
-        raise SyntheticPdfCandidateRunnerError("source_attested_input_invalid") from error
+    receipt, packet = load_local_synthetic_pdf_evaluation_inputs(
+        receipt_path=receipt_path,
+        packet_path=packet_path,
+        receipt_code="source_attested_input_invalid",
+        packet_code="source_attested_input_invalid",
+        validation_code="source_attested_input_invalid",
+    )
     write_source_attested_synthetic_dataset_receipt(
         receipt=receipt,
         output_directory=profile.document_preview_root / "source-attested-dataset-receipts",

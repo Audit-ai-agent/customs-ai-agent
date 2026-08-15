@@ -65,6 +65,12 @@ from customs_ai_agent.service.document_preview_runtime import (
 
 
 _SHA256 = re.compile(r"^[a-f0-9]{64}$")
+# A complete immutable receipt enumerates every PDF in the fixed 6,000-asset
+# synthetic corpus. It is metadata only, but is larger than the compact packet
+# and runtime sidecars. Keep its explicit 8 MiB ceiling aligned with the
+# runtime's source-attested receipt reader; do not weaken the 1 MiB limit for
+# packets or sidecars merely because the receipt has a larger inventory.
+_MAX_DATASET_RECEIPT_BYTES = 8 * 1024 * 1024
 _MAX_JSON_BYTES = 1 * 1024 * 1024
 _MAX_SOURCE_BYTES = 32 * 1024 * 1024
 _PROFILE_MODE: Literal["offline_synthetic_pdf_evaluation"] = "offline_synthetic_pdf_evaluation"
@@ -335,20 +341,44 @@ def load_unapproved_local_candidate_profile(
     )
 
 
-def _load_receipt_and_packet(
-    *, receipt_path: Path, packet_path: Path, source_directory: Path
-) -> tuple[DatasetReceiptV1, EvaluationPacketV2, Path]:
+def load_local_synthetic_pdf_evaluation_inputs(
+    *,
+    receipt_path: Path,
+    packet_path: Path,
+    receipt_code: str = "candidate_receipt_invalid",
+    packet_code: str = "candidate_packet_invalid",
+    validation_code: str = "candidate_packet_or_receipt_invalid",
+) -> tuple[DatasetReceiptV1, EvaluationPacketV2]:
+    """Read a bounded local receipt and packet without following links.
+
+    The receipt records the complete corpus and therefore has its own 8 MiB
+    bound. The selected packet remains compact and retains the 1 MiB bound.
+    Callers choose only content-free error codes, so this helper can be used
+    by both the candidate runner and the source-attested evaluator without
+    exposing document or OCR text.
+    """
+
     _receipt_file, receipt_raw = _require_local_data_file(
-        receipt_path, limit=_MAX_JSON_BYTES, code="candidate_receipt_invalid"
+        receipt_path, limit=_MAX_DATASET_RECEIPT_BYTES, code=receipt_code
     )
     _packet_file, packet_raw = _require_local_data_file(
-        packet_path, limit=_MAX_JSON_BYTES, code="candidate_packet_invalid"
+        packet_path, limit=_MAX_JSON_BYTES, code=packet_code
     )
     try:
         receipt = DatasetReceiptV1.model_validate_json(receipt_raw)
         packet = EvaluationPacketV2.model_validate_json(packet_raw)
     except ValidationError as error:
-        raise SyntheticPdfCandidateRunnerError("candidate_packet_or_receipt_invalid") from error
+        raise SyntheticPdfCandidateRunnerError(validation_code) from error
+    return receipt, packet
+
+
+def _load_receipt_and_packet(
+    *, receipt_path: Path, packet_path: Path, source_directory: Path
+) -> tuple[DatasetReceiptV1, EvaluationPacketV2, Path]:
+    receipt, packet = load_local_synthetic_pdf_evaluation_inputs(
+        receipt_path=receipt_path,
+        packet_path=packet_path,
+    )
     if (
         receipt_sha256(receipt) != packet.receipt_sha256
         or receipt.dataset_id != packet.dataset_id
@@ -1214,6 +1244,7 @@ __all__ = [
     "SyntheticPdfCandidateAdapter",
     "SyntheticPdfCandidateRunnerError",
     "build_default_synthetic_pdf_candidate_adapter",
+    "load_local_synthetic_pdf_evaluation_inputs",
     "load_unapproved_local_candidate_profile",
     "normalize_synthetic_pdf_docling_table_cells",
     "normalize_synthetic_pdf_fields",
