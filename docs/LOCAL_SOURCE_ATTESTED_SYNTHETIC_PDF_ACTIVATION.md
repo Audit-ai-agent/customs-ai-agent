@@ -74,6 +74,15 @@ file을 inventory의 path·size·SHA-256으로 선언해야 하며, extra·누�
 symlink/Windows junction(reparse point)은 activation과 runtime 모두에서 거부된다.
 이 활성화 명령은 다운로드, network fallback, model 설치를 수행하지 않는다.
 
+현재 pinned PaddleOCR profile은 `PP-OCRv4`, CPU (`use_gpu: false`,
+`cpu_threads: 1`)와 detection, recognition, classifier의 **세** local model directory를
+모두 명시해야 한다. classifier를 사용하지 않아도 PaddleOCR 2.9.1은 기본 classifier
+downloader를 초기화할 수 있으므로, `cls_model_directory`를 생략할 수 없다. Docling profile은
+`ocr_enabled: false`, `device: cpu`, `num_threads: 1`, table structure `fast`와 cell matching
+고정만 허용한다. 이 후보는 inventory된 Docling layout/table artifact를 쓰는 로컬 구조·표
+parser이며 EasyOCR downloader를 쓰지 않는다. 따라서 자동 certificate에서 Docling을 일반
+optical OCR로 표현하지 않는다.
+
 ## 활성화
 
 source-attested evaluator가 `source-attested-evaluation-results/` 아래에 passing sealed result를
@@ -112,9 +121,11 @@ uv run --locked --no-sync --group dev customs-ai-agent-dev-serve
 
 이렇게 시작한 process는 pointer가 아직 없으면 계속 `unavailable`이며, sealed
 evaluator가 passing 결과로 pointer를 원자적으로 쓴 뒤 **다음 PDF 요청**에서 새
-chain을 검증해 자동 반영한다. 이후 activation마다 SHA 복사나 Agent 재시작은 필요하지
-않다. 단, 이미 일반 mode로 떠 있는 process를 이 mode로 바꾸려면 처음 한 번은 이
-switch로 다시 시작해야 한다.
+chain을 검증해 자동 반영한다. PaddleOCR/Docling source-attested pointer는 평가했던
+직접 profile을 그대로 실행하며, native text-layer fallback으로 바뀌지 않는다. 기존
+human-approved pointer의 text-layer-first 동작은 그대로다. 이후 activation마다 SHA 복사나
+Agent 재시작은 필요하지 않다. 단, 이미 일반 mode로 떠 있는 process를 이 mode로 바꾸려면
+처음 한 번은 이 switch로 다시 시작해야 한다.
 
 이 자동 모드는 source-attested synthetic PDF 전용의 local trust boundary다. 같은
 local write 권한의 악성 프로세스까지 암호학적으로 식별하는 외부 signer는 아니므로,

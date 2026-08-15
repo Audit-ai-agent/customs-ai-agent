@@ -130,7 +130,10 @@ Gate를 통과하지 못합니다. Docling도 pipe table을 내지 않거나 Mar
 이는 결과를 보고 재시도하여 좋은 결과만 고르는 일을 막기 위한
 fail-closed 규칙입니다.
 
-봉인 결과의 Gate 통과만으로는 서비스가 활성화되지 않습니다. 별도의
-사람 승인 명령이 Gold receipt, sealed evaluation result, engine revision,
-configuration, inventory를 대조한 뒤에만 PDF preview active pointer를
-만듭니다. JPEG/PNG는 이 승인 범위 밖이며 계속 `unavailable`입니다.
+사람이 검수한 Gold 경로에서는 봉인 결과 뒤에도 별도의 사람 승인 명령이 Gold receipt,
+sealed evaluation result, engine revision, configuration, inventory를 대조한 뒤에만 PDF
+preview active pointer를 만듭니다. 반대로 `source_attested_synthetic` 경로는 별도 layout
+truth·개발 selection·sealed state chain이 세 Gate를 통과했을 때만 evaluator가 pointer를
+자동으로 만듭니다. 두 provenance를 섞을 수 없으며 상세 조건은
+[`LOCAL_SOURCE_ATTESTED_SYNTHETIC_PDF_ACTIVATION.md`](LOCAL_SOURCE_ATTESTED_SYNTHETIC_PDF_ACTIVATION.md)에
+있습니다. JPEG/PNG는 두 경로 모두 계속 `unavailable`입니다.

@@ -3,8 +3,10 @@ from __future__ import annotations
 import hashlib
 import json
 import socket
+import sys
 from pathlib import Path
-from typing import cast
+from types import ModuleType, SimpleNamespace
+from typing import Literal, cast
 
 import pytest
 from pydantic import SecretStr
@@ -803,6 +805,30 @@ class _FakePdfEngine:
         )
 
 
+def _preview_candidate(*, revision: str, text: str) -> PreviewCandidateV1:
+    return PreviewCandidateV1(
+        status="preview_ready",
+        extractor_revision=revision,
+        pages=[
+            DocumentPreviewPageV1(
+                page_number=1,
+                width=1,
+                height=1,
+                coordinate_unit="pdf_points",
+                spans=[
+                    DocumentSpanV1(
+                        span_id="page-1-span-1",
+                        ordinal=1,
+                        reading_order=1,
+                        text=text,
+                    )
+                ],
+            )
+        ],
+        warnings=[],
+    )
+
+
 def _pdf_input() -> PreviewInputV1:
     content = b"%PDF-1.7\n1 0 obj<</Type /Page>>endobj\n%%EOF\n"
     return PreviewInputV1(
@@ -831,7 +857,9 @@ def _jpeg_input() -> PreviewInputV1:
     )
 
 
-def _source_attested_activation_pointer(*, extractor_revision: str) -> bytes:
+def _source_attested_activation_pointer(
+    *, extractor_revision: str, engine_kind: str = "pdf_text_layer"
+) -> bytes:
     return _canonical(
         {
             "schema_version": "1.0",
@@ -839,7 +867,7 @@ def _source_attested_activation_pointer(*, extractor_revision: str) -> bytes:
             "status": "activated",
             "media_type": "application/pdf",
             "engine": {
-                "kind": "pdf_text_layer",
+                "kind": engine_kind,
                 "extractor_revision": extractor_revision,
                 "configuration_sha256": "a" * 64,
                 "model_inventory_sha256": "b" * 64,
@@ -861,6 +889,94 @@ def _source_attested_activation_pointer(*, extractor_revision: str) -> bytes:
         },
         newline=True,
     )
+
+
+@pytest.mark.parametrize(
+    ("engine_kind", "adapter_name"),
+    [
+        ("paddleocr", "PaddleOcrPdfPreviewAdapter"),
+        ("docling", "DoclingPdfPreviewAdapter"),
+    ],
+)
+def test_source_attested_runtime_uses_the_direct_evaluated_profile(
+    tmp_path: Path,
+    monkeypatch: pytest.MonkeyPatch,
+    engine_kind: str,
+    adapter_name: str,
+) -> None:
+    """Auto pointers may not silently serve the text-layer fallback.
+
+    Development/sealed source-attested evaluation invokes PaddleOCR and
+    Docling directly.  The same pointer must therefore invoke the selected
+    raster profile in serving, while a legacy human approval keeps the
+    historic native-text-first behavior.
+    """
+
+    calls = {"text": 0, "raster": 0}
+
+    class FakeTextLayer:
+        def __init__(self, *, extractor_revision: str) -> None:
+            self.extractor_revision = extractor_revision
+
+        def extract_pdf_text_layer(self, _preview_input: PreviewInputV1) -> PreviewCandidateV1:
+            calls["text"] += 1
+            return _preview_candidate(revision=self.extractor_revision, text="text-layer")
+
+    class FakeRaster:
+        def __init__(self, *, extractor_revision: str, **_kwargs: object) -> None:
+            self.extractor_revision = extractor_revision
+
+        def extract_raster_or_image(self, _preview_input: PreviewInputV1) -> PreviewCandidateV1:
+            calls["raster"] += 1
+            return _preview_candidate(revision=self.extractor_revision, text=engine_kind)
+
+    monkeypatch.setattr(runtime_module, "PdfTextLayerPreviewAdapter", FakeTextLayer)
+    monkeypatch.setattr(runtime_module, adapter_name, FakeRaster)
+
+    source_approval = parse_source_attested_synthetic_pdf_preview_activation(
+        _source_attested_activation_pointer(
+            extractor_revision="selected-profile-v1", engine_kind=engine_kind
+        )
+    )
+    source_binding = SimpleNamespace(
+        approval=source_approval,
+        root=_root(tmp_path),
+        configuration=SimpleNamespace(options={}),
+    )
+    source_engine = runtime_module.build_default_pdf_preview_adapter(
+        cast(runtime_module.ApprovedPdfPreviewBinding, source_binding)
+    )
+
+    source_candidate = source_engine.extract(_pdf_input())
+
+    assert source_candidate.pages[0].spans[0].text == engine_kind
+    assert calls == {"text": 0, "raster": 1}
+
+    calls["text"] = 0
+    calls["raster"] = 0
+    human_approval = runtime_module.PdfPreviewApprovalV1(
+        approval_id="human-approval-v1",
+        engine_kind=cast(Literal["paddleocr", "docling"], engine_kind),
+        extractor_revision="selected-profile-v1",
+        configuration_sha256="a" * 64,
+        model_inventory_sha256="b" * 64,
+        dataset_revision="synthetic-pdf-r1",
+        gold_receipt_sha256="c" * 64,
+        evaluation_result_sha256="d" * 64,
+    )
+    human_binding = SimpleNamespace(
+        approval=human_approval,
+        root=_root(tmp_path),
+        configuration=SimpleNamespace(options={}),
+    )
+    human_engine = runtime_module.build_default_pdf_preview_adapter(
+        cast(runtime_module.ApprovedPdfPreviewBinding, human_binding)
+    )
+
+    human_candidate = human_engine.extract(_pdf_input())
+
+    assert human_candidate.pages[0].spans[0].text == "text-layer"
+    assert calls == {"text": 1, "raster": 0}
 
 
 def _replace_pointer(path: Path, raw: bytes) -> None:
@@ -928,7 +1044,14 @@ def test_runtime_rejects_an_added_file_in_the_active_docling_model_directory(
         "schema_version": "1.0",
         "engine_kind": "docling",
         "extractor_revision": "docling-test-v1",
-        "options": {"artifacts_directory": "models/docling", "ocr_enabled": True},
+        "options": {
+            "artifacts_directory": "models/docling",
+            "ocr_enabled": False,
+            "device": "cpu",
+            "num_threads": 1,
+            "do_table_structure": True,
+            "table_structure_mode": "fast",
+        },
     }
     inventory = {
         "schema_version": "1.0",
@@ -987,6 +1110,180 @@ def test_runtime_rejects_an_added_file_in_the_active_docling_model_directory(
 
     with pytest.raises(DocumentPreviewRuntimeError, match="document_preview_model_runtime_changed"):
         binding.verify_runtime_state()
+
+
+@pytest.mark.parametrize(
+    "options",
+    [
+        {
+            "det_model_directory": "models/det",
+            "rec_model_directory": "models/rec",
+            "ocr_version": "PP-OCRv4",
+            "use_gpu": False,
+            "cpu_threads": 1,
+        },
+        {
+            "det_model_directory": "models/det",
+            "rec_model_directory": "models/rec",
+            "cls_model_directory": "models/cls",
+            "use_gpu": False,
+            "cpu_threads": 1,
+        },
+        {
+            "det_model_directory": "models/det",
+            "rec_model_directory": "models/rec",
+            "cls_model_directory": "models/cls",
+            "ocr_version": "PP-OCRv4",
+            "use_gpu": True,
+            "cpu_threads": 1,
+        },
+        {
+            "det_model_directory": "models/det",
+            "rec_model_directory": "models/rec",
+            "cls_model_directory": "models/cls",
+            "ocr_version": "PP-OCRv4",
+            "use_gpu": False,
+            "cpu_threads": 2,
+        },
+    ],
+)
+def test_paddle_profile_requires_all_local_models_and_fixed_cpu_profile(
+    options: dict[str, object],
+) -> None:
+    raw = _canonical(
+        {
+            "schema_version": "1.0",
+            "engine_kind": "paddleocr",
+            "extractor_revision": "paddle-test-v1",
+            "options": options,
+        },
+        newline=True,
+    )
+
+    with pytest.raises(DocumentPreviewRuntimeError, match="document_preview_configuration_invalid"):
+        runtime_module.parse_runtime_configuration(raw)
+
+
+def test_docling_profile_rejects_easyocr_download_mode() -> None:
+    raw = _canonical(
+        {
+            "schema_version": "1.0",
+            "engine_kind": "docling",
+            "extractor_revision": "docling-test-v1",
+            "options": {
+                "artifacts_directory": "models/docling",
+                "ocr_enabled": True,
+                "device": "cpu",
+                "num_threads": 1,
+                "do_table_structure": True,
+                "table_structure_mode": "fast",
+            },
+        },
+        newline=True,
+    )
+
+    with pytest.raises(DocumentPreviewRuntimeError, match="document_preview_configuration_invalid"):
+        runtime_module.parse_runtime_configuration(raw)
+
+
+def test_runtime_profiles_accept_only_the_explicit_offline_options() -> None:
+    paddle = runtime_module.parse_runtime_configuration(
+        _canonical(
+            {
+                "schema_version": "1.0",
+                "engine_kind": "paddleocr",
+                "extractor_revision": "paddle-test-v1",
+                "options": {
+                    "det_model_directory": "models/paddle/det",
+                    "rec_model_directory": "models/paddle/rec",
+                    "cls_model_directory": "models/paddle/cls",
+                    "ocr_version": "PP-OCRv4",
+                    "use_gpu": False,
+                    "cpu_threads": 1,
+                },
+            },
+            newline=True,
+        )
+    )
+    docling = runtime_module.parse_runtime_configuration(
+        _canonical(
+            {
+                "schema_version": "1.0",
+                "engine_kind": "docling",
+                "extractor_revision": "docling-test-v1",
+                "options": {
+                    "artifacts_directory": "models/docling",
+                    "ocr_enabled": False,
+                    "device": "cpu",
+                    "num_threads": 1,
+                    "do_table_structure": True,
+                    "table_structure_mode": "fast",
+                },
+            },
+            newline=True,
+        )
+    )
+
+    assert paddle.options == {
+        "det_model_directory": "models/paddle/det",
+        "rec_model_directory": "models/paddle/rec",
+        "cls_model_directory": "models/paddle/cls",
+        "ocr_version": "PP-OCRv4",
+        "use_gpu": False,
+        "cpu_threads": 1,
+        "language": "en",
+        "use_angle_cls": False,
+    }
+    assert docling.options == {
+        "artifacts_directory": "models/docling",
+        "ocr_enabled": False,
+        "device": "cpu",
+        "num_threads": 1,
+        "do_table_structure": True,
+        "table_structure_mode": "fast",
+    }
+
+
+def test_paddle_adapter_passes_pinned_offline_arguments(
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    captured: dict[str, object] = {}
+
+    class FakePaddleOcr:
+        def __init__(self, **kwargs: object) -> None:
+            captured.update(kwargs)
+
+    module = ModuleType("paddleocr")
+    module.PaddleOCR = FakePaddleOcr  # type: ignore[attr-defined]
+    monkeypatch.setitem(sys.modules, "paddleocr", module)
+    adapter = runtime_module.PaddleOcrPdfPreviewAdapter(
+        extractor_revision="paddle-test-v1",
+        model_root=tmp_path,
+        options={
+            "det_model_directory": "models/paddle/det",
+            "rec_model_directory": "models/paddle/rec",
+            "cls_model_directory": "models/paddle/cls",
+            "ocr_version": "PP-OCRv4",
+            "use_gpu": False,
+            "cpu_threads": 1,
+            "language": "en",
+            "use_angle_cls": False,
+        },
+    )
+
+    adapter._paddle_engine()
+
+    assert captured == {
+        "det_model_dir": str(tmp_path / "models" / "paddle" / "det"),
+        "rec_model_dir": str(tmp_path / "models" / "paddle" / "rec"),
+        "cls_model_dir": str(tmp_path / "models" / "paddle" / "cls"),
+        "ocr_version": "PP-OCRv4",
+        "use_gpu": False,
+        "cpu_threads": 1,
+        "lang": "en",
+        "use_angle_cls": False,
+        "show_log": False,
+    }
 
 
 def test_source_attested_auto_engine_activates_then_clears_cache_on_bad_pointer(

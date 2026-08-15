@@ -40,6 +40,11 @@ content stream을 독립적인 pinned parser와 template profile로 읽어 만�
 - `clean_manifest.csv`와 `error_labels.csv`는 dataset 결속, strata와 compact
   mismatch receipt용이다. PDF에 실제로 그려진 값을 조용히 고치거나 OCR 후보
   출력으로 정답을 만들지 않는다.
+- PaddleOCR 후보는 `PP-OCRv4`, CPU 1 thread와 detection/recognition/classifier
+  세 local directory를 모두 configuration·inventory에 고정한다. Docling 후보는
+  CPU 1 thread의 local layout/table parser로만 동작하며 EasyOCR downloader를 피하기 위해
+  `ocr_enabled: false`와 table structure `fast`를 고정한다. 이 둘의 실제 실행 profile은
+  source-attested runtime에서도 fallback 없이 그대로 사용된다.
 
 ## 불변 local artifact
 
