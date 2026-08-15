@@ -212,7 +212,9 @@ def _run_preview_auto_importer_check(
         pytest.skip("PowerShell is required to test the Agent profile importer")
 
     importer = workspace / "customs-ai-agent" / "tools" / "Import-AgentProfile.ps1"
-    pointer = workspace / "_local" / "data" / "document-preview" / "approvals" / "pdf-preview-active.json"
+    pointer = (
+        workspace / "_local" / "data" / "document-preview" / "approvals" / "pdf-preview-active.json"
+    )
     switch = " -EnableSourceAttestedPdfPreviewAutoActivation" if enable else ""
     if preserve_and_clear:
         command = (

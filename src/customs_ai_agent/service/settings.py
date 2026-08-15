@@ -170,7 +170,9 @@ class ServiceSettings:
         has_preview_auto_activation = self.document_preview_auto_activation_mode is not None
         if has_preview_auto_activation:
             if self.document_preview_auto_activation_mode != "source-attested-synthetic":
-                raise ServiceConfigurationError("customs_agent_document_preview_auto_activation_invalid")
+                raise ServiceConfigurationError(
+                    "customs_agent_document_preview_auto_activation_invalid"
+                )
             if not has_preview_approval_path or has_preview_approval_sha256:
                 raise ServiceConfigurationError(
                     "customs_agent_document_preview_auto_activation_incomplete"
@@ -287,7 +289,10 @@ class ServiceSettings:
             raise ServiceConfigurationError("guidance_service_peer_incomplete")
         if has_guidance_registry_version != has_guidance_base_url:
             raise ServiceConfigurationError("guidance_registry_version_peer_incomplete")
-        if not has_preview_auto_activation and has_preview_approval_path != has_preview_approval_sha256:
+        if (
+            not has_preview_auto_activation
+            and has_preview_approval_path != has_preview_approval_sha256
+        ):
             raise ServiceConfigurationError("customs_agent_document_preview_approval_incomplete")
         guidance_base_url: str | None = None
         guidance_service_token: SecretStr | None = None
@@ -315,7 +320,9 @@ class ServiceSettings:
                 source, "CUSTOMS_AGENT_DOCUMENT_PREVIEW_AUTO_ACTIVATION"
             )
             if configured_auto_activation != "source-attested-synthetic":
-                raise ServiceConfigurationError("customs_agent_document_preview_auto_activation_invalid")
+                raise ServiceConfigurationError(
+                    "customs_agent_document_preview_auto_activation_invalid"
+                )
             if not has_preview_approval_path or has_preview_approval_sha256:
                 raise ServiceConfigurationError(
                     "customs_agent_document_preview_auto_activation_incomplete"

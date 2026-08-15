@@ -173,8 +173,7 @@ def create_app(
             approval_path=active_settings.document_preview_approval_path,
             approval_sha256=active_settings.document_preview_approval_sha256,
             source_attested_auto_activation=(
-                active_settings.document_preview_auto_activation_mode
-                == "source-attested-synthetic"
+                active_settings.document_preview_auto_activation_mode == "source-attested-synthetic"
             ),
         )
     )

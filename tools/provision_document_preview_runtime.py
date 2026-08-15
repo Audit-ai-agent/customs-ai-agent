@@ -42,7 +42,9 @@ def _check_free_space(path: Path, minimum_free_gib: float) -> None:
     try:
         free_bytes = shutil.disk_usage(path).free
     except OSError as error:
-        raise DocumentPreviewRuntimeError("document_preview_provisioning_space_check_failed") from error
+        raise DocumentPreviewRuntimeError(
+            "document_preview_provisioning_space_check_failed"
+        ) from error
     if free_bytes < int(minimum_free_gib * 1024**3):
         raise DocumentPreviewRuntimeError("document_preview_provisioning_space_insufficient")
 
@@ -61,7 +63,9 @@ def provision_runtime(
         try:
             cache = cache_directory.resolve(strict=True)
         except OSError as error:
-            raise DocumentPreviewRuntimeError("document_preview_provisioning_space_check_failed") from error
+            raise DocumentPreviewRuntimeError(
+                "document_preview_provisioning_space_check_failed"
+            ) from error
         _check_free_space(cache, minimum_free_gib)
     configuration = _json_object(configuration_path, root=root)
     inventory = _json_object(inventory_path, root=root)
@@ -101,7 +105,9 @@ def _parser() -> argparse.ArgumentParser:
 def main(argv: Sequence[str] | None = None) -> int:
     arguments = _parser().parse_args(argv)
     if not arguments.confirm_provision:
-        print(json.dumps({"status": "failed", "code": "confirmation_required"}, separators=(",", ":")))
+        print(
+            json.dumps({"status": "failed", "code": "confirmation_required"}, separators=(",", ":"))
+        )
         return 2
     try:
         configuration_sha256, model_inventory_sha256 = provision_runtime(

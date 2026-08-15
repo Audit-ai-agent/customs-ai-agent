@@ -72,7 +72,9 @@ def _parser() -> argparse.ArgumentParser:
     parser.add_argument("--receipt", type=Path, required=True)
     parser.add_argument("--error-labels", type=Path, required=True)
     parser.add_argument("--output-directory", type=Path, required=True)
-    parser.add_argument("--as-of", required=True, help="Packet preparation date in YYYY-MM-DD format.")
+    parser.add_argument(
+        "--as-of", required=True, help="Packet preparation date in YYYY-MM-DD format."
+    )
     return parser
 
 
@@ -89,7 +91,11 @@ def main(argv: Sequence[str] | None = None) -> int:
             prepared_as_of=prepared_as_of,
         )
     except (OSError, ValueError, json.JSONDecodeError):
-        print(json.dumps({"status": "failed", "code": "packet_preparation_failed"}, separators=(",", ":")))
+        print(
+            json.dumps(
+                {"status": "failed", "code": "packet_preparation_failed"}, separators=(",", ":")
+            )
+        )
         return 2
     print(json.dumps(summary, ensure_ascii=False, separators=(",", ":"), sort_keys=True))
     return 0

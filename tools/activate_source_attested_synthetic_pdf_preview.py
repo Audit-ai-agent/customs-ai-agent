@@ -55,7 +55,9 @@ def activate_source_attested_synthetic_runtime(
         ) from error
     evaluation = parse_source_attested_synthetic_sealed_evaluation_result(raw)
     if source.name != f"{evaluation.evaluation_result_sha256}.json":
-        raise DocumentPreviewRuntimeError("document_preview_source_attested_activation_input_invalid")
+        raise DocumentPreviewRuntimeError(
+            "document_preview_source_attested_activation_input_invalid"
+        )
     activation_sha256, _activation = write_source_attested_synthetic_pdf_preview_pointer(
         document_preview_root=root,
         evaluation_raw=raw,

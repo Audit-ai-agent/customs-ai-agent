@@ -217,9 +217,7 @@ def _write_source_attested_evaluation_artifact(*, root: Path, raw: bytes) -> Non
     destination.write_bytes(_canonical_local_artifact(value))
 
 
-def _rewrite_source_attested_evaluation(
-    *, root: Path, value: dict[str, object]
-) -> bytes:
+def _rewrite_source_attested_evaluation(*, root: Path, value: dict[str, object]) -> bytes:
     """Re-hash one test-only source result after a content-free mutation."""
 
     value["evaluation_result_sha256"] = _self_digest(value, "evaluation_result_sha256")
@@ -290,7 +288,9 @@ def _write_source_attested_receipt_chain(
     dataset_receipt_path.parent.mkdir(parents=True, exist_ok=True)
     dataset_receipt_path.write_bytes(_canonical_local_artifact(receipt))
 
-    def write_packet(*, split: str, records: list[dict[str, object]]) -> tuple[dict[str, object], str]:
+    def write_packet(
+        *, split: str, records: list[dict[str, object]]
+    ) -> tuple[dict[str, object], str]:
         packet: dict[str, object] = {
             "schema_version": "2.0",
             "packet_kind": "stratified-v2",
@@ -439,9 +439,7 @@ def _write_source_attested_receipt_chain(
         """Create the immutable content-free execution sidecar expected by runtime."""
 
         candidate_raw = (
-            root
-            / "source-attested-candidate-bundles"
-            / f"{candidate_bundle_sha256}.json"
+            root / "source-attested-candidate-bundles" / f"{candidate_bundle_sha256}.json"
         ).read_bytes()
         execution: dict[str, object] = {
             "schema_version": "1.0",
@@ -466,17 +464,21 @@ def _write_source_attested_receipt_chain(
             execution, "candidate_execution_receipt_sha256"
         )
         execution_sha256 = str(execution["candidate_execution_receipt_sha256"])
-        path = (
-            root
-            / "source-attested-candidate-executions"
-            / f"{execution_sha256}.json"
-        )
+        path = root / "source-attested-candidate-executions" / f"{execution_sha256}.json"
         path.parent.mkdir(parents=True, exist_ok=True)
         path.write_bytes(_canonical_local_artifact(execution))
         return execution_sha256
 
     development_profiles = [
-        ("pdf_text_layer", "pdf-text-test-v1", configuration_sha256, inventory_sha256, 1.0, 0.0, 1.0),
+        (
+            "pdf_text_layer",
+            "pdf-text-test-v1",
+            configuration_sha256,
+            inventory_sha256,
+            1.0,
+            0.0,
+            1.0,
+        ),
         ("paddleocr", "paddle-test-v1", "5" * 64, "6" * 64, 0.995, 0.005, 0.985),
         ("docling", "docling-test-v1", "7" * 64, "8" * 64, 0.99, 0.01, 0.98),
     ]
@@ -1375,9 +1377,7 @@ def test_source_attested_writer_rejects_missing_hash_named_dataset_receipt(tmp_p
         inventory_sha256=inventory_sha256,
     )
     dataset_path = (
-        root
-        / "source-attested-dataset-receipts"
-        / f"{chain['dataset_receipt_sha256']}.json"
+        root / "source-attested-dataset-receipts" / f"{chain['dataset_receipt_sha256']}.json"
     )
     dataset_path.unlink()
     evaluation = chain["evaluation"]
@@ -1423,23 +1423,15 @@ def test_source_attested_writer_rejects_tampered_actual_evidence_artifact(
     )
     if artifact_kind == "dataset":
         target = (
-            root
-            / "source-attested-dataset-receipts"
-            / f"{chain['dataset_receipt_sha256']}.json"
+            root / "source-attested-dataset-receipts" / f"{chain['dataset_receipt_sha256']}.json"
         )
     elif artifact_kind == "development_result":
         selection_path = (
-            root
-            / "source-attested-development-selections"
-            / f"{chain['selection_sha256']}.json"
+            root / "source-attested-development-selections" / f"{chain['selection_sha256']}.json"
         )
         selection = json.loads(selection_path.read_bytes())
         development_result_sha256 = selection["candidate_results"][0]["evaluation_result_sha256"]
-        target = (
-            root
-            / "source-attested-evaluation-results"
-            / f"{development_result_sha256}.json"
-        )
+        target = root / "source-attested-evaluation-results" / f"{development_result_sha256}.json"
     else:
         target = (
             root
@@ -1484,9 +1476,7 @@ def test_source_attested_loader_recomputes_development_selection_rank(tmp_path: 
     forged_selection["selected_extractor_revision"] = lower_ranked["extractor_revision"]
     forged_selection["selected_configuration_sha256"] = lower_ranked["configuration_sha256"]
     forged_selection["selected_model_inventory_sha256"] = lower_ranked["model_inventory_sha256"]
-    forged_selection["selected_evaluation_result_sha256"] = lower_ranked[
-        "evaluation_result_sha256"
-    ]
+    forged_selection["selected_evaluation_result_sha256"] = lower_ranked["evaluation_result_sha256"]
     forged_selection["development_selection_receipt_sha256"] = _self_digest(
         forged_selection, "development_selection_receipt_sha256"
     )
@@ -1505,9 +1495,7 @@ def test_source_attested_loader_recomputes_development_selection_rank(tmp_path: 
     forged_run["selected_development_evaluation_result_sha256"] = lower_ranked[
         "evaluation_result_sha256"
     ]
-    forged_run["sealed_run_receipt_sha256"] = _self_digest(
-        forged_run, "sealed_run_receipt_sha256"
-    )
+    forged_run["sealed_run_receipt_sha256"] = _self_digest(forged_run, "sealed_run_receipt_sha256")
     forged_run_sha256 = str(forged_run["sealed_run_receipt_sha256"])
     (root / "source-attested-sealed-runs" / f"{forged_run_sha256}.json").write_bytes(
         _canonical_local_artifact(forged_run)
@@ -1597,7 +1585,9 @@ def test_source_attested_loader_rejects_a_rehashed_candidate_with_incomplete_sou
     ):
         load_source_attested_synthetic_receipt_binding(
             root=root,
-            evaluation=parse_source_attested_synthetic_sealed_evaluation_result(rewritten_evaluation),
+            evaluation=parse_source_attested_synthetic_sealed_evaluation_result(
+                rewritten_evaluation
+            ),
         )
 
 
@@ -1713,14 +1703,10 @@ def test_source_attested_loader_rejects_execution_receipt_mismatch(tmp_path: Pat
     )
     selection = json.loads(
         (
-            root
-            / "source-attested-development-selections"
-            / f"{chain['selection_sha256']}.json"
+            root / "source-attested-development-selections" / f"{chain['selection_sha256']}.json"
         ).read_bytes()
     )
-    development_execution = selection["candidate_results"][0][
-        "candidate_execution_receipt_sha256"
-    ]
+    development_execution = selection["candidate_results"][0]["candidate_execution_receipt_sha256"]
     result = json.loads(chain["evaluation"])
     result["candidate_execution_receipt_sha256"] = development_execution
     rewritten = _rewrite_source_attested_evaluation(root=root, value=result)
@@ -1934,7 +1920,9 @@ def test_settings_keep_static_pin_and_allow_only_explicit_source_auto_mode(tmp_p
         )
 
 
-def test_settings_environment_requires_xor_between_static_hash_and_auto_mode(tmp_path: Path) -> None:
+def test_settings_environment_requires_xor_between_static_hash_and_auto_mode(
+    tmp_path: Path,
+) -> None:
     pointer = _root(tmp_path) / "approvals" / "pdf-preview-active.json"
     token = "aaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaBCDEFGHIJKL"
     environment = {

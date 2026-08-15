@@ -1228,9 +1228,7 @@ def _parse_source_attested_metrics(
     ocr_cer = _finite_number(metrics["ocr_cer"], code=code)
     table_cell_f1 = _finite_number(metrics["table_cell_f1"], code=code)
     if not (
-        0.0 <= field_exact_match <= 1.0
-        and 0.0 <= ocr_cer <= 1.0
-        and 0.0 <= table_cell_f1 <= 1.0
+        0.0 <= field_exact_match <= 1.0 and 0.0 <= ocr_cer <= 1.0 and 0.0 <= table_cell_f1 <= 1.0
     ):
         raise DocumentPreviewRuntimeError(code)
     field_exact_match_count = _source_attested_nonnegative_int(
@@ -1910,8 +1908,7 @@ def _load_source_attested_dataset_receipt(
     except ValidationError as error:
         raise DocumentPreviewRuntimeError(code) from error
     if (
-        raw
-        != _canonical_local_artifact_file_bytes(receipt.model_dump(mode="json", warnings=False))
+        raw != _canonical_local_artifact_file_bytes(receipt.model_dump(mode="json", warnings=False))
         or receipt_sha256(receipt) != dataset_receipt_sha256
     ):
         raise DocumentPreviewRuntimeError(code)
@@ -1924,11 +1921,15 @@ def _load_source_attested_dataset_receipt(
         )
         for asset in receipt.assets
     )
-    return path, raw, SourceAttestedDatasetReceiptV1(
-        dataset_id=_identifier(receipt.dataset_id, code=code),
-        dataset_revision=_identifier(receipt.dataset_revision, code=code),
-        dataset_receipt_sha256=dataset_receipt_sha256,
-        assets=assets,
+    return (
+        path,
+        raw,
+        SourceAttestedDatasetReceiptV1(
+            dataset_id=_identifier(receipt.dataset_id, code=code),
+            dataset_revision=_identifier(receipt.dataset_revision, code=code),
+            dataset_receipt_sha256=dataset_receipt_sha256,
+            assets=assets,
+        ),
     )
 
 
@@ -1953,8 +1954,7 @@ def _load_source_attested_packet(
     except ValidationError as error:
         raise DocumentPreviewRuntimeError(code) from error
     if (
-        raw
-        != _canonical_local_artifact_file_bytes(packet.model_dump(mode="json", warnings=False))
+        raw != _canonical_local_artifact_file_bytes(packet.model_dump(mode="json", warnings=False))
         or packet_receipt_sha256(packet) != expected_packet_receipt_sha256
     ):
         raise DocumentPreviewRuntimeError(code)
@@ -1970,14 +1970,18 @@ def _load_source_attested_packet(
         )
         for item in packet.items
     )
-    return path, raw, SourceAttestedPacketV1(
-        dataset_id=_identifier(packet.dataset_id, code=code),
-        dataset_revision=_identifier(packet.dataset_revision, code=code),
-        dataset_receipt_sha256=_sha256(packet.receipt_sha256, code=code),
-        packet_split=cast(Literal["development", "sealed"], packet.split),
-        packet_receipt_sha256=expected_packet_receipt_sha256,
-        error_labels_sha256=_sha256(packet.error_labels_sha256, code=code),
-        items=items,
+    return (
+        path,
+        raw,
+        SourceAttestedPacketV1(
+            dataset_id=_identifier(packet.dataset_id, code=code),
+            dataset_revision=_identifier(packet.dataset_revision, code=code),
+            dataset_receipt_sha256=_sha256(packet.receipt_sha256, code=code),
+            packet_split=cast(Literal["development", "sealed"], packet.split),
+            packet_receipt_sha256=expected_packet_receipt_sha256,
+            error_labels_sha256=_sha256(packet.error_labels_sha256, code=code),
+            items=items,
+        ),
     )
 
 
@@ -2016,17 +2020,21 @@ def _load_source_attested_candidate_bundle(
     )
     if len(source_assets) != len(set(source_assets)):
         raise DocumentPreviewRuntimeError(code)
-    return path, raw, SourceAttestedCandidateBundleV1(
-        dataset_id=_identifier(candidate.dataset_id, code=code),
-        dataset_revision=_identifier(candidate.dataset_revision, code=code),
-        packet_receipt_sha256=_sha256(candidate.packet_receipt_sha256, code=code),
-        parser_revision=_identifier(candidate.parser_revision, code=code),
-        engine_kind=_engine_kind(candidate.engine_kind, code=code),
-        extractor_revision=_identifier(candidate.extractor_revision, code=code),
-        configuration_sha256=_sha256(candidate.configuration_sha256, code=code),
-        model_inventory_sha256=_sha256(candidate.model_inventory_sha256, code=code),
-        candidate_bundle_sha256=candidate_bundle_sha256_value,
-        source_assets=source_assets,
+    return (
+        path,
+        raw,
+        SourceAttestedCandidateBundleV1(
+            dataset_id=_identifier(candidate.dataset_id, code=code),
+            dataset_revision=_identifier(candidate.dataset_revision, code=code),
+            packet_receipt_sha256=_sha256(candidate.packet_receipt_sha256, code=code),
+            parser_revision=_identifier(candidate.parser_revision, code=code),
+            engine_kind=_engine_kind(candidate.engine_kind, code=code),
+            extractor_revision=_identifier(candidate.extractor_revision, code=code),
+            configuration_sha256=_sha256(candidate.configuration_sha256, code=code),
+            model_inventory_sha256=_sha256(candidate.model_inventory_sha256, code=code),
+            candidate_bundle_sha256=candidate_bundle_sha256_value,
+            source_assets=source_assets,
+        ),
     )
 
 
@@ -2147,7 +2155,10 @@ def _validate_source_attested_candidate_coverage(
         or candidate.extractor_revision != extractor_revision
         or candidate.configuration_sha256 != configuration_sha256
         or candidate.model_inventory_sha256 != model_inventory_sha256
-        or (expected_parser_revision is not None and candidate.parser_revision != expected_parser_revision)
+        or (
+            expected_parser_revision is not None
+            and candidate.parser_revision != expected_parser_revision
+        )
         or len(candidate.source_assets) != len(packet_assets)
         or set(candidate.source_assets) != packet_assets
     ):
@@ -2169,10 +2180,8 @@ def _validate_source_attested_development_result(
         or result.dataset_revision != development_packet.dataset_revision
         or result.packet_receipt_sha256 != development_packet.packet_receipt_sha256
         or result.layout_truth_receipt_sha256 != development_layout_truth.receipt_sha256
-        or result.layout_truth_parser_spec_sha256
-        != development_layout_truth.parser_spec_sha256
-        or result.layout_truth_parser_spec_sha256
-        != selection.layout_truth_parser_spec_sha256
+        or result.layout_truth_parser_spec_sha256 != development_layout_truth.parser_spec_sha256
+        or result.layout_truth_parser_spec_sha256 != selection.layout_truth_parser_spec_sha256
         or result.candidate_parser_revision != selection_member.candidate_parser_revision
         or result.candidate_parser_revision != selection.candidate_parser_revision
         or result.engine_kind != selection_member.engine_kind
@@ -2207,7 +2216,10 @@ def _recompute_source_attested_development_selection(
     """Apply the fixed metric ordering from verified raw development results."""
 
     code = "document_preview_source_attested_development_selection_mismatch"
-    if len(results) != len(_ENGINE_KINDS) or {result.engine_kind for result in results} != _ENGINE_KINDS:
+    if (
+        len(results) != len(_ENGINE_KINDS)
+        or {result.engine_kind for result in results} != _ENGINE_KINDS
+    ):
         raise DocumentPreviewRuntimeError(code)
     passing = [result for result in results if result.passed]
     if not passing:
@@ -2449,7 +2461,7 @@ def load_source_attested_synthetic_receipt_binding(
     # source-attested evaluation workflow.
     sealed_evaluation_path, sealed_evaluation_raw, sealed_evaluation = (
         _load_source_attested_sealed_evaluation(
-        root=root, evaluation_result_sha256=evaluation.evaluation_result_sha256
+            root=root, evaluation_result_sha256=evaluation.evaluation_result_sha256
         )
     )
     if sealed_evaluation != evaluation:
@@ -2502,12 +2514,16 @@ def load_source_attested_synthetic_receipt_binding(
         receipt_sha256=evaluation.sealed_run_receipt_sha256,
     )
 
-    dataset_receipt_path, dataset_receipt_raw, dataset_receipt = _load_source_attested_dataset_receipt(
-        root=root, dataset_receipt_sha256=layout_truth.dataset_receipt_sha256
+    dataset_receipt_path, dataset_receipt_raw, dataset_receipt = (
+        _load_source_attested_dataset_receipt(
+            root=root, dataset_receipt_sha256=layout_truth.dataset_receipt_sha256
+        )
     )
-    development_packet_path, development_packet_raw, development_packet = _load_source_attested_packet(
-        root=root,
-        expected_packet_receipt_sha256=selection.development_packet_receipt_sha256,
+    development_packet_path, development_packet_raw, development_packet = (
+        _load_source_attested_packet(
+            root=root,
+            expected_packet_receipt_sha256=selection.development_packet_receipt_sha256,
+        )
     )
     sealed_packet_path, sealed_packet_raw, sealed_packet = _load_source_attested_packet(
         root=root, expected_packet_receipt_sha256=evaluation.packet_receipt_sha256
@@ -2583,12 +2599,12 @@ def load_source_attested_synthetic_receipt_binding(
     for member in selection.candidate_results:
         evaluation_path, development_evaluation_raw, development_result = (
             _load_source_attested_development_evaluation(
-            root=root, evaluation_result_sha256=member.evaluation_result_sha256
+                root=root, evaluation_result_sha256=member.evaluation_result_sha256
             )
         )
         candidate_path, development_candidate_raw, development_candidate = (
             _load_source_attested_candidate_bundle(
-            root=root, candidate_bundle_sha256_value=member.candidate_bundle_sha256
+                root=root, candidate_bundle_sha256_value=member.candidate_bundle_sha256
             )
         )
         execution_path, execution_raw = _load_source_attested_candidate_execution(
@@ -2614,11 +2630,16 @@ def load_source_attested_synthetic_receipt_binding(
     selected_development_result = _recompute_source_attested_development_selection(
         results=tuple(development_evaluations), selection=selection
     )
-    if selected_development_result.evaluation_result_sha256 != sealed_run.selected_development_evaluation_result_sha256:
+    if (
+        selected_development_result.evaluation_result_sha256
+        != sealed_run.selected_development_evaluation_result_sha256
+    ):
         raise DocumentPreviewRuntimeError(binding_code)
 
-    sealed_candidate_path, sealed_candidate_raw, sealed_candidate = _load_source_attested_candidate_bundle(
-        root=root, candidate_bundle_sha256_value=sealed_run.candidate_bundle_sha256
+    sealed_candidate_path, sealed_candidate_raw, sealed_candidate = (
+        _load_source_attested_candidate_bundle(
+            root=root, candidate_bundle_sha256_value=sealed_run.candidate_bundle_sha256
+        )
     )
     _validate_source_attested_candidate_coverage(
         candidate=sealed_candidate,
@@ -2823,15 +2844,11 @@ def _model_relative_path_key(relative_path: str) -> tuple[str, ...]:
     return tuple(parts)
 
 
-def _is_relative_descendant(
-    candidate: tuple[str, ...], directory: tuple[str, ...]
-) -> bool:
+def _is_relative_descendant(candidate: tuple[str, ...], directory: tuple[str, ...]) -> bool:
     return len(candidate) > len(directory) and candidate[: len(directory)] == directory
 
 
-def _walk_regular_model_files(
-    *, root: Path, directory: Path
-) -> frozenset[tuple[str, ...]]:
+def _walk_regular_model_files(*, root: Path, directory: Path) -> frozenset[tuple[str, ...]]:
     """Return every regular file below one configured model directory.
 
     The model folder is an immutable inventory boundary, not a cache.  A
@@ -3567,7 +3584,9 @@ class AutoActivatingSourceAttestedPdfPreviewEngine:
     package_version_reader: Callable[[str], str]
     _lock: threading.RLock = field(default_factory=threading.RLock, init=False, repr=False)
     _active_pointer_sha256: str | None = field(default=None, init=False, repr=False)
-    _active_engine: ApprovedPdfOnlyPreviewEngine | None = field(default=None, init=False, repr=False)
+    _active_engine: ApprovedPdfOnlyPreviewEngine | None = field(
+        default=None, init=False, repr=False
+    )
 
     def _clear_active(self) -> None:
         self._active_pointer_sha256 = None
@@ -3593,10 +3612,7 @@ class AutoActivatingSourceAttestedPdfPreviewEngine:
 
         with self._lock:
             initial_raw, pointer_sha256 = self._read_source_attested_pointer_snapshot()
-            if (
-                self._active_engine is not None
-                and self._active_pointer_sha256 == pointer_sha256
-            ):
+            if self._active_engine is not None and self._active_pointer_sha256 == pointer_sha256:
                 return self._active_engine
 
             # Pointer bytes changed.  Drop the previous profile before doing
@@ -3608,13 +3624,17 @@ class AutoActivatingSourceAttestedPdfPreviewEngine:
                 package_version_reader=self.package_version_reader,
             )
             if not isinstance(binding.approval, SourceAttestedSyntheticPdfPreviewActivationV1):
-                raise DocumentPreviewRuntimeError("document_preview_source_attested_auto_pointer_invalid")
+                raise DocumentPreviewRuntimeError(
+                    "document_preview_source_attested_auto_pointer_invalid"
+                )
 
             # A writer uses atomic replacement, but re-read after the complete
             # chain validation to reject a pointer that changed while loading.
             confirmed_raw, confirmed_sha256 = self._read_source_attested_pointer_snapshot()
             if confirmed_sha256 != pointer_sha256 or confirmed_raw != initial_raw:
-                raise DocumentPreviewRuntimeError("document_preview_source_attested_auto_pointer_changed")
+                raise DocumentPreviewRuntimeError(
+                    "document_preview_source_attested_auto_pointer_changed"
+                )
             binding.verify_runtime_state()
             candidate = ApprovedPdfOnlyPreviewEngine(
                 binding=binding,

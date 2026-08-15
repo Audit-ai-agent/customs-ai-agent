@@ -1527,9 +1527,11 @@ def _require_error_content_stream_difference(
     mutation_rendered = False
     for label in error_labels:
         field_name = _SOURCE_ERROR_LABEL_FIELDS.get((item.document_type, label["field"]))
+        if field_name is None:
+            continue
         error_rendered = error_rendered_fields.get(field_name)
         clean_rendered = clean_rendered_fields.get(field_name)
-        if field_name is None or error_rendered is None or clean_rendered is None:
+        if error_rendered is None or clean_rendered is None:
             continue
         wrong_projection = _error_label_projection(
             document_type=item.document_type,

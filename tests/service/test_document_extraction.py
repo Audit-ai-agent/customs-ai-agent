@@ -119,8 +119,12 @@ def test_disabled_default_returns_content_free_unavailable_preview() -> None:
     }
 
 
-def test_explicit_source_attested_auto_mode_starts_pending_without_a_pointer(tmp_path: Path) -> None:
-    pointer = tmp_path / "_local" / "data" / "document-preview" / "approvals" / "pdf-preview-active.json"
+def test_explicit_source_attested_auto_mode_starts_pending_without_a_pointer(
+    tmp_path: Path,
+) -> None:
+    pointer = (
+        tmp_path / "_local" / "data" / "document-preview" / "approvals" / "pdf-preview-active.json"
+    )
     app = create_app(
         _settings(
             document_preview_approval_path=pointer,

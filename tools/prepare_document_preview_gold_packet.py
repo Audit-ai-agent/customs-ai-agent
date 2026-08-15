@@ -35,7 +35,9 @@ def _write_json(path: Path, payload: object) -> None:
     path.write_text(f"{encoded}\n", encoding="utf-8")
 
 
-def prepare_packets(*, receipt_path: Path, output_directory: Path, prepared_as_of: date) -> dict[str, object]:
+def prepare_packets(
+    *, receipt_path: Path, output_directory: Path, prepared_as_of: date
+) -> dict[str, object]:
     receipt_raw = json.loads(receipt_path.read_text(encoding="utf-8"))
     receipt = DatasetReceiptV1.model_validate(receipt_raw)
     development, sealed = build_draft_gold_packets(receipt, prepared_as_of=prepared_as_of)
@@ -59,15 +61,21 @@ def prepare_packets(*, receipt_path: Path, output_directory: Path, prepared_as_o
 
 
 def _parser() -> argparse.ArgumentParser:
-    parser = argparse.ArgumentParser(description="Prepare local-only draft document-preview Gold packets.")
-    parser.add_argument("--receipt", type=Path, required=True, help="Local immutable dataset receipt JSON.")
+    parser = argparse.ArgumentParser(
+        description="Prepare local-only draft document-preview Gold packets."
+    )
+    parser.add_argument(
+        "--receipt", type=Path, required=True, help="Local immutable dataset receipt JSON."
+    )
     parser.add_argument(
         "--output-directory",
         type=Path,
         required=True,
         help="Existing or new directory below _local/data for the draft packets.",
     )
-    parser.add_argument("--as-of", required=True, help="Packet preparation date in YYYY-MM-DD format.")
+    parser.add_argument(
+        "--as-of", required=True, help="Packet preparation date in YYYY-MM-DD format."
+    )
     return parser
 
 

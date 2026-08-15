@@ -65,7 +65,11 @@ def _parser() -> argparse.ArgumentParser:
 def main(argv: Sequence[str] | None = None) -> int:
     arguments = _parser().parse_args(argv)
     if not arguments.confirm_human_approval:
-        print(json.dumps({"status": "failed", "code": "human_approval_required"}, separators=(",", ":")))
+        print(
+            json.dumps(
+                {"status": "failed", "code": "human_approval_required"}, separators=(",", ":")
+            )
+        )
         return 2
     try:
         approval_sha256 = approve_runtime(
