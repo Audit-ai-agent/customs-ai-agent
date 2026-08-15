@@ -4,6 +4,7 @@ import hashlib
 import json
 import socket
 from pathlib import Path
+from typing import cast
 
 import pytest
 from pydantic import SecretStr
@@ -35,6 +36,25 @@ from customs_ai_agent.service.document_preview_runtime import (
     write_source_attested_synthetic_pdf_preview_pointer,
 )
 from customs_ai_agent.service.settings import ServiceConfigurationError, ServiceSettings
+
+
+@pytest.fixture(autouse=True)
+def _isolate_runtime_source_replay(monkeypatch: pytest.MonkeyPatch) -> None:
+    """Keep old compact runtime-chain fixtures separate from source truth data.
+
+    The source verifier deliberately accepts only the immutable production
+    6,000-PDF corpus and canonical 60/20 packets.  This service test module
+    uses tiny content-free fixtures to exercise path/hash/pointer failures;
+    the source-truth module owns full re-score tests.  Individual runtime
+    wiring tests below replace this no-op and assert the loader invokes the
+    verifier with every raw artifact.
+    """
+
+    monkeypatch.setattr(
+        runtime_module,
+        "_verify_source_attested_synthetic_replay",
+        lambda **_kwargs: None,
+    )
 
 
 def _canonical(value: object, *, newline: bool = False) -> bytes:
@@ -131,7 +151,9 @@ def _source_attested_evaluation(
     layout_truth_parser_spec_sha256: str = "d" * 64,
     development_selection_receipt_sha256: str = "e" * 64,
     sealed_run_receipt_sha256: str = "f" * 64,
+    candidate_parser_revision: str = "synthetic-pdf-label-normalizer-v2",
     candidate_bundle_sha256: str = "1" * 64,
+    candidate_execution_receipt_sha256: str = "2" * 64,
     engine_kind: str = "pdf_text_layer",
     extractor_revision: str = "pdf-text-test-v1",
 ) -> bytes:
@@ -153,12 +175,24 @@ def _source_attested_evaluation(
         "extractor_revision": extractor_revision,
         "configuration_sha256": configuration_sha256,
         "model_inventory_sha256": inventory_sha256,
+        "candidate_parser_revision": candidate_parser_revision,
         "passed": True,
         "metrics": {
             "field_exact_match": 0.99,
+            "field_exact_match_count": 99,
+            "field_exact_match_total": 100,
+            "field_exact_match_denominators": [
+                {
+                    "document_type": "invoice",
+                    "document_count": 1,
+                    "fields_per_document": 100,
+                    "total_fields": 100,
+                }
+            ],
             "ocr_cer": 0.01,
             "table_cell_f1": 0.98,
         },
+        "candidate_execution_receipt_sha256": candidate_execution_receipt_sha256,
     }
     value = {
         **unsigned,
@@ -183,14 +217,28 @@ def _write_source_attested_evaluation_artifact(*, root: Path, raw: bytes) -> Non
     destination.write_bytes(_canonical_local_artifact(value))
 
 
+def _rewrite_source_attested_evaluation(
+    *, root: Path, value: dict[str, object]
+) -> bytes:
+    """Re-hash one test-only source result after a content-free mutation."""
+
+    value["evaluation_result_sha256"] = _self_digest(value, "evaluation_result_sha256")
+    raw = _canonical_local_artifact(value)
+    _write_source_attested_evaluation_artifact(root=root, raw=raw)
+    return raw
+
+
 def _write_source_attested_receipt_chain(
-    *, root: Path, configuration_sha256: str, inventory_sha256: str
+    *,
+    root: Path,
+    configuration_sha256: str,
+    inventory_sha256: str,
+    candidate_parser_revision: str = "synthetic-pdf-label-normalizer-v2",
 ) -> dict[str, str | bytes]:
     """Build a complete local source-attested chain, not hash-shaped placeholders."""
 
     parser_spec_sha256 = "c" * 64
     error_labels_sha256 = "2" * 64
-    candidate_parser_revision = "synthetic-pdf-label-normalizer-v2"
     strata = [
         (fixture_kind, document_type)
         for fixture_kind in ("clean", "error")
@@ -377,6 +425,56 @@ def _write_source_attested_receipt_chain(
         path.write_bytes(_canonical_local_artifact(bundle))
         return bundle_sha256
 
+    def write_candidate_execution(
+        *,
+        packet_sha256: str,
+        packet_kind: str,
+        layout_truth_sha256: str,
+        engine_kind: str,
+        extractor_revision: str,
+        candidate_configuration_sha256: str,
+        candidate_inventory_sha256: str,
+        candidate_bundle_sha256: str,
+    ) -> str:
+        """Create the immutable content-free execution sidecar expected by runtime."""
+
+        candidate_raw = (
+            root
+            / "source-attested-candidate-bundles"
+            / f"{candidate_bundle_sha256}.json"
+        ).read_bytes()
+        execution: dict[str, object] = {
+            "schema_version": "1.0",
+            "artifact_kind": "source_attested_synthetic_pdf_candidate_execution",
+            "profile_mode": "offline_synthetic_pdf_evaluation",
+            "dataset_id": "synthetic-pdf",
+            "dataset_revision": "synthetic-pdf-r1",
+            "dataset_receipt_sha256": dataset_receipt_sha256,
+            "packet_kind": packet_kind,
+            "packet_receipt_sha256": packet_sha256,
+            "layout_truth_receipt_sha256": layout_truth_sha256,
+            "layout_truth_parser_spec_sha256": parser_spec_sha256,
+            "engine_kind": engine_kind,
+            "extractor_revision": extractor_revision,
+            "configuration_sha256": candidate_configuration_sha256,
+            "model_inventory_sha256": candidate_inventory_sha256,
+            "candidate_parser_revision": candidate_parser_revision,
+            "candidate_bundle_sha256": candidate_bundle_sha256,
+            "candidate_output_sha256": hashlib.sha256(candidate_raw).hexdigest(),
+        }
+        execution["candidate_execution_receipt_sha256"] = _self_digest(
+            execution, "candidate_execution_receipt_sha256"
+        )
+        execution_sha256 = str(execution["candidate_execution_receipt_sha256"])
+        path = (
+            root
+            / "source-attested-candidate-executions"
+            / f"{execution_sha256}.json"
+        )
+        path.parent.mkdir(parents=True, exist_ok=True)
+        path.write_bytes(_canonical_local_artifact(execution))
+        return execution_sha256
+
     development_profiles = [
         ("pdf_text_layer", "pdf-text-test-v1", configuration_sha256, inventory_sha256, 1.0, 0.0, 1.0),
         ("paddleocr", "paddle-test-v1", "5" * 64, "6" * 64, 0.995, 0.005, 0.985),
@@ -400,6 +498,18 @@ def _write_source_attested_receipt_chain(
             candidate_configuration_sha256=candidate_configuration_sha256,
             candidate_inventory_sha256=candidate_inventory_sha256,
         )
+        candidate_execution_sha256 = write_candidate_execution(
+            packet_sha256=development_packet_sha256,
+            packet_kind="development",
+            layout_truth_sha256=development_layout_sha256,
+            engine_kind=engine_kind,
+            extractor_revision=extractor_revision,
+            candidate_configuration_sha256=candidate_configuration_sha256,
+            candidate_inventory_sha256=candidate_inventory_sha256,
+            candidate_bundle_sha256=candidate_bundle_sha256,
+        )
+        field_exact_match_total = 200
+        field_exact_match_count = round(field_exact_match * field_exact_match_total)
         result: dict[str, object] = {
             "schema_version": "1.0",
             "evaluation_basis": "source_attested_synthetic",
@@ -417,10 +527,22 @@ def _write_source_attested_receipt_chain(
             "extractor_revision": extractor_revision,
             "configuration_sha256": candidate_configuration_sha256,
             "model_inventory_sha256": candidate_inventory_sha256,
+            "candidate_parser_revision": candidate_parser_revision,
             "candidate_bundle_sha256": candidate_bundle_sha256,
+            "candidate_execution_receipt_sha256": candidate_execution_sha256,
             "passed": True,
             "metrics": {
                 "field_exact_match": field_exact_match,
+                "field_exact_match_count": field_exact_match_count,
+                "field_exact_match_total": field_exact_match_total,
+                "field_exact_match_denominators": [
+                    {
+                        "document_type": "invoice",
+                        "document_count": 10,
+                        "fields_per_document": 20,
+                        "total_fields": field_exact_match_total,
+                    }
+                ],
                 "ocr_cer": ocr_cer,
                 "table_cell_f1": table_cell_f1,
             },
@@ -436,8 +558,10 @@ def _write_source_attested_receipt_chain(
                 "extractor_revision": extractor_revision,
                 "configuration_sha256": candidate_configuration_sha256,
                 "model_inventory_sha256": candidate_inventory_sha256,
+                "candidate_parser_revision": candidate_parser_revision,
                 "evaluation_result_sha256": result_sha256,
                 "candidate_bundle_sha256": candidate_bundle_sha256,
+                "candidate_execution_receipt_sha256": candidate_execution_sha256,
                 "passed": True,
             }
         )
@@ -454,6 +578,7 @@ def _write_source_attested_receipt_chain(
         "development_packet_receipt_sha256": development_packet_sha256,
         "layout_truth_receipt_sha256": development_layout_sha256,
         "layout_truth_parser_spec_sha256": parser_spec_sha256,
+        "candidate_parser_revision": candidate_parser_revision,
         "candidate_results": candidates,
         "selected_engine_kind": selected["engine_kind"],
         "selected_extractor_revision": selected["extractor_revision"],
@@ -476,6 +601,16 @@ def _write_source_attested_receipt_chain(
         extractor_revision="pdf-text-test-v1",
         candidate_configuration_sha256=configuration_sha256,
         candidate_inventory_sha256=inventory_sha256,
+    )
+    sealed_candidate_execution_sha256 = write_candidate_execution(
+        packet_sha256=sealed_packet_sha256,
+        packet_kind="sealed",
+        layout_truth_sha256=layout_sha256,
+        engine_kind="pdf_text_layer",
+        extractor_revision="pdf-text-test-v1",
+        candidate_configuration_sha256=configuration_sha256,
+        candidate_inventory_sha256=inventory_sha256,
+        candidate_bundle_sha256=sealed_candidate_bundle_sha256,
     )
     reservation: dict[str, object] = {
         "schema_version": "1.0",
@@ -515,6 +650,7 @@ def _write_source_attested_receipt_chain(
         "selected_development_evaluation_result_sha256": selected["evaluation_result_sha256"],
         "candidate_bundle_sha256": sealed_candidate_bundle_sha256,
         "candidate_parser_revision": candidate_parser_revision,
+        "candidate_execution_receipt_sha256": sealed_candidate_execution_sha256,
         "sealed_candidate_reservation_sha256": reservation_sha256,
     }
     sealed_run["sealed_run_receipt_sha256"] = _self_digest(sealed_run, "sealed_run_receipt_sha256")
@@ -531,6 +667,8 @@ def _write_source_attested_receipt_chain(
         development_selection_receipt_sha256=selection_sha256,
         sealed_run_receipt_sha256=sealed_run_sha256,
         candidate_bundle_sha256=sealed_candidate_bundle_sha256,
+        candidate_parser_revision=candidate_parser_revision,
+        candidate_execution_receipt_sha256=sealed_candidate_execution_sha256,
     )
     _write_source_attested_evaluation_artifact(root=root, raw=evaluation)
     return {
@@ -542,6 +680,7 @@ def _write_source_attested_receipt_chain(
         "selection_sha256": selection_sha256,
         "sealed_run_sha256": sealed_run_sha256,
         "sealed_candidate_bundle_sha256": sealed_candidate_bundle_sha256,
+        "sealed_candidate_execution_sha256": sealed_candidate_execution_sha256,
         "evaluation": evaluation,
     }
 
@@ -1023,6 +1162,16 @@ def test_source_attested_parser_rejects_missing_scope_and_mixed_human_provenance
     out_of_range = json.loads(raw)
     out_of_range["metrics"] = {
         "field_exact_match": 2.0,
+        "field_exact_match_count": 200,
+        "field_exact_match_total": 100,
+        "field_exact_match_denominators": [
+            {
+                "document_type": "invoice",
+                "document_count": 1,
+                "fields_per_document": 100,
+                "total_fields": 100,
+            }
+        ],
         "ocr_cer": -0.01,
         "table_cell_f1": 2.0,
     }
@@ -1095,6 +1244,7 @@ def test_source_attested_writer_rejects_development_selection_without_three_engi
         sealed_run_receipt_sha256=sealed_run_sha256,
         packet_receipt_sha256=str(chain["sealed_packet_receipt_sha256"]),
         candidate_bundle_sha256=str(chain["sealed_candidate_bundle_sha256"]),
+        candidate_execution_receipt_sha256=str(chain["sealed_candidate_execution_sha256"]),
     )
     _write_source_attested_evaluation_artifact(root=root, raw=evaluation)
 
@@ -1192,6 +1342,7 @@ def test_source_attested_writer_rejects_a_valid_but_mismatched_sealed_run_receip
         sealed_run_receipt_sha256=mismatched_run_sha256,
         packet_receipt_sha256=str(chain["sealed_packet_receipt_sha256"]),
         candidate_bundle_sha256=str(chain["sealed_candidate_bundle_sha256"]),
+        candidate_execution_receipt_sha256=str(chain["sealed_candidate_execution_sha256"]),
     )
     _write_source_attested_evaluation_artifact(root=root, raw=evaluation)
 
@@ -1372,6 +1523,7 @@ def test_source_attested_loader_recomputes_development_selection_rank(tmp_path: 
         development_selection_receipt_sha256=forged_selection_sha256,
         sealed_run_receipt_sha256=forged_run_sha256,
         candidate_bundle_sha256=str(chain["sealed_candidate_bundle_sha256"]),
+        candidate_execution_receipt_sha256=str(chain["sealed_candidate_execution_sha256"]),
     )
     _write_source_attested_evaluation_artifact(root=root, raw=forged_evaluation)
 
@@ -1435,6 +1587,7 @@ def test_source_attested_loader_rejects_a_rehashed_candidate_with_incomplete_sou
         development_selection_receipt_sha256=str(chain["selection_sha256"]),
         sealed_run_receipt_sha256=rewritten_run_sha256,
         candidate_bundle_sha256=incomplete_candidate_sha256,
+        candidate_execution_receipt_sha256=str(chain["sealed_candidate_execution_sha256"]),
     )
     _write_source_attested_evaluation_artifact(root=root, raw=rewritten_evaluation)
 
@@ -1445,6 +1598,205 @@ def test_source_attested_loader_rejects_a_rehashed_candidate_with_incomplete_sou
         load_source_attested_synthetic_receipt_binding(
             root=root,
             evaluation=parse_source_attested_synthetic_sealed_evaluation_result(rewritten_evaluation),
+        )
+
+
+def test_source_attested_loader_rejects_an_altered_raw_candidate_bundle(tmp_path: Path) -> None:
+    """A changed candidate byte cannot pass the hash-named canonical boundary."""
+
+    root = _root(tmp_path)
+    root.mkdir(parents=True)
+    configuration_sha256, inventory_sha256 = write_runtime_sidecars(
+        document_preview_root=root,
+        configuration_value=_configuration(),
+        inventory_value=_inventory(),
+        package_version_reader=_package_version,
+    )
+    chain = _write_source_attested_receipt_chain(
+        root=root,
+        configuration_sha256=configuration_sha256,
+        inventory_sha256=inventory_sha256,
+    )
+    candidate_path = (
+        root
+        / "source-attested-candidate-bundles"
+        / f"{chain['sealed_candidate_bundle_sha256']}.json"
+    )
+    candidate_path.write_bytes(b"{}\n")
+    evaluation = chain["evaluation"]
+    assert isinstance(evaluation, bytes)
+
+    with pytest.raises(
+        DocumentPreviewRuntimeError,
+        match="document_preview_source_attested_candidate_bundle_invalid",
+    ):
+        load_source_attested_synthetic_receipt_binding(
+            root=root,
+            evaluation=parse_source_attested_synthetic_sealed_evaluation_result(evaluation),
+        )
+
+
+def test_source_attested_replay_rejects_a_rehashed_result_mismatch(
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    """The shared pointer loader invokes replay after all receipt readers bind."""
+
+    root = _root(tmp_path)
+    root.mkdir(parents=True)
+    configuration_sha256, inventory_sha256 = write_runtime_sidecars(
+        document_preview_root=root,
+        configuration_value=_configuration(),
+        inventory_value=_inventory(),
+        package_version_reader=_package_version,
+    )
+    chain = _write_source_attested_receipt_chain(
+        root=root,
+        configuration_sha256=configuration_sha256,
+        inventory_sha256=inventory_sha256,
+    )
+    result = json.loads(chain["evaluation"])
+    metrics = result["metrics"]
+    assert isinstance(metrics, dict)
+    metrics["field_exact_match"] = 1.0
+    metrics["field_exact_match_count"] = 100
+    metrics["field_exact_match_total"] = 100
+    metrics["field_exact_match_denominators"] = [
+        {
+            "document_type": "invoice",
+            "document_count": 1,
+            "fields_per_document": 100,
+            "total_fields": 100,
+        }
+    ]
+    rewritten = _rewrite_source_attested_evaluation(root=root, value=result)
+    replay_calls: list[dict[str, object]] = []
+
+    def reject_replayed_mismatch(**kwargs: object) -> None:
+        replay_calls.append(kwargs)
+        raise DocumentPreviewRuntimeError("document_preview_source_attested_replay_mismatch")
+
+    monkeypatch.setattr(
+        runtime_module, "_verify_source_attested_synthetic_replay", reject_replayed_mismatch
+    )
+    with pytest.raises(
+        DocumentPreviewRuntimeError,
+        match="document_preview_source_attested_replay_mismatch",
+    ):
+        write_source_attested_synthetic_pdf_preview_pointer(
+            document_preview_root=root,
+            evaluation_raw=rewritten,
+            configuration_sha256=configuration_sha256,
+            model_inventory_sha256=inventory_sha256,
+            package_version_reader=_package_version,
+        )
+    assert len(replay_calls) == 1
+    assert len(cast(tuple[bytes, ...], replay_calls[0]["development_candidate_raws"])) == 3
+    assert isinstance(replay_calls[0]["sealed_candidate_raw"], bytes)
+    assert not (root / "approvals" / "pdf-preview-active.json").exists()
+
+
+def test_source_attested_loader_rejects_execution_receipt_mismatch(tmp_path: Path) -> None:
+    """A sealed result may not substitute a development execution sidecar."""
+
+    root = _root(tmp_path)
+    root.mkdir(parents=True)
+    configuration_sha256, inventory_sha256 = write_runtime_sidecars(
+        document_preview_root=root,
+        configuration_value=_configuration(),
+        inventory_value=_inventory(),
+        package_version_reader=_package_version,
+    )
+    chain = _write_source_attested_receipt_chain(
+        root=root,
+        configuration_sha256=configuration_sha256,
+        inventory_sha256=inventory_sha256,
+    )
+    selection = json.loads(
+        (
+            root
+            / "source-attested-development-selections"
+            / f"{chain['selection_sha256']}.json"
+        ).read_bytes()
+    )
+    development_execution = selection["candidate_results"][0][
+        "candidate_execution_receipt_sha256"
+    ]
+    result = json.loads(chain["evaluation"])
+    result["candidate_execution_receipt_sha256"] = development_execution
+    rewritten = _rewrite_source_attested_evaluation(root=root, value=result)
+
+    with pytest.raises(
+        DocumentPreviewRuntimeError,
+        match="document_preview_source_attested_receipt_binding_mismatch",
+    ):
+        load_source_attested_synthetic_receipt_binding(
+            root=root,
+            evaluation=parse_source_attested_synthetic_sealed_evaluation_result(rewritten),
+        )
+
+
+def test_source_attested_loader_accepts_one_consistent_visible_layout_v3_chain(
+    tmp_path: Path,
+) -> None:
+    """The new v3 parser is accepted only when every immutable binding agrees."""
+
+    root = _root(tmp_path)
+    root.mkdir(parents=True)
+    configuration_sha256, inventory_sha256 = write_runtime_sidecars(
+        document_preview_root=root,
+        configuration_value=_configuration(),
+        inventory_value=_inventory(),
+        package_version_reader=_package_version,
+    )
+    chain = _write_source_attested_receipt_chain(
+        root=root,
+        configuration_sha256=configuration_sha256,
+        inventory_sha256=inventory_sha256,
+        candidate_parser_revision="synthetic-pdf-visible-layout-normalizer-v3",
+    )
+    evaluation = chain["evaluation"]
+    assert isinstance(evaluation, bytes)
+
+    binding = load_source_attested_synthetic_receipt_binding(
+        root=root,
+        evaluation=parse_source_attested_synthetic_sealed_evaluation_result(evaluation),
+    )
+
+    assert binding.development_selection.candidate_parser_revision == (
+        "synthetic-pdf-visible-layout-normalizer-v3"
+    )
+    assert binding.sealed_run.candidate_parser_revision == (
+        "synthetic-pdf-visible-layout-normalizer-v3"
+    )
+
+
+def test_source_attested_loader_rejects_candidate_parser_revision_mismatch(tmp_path: Path) -> None:
+    """A pointer is pinned to the exact candidate parser revision, including v3."""
+
+    root = _root(tmp_path)
+    root.mkdir(parents=True)
+    configuration_sha256, inventory_sha256 = write_runtime_sidecars(
+        document_preview_root=root,
+        configuration_value=_configuration(),
+        inventory_value=_inventory(),
+        package_version_reader=_package_version,
+    )
+    chain = _write_source_attested_receipt_chain(
+        root=root,
+        configuration_sha256=configuration_sha256,
+        inventory_sha256=inventory_sha256,
+    )
+    result = json.loads(chain["evaluation"])
+    result["candidate_parser_revision"] = "synthetic-pdf-visible-layout-normalizer-v3"
+    rewritten = _rewrite_source_attested_evaluation(root=root, value=result)
+
+    with pytest.raises(
+        DocumentPreviewRuntimeError,
+        match="document_preview_source_attested_receipt_binding_mismatch",
+    ):
+        load_source_attested_synthetic_receipt_binding(
+            root=root,
+            evaluation=parse_source_attested_synthetic_sealed_evaluation_result(rewritten),
         )
 
 

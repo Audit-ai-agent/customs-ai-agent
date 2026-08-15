@@ -80,9 +80,21 @@ def _result(configuration_sha256: str, inventory_sha256: str) -> bytes:
         "extractor_revision": "pdf-text-test-v1",
         "configuration_sha256": configuration_sha256,
         "model_inventory_sha256": inventory_sha256,
+        "candidate_parser_revision": "synthetic-pdf-label-normalizer-v2",
+        "candidate_execution_receipt_sha256": "1" * 64,
         "passed": True,
         "metrics": {
             "field_exact_match": 0.99,
+            "field_exact_match_count": 99,
+            "field_exact_match_total": 100,
+            "field_exact_match_denominators": [
+                {
+                    "document_type": "invoice",
+                    "document_count": 1,
+                    "fields_per_document": 100,
+                    "total_fields": 100,
+                }
+            ],
             "ocr_cer": 0.01,
             "table_cell_f1": 0.98,
         },
