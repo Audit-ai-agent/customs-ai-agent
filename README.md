@@ -311,7 +311,28 @@ runtime은 시작 시 pointer·configuration·inventory·sealed result·설치 p
 # 예: PDF text layer 후보. PaddleOCR/Docling도 각각의 pinned extra 하나만 선택한다.
 uv sync --locked --extra document-preview-pdf
 
-# 이 명령 전에는 models/와 staging/의 configuration·inventory JSON을 사람이 준비한다.
+# 사람이 작성하는 것은 strict configuration과 provenance뿐이다. inventory의 package
+# version, 모든 model file SHA-256/size는 local-only builder가 실제 설치/파일에서 만든다.
+# configuration은 이 명령으로 변경되지 않는다. provenance의 packages는 이 engine의
+# runtime execution closure와 정확히 같아야 하며, artifact_directories는 configuration의
+# model directory와 정확히 같아야 한다.
+# {
+#   "schema_version":"1.0",
+#   "engine_kind":"docling",
+#   "packages":[{"name":"docling","license_id":"MIT","source_uri":"https://..."}],
+#   "artifact_directories":[
+#     {"relative_directory":"models/docling","license_id":"<model-license>","source_uri":"https://..."}
+#   ]
+# }
+# 위 `packages` 한 항목은 형식 설명용이다. 실제 Docling provenance에는 runtime이 요구하는
+# 모든 실행 package를 각각 한 번씩 적고, 각 package/model의 실제 license와 공식 HTTPS source를 쓴다.
+uv run --locked --no-sync --group dev python tools/build_document_preview_runtime_inventory.py `
+  --document-preview-root <workspace>/_local/data/document-preview `
+  --configuration <workspace>/_local/data/document-preview/staging/configuration.json `
+  --provenance <workspace>/_local/data/document-preview/staging/provenance.json `
+  --inventory-output <workspace>/_local/data/document-preview/staging/inventory.json `
+  --confirm-local-build
+
 # 기본 12 GiB free-space gate는 실제 PaddleOCR/Docling provisioning 전에 보수적으로 막는다.
 uv run --locked --no-sync --group dev python tools/provision_document_preview_runtime.py `
   --document-preview-root <workspace>/_local/data/document-preview `
