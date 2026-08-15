@@ -27,6 +27,7 @@ from customs_ai_agent.service.document_extraction import (
     extract_document_preview,
 )
 from customs_ai_agent.service.document_input import read_bounded_document_body
+from customs_ai_agent.service.document_preview_runtime import resolve_approved_pdf_preview_engine
 from customs_ai_agent.service.errors import ServiceHttpError
 from customs_ai_agent.service.input import (
     ERROR_RESPONSE_SCHEMA,
@@ -160,7 +161,24 @@ def create_app(
     document_extraction_result_schema = get_schema("backend", "v3", "document-extraction-result")
     make_runtime = runtime_factory or _profile_runtime
     make_readiness_probe = readiness_probe_factory or _profile_readiness_probe
-    active_document_preview_engine = document_preview_engine or DisabledDocumentPreviewEngine()
+    # Direct injection remains a test-only seam.  Normal startup may resolve
+    # only the local approval pointer and never accepts an engine/model URL or
+    # a fallback selector through the environment.
+    preview_resolution = (
+        None
+        if document_preview_engine is not None
+        else resolve_approved_pdf_preview_engine(
+            approval_path=active_settings.document_preview_approval_path,
+            approval_sha256=active_settings.document_preview_approval_sha256,
+        )
+    )
+    active_document_preview_engine = (
+        document_preview_engine
+        if document_preview_engine is not None
+        else preview_resolution.engine
+        if preview_resolution is not None
+        else DisabledDocumentPreviewEngine()
+    )
 
     @asynccontextmanager
     async def lifespan(app: FastAPI) -> AsyncIterator[None]:
@@ -208,6 +226,16 @@ def create_app(
     )
     app.state.service_settings = active_settings
     app.state.build_metadata = build_metadata(active_settings)
+    app.state.document_preview_activation_status = (
+        "injected"
+        if document_preview_engine is not None
+        else preview_resolution.status
+        if preview_resolution is not None
+        else "disabled"
+    )
+    app.state.document_preview_activation_reason = (
+        None if preview_resolution is None else preview_resolution.reason_code
+    )
 
     async def admitted_body(request: Request) -> bytes:
         admission: asyncio.Semaphore = request.app.state.body_admission
