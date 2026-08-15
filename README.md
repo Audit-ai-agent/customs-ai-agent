@@ -318,14 +318,12 @@ uv sync --locked --extra document-preview-pdf
 # model directory와 정확히 같아야 한다.
 # {
 #   "schema_version":"1.0",
-#   "engine_kind":"docling",
-#   "packages":[{"name":"docling","license_id":"MIT","source_uri":"https://..."}],
-#   "artifact_directories":[
-#     {"relative_directory":"models/docling","license_id":"<model-license>","source_uri":"https://..."}
-#   ]
+#   "engine_kind":"pdf_text_layer",
+#   "packages":[{"name":"pypdf","license_id":"BSD-3-Clause","source_uri":"https://pypi.org/project/pypdf/"}],
+#   "artifact_directories":[]
 # }
-# 위 `packages` 한 항목은 형식 설명용이다. 실제 Docling provenance에는 runtime이 요구하는
-# 모든 실행 package를 각각 한 번씩 적고, 각 package/model의 실제 license와 공식 HTTPS source를 쓴다.
+# Docling/PaddleOCR에는 runtime이 요구하는 모든 실행 package를 각각 한 번씩 적고,
+# configuration의 각 model directory마다 실제 license와 공식 HTTPS source를 적는다.
 uv run --locked --no-sync --group dev python tools/build_document_preview_runtime_inventory.py `
   --document-preview-root <workspace>/_local/data/document-preview `
   --configuration <workspace>/_local/data/document-preview/staging/configuration.json `
