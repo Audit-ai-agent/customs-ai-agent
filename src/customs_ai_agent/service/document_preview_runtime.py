@@ -3834,7 +3834,9 @@ class DoclingPdfPreviewAdapter:
             except ImportError as error:
                 raise DocumentPreviewUnavailable("Docling is not provisioned") from error
             try:
-                pipeline = PdfPipelineOptions()
+                # Docling 2.15.1 provides this default at runtime, while its
+                # Pydantic type stub treats ``ocr_options`` as required.
+                pipeline = PdfPipelineOptions()  # type: ignore[call-arg]
                 # The configuration parser permits only this fixed offline
                 # Docling structure/table profile.  Do not let its default
                 # EasyOCR cache or downloader escape the local inventory.
