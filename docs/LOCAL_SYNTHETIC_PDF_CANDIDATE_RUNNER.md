@@ -41,6 +41,36 @@
    contrib wheel `RECORD`의 regular file 집합·hash·size와 일치하지 않으면 후보 실행을 거부한다. active pointer는
    필요하지 않습니다. 평가는 승인보다 먼저 수행되기 때문입니다.
 
+### Windows Docling native path 조건
+
+Pinned Docling 2.15.1의 `docling-parse`와 `deepsearch-glm` native component는
+Windows에서 non-ASCII `site-packages` 경로의 package-owned resource를 안정적으로
+찾지 못할 수 있다. 이 경우 모델·PDF·network 문제가 아니어도 source PDF를 열기
+전 `document_preview_docling_native_runtime_unavailable`으로 중단한다. 제품 코드가
+drive mapping이나 junction을 자동으로 만들지는 않는다.
+
+프로젝트 경로에 한글 등이 있어도 **Docling을 설치해 실행하는 virtual environment
+자체**를 ASCII-only 위치에 명시적으로 둘 수 있다. 이는 재생성 가능한 Python 환경일
+뿐이며 PDF·Gold·OCR 결과·모델을 그 위치에 복사하지 않는다.
+
+```powershell
+$env:VIRTUAL_ENV = 'C:\customs-agent-docling-venv' # ASCII-only local path
+uv venv $env:VIRTUAL_ENV
+uv sync --active --locked --extra document-preview-docling --group dev
+
+# provisioning은 sidecar 검증 뒤 memory-only blank PDF native self-test를 수행한다.
+& "$env:VIRTUAL_ENV\Scripts\python.exe" tools/provision_document_preview_runtime.py `
+  --document-preview-root <workspace>/_local/data/document-preview `
+  --configuration <workspace>/_local/data/document-preview/staging/configuration-docling.json `
+  --inventory <workspace>/_local/data/document-preview/staging/inventory-docling.json `
+  --confirm-provision
+```
+
+그 self-test는 socket을 차단한 상태에서 메모리의 빈 1-page PDF만 변환하고 결과를
+즉시 버린다. source PDF, OCR text, candidate bundle, sealed reservation은 만들지
+않는다. 이 단계가 실패하면 environment를 바로잡은 뒤 provisioning부터 다시 해야
+하며 development/sealed candidate를 실행해서는 안 된다.
+
 ## 개발 평가 실행
 
 각 엔진을 별도 configuration/inventory로 정확히 한 번씩 실행합니다.

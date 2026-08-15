@@ -152,6 +152,11 @@ class _PaddleOcrCandidateAdapter:
 class _DoclingCandidateAdapter:
     adapter: DoclingPdfPreviewAdapter
 
+    def preflight_native_runtime(self) -> None:
+        """Fail before a selected PDF is loaded when Docling is unusable."""
+
+        self.adapter.verify_native_runtime()
+
     def extract_pdf(self, preview_input: PreviewInputV1) -> CandidateExtractionV1:
         # The current runtime adapter exposes preview spans only.  It does not
         # invent table coordinates; a future local Docling adapter may return a
@@ -1171,6 +1176,15 @@ def run_synthetic_pdf_ocr_candidate(
         adapter = adapter_factory(profile)
     except Exception as error:
         raise SyntheticPdfCandidateRunnerError("candidate_adapter_unavailable") from error
+    if profile.engine_kind == "docling":
+        native_preflight = getattr(adapter, "preflight_native_runtime", None)
+        if callable(native_preflight):
+            try:
+                native_preflight()
+            except (DocumentPreviewError, OSError, socket.error) as error:
+                raise SyntheticPdfCandidateRunnerError("candidate_adapter_unavailable") from error
+            except Exception as error:
+                raise SyntheticPdfCandidateRunnerError("candidate_adapter_unavailable") from error
 
     documents: list[CandidateDocumentOutputV1] = []
     for item in packet.items:

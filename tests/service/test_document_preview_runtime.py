@@ -1259,6 +1259,89 @@ def test_runtime_rejects_an_added_file_in_the_active_docling_model_directory(
         binding.verify_runtime_state()
 
 
+def test_docling_native_runtime_rejects_windows_non_ascii_package_origin(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    """Do not let a native resource lookup fail after a source PDF is read."""
+
+    monkeypatch.setattr(runtime_module.sys, "platform", "win32")
+    monkeypatch.setattr(
+        runtime_module.importlib.util,
+        "find_spec",
+        lambda _name: SimpleNamespace(origin="C:/runtime/한글/site-packages/native.pyd"),
+    )
+
+    with pytest.raises(
+        DocumentPreviewUnavailable,
+        match="document_preview_docling_native_runtime_unavailable",
+    ):
+        runtime_module._require_docling_native_ascii_package_paths()
+
+
+def test_docling_native_runtime_probe_is_cached_and_discards_its_result(
+    monkeypatch: pytest.MonkeyPatch, tmp_path: Path
+) -> None:
+    calls = {"convert": 0}
+
+    class FakeDocumentStream:
+        def __init__(self, **_kwargs: object) -> None:
+            pass
+
+    class FakeConverter:
+        def convert(self, _stream: object) -> object:
+            calls["convert"] += 1
+            return SimpleNamespace(document=SimpleNamespace(pages={1: object()}))
+
+    adapter = runtime_module.DoclingPdfPreviewAdapter(
+        extractor_revision="docling-test-v1",
+        model_root=_root(tmp_path),
+        options={"artifacts_directory": "models/docling"},
+    )
+    adapter._converter = (FakeConverter(), FakeDocumentStream)
+    monkeypatch.setattr(runtime_module, "_require_docling_native_ascii_package_paths", lambda: None)
+    monkeypatch.setattr(
+        runtime_module.DoclingPdfPreviewAdapter,
+        "_native_probe_pdf_bytes",
+        staticmethod(lambda: b"blank-pdf"),
+    )
+
+    adapter.verify_native_runtime()
+    adapter.verify_native_runtime()
+
+    assert calls == {"convert": 1}
+
+
+def test_docling_native_runtime_probe_fails_closed(
+    monkeypatch: pytest.MonkeyPatch, tmp_path: Path
+) -> None:
+    class FakeDocumentStream:
+        def __init__(self, **_kwargs: object) -> None:
+            pass
+
+    class FailingConverter:
+        def convert(self, _stream: object) -> object:
+            raise RuntimeError("native failure")
+
+    adapter = runtime_module.DoclingPdfPreviewAdapter(
+        extractor_revision="docling-test-v1",
+        model_root=_root(tmp_path),
+        options={"artifacts_directory": "models/docling"},
+    )
+    adapter._converter = (FailingConverter(), FakeDocumentStream)
+    monkeypatch.setattr(runtime_module, "_require_docling_native_ascii_package_paths", lambda: None)
+    monkeypatch.setattr(
+        runtime_module.DoclingPdfPreviewAdapter,
+        "_native_probe_pdf_bytes",
+        staticmethod(lambda: b"blank-pdf"),
+    )
+
+    with pytest.raises(
+        DocumentPreviewUnavailable,
+        match="document_preview_docling_native_runtime_unavailable",
+    ):
+        adapter.verify_native_runtime()
+
+
 @pytest.mark.parametrize(
     "options",
     [

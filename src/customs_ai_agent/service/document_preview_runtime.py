@@ -22,6 +22,7 @@ import csv
 import hashlib
 import importlib
 import importlib.metadata
+import importlib.util
 import io
 import json
 import math
@@ -90,6 +91,8 @@ _NETWORK_GUARD_INSTALLED = False
 _ORIGINAL_SOCKET_CONNECT = socket.socket.connect
 _ORIGINAL_SOCKET_CONNECT_EX = socket.socket.connect_ex
 
+_DOCLING_NATIVE_PACKAGE_NAMES: Final = ("docling_parse", "deepsearch_glm")
+
 ApprovedPdfEngineKind = Literal["pdf_text_layer", "paddleocr", "docling"]
 
 
@@ -138,6 +141,31 @@ def local_files_only() -> Iterator[None]:
         yield
     finally:
         _NETWORK_GUARD_STATE.local_files_only = previous
+
+
+def _require_docling_native_ascii_package_paths() -> None:
+    """Reject a Windows path that the pinned native Docling stack cannot read.
+
+    ``docling-parse`` and ``deepsearch-glm`` in the pinned Docling 2.15.1
+    profile resolve their package-owned native resources with a narrow path
+    encoding API on Windows.  A non-ASCII site-packages path therefore fails
+    only after a PDF is supplied and can produce native diagnostics.  Detect
+    that known unsupported runtime before any source PDF is read instead of
+    silently trying a fallback or mapping a drive from product code.
+    """
+
+    if sys.platform != "win32":
+        return
+    for package_name in _DOCLING_NATIVE_PACKAGE_NAMES:
+        specification = importlib.util.find_spec(package_name)
+        origin = None if specification is None else specification.origin
+        if (
+            not isinstance(origin, str)
+            or not origin
+            or origin in {"built-in", "frozen"}
+            or any(ord(character) > 0x7F for character in origin)
+        ):
+            raise DocumentPreviewUnavailable("document_preview_docling_native_runtime_unavailable")
 
 
 def _canonical_json_bytes(value: object, *, trailing_newline: bool = False) -> bytes:
@@ -3814,11 +3842,16 @@ class DoclingPdfPreviewAdapter:
     options: Mapping[str, object]
     _converter: object | None = field(default=None, init=False, repr=False)
     _lock: threading.Lock = field(default_factory=threading.Lock, init=False, repr=False)
+    _native_runtime_verified: bool = field(default=False, init=False, repr=False)
+    _native_runtime_lock: threading.Lock = field(
+        default_factory=threading.Lock, init=False, repr=False
+    )
 
     def _docling_converter(self) -> object:
         with self._lock:
             if self._converter is not None:
                 return self._converter
+            _require_docling_native_ascii_package_paths()
             try:
                 from docling.datamodel.base_models import DocumentStream, InputFormat  # type: ignore[import-not-found]
                 from docling.datamodel.pipeline_options import (  # type: ignore[import-not-found]
@@ -3870,20 +3903,67 @@ class DoclingPdfPreviewAdapter:
                 raise DocumentPreviewUnavailable("Docling local model cannot be loaded") from error
             return self._converter
 
-    def extract_raster_or_image(self, preview_input: PreviewInputV1) -> PreviewCandidateV1:
-        if preview_input.metadata.media_type != "application/pdf":
-            raise DocumentPreviewUnavailable("PDF-only approval")
+    @staticmethod
+    def _native_probe_pdf_bytes() -> bytes:
+        """Build a disposable blank PDF wholly in memory for native preflight."""
+
+        try:
+            from pypdf import PdfWriter  # type: ignore[import-not-found]
+        except ImportError as error:
+            raise DocumentPreviewUnavailable(
+                "document_preview_docling_native_runtime_unavailable"
+            ) from error
+        stream = io.BytesIO()
+        writer = PdfWriter()
+        writer.add_blank_page(width=72, height=72)
+        writer.write(stream)
+        return stream.getvalue()
+
+    def _convert_pdf_bytes(self, content: bytes) -> Any:
         converter_value = self._docling_converter()
         if not isinstance(converter_value, tuple) or len(converter_value) != 2:
             raise DocumentPreviewUnavailable("Docling local converter is invalid")
         converter, document_stream_type = converter_value
         try:
             with local_files_only():
-                result = converter.convert(
-                    document_stream_type(
-                        name="document.pdf", stream=io.BytesIO(preview_input.content)
-                    )
+                return converter.convert(
+                    document_stream_type(name="document.pdf", stream=io.BytesIO(content))
                 )
+        except DocumentPreviewUnavailable:
+            raise
+        except Exception as error:
+            raise DocumentPreviewExecutionError("Docling execution failed") from error
+
+    def verify_native_runtime(self) -> None:
+        """Run the native Docling stack before any selected source PDF is read.
+
+        The result is intentionally discarded.  It proves only that the
+        exact local package/model runtime can convert a blank one-page PDF
+        while sockets are denied; it neither evaluates nor records OCR text.
+        """
+
+        with self._native_runtime_lock:
+            if self._native_runtime_verified:
+                return
+            try:
+                _require_docling_native_ascii_package_paths()
+                result = self._convert_pdf_bytes(self._native_probe_pdf_bytes())
+                document = getattr(result, "document", None)
+                pages = getattr(document, "pages", None)
+                if not pages or len(pages) != 1:
+                    raise ValueError("blank Docling PDF was not converted")
+            except Exception as error:
+                raise DocumentPreviewUnavailable(
+                    "document_preview_docling_native_runtime_unavailable"
+                ) from error
+            self._native_runtime_verified = True
+
+    def extract_raster_or_image(self, preview_input: PreviewInputV1) -> PreviewCandidateV1:
+        if preview_input.metadata.media_type != "application/pdf":
+            raise DocumentPreviewUnavailable("PDF-only approval")
+        self.verify_native_runtime()
+        try:
+            result = self._convert_pdf_bytes(preview_input.content)
             document = result.document
             page_values = getattr(document, "pages", {})
             page_numbers = sorted(int(number) for number in page_values) if page_values else [1]
@@ -3904,6 +3984,26 @@ class DoclingPdfPreviewAdapter:
             pages=pages,
             warnings=[] if has_text else [DocumentExtractionWarningV1(code="ocr_text_not_found")],
         )
+
+
+def preflight_provisioned_docling_native_runtime(
+    *, document_preview_root: Path, configuration: RuntimeConfigurationV1
+) -> None:
+    """Verify the explicit Docling profile without ever opening a source asset."""
+
+    if configuration.engine_kind != "docling":
+        return
+    adapter = DoclingPdfPreviewAdapter(
+        extractor_revision=configuration.extractor_revision,
+        model_root=document_preview_root,
+        options=configuration.options,
+    )
+    try:
+        adapter.verify_native_runtime()
+    except DocumentPreviewUnavailable as error:
+        raise DocumentPreviewRuntimeError(
+            "document_preview_docling_native_runtime_unavailable"
+        ) from error
 
 
 @dataclass(slots=True)
@@ -4479,6 +4579,7 @@ __all__ = [
     "parse_sealed_evaluation_result",
     "parse_source_attested_synthetic_pdf_preview_activation",
     "parse_source_attested_synthetic_sealed_evaluation_result",
+    "preflight_provisioned_docling_native_runtime",
     "resolve_document_preview_engine",
     "resolve_approved_pdf_preview_engine",
     "validate_approval_pointer_path",
