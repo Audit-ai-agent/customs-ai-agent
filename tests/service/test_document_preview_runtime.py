@@ -86,6 +86,37 @@ def _package_version(_name: str) -> str:
     return "test-v1"
 
 
+_DOCLING_EXECUTION_PACKAGE_NAMES = (
+    "deepsearch-glm",
+    "docling",
+    "docling-core",
+    "docling-ibm-models",
+    "docling-parse",
+    "numpy",
+    "pillow",
+    "pypdf",
+    "pypdfium2",
+    "rtree",
+    "safetensors",
+    "scipy",
+    "torch",
+    "torchvision",
+    "transformers",
+)
+
+
+def _docling_execution_packages() -> list[dict[str, str]]:
+    return [
+        {
+            "name": name,
+            "version": "test-v1",
+            "license_id": "test-license",
+            "source_uri": "https://example.test/docling/",
+        }
+        for name in _DOCLING_EXECUTION_PACKAGE_NAMES
+    ]
+
+
 def _configuration() -> dict[str, object]:
     return {
         "schema_version": "1.0",
@@ -1056,20 +1087,7 @@ def test_runtime_rejects_an_added_file_in_the_active_docling_model_directory(
     inventory = {
         "schema_version": "1.0",
         "engine_kind": "docling",
-        "packages": [
-            {
-                "name": "pypdf",
-                "version": "test-v1",
-                "license_id": "BSD-3-Clause",
-                "source_uri": "https://pypi.org/project/pypdf/",
-            },
-            {
-                "name": "docling",
-                "version": "test-v1",
-                "license_id": "MIT",
-                "source_uri": "https://pypi.org/project/docling/",
-            },
-        ],
+        "packages": _docling_execution_packages(),
         "artifacts": [
             {
                 "artifact_id": "docling-model",
@@ -1184,6 +1202,31 @@ def test_docling_profile_rejects_easyocr_download_mode() -> None:
 
     with pytest.raises(DocumentPreviewRuntimeError, match="document_preview_configuration_invalid"):
         runtime_module.parse_runtime_configuration(raw)
+
+
+def test_docling_inventory_requires_every_output_affecting_execution_package() -> None:
+    expected = set(_DOCLING_EXECUTION_PACKAGE_NAMES)
+    assert runtime_module._required_packages("docling") == expected
+    inventory = runtime_module.parse_model_inventory(
+        _canonical(
+            {
+                "schema_version": "1.0",
+                "engine_kind": "docling",
+                "packages": [
+                    package
+                    for package in _docling_execution_packages()
+                    if package["name"] != "torch"
+                ],
+                "artifacts": [],
+            },
+            newline=True,
+        )
+    )
+
+    with pytest.raises(
+        DocumentPreviewRuntimeError, match="document_preview_inventory_packages_invalid"
+    ):
+        runtime_module.verify_inventory_packages(inventory, package_version_reader=_package_version)
 
 
 def test_runtime_profiles_accept_only_the_explicit_offline_options() -> None:

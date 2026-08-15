@@ -303,7 +303,7 @@ OCR preview engine은 human-Gold 경로에서는 Gold 평가와 사람 승인을
 - runtime configuration SHA-256과 model inventory SHA-256
 - sealed packet의 dataset revision, Gold receipt SHA-256, evaluator result SHA-256
 
-runtime은 시작 시 pointer·configuration·inventory·sealed result·설치 package version·모든 model artifact SHA-256을 검사합니다. PaddleOCR/Docling의 설정된 model directory는 재귀적으로 훑어 inventory에 적힌 regular file 집합과 정확히 같아야 하므로, 누락·미신고 파일·symlink/Windows junction(reparse point)은 모두 fail-closed 합니다. 요청 중에도 이 집합을 다시 확인하고, model file의 크기·수정시각·regular-file 상태가 달라지면 PDF도 즉시 `unavailable`으로 끝냅니다. 모델을 다시 다운로드하거나 다른 OCR engine으로 fallback하지 않습니다. OCR 결과는 계속 사람 확인 전 후보이며 Review·Finding·통관 결론에 자동으로 들어가지 않습니다.
+runtime은 시작 시 pointer·configuration·inventory·sealed result·설치 package version·모든 model artifact SHA-256을 검사합니다. Docling inventory에는 `docling`만이 아니라 실제 layout/table/GLM 실행에 관여하는 `docling-core`, `docling-ibm-models`, `docling-parse`, `deepsearch-glm`, `torch`, `torchvision` 등 고정 실행 closure도 모두 version으로 선언해야 합니다. PaddleOCR/Docling의 설정된 model directory는 재귀적으로 훑어 inventory에 적힌 regular file 집합과 정확히 같아야 하므로, 누락·미신고 파일·symlink/Windows junction(reparse point)은 모두 fail-closed 합니다. 요청 중에도 이 집합을 다시 확인하고, package version 또는 model file의 크기·수정시각·regular-file 상태가 달라지면 PDF도 즉시 `unavailable`으로 끝냅니다. 모델을 다시 다운로드하거나 다른 OCR engine으로 fallback하지 않습니다. OCR 결과는 계속 사람 확인 전 후보이며 Review·Finding·통관 결론에 자동으로 들어가지 않습니다.
 
 실제 package/model provisioning은 기본 서비스 명령과 분리된 **명시적 운영자 작업**입니다. optional extra는 하나만 고르고, package/model 다운로드가 필요한 명령도 운영자가 직접 실행합니다. `provision`과 `approve` 도구 자체는 네트워크에 접속하지 않습니다.
 
@@ -349,7 +349,7 @@ uv run --locked --no-sync --group dev customs-ai-agent-dev-serve
 동일 local write 권한을 가진 악성 프로세스까지 구별하는 외부 signer도 아니다. 상세
 제약과 증거 chain은 [`docs/LOCAL_SOURCE_ATTESTED_SYNTHETIC_PDF_ACTIVATION.md`](docs/LOCAL_SOURCE_ATTESTED_SYNTHETIC_PDF_ACTIVATION.md)에 있다.
 
-`configuration`은 `schema_version`, `engine_kind`, `extractor_revision`, `options`만 허용합니다. `pdf_text_layer`의 `options`는 빈 객체이다. PaddleOCR은 `PP-OCRv4`, CPU 1 thread, detection/recognition/classifier의 세 local model directory를 모두 고정해야 하며, classifier를 쓰지 않아도 생략할 수 없다. Docling은 CPU 1 thread·table structure `fast`의 local layout/table parser만 허용하고 `ocr_enabled: false`를 강제해 EasyOCR downloader를 차단한다. `inventory`는 pinned package version과 각 model artifact의 relative path·byte size·SHA-256·license ID·공식 HTTPS source URI를 모두 요구한다. OCR engine의 설정 directory 아래 regular file은 inventory에 모두 한 번씩 선언되어야 하며, extra file·누락 file·link/junction은 허용하지 않는다. 경로 이탈·symlink·누락 artifact·버전 불일치·sealed 평가 Gate 실패·pointer 변조는 모두 preview 비활성으로 끝난다.
+`configuration`은 `schema_version`, `engine_kind`, `extractor_revision`, `options`만 허용합니다. `pdf_text_layer`의 `options`는 빈 객체이다. PaddleOCR은 `PP-OCRv4`, CPU 1 thread, detection/recognition/classifier의 세 local model directory를 모두 고정해야 하며, classifier를 쓰지 않아도 생략할 수 없다. Docling은 CPU 1 thread·table structure `fast`의 local layout/table parser만 허용하고 `ocr_enabled: false`를 강제해 EasyOCR downloader를 차단한다. `inventory`는 pinned package version과 각 model artifact의 relative path·byte size·SHA-256·license ID·공식 HTTPS source URI를 모두 요구하며, Docling은 output에 관여하는 고정 실행 closure 전체도 빠짐없이 적어야 한다. OCR engine의 설정 directory 아래 regular file은 inventory에 모두 한 번씩 선언되어야 하며, extra file·누락 file·link/junction은 허용하지 않는다. 경로 이탈·symlink·누락 artifact·버전 불일치·sealed 평가 Gate 실패·pointer 변조는 모두 preview 비활성으로 끝난다.
 
 PaddleOCR/Docling은 대용량 wheel·모델·cache가 필요할 수 있습니다. provisioning 도구의 기본 free-space 기준은 12 GiB이며 `--minimum-free-gib`로 더 높은 운영 기준을 지정할 수 있습니다. 여유 공간이 부족하면 다운로드나 부분 설치 전에 중단해야 하며, 일반 Agent runtime은 언제나 no-download 상태를 유지합니다.
 
