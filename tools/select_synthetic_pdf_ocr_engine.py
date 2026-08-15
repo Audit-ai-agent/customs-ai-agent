@@ -18,7 +18,9 @@ def _local_data_directory(path: Path) -> Path:
     resolved = path.resolve()
     parts = [part.casefold() for part in resolved.parts]
     if not any(parts[index : index + 2] == ["_local", "data"] for index in range(len(parts) - 1)):
-        raise ValueError("selection output directory must be below the local-only _local/data boundary")
+        raise ValueError(
+            "selection output directory must be below the local-only _local/data boundary"
+        )
     return resolved
 
 
@@ -75,7 +77,11 @@ def main(argv: Sequence[str] | None = None) -> int:
             output_directory=arguments.output_directory,
         )
     except (OSError, ValueError, json.JSONDecodeError):
-        print(json.dumps({"status": "failed", "code": "development_selection_failed"}, separators=(",", ":")))
+        print(
+            json.dumps(
+                {"status": "failed", "code": "development_selection_failed"}, separators=(",", ":")
+            )
+        )
         return 2
     print(json.dumps(summary, ensure_ascii=False, separators=(",", ":"), sort_keys=True))
     return 0

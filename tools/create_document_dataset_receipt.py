@@ -56,7 +56,9 @@ def build_receipt(
     if not root.is_dir():
         raise ValueError("source directory is unavailable")
     assets: list[DatasetAssetReceiptV1] = []
-    for path in sorted((candidate for candidate in root.rglob("*") if candidate.is_file()), key=str):
+    for path in sorted(
+        (candidate for candidate in root.rglob("*") if candidate.is_file()), key=str
+    ):
         media_type = _MEDIA_TYPES.get(path.suffix.casefold())
         if media_type is None:
             continue
@@ -71,7 +73,9 @@ def build_receipt(
                 byte_size=path.stat().st_size,
                 sha256=digest,
                 source_role=(
-                    "structured_reference" if media_type == "application/json" else "preview_candidate"
+                    "structured_reference"
+                    if media_type == "application/json"
+                    else "preview_candidate"
                 ),
             )
         )
@@ -86,16 +90,21 @@ def build_receipt(
 
 
 def _canonical_json(value: object) -> str:
-    return json.dumps(
-        value,
-        ensure_ascii=False,
-        allow_nan=False,
-        indent=2,
-        sort_keys=True,
-    ) + "\n"
+    return (
+        json.dumps(
+            value,
+            ensure_ascii=False,
+            allow_nan=False,
+            indent=2,
+            sort_keys=True,
+        )
+        + "\n"
+    )
 
 
-def write_immutable_receipt(*, receipt: DatasetReceiptV1, output_directory: Path) -> dict[str, object]:
+def write_immutable_receipt(
+    *, receipt: DatasetReceiptV1, output_directory: Path
+) -> dict[str, object]:
     output = _local_data_directory(output_directory)
     output.mkdir(parents=True, exist_ok=True)
     destination = output / "dataset-receipt.json"
@@ -112,7 +121,9 @@ def write_immutable_receipt(*, receipt: DatasetReceiptV1, output_directory: Path
 
 
 def _parser() -> argparse.ArgumentParser:
-    parser = argparse.ArgumentParser(description="Hash a local document dataset into an immutable receipt.")
+    parser = argparse.ArgumentParser(
+        description="Hash a local document dataset into an immutable receipt."
+    )
     parser.add_argument("--source-directory", type=Path, required=True)
     parser.add_argument("--dataset-id", required=True)
     parser.add_argument("--dataset-revision", required=True)
@@ -133,7 +144,9 @@ def main(argv: Sequence[str] | None = None) -> int:
             dataset_revision=arguments.dataset_revision,
             received_as_of=received_as_of,
         )
-        summary = write_immutable_receipt(receipt=receipt, output_directory=arguments.output_directory)
+        summary = write_immutable_receipt(
+            receipt=receipt, output_directory=arguments.output_directory
+        )
     except (OSError, ValueError) as error:
         # Do not expose absolute local paths or source content in command output.
         print(json.dumps({"status": "failed", "code": type(error).__name__}, separators=(",", ":")))

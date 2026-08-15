@@ -27,7 +27,7 @@ from customs_ai_agent.service.document_extraction import (
     extract_document_preview,
 )
 from customs_ai_agent.service.document_input import read_bounded_document_body
-from customs_ai_agent.service.document_preview_runtime import resolve_approved_pdf_preview_engine
+from customs_ai_agent.service.document_preview_runtime import resolve_document_preview_engine
 from customs_ai_agent.service.errors import ServiceHttpError
 from customs_ai_agent.service.input import (
     ERROR_RESPONSE_SCHEMA,
@@ -162,14 +162,19 @@ def create_app(
     make_runtime = runtime_factory or _profile_runtime
     make_readiness_probe = readiness_probe_factory or _profile_readiness_probe
     # Direct injection remains a test-only seam.  Normal startup may resolve
-    # only the local approval pointer and never accepts an engine/model URL or
-    # a fallback selector through the environment.
+    # only the fixed local approval pointer and never accepts an engine/model
+    # URL or a fallback selector through the environment.  The explicit
+    # source-attested mode still begins unavailable; it validates a later
+    # atomic local pointer replacement per PDF request.
     preview_resolution = (
         None
         if document_preview_engine is not None
-        else resolve_approved_pdf_preview_engine(
+        else resolve_document_preview_engine(
             approval_path=active_settings.document_preview_approval_path,
             approval_sha256=active_settings.document_preview_approval_sha256,
+            source_attested_auto_activation=(
+                active_settings.document_preview_auto_activation_mode == "source-attested-synthetic"
+            ),
         )
     )
     active_document_preview_engine = (

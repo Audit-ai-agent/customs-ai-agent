@@ -4,6 +4,8 @@ import hashlib
 import inspect
 import json
 import socket
+import stat
+from types import SimpleNamespace
 from dataclasses import dataclass
 from datetime import date
 from pathlib import Path
@@ -27,11 +29,18 @@ from customs_ai_agent.evaluation.document_ocr_quality import (
 from customs_ai_agent.evaluation.synthetic_pdf_candidate_runner import (
     CandidateExtractionV1,
     EvaluationRuntimeProfileV1,
+    SYNTHETIC_PDF_LABEL_NORMALIZER_REVISION,
+    SyntheticPdfCandidateAdapter,
     SyntheticPdfCandidateRunnerError,
     build_default_synthetic_pdf_candidate_adapter,
+    load_unapproved_local_candidate_profile,
     normalize_synthetic_pdf_docling_table_cells,
     normalize_synthetic_pdf_fields,
     run_synthetic_pdf_ocr_candidate,
+)
+from customs_ai_agent.service.document_preview_runtime import (
+    DocumentPreviewRuntimeError,
+    write_runtime_sidecars,
 )
 from tools.run_synthetic_pdf_ocr_candidate import _parser, main
 
@@ -277,9 +286,152 @@ class _FakeAdapter:
         )
 
 
+def _table_cells(
+    *, headers: tuple[str, ...], values: tuple[str, ...]
+) -> tuple[CandidateTableCellV1, ...]:
+    assert len(headers) == len(values)
+    return tuple(
+        CandidateTableCellV1(
+            page_number=1,
+            table_index=1,
+            row_index=row_index,
+            column_index=column_index,
+            text=text,
+        )
+        for row_index, row in enumerate((headers, values))
+        for column_index, text in enumerate(row)
+    )
+
+
+def _full_visible_layout_extraction(document_type: str) -> CandidateExtractionV1:
+    """Generic fake engine output; no local PDF/Gold/CSV values are used."""
+
+    if document_type == "bill_of_lading":
+        form_lines = (
+            "Shipper",
+            "Seller One",
+            "Consignee",
+            "Receiver One",
+            "Port of Loading",
+            "Port Alpha",
+            "Port of Discharge",
+            "Port Beta",
+            "Final Destination",
+            "City Gamma",
+            "Vessel/Flight",
+            "Vessel Delta",
+            "Voyage No.",
+            "V-01",
+            "B/L No.",
+            "BL-001",
+        )
+        cells = _table_cells(
+            headers=(
+                "Container No.",
+                "Seal No.",
+                "No. & Kind of Packages/Containers",
+                "Goods Description",
+                "Gross Weight",
+                "Measurement",
+            ),
+            values=("CONT-1", "SEAL-1", "8 CTNS", "Widget", "100 KG", "1 CBM"),
+        )
+    elif document_type == "invoice":
+        form_lines = (
+            "Shipper",
+            "Seller One",
+            "Notify Party",
+            "Buyer One",
+            "Consignee",
+            "Receiver One",
+            "Port of Loading",
+            "Port Alpha",
+            "Port of Discharge",
+            "Port Beta",
+            "Vessel/Flight",
+            "Vessel Delta",
+            "Invoice No.",
+            "INV-001",
+            "Invoice Date",
+            "2026-01-01",
+            "L/C No.",
+            "LC-001",
+            "TOTAL",
+            "62.50",
+        )
+        cells = _table_cells(
+            headers=("Marks/No.", "Description of Goods", "Quantity", "Unit Price", "Amount"),
+            values=("-", "Widget", "5 PCS", "12.50", "62.50"),
+        )
+    elif document_type == "packing_list":
+        form_lines = (
+            "Shipper",
+            "Seller One",
+            "To Applicant / Consignee",
+            "Receiver One",
+            "No. of Invoice",
+            "INV-001",
+            "No. of L/C",
+            "LC-001",
+        )
+        cells = _table_cells(
+            headers=(
+                "Marks/Numbers/PKGS",
+                "Goods Description",
+                "Net Weight",
+                "Gross Weight",
+                "Measurement",
+            ),
+            values=("3 CTNS", "Widget\n5 PCS", "10 KG", "12 KG", "0.20 CBM"),
+        )
+    else:
+        raise AssertionError("unexpected synthetic document type")
+    return CandidateExtractionV1(
+        spans=(CandidateSpanV1(page_number=1, reading_order=1, text="\n".join(form_lines)),),
+        table_cells=cells,
+    )
+
+
+@dataclass
+class _FullInvoiceVisibleLayoutFakeAdapter:
+    calls: int = 0
+
+    def extract_pdf(self, _preview_input) -> CandidateExtractionV1:  # type: ignore[no-untyped-def]
+        self.calls += 1
+        return _full_visible_layout_extraction("invoice")
+
+
+@dataclass
+class _FullInvoiceDoclingMarkdownFakeAdapter:
+    calls: int = 0
+
+    def extract_pdf(self, _preview_input) -> CandidateExtractionV1:  # type: ignore[no-untyped-def]
+        self.calls += 1
+        # The current pinned Docling boundary emits Markdown spans, not direct
+        # table cells.  This generic engine-shaped output exercises the sole
+        # allowed pipe-table fallback without consulting a local PDF or truth.
+        return CandidateExtractionV1(
+            spans=(
+                CandidateSpanV1(
+                    page_number=1,
+                    reading_order=1,
+                    text=(
+                        "Shipper\nSeller One\nNotify Party\nBuyer One\nConsignee\nReceiver One\n"
+                        "Port of Loading\nPort Alpha\nPort of Discharge\nPort Beta\n"
+                        "Vessel/Flight\nVessel Delta\nInvoice No.\nINV-001\n"
+                        "Invoice Date\n2026-01-01\nL/C No.\nLC-001\nTOTAL\n62.50\n\n"
+                        "| Marks/No. | Description of Goods | Quantity | Unit Price | Amount |\n"
+                        "| --- | --- | --- | ---: | ---: |\n"
+                        "| - | Widget | 5 PCS | 12.50 | 62.50 |"
+                    ),
+                ),
+            )
+        )
+
+
 def _run(
     fixture: dict[str, object],
-    adapter: _FakeAdapter,
+    adapter: SyntheticPdfCandidateAdapter,
     *,
     factory_calls: list[int] | None = None,
 ) -> dict[str, object]:
@@ -319,7 +471,7 @@ def test_runner_binds_every_engine_profile_and_preserves_adapter_cells(
     assert bundle.extractor_revision == summary["extractor_revision"]
     assert bundle.configuration_sha256 == summary["configuration_sha256"]
     assert bundle.model_inventory_sha256 == summary["model_inventory_sha256"]
-    assert bundle.parser_revision == "synthetic-pdf-label-normalizer-v2"
+    assert bundle.parser_revision == SYNTHETIC_PDF_LABEL_NORMALIZER_REVISION
     assert [field.field_name for field in bundle.documents[0].fields] == [
         "inv_no",
         "amount",
@@ -327,6 +479,294 @@ def test_runner_binds_every_engine_profile_and_preserves_adapter_cells(
     ]
     assert bundle.documents[0].table_cells[0].text == "Widget"
     assert adapter.calls == 1
+
+
+def test_runner_v3_full_invoice_fake_adapter_uses_visible_candidate_output_only(
+    tmp_path: Path,
+) -> None:
+    """The runner can emit every Invoice field without a source-truth input."""
+
+    fixture = _fixture(tmp_path, engine_kind="docling")
+    adapter = _FullInvoiceVisibleLayoutFakeAdapter()
+
+    summary = _run(fixture, adapter)
+
+    output = fixture["output_directory"] / summary["candidate_file"]  # type: ignore[operator]
+    bundle = SyntheticPdfCandidateOutputBundleV1.model_validate_json(output.read_bytes())
+    assert bundle.parser_revision == SYNTHETIC_PDF_LABEL_NORMALIZER_REVISION
+    assert [field.field_name for field in bundle.documents[0].fields] == [
+        "exporter_name",
+        "importer_name",
+        "consignee",
+        "load_port",
+        "disch_port",
+        "vessel",
+        "inv_no",
+        "inv_date",
+        "lc_no",
+        "good",
+        "unit",
+        "qty",
+        "unit_price",
+        "amount",
+        "total",
+    ]
+    assert adapter.calls == 1
+
+
+def test_runner_v3_derives_full_docling_markdown_candidate_without_direct_table_cells(
+    tmp_path: Path,
+) -> None:
+    fixture = _fixture(tmp_path, engine_kind="docling")
+    adapter = _FullInvoiceDoclingMarkdownFakeAdapter()
+
+    summary = _run(fixture, adapter)
+
+    output = fixture["output_directory"] / summary["candidate_file"]  # type: ignore[operator]
+    bundle = SyntheticPdfCandidateOutputBundleV1.model_validate_json(output.read_bytes())
+    assert [field.field_name for field in bundle.documents[0].fields] == [
+        "exporter_name",
+        "importer_name",
+        "consignee",
+        "load_port",
+        "disch_port",
+        "vessel",
+        "inv_no",
+        "inv_date",
+        "lc_no",
+        "good",
+        "unit",
+        "qty",
+        "unit_price",
+        "amount",
+        "total",
+    ]
+    assert len(bundle.documents[0].table_cells) == 10
+    assert adapter.calls == 1
+
+
+@pytest.mark.parametrize(
+    ("document_type", "expected_fields"),
+    [
+        (
+            "bill_of_lading",
+            [
+                "exporter_name",
+                "consignee",
+                "load_port",
+                "disch_port",
+                "final_dest",
+                "vessel",
+                "voyage",
+                "bl_no",
+                "container_no",
+                "seal_no",
+                "good",
+                "gross_weight",
+                "containers",
+            ],
+        ),
+        (
+            "invoice",
+            [
+                "exporter_name",
+                "importer_name",
+                "consignee",
+                "load_port",
+                "disch_port",
+                "vessel",
+                "inv_no",
+                "inv_date",
+                "lc_no",
+                "good",
+                "unit",
+                "qty",
+                "unit_price",
+                "amount",
+                "total",
+            ],
+        ),
+        (
+            "packing_list",
+            [
+                "exporter_name",
+                "consignee",
+                "inv_no",
+                "lc_no",
+                "good",
+                "unit",
+                "qty",
+                "cartons",
+                "net_weight",
+                "gross_weight",
+                "cbm",
+                "net_gross_weight",
+            ],
+        ),
+    ],
+)
+def test_v3_visible_layout_normalizer_derives_every_rendered_field_from_fake_candidate_output(
+    document_type: str, expected_fields: list[str]
+) -> None:
+    extraction = _full_visible_layout_extraction(document_type)
+
+    fields = normalize_synthetic_pdf_fields(
+        document_type=document_type,  # type: ignore[arg-type]
+        spans=extraction.spans,
+        table_cells=extraction.table_cells,
+    )
+
+    assert [field.field_name for field in fields] == expected_fields
+
+
+def test_v3_visible_layout_normalizer_fails_closed_for_ambiguous_or_missing_table_fields() -> None:
+    extraction = _full_visible_layout_extraction("invoice")
+    ambiguous_cells = tuple(
+        cell
+        for cell in extraction.table_cells
+        if not (cell.row_index == 0 and cell.column_index == 4)
+    ) + (
+        CandidateTableCellV1(
+            page_number=1,
+            table_index=1,
+            row_index=0,
+            column_index=5,
+            text="Amount",
+        ),
+        CandidateTableCellV1(
+            page_number=1,
+            table_index=1,
+            row_index=1,
+            column_index=5,
+            text="62.50",
+        ),
+    )
+
+    fields = normalize_synthetic_pdf_fields(
+        document_type="invoice",
+        spans=extraction.spans,
+        table_cells=ambiguous_cells,
+    )
+
+    # All form fields remain direct candidate output, but the table is rejected
+    # as ambiguous; no table-derived values are silently filled from elsewhere.
+    assert [field.field_name for field in fields] == [
+        "exporter_name",
+        "importer_name",
+        "consignee",
+        "load_port",
+        "disch_port",
+        "vessel",
+        "inv_no",
+        "inv_date",
+        "lc_no",
+        "total",
+    ]
+
+
+def test_v3_normalizer_has_only_candidate_span_and_table_inputs() -> None:
+    parameters = inspect.signature(normalize_synthetic_pdf_fields).parameters
+    assert tuple(parameters) == ("document_type", "spans", "table_cells")
+    implementation = inspect.getsource(normalize_synthetic_pdf_fields)
+    assert "source_attested" not in implementation
+    assert "clean_manifest" not in implementation
+    assert "error_labels" not in implementation
+
+
+@pytest.mark.parametrize(
+    ("engine_kind", "configured_directory"),
+    [
+        ("paddleocr", "models/det"),
+        ("docling", "models/docling"),
+    ],
+)
+def test_model_directory_inventory_rejects_an_undeclared_regular_file(
+    tmp_path: Path, engine_kind: str, configured_directory: str
+) -> None:
+    """Provisioning and candidate execution share the same exact-set gate."""
+
+    fixture = _fixture(tmp_path, engine_kind=engine_kind)
+    root = fixture["root"]
+    configuration_path = fixture["configuration_path"]
+    inventory_path = fixture["inventory_path"]
+    assert isinstance(root, Path)
+    assert isinstance(configuration_path, Path)
+    assert isinstance(inventory_path, Path)
+    configuration_value = json.loads(configuration_path.read_text(encoding="utf-8"))
+    inventory_value = json.loads(inventory_path.read_text(encoding="utf-8"))
+    (root / configured_directory / "not-in-inventory.bin").write_bytes(b"untracked")
+
+    with pytest.raises(
+        DocumentPreviewRuntimeError, match="document_preview_model_artifact_invalid"
+    ):
+        write_runtime_sidecars(
+            document_preview_root=root,
+            configuration_value=configuration_value,
+            inventory_value=inventory_value,
+            package_version_reader=lambda _name: "test-v1",
+        )
+    with pytest.raises(SyntheticPdfCandidateRunnerError, match="candidate_model_inventory_invalid"):
+        load_unapproved_local_candidate_profile(
+            document_preview_root=root,
+            configuration_path=configuration_path,
+            inventory_path=inventory_path,
+            engine_kind=engine_kind,  # type: ignore[arg-type]
+            package_version_reader=lambda _name: "test-v1",
+        )
+
+
+def test_model_directory_inventory_rejects_a_missing_declared_file(tmp_path: Path) -> None:
+    fixture = _fixture(tmp_path, engine_kind="docling")
+    root = fixture["root"]
+    configuration_path = fixture["configuration_path"]
+    inventory_path = fixture["inventory_path"]
+    assert isinstance(root, Path)
+    assert isinstance(configuration_path, Path)
+    assert isinstance(inventory_path, Path)
+    (root / "models" / "docling" / "model.bin").unlink()
+
+    with pytest.raises(SyntheticPdfCandidateRunnerError, match="candidate_model_inventory_invalid"):
+        load_unapproved_local_candidate_profile(
+            document_preview_root=root,
+            configuration_path=configuration_path,
+            inventory_path=inventory_path,
+            engine_kind="docling",
+            package_version_reader=lambda _name: "test-v1",
+        )
+
+
+def test_model_directory_inventory_rejects_a_symlink_entry(
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    """Exercise the link branch even where Windows disallows test symlinks."""
+
+    fixture = _fixture(tmp_path, engine_kind="docling")
+    root = fixture["root"]
+    configuration_path = fixture["configuration_path"]
+    inventory_path = fixture["inventory_path"]
+    assert isinstance(root, Path)
+    assert isinstance(configuration_path, Path)
+    assert isinstance(inventory_path, Path)
+    link_entry = root / "models" / "docling" / "redirected-model.bin"
+    link_entry.write_bytes(b"placeholder")
+    path_type = type(link_entry)
+    original_lstat = path_type.lstat
+
+    def fake_lstat(path: Path) -> object:
+        if path == link_entry:
+            return SimpleNamespace(st_mode=stat.S_IFLNK, st_file_attributes=0)
+        return original_lstat(path)
+
+    monkeypatch.setattr(path_type, "lstat", fake_lstat)
+
+    with pytest.raises(SyntheticPdfCandidateRunnerError, match="candidate_model_inventory_invalid"):
+        load_unapproved_local_candidate_profile(
+            document_preview_root=root,
+            configuration_path=configuration_path,
+            inventory_path=inventory_path,
+            engine_kind="docling",
+            package_version_reader=lambda _name: "test-v1",
+        )
 
 
 def test_candidate_bundle_cannot_be_relabelled_at_evaluation(tmp_path: Path) -> None:
@@ -387,7 +827,8 @@ def test_normalizer_uses_only_explicit_labelled_candidate_spans() -> None:
 
     assert [(field.field_name, field.value) for field in fields] == [
         ("inv_no", "INV-9"),
-        ("qty", "4 PCS"),
+        ("unit", "PCS"),
+        ("qty", "4"),
         ("net_gross_weight", "3 / 4 KG"),
     ]
 
@@ -513,6 +954,12 @@ def test_sealed_packet_is_reserved_before_adapter_factory_and_never_reruns(tmp_p
         _run(fixture, _FakeAdapter(), factory_calls=factory_calls)
 
     assert first["reservation_file"] is not None
+    reservation = (
+        fixture["root"] / "candidate-run-reservations" / first["reservation_file"]  # type: ignore[operator]
+    )
+    assert json.loads(reservation.read_text(encoding="utf-8"))["parser_revision"] == (
+        SYNTHETIC_PDF_LABEL_NORMALIZER_REVISION
+    )
     assert adapter.calls == 1
     assert len(factory_calls) == 1
 

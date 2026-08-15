@@ -3,6 +3,7 @@ from __future__ import annotations
 import hashlib
 import logging
 from dataclasses import replace
+from pathlib import Path
 
 from fastapi.testclient import TestClient
 from pydantic import SecretStr
@@ -116,6 +117,33 @@ def test_disabled_default_returns_content_free_unavailable_preview() -> None:
         "pages": [],
         "warnings": [{"code": "preview_engine_unavailable"}],
     }
+
+
+def test_explicit_source_attested_auto_mode_starts_pending_without_a_pointer(
+    tmp_path: Path,
+) -> None:
+    pointer = (
+        tmp_path / "_local" / "data" / "document-preview" / "approvals" / "pdf-preview-active.json"
+    )
+    app = create_app(
+        _settings(
+            document_preview_approval_path=pointer,
+            document_preview_auto_activation_mode="source-attested-synthetic",
+        )
+    )
+    content = _pdf()
+
+    assert app.state.document_preview_activation_status == "auto-pending"
+    with TestClient(app, raise_server_exceptions=False) as client:
+        response = client.post(
+            "/internal/agent/v2/document-extractions",
+            content=content,
+            headers=_headers(content, "application/pdf"),
+        )
+
+    assert response.status_code == 200
+    assert response.json()["status"] == "unavailable"
+    assert response.json()["extractor_revision"] is None
 
 
 def test_preview_returns_only_extracted_spans_not_binary_or_filename(

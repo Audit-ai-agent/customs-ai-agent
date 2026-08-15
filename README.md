@@ -232,7 +232,7 @@ POST /internal/agent/v2/knowledge/answers
 
 `POST /internal/agent/v2/reviews`는 텍스트 문서, Case ID, 실행 ID, 기준일, 무역 유형, `KR`만 받습니다. 상업송장·포장명세서·B/L·AWB·원산지증명서·수출신고서·보완 증빙 문서를 받아 수입 또는 수출 심사를 수행합니다. V3.2 응답은 사람 검토 상태와 함께 실제 workflow 단계, 최대 2 cycle·6 action의 제한된 계획 trace, 문서별 추출 사실과 원문 인용, 코드 기반 비교 결과, Evidence에 연결된 finding·담당자 조치, 8구역 근거 보고서를 담습니다. 이력 Evidence가 사용된 경우에는 법령·HSK·요건의 기준일을 담은 nullable `temporal_context`와 각 영역의 `covered|unavailable` 상태를 담은 nullable `temporal_coverage`가 함께 추가됩니다. 승인된 사람 수정은 원문을 덮어쓰지 않고 `human_provided` 사실로 별도 표시합니다. 수량·금액·원산지·문서 식별자 판정은 LLM이 아니라 코드가 수행하며, 결과는 언제나 자동완료 대상이 아닙니다.
 
-`POST /internal/agent/v2/document-extractions`는 `/reviews`와 분리된 binary boundary입니다. `Content-Type`은 `application/pdf`·`image/jpeg`·`image/png` 중 하나이고, body에는 identity-encoded raw bytes만 담습니다. Backend는 `X-Document-Asset-ID`, `X-Extraction-Request-ID`, `X-Document-SHA256`을 함께 보내며 Agent는 size·streaming SHA-256·magic·PDF page hint·image pixel limit을 독립 확인합니다. 응답에는 asset/request ID, hash, adapter revision, page/span/normalized bbox, canonical text hash와 content-free warning만 있으며 raw bytes·base64·filename·Case ID는 없습니다. span text는 검수 화면 표시용 후보일 뿐이며 Agent의 일반 로그·scenario transcript·review contract에는 들어가지 않습니다. 기본 preview engine은 `unavailable`입니다. 운영 시작 시에는 사람이 승인한 local pointer가 정확히 검증된 경우에만 PDF 후보를 만들며, JPEG·PNG는 PDF 승인과 무관하게 계속 `unavailable`입니다.
+`POST /internal/agent/v2/document-extractions`는 `/reviews`와 분리된 binary boundary입니다. `Content-Type`은 `application/pdf`·`image/jpeg`·`image/png` 중 하나이고, body에는 identity-encoded raw bytes만 담습니다. Backend는 `X-Document-Asset-ID`, `X-Extraction-Request-ID`, `X-Document-SHA256`을 함께 보내며 Agent는 size·streaming SHA-256·magic·PDF page hint·image pixel limit을 독립 확인합니다. 응답에는 asset/request ID, hash, adapter revision, page/span/normalized bbox, canonical text hash와 content-free warning만 있으며 raw bytes·base64·filename·Case ID는 없습니다. span text는 검수 화면 표시용 후보일 뿐이며 Agent의 일반 로그·scenario transcript·review contract에는 들어가지 않습니다. 기본 preview engine은 `unavailable`입니다. 일반 경로는 사람이 승인한 pointer SHA-256을 process 시작에 고정하며, 합성 source-attested PDF 전용의 명시 opt-in만 sealed chain을 다음 PDF 요청에 자동 반영할 수 있습니다. JPEG·PNG는 어느 경로에서도 계속 `unavailable`입니다.
 
 `POST /internal/agent/v2/assistant/answers`는 Backend가 저장한 Review Run snapshot, 질문, 최근 검증 대화 최대 8턴과 선택적 `expected_snapshot_id`만 받습니다. 기존 단일 일반 안내는 그대로 `guidance_resolution` 하나를 사용합니다. V2에서만 방향이 같은 독립 scope 정확히 두 개를 순차 조회할 수 있으며, 첫 응답의 immutable snapshot으로 두 번째 조회를 고정합니다. 두 scope가 모두 `covered`이고 사건의 독립 citation도 있을 때만 `guidance_resolutions` 정확히 두 개, `answer_format="multi_scope_checklist"`, `사건 분석 → 주제 1 공식 안내 → 주제 2 공식 안내 → 사건 확인 목록`의 네 구역을 반환합니다. 각 공식 인용·안내 구역에는 `resolution_index`가 붙고, 마지막 확인 목록은 법적 결론·HS·세액·허가·통관 승인 판단을 만들지 않습니다. 한 scope라도 partial/no coverage/계약 오류이면 인용이나 사건 적용을 섞지 않고 항목화된 `insufficient_evidence`로 끝냅니다. 세 개 이상이거나 방향이 충돌하면 기존 명확화 질문을 반환합니다. 문서 본문처럼 보이는 다줄 붙여넣기는 새 심사 근거가 아니며 Agent·Data·Claude·transcript에 전달하지 않고 문서 등록 또는 교체 후 재심사를 안내합니다. 이 호출은 Case, 문서, finding, 수정 제안을 직접 바꾸지 않습니다.
 
@@ -284,7 +284,7 @@ offline 실행·평가·봉인 reservation 절차는
 [`docs/LOCAL_SYNTHETIC_PDF_CANDIDATE_RUNNER.md`](docs/LOCAL_SYNTHETIC_PDF_CANDIDATE_RUNNER.md)에
 있다. 이때도 OCR 결과는 자동 심사 입력이 아니다.
 
-OCR preview engine은 Gold 평가와 사람 승인을 거치기 전에는 켜지지 않습니다. runtime이 읽는 모든 파일은 workspace의 Git 제외 경로 한 곳에만 둡니다.
+OCR preview engine은 human-Gold 경로에서는 Gold 평가와 사람 승인을 거치기 전에는 켜지지 않습니다. 합성 PDF의 source-attested 경로는 별도 local receipt chain과 sealed Gate가 통과한 경우에만 자동 pointer를 만들 수 있으며, 두 provenance를 섞지 않습니다. runtime이 읽는 모든 파일은 workspace의 Git 제외 경로 한 곳에만 둡니다.
 
 ```text
 <workspace>/_local/data/document-preview/
@@ -293,6 +293,7 @@ OCR preview engine은 Gold 평가와 사람 승인을 거치기 전에는 켜지
   runtime-configurations/<SHA>.json
   model-inventories/<SHA>.json
   evaluation-results/<SHA>.json   # sealed evaluator의 canonical 결과
+  source-attested-evaluation-results/<SHA>.json  # source-attested sealed 결과
   approvals/pdf-preview-active.json
 ```
 
@@ -302,7 +303,7 @@ OCR preview engine은 Gold 평가와 사람 승인을 거치기 전에는 켜지
 - runtime configuration SHA-256과 model inventory SHA-256
 - sealed packet의 dataset revision, Gold receipt SHA-256, evaluator result SHA-256
 
-runtime은 시작 시 pointer·configuration·inventory·sealed result·설치 package version·모든 model artifact SHA-256을 검사합니다. 요청 중에는 작은 pointer/sidecar를 다시 검사하고, model file의 크기·수정시각·regular-file 상태가 달라지면 PDF도 즉시 `unavailable`으로 fail-closed 합니다. 모델을 다시 다운로드하거나 다른 OCR engine으로 fallback하지 않습니다. OCR 결과는 계속 사람 확인 전 후보이며 Review·Finding·통관 결론에 자동으로 들어가지 않습니다.
+runtime은 시작 시 pointer·configuration·inventory·sealed result·설치 package version·모든 model artifact SHA-256을 검사합니다. PaddleOCR/Docling의 설정된 model directory는 재귀적으로 훑어 inventory에 적힌 regular file 집합과 정확히 같아야 하므로, 누락·미신고 파일·symlink/Windows junction(reparse point)은 모두 fail-closed 합니다. 요청 중에도 이 집합을 다시 확인하고, model file의 크기·수정시각·regular-file 상태가 달라지면 PDF도 즉시 `unavailable`으로 끝냅니다. 모델을 다시 다운로드하거나 다른 OCR engine으로 fallback하지 않습니다. OCR 결과는 계속 사람 확인 전 후보이며 Review·Finding·통관 결론에 자동으로 들어가지 않습니다.
 
 실제 package/model provisioning은 기본 서비스 명령과 분리된 **명시적 운영자 작업**입니다. optional extra는 하나만 고르고, package/model 다운로드가 필요한 명령도 운영자가 직접 실행합니다. `provision`과 `approve` 도구 자체는 네트워크에 접속하지 않습니다.
 
@@ -318,7 +319,7 @@ uv run --locked --no-sync --group dev python tools/provision_document_preview_ru
   --inventory <workspace>/_local/data/document-preview/staging/inventory.json `
   --cache-directory <local-package-or-model-cache> --confirm-provision
 
-# sealed evaluator 결과가 Gate를 통과하고 사람이 검토한 뒤에만 pointer를 atomic activation한다.
+# human-Gold sealed evaluator 결과를 사람이 검토한 뒤에만 pointer를 atomic activation한다.
 uv run --locked --no-sync --group dev python tools/approve_document_preview_runtime.py `
   --document-preview-root <workspace>/_local/data/document-preview `
   --evaluation-result <workspace>/_local/data/document-preview/evaluation-results/<evaluation-result-sha>.json `
@@ -330,7 +331,25 @@ $env:CUSTOMS_AGENT_DOCUMENT_PREVIEW_APPROVAL_PATH = '<workspace>/_local/data/doc
 $env:CUSTOMS_AGENT_DOCUMENT_PREVIEW_APPROVAL_SHA256 = '<approval-sha256>'
 ```
 
-`configuration`은 `schema_version`, `engine_kind`, `extractor_revision`, `options`만 허용합니다. `pdf_text_layer`의 `options`는 빈 객체이고, PaddleOCR은 명시적 detection/recognition model directory, Docling은 명시적 local artifacts directory만 받습니다. `inventory`는 pinned package version과 각 model artifact의 relative path·byte size·SHA-256·license ID·공식 HTTPS source URI를 모두 요구합니다. 경로 이탈·symlink·누락 artifact·버전 불일치·sealed 평가 Gate 실패·pointer 변조는 모두 preview 비활성으로 끝납니다.
+합성 PDF의 `source_attested_synthetic` sealed 결과는 별도 evaluator의
+`--auto-activate-source-attested-synthetic` switch가 pointer를 원자적으로 쓸 수
+있다. 이를 이미 실행 중인 Agent에 반영하려면, Agent를 처음 시작할 때에만 importer의
+명시 switch를 사용한다. pointer가 없거나 chain이 불완전하면 process는 계속
+`unavailable`이며, sealed pointer가 생긴 뒤 다음 PDF 요청에서 전체 local chain을 다시
+검증해 반영한다. 이후 activation마다 SHA 환경변수 변경이나 Agent 재시작은 없다.
+
+```powershell
+. .\tools\Import-AgentProfile.ps1 -Profile dev-fixture `
+  -EnableSourceAttestedPdfPreviewAutoActivation
+uv run --locked --no-sync --group dev customs-ai-agent-dev-serve
+```
+
+이 모드는 PDF content-stream compatibility를 검증한 이 정확한 합성 데이터셋에만
+적용된다. 실제 기업 문서·스캔·손글씨·저화질 이미지의 OCR 품질 근거가 아니며,
+동일 local write 권한을 가진 악성 프로세스까지 구별하는 외부 signer도 아니다. 상세
+제약과 증거 chain은 [`docs/LOCAL_SOURCE_ATTESTED_SYNTHETIC_PDF_ACTIVATION.md`](docs/LOCAL_SOURCE_ATTESTED_SYNTHETIC_PDF_ACTIVATION.md)에 있다.
+
+`configuration`은 `schema_version`, `engine_kind`, `extractor_revision`, `options`만 허용합니다. `pdf_text_layer`의 `options`는 빈 객체이고, PaddleOCR은 명시적 detection/recognition model directory, Docling은 명시적 local artifacts directory만 받습니다. `inventory`는 pinned package version과 각 model artifact의 relative path·byte size·SHA-256·license ID·공식 HTTPS source URI를 모두 요구합니다. OCR engine의 설정 directory 아래 regular file은 inventory에 모두 한 번씩 선언되어야 하며, extra file·누락 file·link/junction은 허용하지 않습니다. 경로 이탈·symlink·누락 artifact·버전 불일치·sealed 평가 Gate 실패·pointer 변조는 모두 preview 비활성으로 끝납니다.
 
 PaddleOCR/Docling은 대용량 wheel·모델·cache가 필요할 수 있습니다. provisioning 도구의 기본 free-space 기준은 12 GiB이며 `--minimum-free-gib`로 더 높은 운영 기준을 지정할 수 있습니다. 여유 공간이 부족하면 다운로드나 부분 설치 전에 중단해야 하며, 일반 Agent runtime은 언제나 no-download 상태를 유지합니다.
 

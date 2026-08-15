@@ -30,7 +30,12 @@ param(
     # Zero selects the profile's immutable default: legacy V1 guidance uses
     # 18093 and the separately verified V2 guidance peer uses 18094.
     [ValidateRange(0, 65535)]
-    [int]$GuidancePort = 0
+    [int]$GuidancePort = 0,
+
+    # Explicitly opt this one Agent process into local synthetic PDF pointer
+    # discovery.  It never enables a preview by itself: a separate sealed
+    # source-attested evaluator must first atomically write the fixed pointer.
+    [switch]$EnableSourceAttestedPdfPreviewAutoActivation
 )
 
 Set-StrictMode -Version Latest
@@ -249,6 +254,25 @@ $env:EVIDENCE_SERVICE_TOKEN_HEADER = "Authorization"
 # credential and lets the runtime require law-history temporal provenance
 # without weakening nullable compatibility for the retained three-law profile.
 $env:CUSTOMS_AGENT_EVIDENCE_PROFILE = $evidenceProfile
+
+if ($EnableSourceAttestedPdfPreviewAutoActivation) {
+    $previewRoot = Join-Path $workspaceRoot "_local\data\document-preview"
+    $previewApprovalDirectory = Join-Path $previewRoot "approvals"
+    $env:CUSTOMS_AGENT_DOCUMENT_PREVIEW_AUTO_ACTIVATION = "source-attested-synthetic"
+    $env:CUSTOMS_AGENT_DOCUMENT_PREVIEW_APPROVAL_PATH = Join-Path $previewApprovalDirectory "pdf-preview-active.json"
+    # Static SHA pinning and live source-attested discovery are mutually
+    # exclusive.  The runtime verifies the complete local evidence chain on
+    # every PDF request instead of inheriting a stale shell hash.
+    Remove-Item -LiteralPath "Env:CUSTOMS_AGENT_DOCUMENT_PREVIEW_APPROVAL_SHA256" -ErrorAction SilentlyContinue
+} elseif (Test-Path -LiteralPath "Env:CUSTOMS_AGENT_DOCUMENT_PREVIEW_AUTO_ACTIVATION") {
+    # Returning to a normal profile after the explicit automatic mode restores
+    # the safe default.  Preserve an independently configured static pair
+    # when this importer did not previously set automatic discovery.
+    Remove-Item -LiteralPath "Env:CUSTOMS_AGENT_DOCUMENT_PREVIEW_AUTO_ACTIVATION" -ErrorAction SilentlyContinue
+    Remove-Item -LiteralPath "Env:CUSTOMS_AGENT_DOCUMENT_PREVIEW_APPROVAL_PATH" -ErrorAction SilentlyContinue
+    Remove-Item -LiteralPath "Env:CUSTOMS_AGENT_DOCUMENT_PREVIEW_APPROVAL_SHA256" -ErrorAction SilentlyContinue
+}
+
 if ($null -eq $guidanceProfile) {
     # A shell can switch from the composed profile back to an existing one.
     # Remove stale overrides so its bounded guidance query falls back to the
