@@ -31,6 +31,8 @@
    Docling의 각 설정 directory는 하위까지 재귀적으로 검사하며, 실제 regular file
    집합이 inventory의 path·size·hash 선언과 정확히 같아야 합니다. 미신고 file,
    누락 file, symlink 또는 Windows junction(reparse point)은 후보 실행 전에
+   fail-closed 합니다. Docling inventory에는 패키지 본체뿐 아니라 layout/table/GLM
+   실행 closure의 고정 version도 포함해야 하므로, 평가 후 전이 의존성 교체도
    fail-closed 합니다. active pointer는 필요하지 않습니다. 평가는 승인보다 먼저
    수행되기 때문입니다.
 

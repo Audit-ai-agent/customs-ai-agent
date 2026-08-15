@@ -79,6 +79,25 @@ def _package(name: str) -> dict[str, object]:
     }
 
 
+_DOCLING_EXECUTION_PACKAGE_NAMES = (
+    "deepsearch-glm",
+    "docling",
+    "docling-core",
+    "docling-ibm-models",
+    "docling-parse",
+    "numpy",
+    "pillow",
+    "pypdf",
+    "pypdfium2",
+    "rtree",
+    "safetensors",
+    "scipy",
+    "torch",
+    "torchvision",
+    "transformers",
+)
+
+
 def _profile_sidecars(root: Path, engine_kind: str) -> tuple[Path, Path]:
     if engine_kind == "pdf_text_layer":
         configuration = {
@@ -155,7 +174,7 @@ def _profile_sidecars(root: Path, engine_kind: str) -> tuple[Path, Path]:
         inventory = {
             "schema_version": "1.0",
             "engine_kind": engine_kind,
-            "packages": [_package("pypdf"), _package("docling")],
+            "packages": [_package(name) for name in _DOCLING_EXECUTION_PACKAGE_NAMES],
             "artifacts": [
                 {
                     "artifact_id": "docling-model",

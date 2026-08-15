@@ -2956,12 +2956,38 @@ def _verify_inventory_artifacts(
     return tuple(fingerprints)
 
 
+_DOCLING_EXECUTION_PACKAGES = frozenset(
+    {
+        # The direct local Docling profile instantiates the PDF parser,
+        # GLM assembler, layout model, and TableFormer.  These distributions
+        # can affect its output even though only ``docling`` is imported by
+        # this module.  They must therefore be hash-bound inventory entries,
+        # not an unobserved dependency closure supplied by the host.
+        "deepsearch-glm",
+        "docling",
+        "docling-core",
+        "docling-ibm-models",
+        "docling-parse",
+        "numpy",
+        "pillow",
+        "pypdf",
+        "pypdfium2",
+        "rtree",
+        "safetensors",
+        "scipy",
+        "torch",
+        "torchvision",
+        "transformers",
+    }
+)
+
+
 def _required_packages(kind: ApprovedPdfEngineKind) -> frozenset[str]:
     if kind == "pdf_text_layer":
         return frozenset({"pypdf"})
     if kind == "paddleocr":
         return frozenset({"pypdf", "paddleocr", "paddlepaddle", "pypdfium2"})
-    return frozenset({"pypdf", "docling"})
+    return _DOCLING_EXECUTION_PACKAGES
 
 
 def _normalized_distribution_name(name: str) -> str:

@@ -69,7 +69,8 @@ provenance field, 다른 scope/kind는 이 경로에서 모두 거부된다. 반
 새 chain 검증 실패가 있으면 이전 engine을 유지하지 않고 `unavailable`로 끝낸다.
 
 모델과 package는 여전히 별도 명시 provisioning으로 local-only inventory에
-기록해야 한다. PaddleOCR/Docling은 설정된 model directory 아래의 모든 regular
+기록해야 한다. Docling은 본체만이 아니라 layout/table/GLM 실행에 실제로 관여하는
+고정 dependency closure의 package version도 inventory에 기록해야 한다. PaddleOCR/Docling은 설정된 model directory 아래의 모든 regular
 file을 inventory의 path·size·SHA-256으로 선언해야 하며, extra·누락 file 또는
 symlink/Windows junction(reparse point)은 activation과 runtime 모두에서 거부된다.
 이 활성화 명령은 다운로드, network fallback, model 설치를 수행하지 않는다.
