@@ -39,6 +39,7 @@ from customs_ai_agent.evaluation.document_ocr_quality import (
     SyntheticPdfCandidateOutputBundleV1,
     candidate_bundle_sha256,
     canonical_json_file_bytes,
+    normalize_field_value,
     verify_receipt_source_assets,
 )
 from customs_ai_agent.schemas.document_extraction import (
@@ -67,10 +68,10 @@ _SHA256 = re.compile(r"^[a-f0-9]{64}$")
 _MAX_JSON_BYTES = 1 * 1024 * 1024
 _MAX_SOURCE_BYTES = 32 * 1024 * 1024
 _PROFILE_MODE: Literal["offline_synthetic_pdf_evaluation"] = "offline_synthetic_pdf_evaluation"
-# v2 adds an explicit Markdown-pipe-table transform for the local Docling
-# candidate only.  It is part of the candidate provenance so an old field-only
-# output cannot be relabelled as a table-capable one.
-SYNTHETIC_PDF_LABEL_NORMALIZER_REVISION = "synthetic-pdf-label-normalizer-v2"
+# v3 binds the visible label/value and table-header/body transform.  It is
+# deliberately a candidate-only revision: historical v1/v2 bundles cannot be
+# relabelled as outputs from the stricter layout parser.
+SYNTHETIC_PDF_LABEL_NORMALIZER_REVISION = "synthetic-pdf-visible-layout-normalizer-v3"
 
 
 class SyntheticPdfCandidateRunnerError(ValueError):
@@ -400,99 +401,474 @@ def _load_selected_pdf(*, source_root: Path, asset: DatasetAssetReceiptV1) -> by
     return content
 
 
-# The parser is a deliberately small, versioned document-specific specification.
-# It never imports Gold, clean_manifest.csv, error_labels.csv, or a rendered-PDF
-# template.  A label must appear in an emitted span with an explicit delimiter;
-# unknown/ambiguous labels stay absent so the scorer fails naturally.
-_SYNTHETIC_FIELD_LABELS: dict[SyntheticDocumentType, tuple[tuple[str, tuple[str, ...]], ...]] = {
+# This is deliberately a small, candidate-only visible-layout specification.
+# It has no source-content-stream, Gold, CSV, or cross-document input.  Names
+# below are *visible form labels and visible table headers*, not a coordinate
+# profile or a source-of-truth mapping.  A missing/ambiguous output stays
+# missing: the independent evaluator consequently cannot pass its field gate.
+_VisibleNormalizer = Literal["text-v1", "numeric-v1", "identifier-v1"]
+
+
+@dataclass(frozen=True, slots=True)
+class _VisibleFieldSpec:
+    field_name: str
+    normalizer: _VisibleNormalizer
+    labels: tuple[str, ...]
+    # Adjacent label/value lines are accepted only for explicitly form-like
+    # fields.  Table captions otherwise could consume a neighbouring cell.
+    accepts_adjacent_value: bool = False
+
+
+# The field universe is the actually visible synthetic PDF contract: B/L 13,
+# Invoice 15, Packing List 12.  Packing List intentionally excludes the
+# non-rendered ``containers`` manifest column.
+_VISIBLE_LAYOUT_FIELDS: dict[SyntheticDocumentType, tuple[_VisibleFieldSpec, ...]] = {
     "bill_of_lading": (
-        ("exporter_name", ("exporter", "shipper")),
-        ("consignee", ("consignee", "to applicant / consignee")),
-        ("load_port", ("port of loading", "load port")),
-        ("disch_port", ("port of discharge", "discharge port")),
-        ("final_dest", ("final destination",)),
-        ("vessel", ("vessel/flight", "vessel")),
-        ("voyage", ("voyage no", "voyage")),
-        ("bl_no", ("bill of lading no", "b/l no", "bl no")),
-        ("container_no", ("container no",)),
-        ("seal_no", ("seal no",)),
-        ("good", ("goods description", "description of goods")),
-        ("gross_weight", ("gross weight",)),
-        ("containers", ("no. of containers", "number of containers", "containers")),
+        _VisibleFieldSpec("exporter_name", "text-v1", ("shipper", "exporter"), True),
+        _VisibleFieldSpec("consignee", "text-v1", ("consignee", "to applicant / consignee"), True),
+        _VisibleFieldSpec("load_port", "text-v1", ("port of loading", "load port"), True),
+        _VisibleFieldSpec("disch_port", "text-v1", ("port of discharge", "discharge port"), True),
+        _VisibleFieldSpec("final_dest", "text-v1", ("final destination",), True),
+        _VisibleFieldSpec(
+            "vessel", "text-v1", ("vessel / flight", "vessel/flight", "vessel"), True
+        ),
+        _VisibleFieldSpec("voyage", "identifier-v1", ("voyage no", "voyage"), True),
+        _VisibleFieldSpec("bl_no", "identifier-v1", ("bill of lading no", "b/l no", "bl no"), True),
+        _VisibleFieldSpec("container_no", "identifier-v1", ("container no", "container number")),
+        _VisibleFieldSpec("seal_no", "identifier-v1", ("seal no", "seal number")),
+        _VisibleFieldSpec("good", "text-v1", ("goods description", "description of goods")),
+        _VisibleFieldSpec("gross_weight", "numeric-v1", ("gross weight",)),
+        _VisibleFieldSpec(
+            "containers", "numeric-v1", ("no of containers", "number of containers", "containers")
+        ),
     ),
     "invoice": (
-        ("exporter_name", ("exporter", "seller", "shipper")),
-        ("importer_name", ("importer", "buyer")),
-        ("consignee", ("consignee", "to applicant / consignee")),
-        ("load_port", ("port of loading", "load port")),
-        ("disch_port", ("port of discharge", "discharge port")),
-        ("vessel", ("vessel/flight", "vessel")),
-        ("inv_no", ("invoice number", "invoice no", "inv no")),
-        ("inv_date", ("invoice date",)),
-        ("lc_no", ("letter of credit", "l/c no", "lc no")),
-        ("good", ("goods description", "description of goods")),
-        ("unit", ("unit",)),
-        ("qty", ("quantity", "qty")),
-        ("unit_price", ("unit price",)),
-        ("amount", ("amount",)),
-        ("total", ("total",)),
+        _VisibleFieldSpec("exporter_name", "text-v1", ("exporter", "seller", "shipper"), True),
+        # ``Notify Party`` is the visible invoice form label for this field;
+        # no consignee/B/L sibling or data file is consulted.
+        _VisibleFieldSpec("importer_name", "text-v1", ("notify party", "importer", "buyer"), True),
+        _VisibleFieldSpec("consignee", "text-v1", ("consignee", "to applicant / consignee"), True),
+        _VisibleFieldSpec("load_port", "text-v1", ("port of loading", "load port"), True),
+        _VisibleFieldSpec("disch_port", "text-v1", ("port of discharge", "discharge port"), True),
+        _VisibleFieldSpec(
+            "vessel", "text-v1", ("vessel / flight", "vessel/flight", "vessel"), True
+        ),
+        _VisibleFieldSpec(
+            "inv_no", "identifier-v1", ("invoice number", "invoice no", "inv no"), True
+        ),
+        _VisibleFieldSpec("inv_date", "identifier-v1", ("invoice date",), True),
+        _VisibleFieldSpec("lc_no", "identifier-v1", ("letter of credit", "l/c no", "lc no"), True),
+        _VisibleFieldSpec("good", "text-v1", ("goods description", "description of goods")),
+        _VisibleFieldSpec("unit", "text-v1", ("unit",)),
+        _VisibleFieldSpec("qty", "numeric-v1", ("quantity", "qty")),
+        _VisibleFieldSpec("unit_price", "numeric-v1", ("unit price",)),
+        _VisibleFieldSpec("amount", "numeric-v1", ("amount",)),
+        _VisibleFieldSpec("total", "numeric-v1", ("total",), True),
     ),
     "packing_list": (
-        ("exporter_name", ("exporter", "seller", "shipper")),
-        ("consignee", ("consignee", "to applicant / consignee")),
-        ("inv_no", ("no. of invoice", "invoice no", "inv no")),
-        ("lc_no", ("no. of l/c", "letter of credit", "l/c no", "lc no")),
-        ("good", ("goods description", "description of goods")),
-        ("unit", ("unit",)),
-        ("qty", ("quantity", "qty")),
-        ("cartons", ("no. of cartons / pkgs", "cartons", "pkgs")),
-        ("containers", ("no. of containers", "number of containers", "containers")),
-        ("net_weight", ("net weight",)),
-        ("gross_weight", ("gross weight",)),
-        ("cbm", ("cbm", "volume")),
-        ("net_gross_weight", ("net/gross weight",)),
+        _VisibleFieldSpec("exporter_name", "text-v1", ("exporter", "seller", "shipper"), True),
+        _VisibleFieldSpec("consignee", "text-v1", ("consignee", "to applicant / consignee"), True),
+        _VisibleFieldSpec(
+            "inv_no", "identifier-v1", ("no of invoice", "invoice no", "inv no"), True
+        ),
+        _VisibleFieldSpec(
+            "lc_no", "identifier-v1", ("no of l/c", "letter of credit", "l/c no", "lc no"), True
+        ),
+        _VisibleFieldSpec("good", "text-v1", ("goods description", "description of goods")),
+        _VisibleFieldSpec("unit", "text-v1", ("unit",)),
+        _VisibleFieldSpec("qty", "numeric-v1", ("quantity", "qty")),
+        _VisibleFieldSpec("cartons", "numeric-v1", ("no of cartons / pkgs", "cartons", "pkgs")),
+        _VisibleFieldSpec("net_weight", "numeric-v1", ("net weight",)),
+        _VisibleFieldSpec("gross_weight", "numeric-v1", ("gross weight",)),
+        _VisibleFieldSpec("cbm", "numeric-v1", ("cbm", "volume", "measurement")),
+        _VisibleFieldSpec("net_gross_weight", "text-v1", ("net/gross weight",)),
     ),
 }
 
 
-def _label_expression(labels: Sequence[str]) -> re.Pattern[str]:
-    escaped = sorted((re.escape(label) for label in labels), key=len, reverse=True)
-    # A separator is required.  That prevents a heading or a value that merely
-    # mentions a label from becoming a field candidate.
-    return re.compile(
-        rf"^\s*(?:{'|'.join(escaped)})\s*(?:[:#]|\s[-–—]\s)\s*(?P<value>[^\r\n]+?)\s*$",
-        re.IGNORECASE,
+# Table keys are intentionally separate from form labels.  Matching requires a
+# complete normalized header, never a column position, bbox, or a value from a
+# different document.
+_VISIBLE_TABLE_HEADERS: dict[SyntheticDocumentType, tuple[tuple[str, tuple[str, ...]], ...]] = {
+    "bill_of_lading": (
+        ("container_no", ("container no", "container number")),
+        ("seal_no", ("seal no", "seal number")),
+        (
+            "containers",
+            (
+                "no and kind of packages/containers",
+                "no kind of packages/containers",
+                "no of packages/containers",
+                "packages/containers",
+            ),
+        ),
+        ("good", ("goods description", "description of goods", "description")),
+        ("gross_weight", ("gross weight",)),
+    ),
+    "invoice": (
+        ("good", ("description of goods", "goods description", "description")),
+        ("qty_unit", ("quantity", "qty", "quantity unit")),
+        ("unit_price", ("unit price",)),
+        ("amount", ("amount",)),
+    ),
+    "packing_list": (
+        (
+            "cartons",
+            ("marks/numbers/pkgs", "marks numbers pkgs", "marks numbers packages", "cartons"),
+        ),
+        ("good_with_quantity", ("goods description", "description of goods", "description")),
+        ("qty_unit", ("quantity", "qty", "quantity unit")),
+        ("net_weight", ("net weight",)),
+        ("gross_weight", ("gross weight",)),
+        ("cbm", ("measurement", "cbm", "volume")),
+    ),
+}
+
+
+_INLINE_LABEL_VALUE = re.compile(r"^\s*(?P<label>.+?)\s*(?::|#|\s[-–—]\s)\s*(?P<value>\S.*?)\s*$")
+_HTML_BREAK = re.compile(r"<br\s*/?>", re.IGNORECASE)
+_QUANTITY_WITH_UNIT = re.compile(
+    r"^\s*(?P<quantity>[+-]?(?:\d{1,3}(?:,\d{3})+|\d+)(?:\.\d+)?)\s+(?P<unit>[A-Za-z]+)\s*$"
+)
+_QUANTITY_ONLY = re.compile(r"^\s*(?P<quantity>[+-]?(?:\d{1,3}(?:,\d{3})+|\d+)(?:\.\d+)?)\s*$")
+_UNIT_ONLY = re.compile(r"^\s*(?P<unit>[A-Za-z]+)\s*$")
+
+
+@dataclass(frozen=True, slots=True)
+class _VisibleLine:
+    page_number: int
+    reading_order: int
+    line_index: int
+    text: str
+
+
+def _normalized_visible_label(value: str) -> str:
+    """Normalize only form/header typography, never an emitted field value."""
+
+    return " ".join(re.sub(r"[^a-z0-9/]+", " ", value.casefold()).replace(" ", " ").split())
+
+
+def _visible_value(value: str) -> str | None:
+    compact = " ".join(
+        _HTML_BREAK.sub("\n", value).replace("\r\n", "\n").replace("\r", "\n").split()
+    )
+    return compact or None
+
+
+def _visible_table_value(value: str) -> str | None:
+    """Normalize table whitespace while preserving an emitted cell line break."""
+
+    lines = [
+        " ".join(line.split())
+        for line in _HTML_BREAK.sub("\n", value)
+        .replace("\r\n", "\n")
+        .replace("\r", "\n")
+        .split("\n")
+    ]
+    nonempty = [line for line in lines if line]
+    return "\n".join(nonempty) or None
+
+
+def _visible_lines(spans: Sequence[CandidateSpanV1]) -> list[_VisibleLine]:
+    lines: list[_VisibleLine] = []
+    for span in sorted(spans, key=lambda item: (item.page_number, item.reading_order)):
+        for line_index, raw in enumerate(
+            span.text.replace("\r\n", "\n").replace("\r", "\n").split("\n")
+        ):
+            text = raw.strip()
+            if text:
+                lines.append(
+                    _VisibleLine(
+                        page_number=span.page_number,
+                        reading_order=span.reading_order,
+                        line_index=line_index,
+                        text=text,
+                    )
+                )
+    return lines
+
+
+def _field_specification(document_type: SyntheticDocumentType) -> tuple[_VisibleFieldSpec, ...]:
+    specification = _VISIBLE_LAYOUT_FIELDS.get(document_type)
+    if specification is None:
+        raise SyntheticPdfCandidateRunnerError("candidate_document_type_invalid")
+    return specification
+
+
+def _matching_visible_field_names(
+    *, document_type: SyntheticDocumentType, label: str
+) -> tuple[str, ...]:
+    normalized = _normalized_visible_label(label)
+    if not normalized:
+        return ()
+    return tuple(
+        specification.field_name
+        for specification in _field_specification(document_type)
+        if normalized in {_normalized_visible_label(alias) for alias in specification.labels}
     )
 
 
-def normalize_synthetic_pdf_fields(
-    *, document_type: SyntheticDocumentType, spans: Sequence[CandidateSpanV1]
-) -> list[CandidateFieldV1]:
-    """Extract only unambiguous labelled values from local candidate spans.
+def _field_spec_by_name(
+    *, document_type: SyntheticDocumentType, field_name: str
+) -> _VisibleFieldSpec:
+    for specification in _field_specification(document_type):
+        if specification.field_name == field_name:
+            return specification
+    raise SyntheticPdfCandidateRunnerError("candidate_visible_field_invalid")
 
-    The normalizer is intentionally not a production document parser.  It is
-    only a stable synthetic-PDF evaluation transform and returns no value when
-    a label is missing, malformed, or produces conflicting values.
+
+def _append_quantity_and_unit(*, candidates: dict[str, list[str]], value: str) -> None:
+    """Emit a deterministic quantity/unit split only for an exact visible token pair."""
+
+    pair = _QUANTITY_WITH_UNIT.fullmatch(value)
+    if pair is not None:
+        candidates.setdefault("qty", []).append(pair.group("quantity"))
+        candidates.setdefault("unit", []).append(pair.group("unit"))
+        return
+    quantity = _QUANTITY_ONLY.fullmatch(value)
+    if quantity is not None:
+        candidates.setdefault("qty", []).append(quantity.group("quantity"))
+
+
+def _append_field_candidate(
+    *, candidates: dict[str, list[str]], field_name: str, raw_value: str
+) -> None:
+    value = _visible_value(raw_value)
+    if value is None:
+        return
+    if field_name == "qty":
+        _append_quantity_and_unit(candidates=candidates, value=value)
+        return
+    if field_name == "unit":
+        unit = _UNIT_ONLY.fullmatch(value)
+        if unit is not None:
+            candidates.setdefault("unit", []).append(unit.group("unit"))
+        return
+    candidates.setdefault(field_name, []).append(value)
+
+
+def _matching_table_header(*, document_type: SyntheticDocumentType, header: str) -> str | None:
+    normalized = _normalized_visible_label(header)
+    matched = {
+        semantic
+        for semantic, aliases in _VISIBLE_TABLE_HEADERS[document_type]
+        if normalized in {_normalized_visible_label(alias) for alias in aliases}
+    }
+    return next(iter(matched)) if len(matched) == 1 else None
+
+
+def _table_cells_by_layout(
+    table_cells: Sequence[CandidateTableCellV1],
+) -> dict[tuple[int, int], dict[tuple[int, int], str]]:
+    tables: dict[tuple[int, int], dict[tuple[int, int], str]] = {}
+    invalid_tables: set[tuple[int, int]] = set()
+    for cell in table_cells:
+        table_key = (cell.page_number, cell.table_index)
+        coordinate = (cell.row_index, cell.column_index)
+        table = tables.setdefault(table_key, {})
+        if coordinate in table:
+            invalid_tables.add(table_key)
+            continue
+        value = _visible_table_value(cell.text)
+        if value is None:
+            invalid_tables.add(table_key)
+            continue
+        table[coordinate] = value
+    for table_key in invalid_tables:
+        tables.pop(table_key, None)
+    return tables
+
+
+def _single_row_table_header_map(
+    *, document_type: SyntheticDocumentType, table: dict[tuple[int, int], str]
+) -> dict[str, str] | None:
+    """Return semantic header -> body value for one explicit one-line-item table.
+
+    The synthetic layouts have exactly one visible line item.  More than one
+    body row is deliberately not guessed or merged, because doing so would
+    create a hidden line-item policy in the quality evaluator.
     """
 
-    specification = _SYNTHETIC_FIELD_LABELS.get(document_type)
-    if specification is None:
-        raise SyntheticPdfCandidateRunnerError("candidate_document_type_invalid")
-    ordered_spans = sorted(spans, key=lambda span: (span.page_number, span.reading_order))
+    row_indexes = {row for row, _column in table}
+    if row_indexes != {0, 1}:
+        return None
+    header_by_column = {column: text for (row, column), text in table.items() if row == 0}
+    body_by_column = {column: text for (row, column), text in table.items() if row == 1}
+    if not header_by_column or set(header_by_column) != set(body_by_column):
+        return None
+    semantic_columns: dict[str, int] = {}
+    for column, header in header_by_column.items():
+        semantic = _matching_table_header(document_type=document_type, header=header)
+        if semantic is None:
+            continue
+        if semantic in semantic_columns:
+            return None
+        semantic_columns[semantic] = column
+    return {semantic: body_by_column[column] for semantic, column in semantic_columns.items()}
+
+
+def _append_packing_list_good_with_quantity(
+    *, candidates: dict[str, list[str]], value: str
+) -> None:
+    fragments = [
+        _visible_value(fragment)
+        for fragment in _HTML_BREAK.sub("\n", value)
+        .replace("\r\n", "\n")
+        .replace("\r", "\n")
+        .split("\n")
+    ]
+    nonempty = [fragment for fragment in fragments if fragment is not None]
+    if len(nonempty) < 2:
+        return
+    quantity_unit = nonempty[-1]
+    if _QUANTITY_WITH_UNIT.fullmatch(quantity_unit) is None:
+        return
+    good = _visible_value(" ".join(nonempty[:-1]))
+    if good is None:
+        return
+    candidates.setdefault("good", []).append(good)
+    _append_quantity_and_unit(candidates=candidates, value=quantity_unit)
+
+
+def _append_table_candidates(
+    *,
+    document_type: SyntheticDocumentType,
+    table_cells: Sequence[CandidateTableCellV1],
+    candidates: dict[str, list[str]],
+) -> None:
+    for _table_key, table in sorted(_table_cells_by_layout(table_cells).items()):
+        values = _single_row_table_header_map(document_type=document_type, table=table)
+        if values is None:
+            continue
+        if document_type == "bill_of_lading":
+            required = {"container_no", "seal_no", "containers", "good", "gross_weight"}
+            if not required.issubset(values):
+                continue
+            for field_name in sorted(required):
+                _append_field_candidate(
+                    candidates=candidates, field_name=field_name, raw_value=values[field_name]
+                )
+            continue
+        if document_type == "invoice":
+            required = {"good", "qty_unit", "unit_price", "amount"}
+            if not required.issubset(values):
+                continue
+            _append_field_candidate(
+                candidates=candidates, field_name="good", raw_value=values["good"]
+            )
+            _append_quantity_and_unit(candidates=candidates, value=values["qty_unit"])
+            _append_field_candidate(
+                candidates=candidates, field_name="unit_price", raw_value=values["unit_price"]
+            )
+            _append_field_candidate(
+                candidates=candidates, field_name="amount", raw_value=values["amount"]
+            )
+            continue
+        required = {"cartons", "net_weight", "gross_weight", "cbm"}
+        if not required.issubset(values) or not (
+            "good_with_quantity" in values or {"good", "qty_unit"}.issubset(values)
+        ):
+            continue
+        _append_field_candidate(
+            candidates=candidates, field_name="cartons", raw_value=values["cartons"]
+        )
+        _append_field_candidate(
+            candidates=candidates, field_name="net_weight", raw_value=values["net_weight"]
+        )
+        _append_field_candidate(
+            candidates=candidates, field_name="gross_weight", raw_value=values["gross_weight"]
+        )
+        _append_field_candidate(candidates=candidates, field_name="cbm", raw_value=values["cbm"])
+        net_gross = _visible_value(f"{values['net_weight']} / {values['gross_weight']}")
+        if net_gross is not None:
+            candidates.setdefault("net_gross_weight", []).append(net_gross)
+        if "good_with_quantity" in values:
+            _append_packing_list_good_with_quantity(
+                candidates=candidates, value=values["good_with_quantity"]
+            )
+        else:
+            _append_field_candidate(
+                candidates=candidates, field_name="good", raw_value=values["good"]
+            )
+            _append_quantity_and_unit(candidates=candidates, value=values["qty_unit"])
+
+
+def _append_span_candidates(
+    *,
+    document_type: SyntheticDocumentType,
+    spans: Sequence[CandidateSpanV1],
+    candidates: dict[str, list[str]],
+) -> None:
+    lines = _visible_lines(spans)
+    for index, line in enumerate(lines):
+        inline = _INLINE_LABEL_VALUE.fullmatch(line.text)
+        if inline is not None:
+            matched = _matching_visible_field_names(
+                document_type=document_type, label=inline.group("label")
+            )
+            if len(matched) == 1:
+                _append_field_candidate(
+                    candidates=candidates,
+                    field_name=matched[0],
+                    raw_value=inline.group("value"),
+                )
+            continue
+        matched = _matching_visible_field_names(document_type=document_type, label=line.text)
+        if len(matched) != 1:
+            continue
+        specification = _field_spec_by_name(document_type=document_type, field_name=matched[0])
+        if not specification.accepts_adjacent_value or index + 1 >= len(lines):
+            continue
+        next_line = lines[index + 1]
+        # Do not cross a page or let a second label/table row serve as a value.
+        if (
+            next_line.page_number != line.page_number
+            or next_line.text.startswith("|")
+            or _matching_visible_field_names(document_type=document_type, label=next_line.text)
+        ):
+            continue
+        _append_field_candidate(
+            candidates=candidates,
+            field_name=matched[0],
+            raw_value=next_line.text,
+        )
+
+
+def normalize_synthetic_pdf_fields(
+    *,
+    document_type: SyntheticDocumentType,
+    spans: Sequence[CandidateSpanV1],
+    table_cells: Sequence[CandidateTableCellV1] = (),
+) -> list[CandidateFieldV1]:
+    """Derive only unambiguous visible label/value and header/body fields.
+
+    The caller supplies raw candidate-engine spans and, if the engine emitted
+    them, table cells.  This pure transform has no Gold, CSV, content-stream,
+    source-truth, or cross-document parameter.  It does not turn an unknown
+    layout into an exception or a guessed value: missing/ambiguous fields are
+    absent, which makes the independent quality gate fail closed.
+    """
+
+    specification = _field_specification(document_type)
+    candidates: dict[str, list[str]] = {}
+    _append_span_candidates(document_type=document_type, spans=spans, candidates=candidates)
+    _append_table_candidates(
+        document_type=document_type, table_cells=table_cells, candidates=candidates
+    )
     fields: list[CandidateFieldV1] = []
-    for field_name, labels in specification:
-        matcher = _label_expression(labels)
-        values: list[str] = []
-        for span in ordered_spans:
-            for line in span.text.replace("\r\n", "\n").replace("\r", "\n").split("\n"):
-                match = matcher.fullmatch(line)
-                if match is not None:
-                    value = match.group("value").strip()
-                    if value:
-                        values.append(value)
-        unique_values = list(dict.fromkeys(values))
-        if len(unique_values) == 1:
-            fields.append(CandidateFieldV1(field_name=field_name, value=unique_values[0]))
+    for field in specification:
+        values = candidates.get(field.field_name, [])
+        canonical_values = {
+            normalize_field_value(value, field.normalizer)
+            for value in values
+            if _visible_value(value) is not None
+        }
+        if len(canonical_values) != 1:
+            continue
+        # Preserve the first candidate-engine value after the minimal visible
+        # transform.  Canonicalization above only decides equivalence; it never
+        # substitutes a value from another artifact.
+        fields.append(CandidateFieldV1(field_name=field.field_name, value=values[0]))
     return fields
 
 
@@ -789,9 +1165,6 @@ def run_synthetic_pdf_ocr_candidate(
             raise SyntheticPdfCandidateRunnerError("candidate_engine_execution_failed") from error
         except Exception as error:
             raise SyntheticPdfCandidateRunnerError("candidate_engine_execution_failed") from error
-        fields = normalize_synthetic_pdf_fields(
-            document_type=item.document_type, spans=extracted.spans
-        )
         # Preserve a future adapter's explicit structured cells.  The current
         # Docling adapter has only Markdown spans, so use its strict synthetic
         # pipe-table parser as the sole fallback.  PDF text/PaddleOCR are not
@@ -799,6 +1172,11 @@ def run_synthetic_pdf_ocr_candidate(
         table_cells = list(extracted.table_cells)
         if not table_cells and profile.engine_kind == "docling":
             table_cells = normalize_synthetic_pdf_docling_table_cells(spans=extracted.spans)
+        fields = normalize_synthetic_pdf_fields(
+            document_type=item.document_type,
+            spans=extracted.spans,
+            table_cells=table_cells,
+        )
         documents.append(
             CandidateDocumentOutputV1(
                 asset_id=item.asset_id,

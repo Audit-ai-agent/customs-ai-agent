@@ -57,7 +57,7 @@ uv run python tools/run_synthetic_pdf_ocr_candidate.py `
 
 - engine kind와 extractor revision
 - configuration SHA-256와 model inventory SHA-256
-- `synthetic-pdf-label-normalizer-v2` parser revision
+- `synthetic-pdf-visible-layout-normalizer-v3` parser revision
 - `offline_synthetic_pdf_evaluation` profile mode
 - 모든 위 값과 candidate document를 묶은 `candidate_bundle_sha256`
 
@@ -83,10 +83,24 @@ uv run python tools/evaluate_synthetic_pdf_ocr.py `
 
 ## field와 table의 제한
 
-`synthetic-pdf-label-normalizer-v2`은 문서 유형(B/L, Invoice, Packing
-List)별 고정 label과 `:`/`#`/명시적 dash 구분자를 가진 span만 읽습니다.
-값이 없거나 충돌하면 field를 비워 둡니다. Gold나 CSV 값으로 빈 field를
-채우지 않습니다.
+`synthetic-pdf-visible-layout-normalizer-v3`은 후보 엔진이 낸 span과
+table cell만 읽습니다. B/L 13개, Invoice 15개, Packing List 12개라는
+**렌더링된 field 계약**을 대상으로 다음 두 가지 visible 의미만 사용합니다.
+
+- form field는 명시적 `:`/`#`/dash label-value 또는 form label 바로 다음의
+  같은 page value만 읽습니다. table caption은 다음 cell을 form value로
+  사용하지 않습니다.
+- table field는 동일 table의 row-0 header와 단 하나의 row-1 body가 모두
+  명시적으로 있을 때만 읽습니다. 열 위치·bbox·다른 문서·PDF content stream은
+  사용하지 않습니다. Invoice/PL의 `qty + unit`은 `숫자 한 개 + 영문 unit 한
+  개`이라는 명시적 cell token에서만 분리하고, PL `net_gross_weight`는 같은
+  표의 Net/Gross cell 두 개를 `net / gross`로 결합합니다.
+
+Packing List의 비렌더링 `containers` column은 평가 field에 포함하지 않습니다.
+label/header의 중복, 값 충돌, body row 추가, 누락 또는 형식 불명확성은 해당
+field를 비워 두며, Gold/CSV/다른 문서의 값으로 채우지 않습니다. 따라서
+normalizer가 source-truth content parser나 `clean_manifest.csv`,
+`error_labels.csv`를 import하거나 받지 않습니다.
 
 현재 runtime preview adapter는 structured table cell을 공개하지 않습니다.
 실제 adapter가 `CandidateExtractionV1.table_cells`를 제공하면 실행기는
