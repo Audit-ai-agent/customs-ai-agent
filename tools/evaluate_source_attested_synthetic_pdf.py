@@ -22,11 +22,13 @@ from customs_ai_agent.evaluation.document_ocr_quality import (
 )
 from customs_ai_agent.evaluation.source_attested_synthetic_pdf_truth import (
     SourceAttestedSyntheticPdfTruthError,
+    build_source_attested_synthetic_candidate_execution,
     build_source_attested_synthetic_sealed_run,
     read_canonical_source_attested_synthetic_development_selection,
     read_canonical_source_attested_synthetic_layout_truth,
     score_source_attested_synthetic_pdf_candidate_output,
     write_source_attested_synthetic_candidate_bundle,
+    write_source_attested_synthetic_candidate_execution,
     write_source_attested_synthetic_dataset_receipt,
     write_source_attested_synthetic_evaluation_result,
     write_source_attested_synthetic_packet,
@@ -52,7 +54,9 @@ def _path_below(*, path: Path, parent: Path, code: str) -> Path:
     return resolved
 
 
-def _candidate_output(*, path: Path, root: Path) -> SyntheticPdfCandidateOutputBundleV1:
+def _candidate_output(
+    *, path: Path, root: Path
+) -> tuple[SyntheticPdfCandidateOutputBundleV1, bytes]:
     resolved = _path_below(
         path=path, parent=root / "candidate-outputs", code="candidate_output_invalid"
     )
@@ -66,7 +70,7 @@ def _candidate_output(*, path: Path, root: Path) -> SyntheticPdfCandidateOutputB
         or raw != canonical_json_file_bytes(candidate.model_dump(mode="json", warnings=False))
     ):
         raise SyntheticPdfCandidateRunnerError("candidate_output_invalid")
-    return candidate
+    return candidate, raw
 
 
 def _output_directory(*, root: Path, name: str, candidate: Path | None) -> Path:
@@ -149,10 +153,28 @@ def evaluate_source_attested_synthetic_pdf(
             code="source_attested_layout_truth_invalid",
         )
     )
-    candidate = _candidate_output(path=candidate_output_path, root=profile.document_preview_root)
+    candidate, candidate_output_raw = _candidate_output(
+        path=candidate_output_path, root=profile.document_preview_root
+    )
     write_source_attested_synthetic_candidate_bundle(
         candidate_bundle=candidate,
         output_directory=profile.document_preview_root / "source-attested-candidate-bundles",
+    )
+    candidate_execution = build_source_attested_synthetic_candidate_execution(
+        receipt=receipt,
+        packet=packet,
+        layout_truth=layout_truth,
+        candidate_output=candidate,
+        candidate_output_raw=candidate_output_raw,
+        engine_kind=profile.engine_kind,
+        extractor_revision=profile.extractor_revision,
+        configuration_sha256=profile.configuration_sha256,
+        model_inventory_sha256=profile.model_inventory_sha256,
+        parser_revision=SYNTHETIC_PDF_LABEL_NORMALIZER_REVISION,
+    )
+    write_source_attested_synthetic_candidate_execution(
+        execution=candidate_execution,
+        output_directory=profile.document_preview_root / "source-attested-candidate-executions",
     )
 
     development_selection = None
@@ -172,6 +194,7 @@ def evaluate_source_attested_synthetic_pdf(
             layout_truth=layout_truth,
             development_selection=development_selection,
             candidate_output=candidate,
+            candidate_execution=candidate_execution,
             document_preview_root=profile.document_preview_root,
             engine_kind=profile.engine_kind,
             extractor_revision=profile.extractor_revision,
@@ -194,7 +217,8 @@ def evaluate_source_attested_synthetic_pdf(
         receipt=receipt,
         packet=packet,
         layout_truth=layout_truth,
-        candidate_output=candidate,
+        candidate_output_raw=candidate_output_raw,
+        candidate_execution=candidate_execution,
         engine_kind=profile.engine_kind,
         extractor_revision=profile.extractor_revision,
         configuration_sha256=profile.configuration_sha256,
@@ -229,6 +253,9 @@ def evaluate_source_attested_synthetic_pdf(
         "status": "source_attested_evaluation_recorded",
         "packet_kind": result.packet_kind,
         "evaluation_result_sha256": result.evaluation_result_sha256,
+        "candidate_execution_receipt_sha256": (
+            candidate_execution.candidate_execution_receipt_sha256
+        ),
         "passed": result.passed,
         "result_file": destination.name,
         "activation_sha256": activation_sha256,

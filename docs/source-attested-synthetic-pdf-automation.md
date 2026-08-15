@@ -15,8 +15,20 @@ content stream을 독립적인 pinned parser와 template profile로 읽어 만�
   `_local/data/document-preview/` 아래에만 둔다.
 - compiler는 PDF 1.3의 관측된 ASCII85+Flate content-stream subset만 받고,
   page/template/field position/table rectangle/asset SHA가 달라지면 중단한다.
+- 자동 승인 기본 경로는 `synthetic-customs-pdf-2000`의 `20260811-r1`, 정확히
+  6,000 PDF(정상 3,000/오류 3,000)와 그 receipt SHA, 그리고 고정된 개발 60개·봉인
+  20개 packet receipt만 받는다. 같은 이름의 작은 샘플·임의 packet은 평가 증거가
+  될 수 없다.
+- field gate는 B/L 13개, Invoice 15개, Packing List 13개의 전체 구조화 field
+  mapping을 요구한다. source parser가 어느 하나라도 모호하게만 읽을 수 있으면
+  manifest/CSV로 보완하지 않고 PDF preview를 `unavailable`로 남긴다.
+  현재 pinned profile은 각각 11/11/7 mapping만 명시돼 있으므로, 전체 mapping을
+  source content stream에서 안전하게 확정하기 전까지 기본 compiler/activation은
+  의도적으로 이 fail-closed 상태다.
 - `error` stratum은 error label만으로 인정하지 않는다. 같은 set/document의
-  clean sibling과 decoded content stream이 실제로 달라야 한다.
+  clean sibling과 decoded content stream이 실제로 달라야 하며, label의
+  `correct_value → wrong_value`가 해당 source field에 실제로 렌더링된 것도
+  확인해야 한다.
 - `clean_manifest.csv`와 `error_labels.csv`는 dataset 결속, strata와 compact
   mismatch receipt용이다. PDF에 실제로 그려진 값을 조용히 고치거나 OCR 후보
   출력으로 정답을 만들지 않는다.
@@ -31,6 +43,9 @@ sorted JSON이다.
 - `source-attested-packets/<packet receipt SHA>.json`
 - `source-layout-truths/<layout truth SHA>.json`
 - `source-attested-candidate-bundles/<candidate bundle SHA>.json`
+- `source-attested-candidate-executions/<execution receipt SHA>.json` — raw
+  candidate JSON의 SHA, parser revision, engine/configuration/inventory 및
+  source-layout/packet 결속만 담는 content-free sidecar
 - `source-attested-evaluation-results/<evaluation result SHA>.json`
 - `source-attested-development-selections/<selection SHA>.json`
 - `source-attested-sealed-runs/<sealed run SHA>.json`
@@ -38,6 +53,12 @@ sorted JSON이다.
 기존 candidate runner의 sealed one-shot reservation은
 `candidate-run-reservations/sealed-<packet SHA>.json`이며, 그 raw canonical
 bytes SHA가 sealed-run receipt에 결속된다.
+
+evaluation result·development selection·sealed run은 모두 candidate parser
+revision과 execution receipt SHA를 함께 결속한다. runtime은 활성 pointer를 읽을
+때 candidate 원문을 반환하거나 로그에 쓰지 않고 local canonical bytes를 메모리에서
+다시 점수화한다. 재계산 metric, candidate/output SHA, source-layout/packet/profile
+중 하나라도 달라지면 pointer를 사용하지 않는다.
 
 ## 실행 순서
 

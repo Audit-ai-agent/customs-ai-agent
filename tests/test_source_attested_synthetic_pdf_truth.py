@@ -29,17 +29,26 @@ from customs_ai_agent.evaluation.document_ocr_quality import (
     sha256_file,
 )
 from customs_ai_agent.evaluation.source_attested_synthetic_pdf_truth import (
+    SourceAttestedSyntheticCandidateExecutionV1,
+    SourceAttestedSyntheticDatasetScopeV1,
+    SourceAttestedSyntheticOcrEvaluationResultV1,
     SourceAttestedSyntheticPdfTruthError,
+    build_source_attested_synthetic_candidate_execution,
     build_source_attested_synthetic_development_selection,
     build_source_attested_synthetic_sealed_run,
     compile_source_attested_synthetic_pdf_layout_truth,
+    recompute_source_attested_synthetic_pdf_candidate_metrics,
     read_canonical_source_attested_synthetic_candidate_bundle,
+    read_canonical_source_attested_synthetic_candidate_execution,
     read_canonical_source_attested_synthetic_dataset_receipt,
     read_canonical_source_attested_synthetic_evaluation_result,
     read_canonical_source_attested_synthetic_layout_truth,
     read_canonical_source_attested_synthetic_packet,
     score_source_attested_synthetic_pdf_candidate_output,
+    source_attested_evaluation_result_sha256,
+    verify_source_attested_synthetic_pdf_evaluation_replay,
     write_source_attested_synthetic_candidate_bundle,
+    write_source_attested_synthetic_candidate_execution,
     write_source_attested_synthetic_dataset_receipt,
     write_source_attested_synthetic_development_selection,
     write_source_attested_synthetic_evaluation_result,
@@ -107,13 +116,28 @@ _BODY_RECTS = (
     (480.0, 377.8898, 70.27559, 150.0),
 )
 
+_TEST_INVOICE_REQUIRED_FIELDS = (
+    ("exporter_name", "text-v1"),
+    ("consignee", "text-v1"),
+    ("inv_no", "identifier-v1"),
+    ("inv_date", "identifier-v1"),
+    ("lc_no", "identifier-v1"),
+    ("importer_name", "text-v1"),
+    ("load_port", "text-v1"),
+    ("disch_port", "text-v1"),
+    ("vessel", "text-v1"),
+    ("good", "text-v1"),
+    ("total", "text-v1"),
+)
+_TEST_REQUIRED_FIELD_SCHEMA = {"invoice": _TEST_INVOICE_REQUIRED_FIELDS}
+
 
 def _sha(value: bytes | str) -> str:
     raw = value if isinstance(value, bytes) else value.encode("utf-8")
     return hashlib.sha256(raw).hexdigest()
 
 
-def _invoice_pdf(*, text_prefix: str, shift_header: bool = False) -> bytes:
+def _invoice_pdf(*, text_prefix: str, total: str, shift_header: bool = False) -> bytes:
     """Build the pinned invoice profile without pulling a PDF package in tests."""
 
     rectangles = [(10.0, 100.0, 20.0, 10.0)] * 11
@@ -160,7 +184,8 @@ def _invoice_pdf(*, text_prefix: str, shift_header: bool = False) -> bytes:
     lines.extend(("BT", "/F1 10 Tf", "12 TL"))
     for reading_order, (x, y) in enumerate(positions, start=1):
         lines.append(f"1 0 0 1 {x} {y} Tm")
-        lines.append(f"({text_prefix}-{reading_order}) Tj")
+        rendered = total if reading_order == 40 else f"{text_prefix}-{reading_order}"
+        lines.append(f"({rendered}) Tj")
     lines.append("ET")
     compressed = zlib.compress("\n".join(lines).encode("ascii"))
     encoded = base64.a85encode(compressed, adobe=True)
@@ -177,7 +202,7 @@ def _invoice_pdf(*, text_prefix: str, shift_header: bool = False) -> bytes:
     )
 
 
-def _write_csv_sources(dataset_root: Path) -> tuple[Path, Path]:
+def _write_csv_sources(dataset_root: Path, *, wrong_total: str) -> tuple[Path, Path]:
     clean_manifest = dataset_root / "clean_manifest.csv"
     error_labels = dataset_root / "error_labels.csv"
     with clean_manifest.open("w", encoding="utf-8", newline="") as stream:
@@ -198,9 +223,9 @@ def _write_csv_sources(dataset_root: Path) -> tuple[Path, Path]:
                     "num_errors_in_set": "1",
                     "error_type": "synthetic",
                     "affected_doc": "COMMERCIAL_INVOICE",
-                    "field": "Amount",
+                    "field": "TOTAL",
                     "correct_value": "10",
-                    "wrong_value": "20",
+                    "wrong_value": wrong_total,
                     "note": "test",
                 }
             )
@@ -255,17 +280,23 @@ def _packet(*, receipt: DatasetReceiptV1, labels_sha256: str, split: str) -> Eva
 
 
 def _fixture(
-    tmp_path: Path, *, unchanged_error: bool = False, shifted_template: bool = False
+    tmp_path: Path,
+    *,
+    unchanged_error: bool = False,
+    shifted_template: bool = False,
+    wrong_total: str = "20",
 ) -> dict[str, object]:
     local_data = tmp_path / "workspace" / "_local" / "data"
     dataset_root = local_data / "synthetic-pdf"
     assets: list[DatasetAssetReceiptV1] = []
     for number in (1, 2):
-        clean_bytes = _invoice_pdf(text_prefix=f"clean{number}")
+        clean_bytes = _invoice_pdf(text_prefix=f"clean{number}", total="10")
         error_bytes = (
             clean_bytes
             if unchanged_error and number == 1
-            else _invoice_pdf(text_prefix=f"error{number}", shift_header=shifted_template)
+            else _invoice_pdf(
+                text_prefix=f"error{number}", total="20", shift_header=shifted_template
+            )
         )
         for fixture_kind, prefix, content in (
             ("clean", "C", clean_bytes),
@@ -291,7 +322,7 @@ def _fixture(
         received_as_of=date(2026, 8, 16),
         assets=assets,
     )
-    clean_manifest, error_labels = _write_csv_sources(dataset_root)
+    clean_manifest, error_labels = _write_csv_sources(dataset_root, wrong_total=wrong_total)
     return {
         "dataset_root": dataset_root,
         "receipt": receipt,
@@ -307,6 +338,22 @@ def _fixture(
     }
 
 
+def _test_scope(fixture: dict[str, object]) -> SourceAttestedSyntheticDatasetScopeV1:
+    receipt = fixture["receipt"]
+    assert isinstance(receipt, DatasetReceiptV1)
+    return SourceAttestedSyntheticDatasetScopeV1(
+        dataset_id=receipt.dataset_id,
+        dataset_revision=receipt.dataset_revision,
+        dataset_receipt_sha256=receipt_sha256(receipt),
+        total_pdf_assets=4,
+        clean_pdf_assets=2,
+        error_pdf_assets=2,
+        sets_per_fixture_kind=2,
+        require_complete_canonical_inventory=False,
+        require_canonical_packets=False,
+    )
+
+
 def _truth(fixture: dict[str, object], split: str):
     return compile_source_attested_synthetic_pdf_layout_truth(
         receipt=fixture["receipt"],  # type: ignore[arg-type]
@@ -314,6 +361,8 @@ def _truth(fixture: dict[str, object], split: str):
         source_directory=fixture["dataset_root"],  # type: ignore[arg-type]
         clean_manifest_path=fixture["clean_manifest"],  # type: ignore[arg-type]
         error_labels_path=fixture["error_labels"],  # type: ignore[arg-type]
+        expected_dataset_scope=_test_scope(fixture),
+        required_field_schema=_TEST_REQUIRED_FIELD_SCHEMA,
     )
 
 
@@ -375,20 +424,54 @@ def _matching_candidate(*, packet: EvaluationPacketV2, truth, engine_kind: str):
     return SyntheticPdfCandidateOutputBundleV1.model_validate(payload)
 
 
+def _candidate_raw(candidate: SyntheticPdfCandidateOutputBundleV1) -> bytes:
+    return canonical_json_file_bytes(candidate.model_dump(mode="json"))
+
+
+def _execution(
+    *, fixture: dict[str, object], packet: EvaluationPacketV2, truth, candidate, engine_kind: str
+) -> SourceAttestedSyntheticCandidateExecutionV1:
+    extractor_revision, configuration_sha256, model_inventory_sha256 = _profile(engine_kind)
+    return build_source_attested_synthetic_candidate_execution(
+        receipt=fixture["receipt"],  # type: ignore[arg-type]
+        packet=packet,
+        layout_truth=truth,
+        candidate_output=candidate,
+        candidate_output_raw=_candidate_raw(candidate),
+        engine_kind=engine_kind,  # type: ignore[arg-type]
+        extractor_revision=extractor_revision,
+        configuration_sha256=configuration_sha256,
+        model_inventory_sha256=model_inventory_sha256,
+        parser_revision=SYNTHETIC_PDF_LABEL_NORMALIZER_REVISION,
+        expected_dataset_scope=_test_scope(fixture),
+        required_field_schema=_TEST_REQUIRED_FIELD_SCHEMA,
+    )
+
+
 def _score(*, fixture: dict[str, object], split: str, truth, engine_kind: str):
     packet = fixture[f"{split}_packet"]
     candidate = _matching_candidate(packet=packet, truth=truth, engine_kind=engine_kind)
     extractor_revision, configuration_sha256, model_inventory_sha256 = _profile(engine_kind)
+    execution = _execution(
+        fixture=fixture,
+        packet=packet,
+        truth=truth,
+        candidate=candidate,
+        engine_kind=engine_kind,
+    )
     result = score_source_attested_synthetic_pdf_candidate_output(
         receipt=fixture["receipt"],
         packet=packet,
         layout_truth=truth,
-        candidate_output=candidate,
+        candidate_output_raw=_candidate_raw(candidate),
+        candidate_execution=execution,
         engine_kind=engine_kind,
         extractor_revision=extractor_revision,
         configuration_sha256=configuration_sha256,
         model_inventory_sha256=model_inventory_sha256,
         parser_revision=SYNTHETIC_PDF_LABEL_NORMALIZER_REVISION,
+        expected_dataset_scope=_test_scope(fixture),
+        required_field_schema=_TEST_REQUIRED_FIELD_SCHEMA,
     )
     return candidate, result
 
@@ -426,6 +509,21 @@ def test_compiler_uses_content_stream_not_manifest_and_writes_immutable_local_tr
         read_canonical_source_attested_synthetic_packet(packet_path)
         == fixture["development_packet"]
     )
+    candidate = _matching_candidate(
+        packet=fixture["development_packet"], truth=truth, engine_kind="pdf_text_layer"
+    )
+    execution = _execution(
+        fixture=fixture,
+        packet=fixture["development_packet"],
+        truth=truth,
+        candidate=candidate,
+        engine_kind="pdf_text_layer",
+    )
+    execution_path = write_source_attested_synthetic_candidate_execution(
+        execution=execution,
+        output_directory=fixture["preview_root"] / "source-attested-candidate-executions",  # type: ignore[operator]
+    )
+    assert read_canonical_source_attested_synthetic_candidate_execution(execution_path) == execution
 
 
 def test_compiler_fails_closed_for_an_unchanged_error_or_changed_template(tmp_path: Path) -> None:
@@ -436,6 +534,134 @@ def test_compiler_fails_closed_for_an_unchanged_error_or_changed_template(tmp_pa
     shifted = _fixture(tmp_path / "shifted", shifted_template=True)
     with pytest.raises(SourceAttestedSyntheticPdfTruthError, match="template_profile_mismatch"):
         _truth(shifted, "development")
+
+
+def test_automatic_scope_rejects_a_small_or_wrong_packet_fixture(tmp_path: Path) -> None:
+    fixture = _fixture(tmp_path)
+    with pytest.raises(SourceAttestedSyntheticPdfTruthError, match="dataset_scope_invalid"):
+        compile_source_attested_synthetic_pdf_layout_truth(
+            receipt=fixture["receipt"],  # type: ignore[arg-type]
+            packet=fixture["development_packet"],  # type: ignore[arg-type]
+            source_directory=fixture["dataset_root"],  # type: ignore[arg-type]
+            clean_manifest_path=fixture["clean_manifest"],  # type: ignore[arg-type]
+            error_labels_path=fixture["error_labels"],  # type: ignore[arg-type]
+        )
+
+
+def test_default_full_field_universe_fails_closed_for_partial_source_profile(
+    tmp_path: Path,
+) -> None:
+    fixture = _fixture(tmp_path)
+    with pytest.raises(
+        SourceAttestedSyntheticPdfTruthError, match="required_field_mapping_missing"
+    ):
+        compile_source_attested_synthetic_pdf_layout_truth(
+            receipt=fixture["receipt"],  # type: ignore[arg-type]
+            packet=fixture["development_packet"],  # type: ignore[arg-type]
+            source_directory=fixture["dataset_root"],  # type: ignore[arg-type]
+            clean_manifest_path=fixture["clean_manifest"],  # type: ignore[arg-type]
+            error_labels_path=fixture["error_labels"],  # type: ignore[arg-type]
+            expected_dataset_scope=_test_scope(fixture),
+        )
+
+
+def test_error_label_must_match_a_rendered_source_mutation(tmp_path: Path) -> None:
+    fixture = _fixture(tmp_path, wrong_total="999")
+    with pytest.raises(
+        SourceAttestedSyntheticPdfTruthError, match="error_label_rendering_unverified"
+    ):
+        _truth(fixture, "development")
+
+
+def test_raw_candidate_rescore_and_execution_receipt_are_replay_bound(tmp_path: Path) -> None:
+    fixture = _fixture(tmp_path)
+    truth = _truth(fixture, "development")
+    packet = fixture["development_packet"]
+    candidate, result = _score(
+        fixture=fixture,
+        split="development",
+        truth=truth,
+        engine_kind="pdf_text_layer",
+    )
+    raw = _candidate_raw(candidate)
+    execution = _execution(
+        fixture=fixture,
+        packet=packet,
+        truth=truth,
+        candidate=candidate,
+        engine_kind="pdf_text_layer",
+    )
+    extractor_revision, configuration_sha256, model_inventory_sha256 = _profile("pdf_text_layer")
+    rescore = recompute_source_attested_synthetic_pdf_candidate_metrics(
+        receipt=fixture["receipt"],  # type: ignore[arg-type]
+        packet=packet,
+        layout_truth=truth,
+        candidate_output_raw=raw,
+        engine_kind="pdf_text_layer",
+        extractor_revision=extractor_revision,
+        configuration_sha256=configuration_sha256,
+        model_inventory_sha256=model_inventory_sha256,
+        parser_revision=SYNTHETIC_PDF_LABEL_NORMALIZER_REVISION,
+        expected_dataset_scope=_test_scope(fixture),
+        required_field_schema=_TEST_REQUIRED_FIELD_SCHEMA,
+    )
+    assert rescore.candidate_bundle_sha256 == candidate.candidate_bundle_sha256
+    assert rescore.candidate_output_sha256 == _sha(raw)
+    assert rescore.metrics == result.metrics
+    verify_source_attested_synthetic_pdf_evaluation_replay(
+        result=result,
+        receipt=fixture["receipt"],  # type: ignore[arg-type]
+        packet=packet,
+        layout_truth=truth,
+        candidate_output_raw=raw,
+        candidate_execution=execution,
+        engine_kind="pdf_text_layer",
+        extractor_revision=extractor_revision,
+        configuration_sha256=configuration_sha256,
+        model_inventory_sha256=model_inventory_sha256,
+        parser_revision=SYNTHETIC_PDF_LABEL_NORMALIZER_REVISION,
+        expected_dataset_scope=_test_scope(fixture),
+        required_field_schema=_TEST_REQUIRED_FIELD_SCHEMA,
+    )
+    with pytest.raises(
+        SourceAttestedSyntheticPdfTruthError, match="candidate_output_not_canonical"
+    ):
+        recompute_source_attested_synthetic_pdf_candidate_metrics(
+            receipt=fixture["receipt"],  # type: ignore[arg-type]
+            packet=packet,
+            layout_truth=truth,
+            candidate_output_raw=raw + b"\n",
+            engine_kind="pdf_text_layer",
+            extractor_revision=extractor_revision,
+            configuration_sha256=configuration_sha256,
+            model_inventory_sha256=model_inventory_sha256,
+            parser_revision=SYNTHETIC_PDF_LABEL_NORMALIZER_REVISION,
+            expected_dataset_scope=_test_scope(fixture),
+            required_field_schema=_TEST_REQUIRED_FIELD_SCHEMA,
+        )
+    forged_payload = result.model_dump(mode="json")
+    forged_payload["metrics"] = dict(forged_payload["metrics"]) | {"field_exact_match": 0.0}
+    forged_payload["passed"] = False
+    forged_payload["evaluation_result_sha256"] = source_attested_evaluation_result_sha256(
+        forged_payload
+    )
+    forged = SourceAttestedSyntheticOcrEvaluationResultV1.model_validate(forged_payload)
+    with pytest.raises(SourceAttestedSyntheticPdfTruthError, match="evaluation_replay_mismatch"):
+        verify_source_attested_synthetic_pdf_evaluation_replay(
+            result=forged,
+            receipt=fixture["receipt"],  # type: ignore[arg-type]
+            packet=packet,
+            layout_truth=truth,
+            candidate_output_raw=raw,
+            candidate_execution=execution,
+            engine_kind="pdf_text_layer",
+            extractor_revision=extractor_revision,
+            configuration_sha256=configuration_sha256,
+            model_inventory_sha256=model_inventory_sha256,
+            parser_revision=SYNTHETIC_PDF_LABEL_NORMALIZER_REVISION,
+            expected_dataset_scope=_test_scope(fixture),
+            required_field_schema=_TEST_REQUIRED_FIELD_SCHEMA,
+        )
 
 
 def test_three_engine_selection_and_distinct_sealed_layout_receipts_are_bound(
@@ -475,6 +701,13 @@ def test_three_engine_selection_and_distinct_sealed_layout_receipts_are_bound(
     extractor_revision, configuration_sha256, model_inventory_sha256 = _profile(
         selection.selected_engine_kind
     )
+    sealed_execution = _execution(
+        fixture=fixture,
+        packet=sealed_packet,
+        truth=sealed_truth,
+        candidate=sealed_candidate,
+        engine_kind=selection.selected_engine_kind,
+    )
     reservation = (
         fixture["preview_root"]
         / "candidate-run-reservations"
@@ -506,6 +739,7 @@ def test_three_engine_selection_and_distinct_sealed_layout_receipts_are_bound(
         layout_truth=sealed_truth,
         development_selection=selection,
         candidate_output=sealed_candidate,
+        candidate_execution=sealed_execution,
         document_preview_root=fixture["preview_root"],
         engine_kind=selection.selected_engine_kind,
         extractor_revision=extractor_revision,
@@ -523,7 +757,8 @@ def test_three_engine_selection_and_distinct_sealed_layout_receipts_are_bound(
         receipt=fixture["receipt"],
         packet=sealed_packet,
         layout_truth=sealed_truth,
-        candidate_output=sealed_candidate,
+        candidate_output_raw=_candidate_raw(sealed_candidate),
+        candidate_execution=sealed_execution,
         engine_kind=selection.selected_engine_kind,
         extractor_revision=extractor_revision,
         configuration_sha256=configuration_sha256,
@@ -531,6 +766,8 @@ def test_three_engine_selection_and_distinct_sealed_layout_receipts_are_bound(
         parser_revision=SYNTHETIC_PDF_LABEL_NORMALIZER_REVISION,
         development_selection=selection,
         sealed_run=sealed_run,
+        expected_dataset_scope=_test_scope(fixture),
+        required_field_schema=_TEST_REQUIRED_FIELD_SCHEMA,
     )
     assert sealed_result.passed is True
     result_path = write_source_attested_synthetic_evaluation_result(
@@ -646,6 +883,22 @@ def test_explicit_auto_activation_runs_only_after_a_passing_sealed_result(
         "tools.evaluate_source_attested_synthetic_pdf.load_unapproved_local_candidate_profile",
         lambda **_kwargs: profile,
     )
+    monkeypatch.setattr(
+        "tools.evaluate_source_attested_synthetic_pdf.build_source_attested_synthetic_candidate_execution",
+        lambda **kwargs: build_source_attested_synthetic_candidate_execution(
+            **kwargs,
+            expected_dataset_scope=_test_scope(fixture),
+            required_field_schema=_TEST_REQUIRED_FIELD_SCHEMA,
+        ),
+    )
+    monkeypatch.setattr(
+        "tools.evaluate_source_attested_synthetic_pdf.score_source_attested_synthetic_pdf_candidate_output",
+        lambda **kwargs: score_source_attested_synthetic_pdf_candidate_output(
+            **kwargs,
+            expected_dataset_scope=_test_scope(fixture),
+            required_field_schema=_TEST_REQUIRED_FIELD_SCHEMA,
+        ),
+    )
     import customs_ai_agent.service.document_preview_runtime as runtime
 
     calls: list[dict[str, object]] = []
@@ -674,6 +927,7 @@ def test_explicit_auto_activation_runs_only_after_a_passing_sealed_result(
         auto_activate_source_attested_synthetic=True,
     )
     assert summary["passed"] is True
+    assert summary["candidate_execution_receipt_sha256"]
     assert summary["activation_sha256"] == _sha("activation")
     assert len(calls) == 1
     assert calls[0]["configuration_sha256"] == configuration_sha256

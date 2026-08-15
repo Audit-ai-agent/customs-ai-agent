@@ -69,6 +69,10 @@ _MEDIA_BOX_RE = re.compile(
     rb"(?P<y1>-?\d+(?:\.\d+)?)\s*\]"
 )
 _ERROR_SET_ID_RE = re.compile(r"^E(?P<set_number>\d{4})$")
+_SYNTHETIC_PDF_RECEIPT_PATH_RE = re.compile(
+    r"^(?P<fixture>clean_sets|error_sets)/set_(?P<set_number>\d{4})/"
+    r"(?P<record>[CE]\d{4})_(?P<document>BL|INV|PL)\.pdf$"
+)
 _DOCUMENT_FILENAME_SUFFIX: dict[SyntheticDocumentType, str] = {
     "bill_of_lading": "BL",
     "invoice": "INV",
@@ -90,6 +94,68 @@ SOURCE_LAYOUT_COMPILER_REVISION: Final[
 SOURCE_LAYOUT_PARSER_SPEC_REVISION: Final[
     Literal["synthetic-pdf-content-stream-parser-spec-v1"]
 ] = "synthetic-pdf-content-stream-parser-spec-v1"
+
+# This automatic path has one deliberately narrow approval target.  These
+# values are a compact identity for the existing human-checked, 2,000-set PDF
+# fixture; they contain no PDF, field, or OCR text.  A different fixture must
+# receive a separately reviewed scope constant and parser revision instead of
+# silently becoming eligible for this approval.
+SOURCE_ATTESTED_SYNTHETIC_DATASET_ID: Final = "synthetic-customs-pdf-2000"
+SOURCE_ATTESTED_SYNTHETIC_DATASET_REVISION: Final = "20260811-r1"
+SOURCE_ATTESTED_SYNTHETIC_DATASET_RECEIPT_SHA256: Final = (
+    "aa3c828f4fdf4afc6a02171b271c71f314eefb363e6676c65625bae803e1b39d"
+)
+SOURCE_ATTESTED_SYNTHETIC_TOTAL_PDF_ASSETS: Final = 6_000
+SOURCE_ATTESTED_SYNTHETIC_CLEAN_PDF_ASSETS: Final = 3_000
+SOURCE_ATTESTED_SYNTHETIC_ERROR_PDF_ASSETS: Final = 3_000
+SOURCE_ATTESTED_SYNTHETIC_SETS_PER_FIXTURE_KIND: Final = 1_000
+SOURCE_ATTESTED_SYNTHETIC_ERROR_LABELS_SHA256: Final = (
+    "10bda04c08a27c89893d4101670991f66b9b37b02df2dbeea8ef1e92ffb9d92f"
+)
+SOURCE_ATTESTED_SYNTHETIC_DEVELOPMENT_PACKET_RECEIPT_SHA256: Final = (
+    "5b8a804b022e97df0e58a60c4fadfc9d3637c900f368273b8c1b6ff347c3f7e2"
+)
+SOURCE_ATTESTED_SYNTHETIC_SEALED_PACKET_RECEIPT_SHA256: Final = (
+    "174d7fad0040e89ee93d367f31694183049ea649a28515cde7a59458261aa271"
+)
+
+
+@dataclass(frozen=True, slots=True)
+class SourceAttestedSyntheticDatasetScopeV1:
+    """One exact synthetic-PDF corpus accepted by the automatic path.
+
+    The injectable form exists solely for hermetic unit tests.  Every shipped
+    CLI and runtime-facing verifier uses ``EXPECTED_SOURCE_ATTESTED...`` by
+    default, so a caller cannot opt a different dataset into the production
+    automatic pointer through a command-line option.
+    """
+
+    dataset_id: str
+    dataset_revision: str
+    dataset_receipt_sha256: str
+    total_pdf_assets: int
+    clean_pdf_assets: int
+    error_pdf_assets: int
+    sets_per_fixture_kind: int
+    require_complete_canonical_inventory: bool = True
+    require_canonical_packets: bool = True
+    error_labels_sha256: str | None = None
+    development_packet_receipt_sha256: str | None = None
+    sealed_packet_receipt_sha256: str | None = None
+
+
+EXPECTED_SOURCE_ATTESTED_SYNTHETIC_DATASET_SCOPE: Final = SourceAttestedSyntheticDatasetScopeV1(
+    dataset_id=SOURCE_ATTESTED_SYNTHETIC_DATASET_ID,
+    dataset_revision=SOURCE_ATTESTED_SYNTHETIC_DATASET_REVISION,
+    dataset_receipt_sha256=SOURCE_ATTESTED_SYNTHETIC_DATASET_RECEIPT_SHA256,
+    total_pdf_assets=SOURCE_ATTESTED_SYNTHETIC_TOTAL_PDF_ASSETS,
+    clean_pdf_assets=SOURCE_ATTESTED_SYNTHETIC_CLEAN_PDF_ASSETS,
+    error_pdf_assets=SOURCE_ATTESTED_SYNTHETIC_ERROR_PDF_ASSETS,
+    sets_per_fixture_kind=SOURCE_ATTESTED_SYNTHETIC_SETS_PER_FIXTURE_KIND,
+    error_labels_sha256=SOURCE_ATTESTED_SYNTHETIC_ERROR_LABELS_SHA256,
+    development_packet_receipt_sha256=(SOURCE_ATTESTED_SYNTHETIC_DEVELOPMENT_PACKET_RECEIPT_SHA256),
+    sealed_packet_receipt_sha256=SOURCE_ATTESTED_SYNTHETIC_SEALED_PACKET_RECEIPT_SHA256,
+)
 
 
 class SourceAttestedSyntheticPdfTruthError(ValueError):
@@ -147,6 +213,89 @@ class _TemplateProfile:
     rectangle_count: int
     field_slots: tuple[_FieldSlot, ...]
     table: _TableSlot
+
+
+# The automatic field gate must cover the same semantic field universe as the
+# original synthetic-PDF contract.  A visible table cell alone is not a
+# substitute for a required structured field: otherwise an extractor could
+# emit no ``gross_weight``/``amount``/``cartons`` field and still claim a
+# perfect field score.  The source parser therefore needs an explicit,
+# unambiguous content-stream mapping for every entry below.  Missing mappings
+# fail closed rather than falling back to clean_manifest.csv or error labels.
+SOURCE_ATTESTED_REQUIRED_FIELDS: Final[
+    Mapping[
+        SyntheticDocumentType,
+        tuple[tuple[str, Literal["text-v1", "numeric-v1", "identifier-v1"]], ...],
+    ]
+] = {
+    "bill_of_lading": (
+        ("exporter_name", "text-v1"),
+        ("consignee", "text-v1"),
+        ("load_port", "text-v1"),
+        ("disch_port", "text-v1"),
+        ("final_dest", "text-v1"),
+        ("vessel", "text-v1"),
+        ("voyage", "identifier-v1"),
+        ("bl_no", "identifier-v1"),
+        ("container_no", "identifier-v1"),
+        ("seal_no", "identifier-v1"),
+        ("good", "text-v1"),
+        ("gross_weight", "numeric-v1"),
+        ("containers", "numeric-v1"),
+    ),
+    "invoice": (
+        ("exporter_name", "text-v1"),
+        ("importer_name", "text-v1"),
+        ("consignee", "text-v1"),
+        ("load_port", "text-v1"),
+        ("disch_port", "text-v1"),
+        ("vessel", "text-v1"),
+        ("inv_no", "identifier-v1"),
+        ("inv_date", "identifier-v1"),
+        ("lc_no", "identifier-v1"),
+        ("good", "text-v1"),
+        ("unit", "text-v1"),
+        ("qty", "numeric-v1"),
+        ("unit_price", "numeric-v1"),
+        ("amount", "numeric-v1"),
+        ("total", "numeric-v1"),
+    ),
+    "packing_list": (
+        ("exporter_name", "text-v1"),
+        ("consignee", "text-v1"),
+        ("inv_no", "identifier-v1"),
+        ("lc_no", "identifier-v1"),
+        ("good", "text-v1"),
+        ("unit", "text-v1"),
+        ("qty", "numeric-v1"),
+        ("cartons", "numeric-v1"),
+        ("containers", "numeric-v1"),
+        ("net_weight", "numeric-v1"),
+        ("gross_weight", "numeric-v1"),
+        ("cbm", "numeric-v1"),
+        ("net_gross_weight", "text-v1"),
+    ),
+}
+
+# ``error_labels.csv`` has a human-facing field caption.  The compiler never
+# copies either CSV value into source truth; this small fixed mapping is used
+# only to prove that a labelled error mutation is actually visible in the
+# immutable error PDF compared with its clean sibling.
+_SOURCE_ERROR_LABEL_FIELDS: Final[dict[tuple[SyntheticDocumentType, str], str]] = {
+    ("bill_of_lading", "Container No."): "container_no",
+    ("bill_of_lading", "Gross Weight"): "gross_weight",
+    ("invoice", "Amount"): "amount",
+    ("invoice", "Port of Discharge"): "disch_port",
+    ("invoice", "TOTAL"): "total",
+    ("invoice", "Vessel/Flight"): "vessel",
+    ("packing_list", "Goods Description"): "good",
+    ("packing_list", "Net/Gross Weight"): "net_gross_weight",
+    ("packing_list", "No. of Cartons / PKGS"): "cartons",
+    ("packing_list", "No. of Invoice"): "inv_no",
+    ("packing_list", "No. of L/C"): "lc_no",
+    ("packing_list", "Quantity"): "qty",
+    ("packing_list", "To Applicant / Consignee"): "consignee",
+}
 
 
 # These are positions and field identifiers, not copied document text.  The
@@ -270,6 +419,17 @@ def _parser_spec_payload() -> dict[str, object]:
     return {
         "revision": SOURCE_LAYOUT_PARSER_SPEC_REVISION,
         "layout_truth_kind": SOURCE_LAYOUT_TRUTH_KIND,
+        # Keep the release field universe in the parser-spec receipt as well
+        # as in the compiler check.  Otherwise a future edit could weaken the
+        # required-field gate without invalidating an already-recorded layout
+        # truth or result.
+        "required_fields": {
+            document_type: [
+                {"field_name": field_name, "normalizer": normalizer}
+                for field_name, normalizer in fields
+            ]
+            for document_type, fields in sorted(SOURCE_ATTESTED_REQUIRED_FIELDS.items())
+        },
         "profiles": {
             document_type: {
                 "text_run_count": profile.text_run_count,
@@ -410,6 +570,160 @@ def layout_truth_receipt_sha256(
     truth: SourceAttestedSyntheticLayoutTruthV1 | Mapping[str, object],
 ) -> str:
     return sha256_bytes(canonical_json_bytes(_layout_truth_payload(truth)))
+
+
+def validate_source_attested_synthetic_dataset_scope(
+    *,
+    receipt: DatasetReceiptV1,
+    expected_scope: SourceAttestedSyntheticDatasetScopeV1 = (
+        EXPECTED_SOURCE_ATTESTED_SYNTHETIC_DATASET_SCOPE
+    ),
+) -> None:
+    """Require the one approved 2,000-set corpus before automatic scoring.
+
+    This is intentionally stricter than a matching ``dataset_id``.  A small
+    hand-made 60+20 packet could otherwise satisfy the evaluator's strata
+    checks and be mistaken for evidence about the existing 6,000-PDF corpus.
+    No source content is returned or logged by this validator.
+    """
+
+    if (
+        receipt.dataset_id != expected_scope.dataset_id
+        or receipt.dataset_revision != expected_scope.dataset_revision
+        or receipt_sha256(receipt) != expected_scope.dataset_receipt_sha256
+        or len(receipt.assets) != expected_scope.total_pdf_assets
+    ):
+        raise SourceAttestedSyntheticPdfTruthError("source_layout_dataset_scope_invalid")
+
+    asset_ids = [asset.asset_id for asset in receipt.assets]
+    relative_paths = [asset.relative_path for asset in receipt.assets]
+    if len(asset_ids) != len(set(asset_ids)) or len(relative_paths) != len(set(relative_paths)):
+        raise SourceAttestedSyntheticPdfTruthError("source_layout_dataset_scope_invalid")
+
+    clean_count = 0
+    error_count = 0
+    for asset in receipt.assets:
+        matched = _SYNTHETIC_PDF_RECEIPT_PATH_RE.fullmatch(asset.relative_path)
+        if (
+            asset.media_type != "application/pdf"
+            or asset.source_role != "preview_candidate"
+            or matched is None
+        ):
+            raise SourceAttestedSyntheticPdfTruthError("source_layout_dataset_scope_invalid")
+        fixture = matched.group("fixture")
+        record = matched.group("record")
+        set_number = int(matched.group("set_number"))
+        expected_prefix = "C" if fixture == "clean_sets" else "E"
+        if (
+            not 1 <= set_number <= expected_scope.sets_per_fixture_kind
+            or record != f"{expected_prefix}{set_number:04d}"
+        ):
+            raise SourceAttestedSyntheticPdfTruthError("source_layout_dataset_scope_invalid")
+        if fixture == "clean_sets":
+            clean_count += 1
+        else:
+            error_count += 1
+    if (
+        clean_count != expected_scope.clean_pdf_assets
+        or error_count != expected_scope.error_pdf_assets
+    ):
+        raise SourceAttestedSyntheticPdfTruthError("source_layout_dataset_scope_invalid")
+
+    if not expected_scope.require_complete_canonical_inventory:
+        return
+    expected_paths = {
+        f"{fixture}_sets/set_{set_number:04d}/{prefix}{set_number:04d}_{suffix}.pdf"
+        for fixture, prefix in (("clean", "C"), ("error", "E"))
+        for set_number in range(1, expected_scope.sets_per_fixture_kind + 1)
+        for suffix in ("BL", "INV", "PL")
+    }
+    if set(relative_paths) != expected_paths:
+        raise SourceAttestedSyntheticPdfTruthError("source_layout_dataset_scope_invalid")
+
+
+def validate_source_attested_synthetic_packet_scope(
+    *,
+    receipt: DatasetReceiptV1,
+    packet: EvaluationPacketV2,
+    expected_scope: SourceAttestedSyntheticDatasetScopeV1 = (
+        EXPECTED_SOURCE_ATTESTED_SYNTHETIC_DATASET_SCOPE
+    ),
+) -> None:
+    """Require the preselected 60/20 packets for the exact corpus.
+
+    A valid packet self-hash only says its own bytes are intact.  The automatic
+    path additionally pins the two packet receipts generated from the existing
+    6,000-PDF receipt, which prevents a hand-picked easy 60/20 subset from
+    becoming release evidence.  The structural checks make the failure reason
+    deterministic even before the fixed packet receipt comparison.
+    """
+
+    validate_source_attested_synthetic_dataset_scope(receipt=receipt, expected_scope=expected_scope)
+    if (
+        packet.packet_kind != "stratified-v2"
+        or packet.dataset_id != receipt.dataset_id
+        or packet.dataset_revision != receipt.dataset_revision
+        or packet.receipt_sha256 != receipt_sha256(receipt)
+    ):
+        raise SourceAttestedSyntheticPdfTruthError("source_layout_packet_scope_invalid")
+    assets_by_id = {asset.asset_id: asset for asset in receipt.assets}
+    strata: dict[tuple[str, SyntheticDocumentType], int] = {}
+    for item in packet.items:
+        asset = assets_by_id.get(item.asset_id)
+        matched = (
+            _SYNTHETIC_PDF_RECEIPT_PATH_RE.fullmatch(asset.relative_path)
+            if asset is not None
+            else None
+        )
+        if (
+            asset is None
+            or asset.sha256 != item.source_sha256
+            or asset.media_type != "application/pdf"
+            or asset.source_role != "preview_candidate"
+            or matched is None
+        ):
+            raise SourceAttestedSyntheticPdfTruthError("source_layout_packet_scope_invalid")
+        fixture_kind = "clean" if matched.group("fixture") == "clean_sets" else "error"
+        document_type = {
+            "BL": "bill_of_lading",
+            "INV": "invoice",
+            "PL": "packing_list",
+        }[matched.group("document")]
+        expected_set_id = ("C" if fixture_kind == "clean" else "E") + matched.group("set_number")
+        if (
+            item.fixture_kind != fixture_kind
+            or item.document_type != document_type
+            or item.set_id != expected_set_id
+        ):
+            raise SourceAttestedSyntheticPdfTruthError("source_layout_packet_scope_invalid")
+        key = (fixture_kind, item.document_type)
+        strata[key] = strata.get(key, 0) + 1
+    if not expected_scope.require_canonical_packets:
+        return
+    expected_packet_sha256 = (
+        expected_scope.development_packet_receipt_sha256
+        if packet.split == "development"
+        else expected_scope.sealed_packet_receipt_sha256
+    )
+    if (
+        expected_scope.error_labels_sha256 is None
+        or expected_packet_sha256 is None
+        or packet.error_labels_sha256 != expected_scope.error_labels_sha256
+        or packet.packet_receipt_sha256 != expected_packet_sha256
+    ):
+        raise SourceAttestedSyntheticPdfTruthError("source_layout_packet_scope_invalid")
+    expected_strata = {
+        (fixture_kind, document_type)
+        for fixture_kind in ("clean", "error")
+        for document_type in ("bill_of_lading", "invoice", "packing_list")
+    }
+    if set(strata) != expected_strata:
+        raise SourceAttestedSyntheticPdfTruthError("source_layout_packet_scope_invalid")
+    if packet.split == "development":
+        if len(packet.items) != 60 or any(count != 10 for count in strata.values()):
+            raise SourceAttestedSyntheticPdfTruthError("source_layout_packet_scope_invalid")
+    elif len(packet.items) != 20 or any(count < 3 for count in strata.values()):
+        raise SourceAttestedSyntheticPdfTruthError("source_layout_packet_scope_invalid")
 
 
 def _parse_pdf_number(token: tuple[str, object], *, code: str) -> float:
@@ -701,8 +1015,33 @@ def _parse_pdf_content_stream_v1(pdf_bytes: bytes) -> _ParsedContentStream:
     )
 
 
+def _validate_required_field_schema(
+    *,
+    document_type: SyntheticDocumentType,
+    fields: Sequence[GoldFieldV2],
+    required_field_schema: Mapping[
+        SyntheticDocumentType,
+        tuple[tuple[str, Literal["text-v1", "numeric-v1", "identifier-v1"]], ...],
+    ] = SOURCE_ATTESTED_REQUIRED_FIELDS,
+) -> None:
+    """Reject partial structured-field truth before the field gate is used."""
+
+    expected = required_field_schema.get(document_type)
+    if expected is None:
+        raise SourceAttestedSyntheticPdfTruthError("source_layout_required_field_schema_invalid")
+    actual = tuple((field.field_name, field.normalizer) for field in fields)
+    if len(actual) != len(set(actual)) or set(actual) != set(expected):
+        raise SourceAttestedSyntheticPdfTruthError("source_layout_required_field_mapping_missing")
+
+
 def _require_profile(
-    *, document_type: SyntheticDocumentType, parsed: _ParsedContentStream
+    *,
+    document_type: SyntheticDocumentType,
+    parsed: _ParsedContentStream,
+    required_field_schema: Mapping[
+        SyntheticDocumentType,
+        tuple[tuple[str, Literal["text-v1", "numeric-v1", "identifier-v1"]], ...],
+    ] = SOURCE_ATTESTED_REQUIRED_FIELDS,
 ) -> _TemplateProfile:
     profile = _TEMPLATE_PROFILES.get(document_type)
     if profile is None:
@@ -749,6 +1088,18 @@ def _require_profile(
             or abs(run.y - slot.y) > 0.0001
         ):
             raise SourceAttestedSyntheticPdfTruthError("source_layout_template_profile_mismatch")
+    _validate_required_field_schema(
+        document_type=document_type,
+        fields=[
+            GoldFieldV2(
+                field_name=slot.field_name,
+                value="profile-slot",
+                normalizer=slot.normalizer,
+            )
+            for slot in profile.field_slots
+        ],
+        required_field_schema=required_field_schema,
+    )
     return profile
 
 
@@ -896,8 +1247,14 @@ def _require_error_content_stream_difference(
     *,
     item: StratifiedPacketItemV2,
     parsed_error: _ParsedContentStream,
+    error_profile: _TemplateProfile,
+    error_labels: Sequence[Mapping[str, str]],
     assets_by_relative_path: Mapping[str, DatasetAssetReceiptV1],
     source_directory: Path,
+    required_field_schema: Mapping[
+        SyntheticDocumentType,
+        tuple[tuple[str, Literal["text-v1", "numeric-v1", "identifier-v1"]], ...],
+    ],
 ) -> None:
     """Prove an error stratum visibly differs from its exact clean sibling.
 
@@ -919,9 +1276,53 @@ def _require_error_content_stream_difference(
         source_directory=source_directory, asset=clean_asset
     )
     parsed_clean = _parse_pdf_content_stream_v1(clean_pdf_bytes)
-    _require_profile(document_type=item.document_type, parsed=parsed_clean)
+    clean_profile = _require_profile(
+        document_type=item.document_type,
+        parsed=parsed_clean,
+        required_field_schema=required_field_schema,
+    )
     if parsed_clean.decoded_sha256 == parsed_error.decoded_sha256:
         raise SourceAttestedSyntheticPdfTruthError("source_layout_error_content_unchanged")
+
+    # The source parser remains the only producer of returned field values.
+    # Here, and only here, a human-checked CSV label is used as a negative
+    # fixture assertion: at least one labelled mutation must be visibly
+    # present in the final error PDF and differ from the clean sibling.  A
+    # merely different stream is not enough—an unrelated title/date edit
+    # cannot be counted as an error-stratum rendering.
+    error_rendered_fields = {
+        field.field_name: field
+        for field in _fields_from_profile(parsed=parsed_error, profile=error_profile)
+    }
+    clean_rendered_fields = {
+        field.field_name: field
+        for field in _fields_from_profile(parsed=parsed_clean, profile=clean_profile)
+    }
+    mutation_rendered = False
+    for label in error_labels:
+        field_name = _SOURCE_ERROR_LABEL_FIELDS.get((item.document_type, label["field"]))
+        error_rendered = error_rendered_fields.get(field_name)
+        clean_rendered = clean_rendered_fields.get(field_name)
+        if (
+            field_name is None
+            or error_rendered is None
+            or clean_rendered is None
+            or normalize_field_value(label["wrong_value"], error_rendered.normalizer)
+            == normalize_field_value(label["correct_value"], clean_rendered.normalizer)
+        ):
+            continue
+        if (
+            normalize_field_value(error_rendered.value, error_rendered.normalizer)
+            == normalize_field_value(label["wrong_value"], error_rendered.normalizer)
+            and normalize_field_value(clean_rendered.value, clean_rendered.normalizer)
+            == normalize_field_value(label["correct_value"], clean_rendered.normalizer)
+            and normalize_field_value(error_rendered.value, error_rendered.normalizer)
+            != normalize_field_value(clean_rendered.value, clean_rendered.normalizer)
+        ):
+            mutation_rendered = True
+            break
+    if not mutation_rendered:
+        raise SourceAttestedSyntheticPdfTruthError("source_layout_error_label_rendering_unverified")
 
 
 def compile_source_attested_synthetic_pdf_layout_truth(
@@ -931,6 +1332,13 @@ def compile_source_attested_synthetic_pdf_layout_truth(
     source_directory: Path,
     clean_manifest_path: Path,
     error_labels_path: Path,
+    expected_dataset_scope: SourceAttestedSyntheticDatasetScopeV1 = (
+        EXPECTED_SOURCE_ATTESTED_SYNTHETIC_DATASET_SCOPE
+    ),
+    required_field_schema: Mapping[
+        SyntheticDocumentType,
+        tuple[tuple[str, Literal["text-v1", "numeric-v1", "identifier-v1"]], ...],
+    ] = SOURCE_ATTESTED_REQUIRED_FIELDS,
 ) -> SourceAttestedSyntheticLayoutTruthV1:
     """Compile local content-stream layout truth without candidate OCR output.
 
@@ -950,6 +1358,9 @@ def compile_source_attested_synthetic_pdf_layout_truth(
         error_labels_path, code="source_layout_label_source_invalid"
     )
     _verify_receipt_packet_binding(receipt=receipt, packet=packet)
+    validate_source_attested_synthetic_packet_scope(
+        receipt=receipt, packet=packet, expected_scope=expected_dataset_scope
+    )
     verify_receipt_source_assets(receipt=receipt, source_directory=source_directory)
     # This validates CSV headers, error-label eligibility, and their exact
     # binding to the selected packet.  Its values are only compared below; they
@@ -979,15 +1390,23 @@ def compile_source_attested_synthetic_pdf_layout_truth(
             raise SourceAttestedSyntheticPdfTruthError("source_layout_source_asset_invalid")
         pdf_bytes = _read_verified_source_pdf(source_directory=source_directory, asset=asset)
         parsed = _parse_pdf_content_stream_v1(pdf_bytes)
-        profile = _require_profile(document_type=item.document_type, parsed=parsed)
+        profile = _require_profile(
+            document_type=item.document_type,
+            parsed=parsed,
+            required_field_schema=required_field_schema,
+        )
         if item.fixture_kind == "error":
-            if not labels_by_key.get((item.set_id, item.document_type)):
+            error_labels = labels_by_key.get((item.set_id, item.document_type))
+            if not error_labels:
                 raise SourceAttestedSyntheticPdfTruthError("source_layout_error_label_missing")
             _require_error_content_stream_difference(
                 item=item,
                 parsed_error=parsed,
+                error_profile=profile,
+                error_labels=error_labels,
                 assets_by_relative_path=receipt_assets_by_relative_path,
                 source_directory=source_directory,
+                required_field_schema=required_field_schema,
             )
         record = _source_record(
             asset_id=item.asset_id,
@@ -997,6 +1416,11 @@ def compile_source_attested_synthetic_pdf_layout_truth(
             set_id=item.set_id,
             parsed=parsed,
             profile=profile,
+        )
+        _validate_required_field_schema(
+            document_type=item.document_type,
+            fields=record.fields,
+            required_field_schema=required_field_schema,
         )
         draft = draft_by_asset[item.asset_id]
         draft_fields = {field.field_name: field for field in draft.fields}
@@ -1053,10 +1477,20 @@ def validate_source_attested_layout_truth_for_evaluation(
     receipt: DatasetReceiptV1,
     packet: EvaluationPacketV2,
     truth: SourceAttestedSyntheticLayoutTruthV1,
+    expected_dataset_scope: SourceAttestedSyntheticDatasetScopeV1 = (
+        EXPECTED_SOURCE_ATTESTED_SYNTHETIC_DATASET_SCOPE
+    ),
+    required_field_schema: Mapping[
+        SyntheticDocumentType,
+        tuple[tuple[str, Literal["text-v1", "numeric-v1", "identifier-v1"]], ...],
+    ] = SOURCE_ATTESTED_REQUIRED_FIELDS,
 ) -> None:
     """Verify receipt → packet → source-layout bindings before scoring."""
 
     _verify_receipt_packet_binding(receipt=receipt, packet=packet)
+    validate_source_attested_synthetic_packet_scope(
+        receipt=receipt, packet=packet, expected_scope=expected_dataset_scope
+    )
     if (
         truth.dataset_id != packet.dataset_id
         or truth.dataset_revision != packet.dataset_revision
@@ -1078,6 +1512,174 @@ def validate_source_attested_layout_truth_for_evaluation(
             or record.set_id != item.set_id
         ):
             raise SourceAttestedSyntheticPdfTruthError("source_layout_evaluation_binding_mismatch")
+        _validate_required_field_schema(
+            document_type=record.document_type,
+            fields=record.fields,
+            required_field_schema=required_field_schema,
+        )
+
+
+class SourceAttestedSyntheticCandidateExecutionV1(_WireModel):
+    """Content-free observation of the exact candidate bytes that were scored.
+
+    This is not a claim that a local administrator cannot edit local files; the
+    automatic path's trust boundary remains the local filesystem.  It does
+    prevent an ordinary result from being relabelled after evaluation and gives
+    the runtime enough immutable metadata to re-read the raw local candidate
+    and replay the score without printing candidate text.
+    """
+
+    schema_version: Literal["1.0"] = "1.0"
+    artifact_kind: Literal["source_attested_synthetic_pdf_candidate_execution"] = (
+        "source_attested_synthetic_pdf_candidate_execution"
+    )
+    profile_mode: Literal["offline_synthetic_pdf_evaluation"] = "offline_synthetic_pdf_evaluation"
+    dataset_id: str = Field(min_length=1, max_length=128, pattern=_IDENTIFIER)
+    dataset_revision: str = Field(min_length=1, max_length=128, pattern=_IDENTIFIER)
+    dataset_receipt_sha256: str = Field(pattern=_SHA256)
+    packet_kind: Literal["development", "sealed"]
+    packet_receipt_sha256: str = Field(pattern=_SHA256)
+    layout_truth_receipt_sha256: str = Field(pattern=_SHA256)
+    layout_truth_parser_spec_sha256: str = Field(pattern=_SHA256)
+    engine_kind: EngineKind
+    extractor_revision: str = Field(min_length=1, max_length=128, pattern=_IDENTIFIER)
+    configuration_sha256: str = Field(pattern=_SHA256)
+    model_inventory_sha256: str = Field(pattern=_SHA256)
+    candidate_parser_revision: str = Field(min_length=1, max_length=128, pattern=_IDENTIFIER)
+    candidate_bundle_sha256: str = Field(pattern=_SHA256)
+    candidate_output_sha256: str = Field(pattern=_SHA256)
+    candidate_execution_receipt_sha256: str = Field(pattern=_SHA256)
+
+    @model_validator(mode="after")
+    def _execution_is_hash_bound(self) -> "SourceAttestedSyntheticCandidateExecutionV1":
+        if self.candidate_execution_receipt_sha256 != candidate_execution_receipt_sha256(self):
+            raise ValueError("source-attested candidate execution SHA-256 mismatch")
+        return self
+
+
+def _candidate_execution_receipt_payload(
+    execution: SourceAttestedSyntheticCandidateExecutionV1 | Mapping[str, object],
+) -> dict[str, object]:
+    payload = (
+        execution.model_dump(mode="json", warnings=False)
+        if isinstance(execution, SourceAttestedSyntheticCandidateExecutionV1)
+        else dict(execution)
+    )
+    payload.pop("candidate_execution_receipt_sha256", None)
+    return payload
+
+
+def candidate_execution_receipt_sha256(
+    execution: SourceAttestedSyntheticCandidateExecutionV1 | Mapping[str, object],
+) -> str:
+    return sha256_bytes(canonical_json_bytes(_candidate_execution_receipt_payload(execution)))
+
+
+def _canonical_candidate_output_bytes(
+    candidate_output: SyntheticPdfCandidateOutputBundleV1,
+) -> bytes:
+    return canonical_json_file_bytes(candidate_output.model_dump(mode="json", warnings=False))
+
+
+def build_source_attested_synthetic_candidate_execution(
+    *,
+    receipt: DatasetReceiptV1,
+    packet: EvaluationPacketV2,
+    layout_truth: SourceAttestedSyntheticLayoutTruthV1,
+    candidate_output: SyntheticPdfCandidateOutputBundleV1,
+    candidate_output_raw: bytes,
+    engine_kind: EngineKind,
+    extractor_revision: str,
+    configuration_sha256: str,
+    model_inventory_sha256: str,
+    parser_revision: str,
+    expected_dataset_scope: SourceAttestedSyntheticDatasetScopeV1 = (
+        EXPECTED_SOURCE_ATTESTED_SYNTHETIC_DATASET_SCOPE
+    ),
+    required_field_schema: Mapping[
+        SyntheticDocumentType,
+        tuple[tuple[str, Literal["text-v1", "numeric-v1", "identifier-v1"]], ...],
+    ] = SOURCE_ATTESTED_REQUIRED_FIELDS,
+) -> SourceAttestedSyntheticCandidateExecutionV1:
+    """Bind an evaluated raw candidate file to its exact source-layout input."""
+
+    validate_source_attested_layout_truth_for_evaluation(
+        receipt=receipt,
+        packet=packet,
+        truth=layout_truth,
+        expected_dataset_scope=expected_dataset_scope,
+        required_field_schema=required_field_schema,
+    )
+    validate_synthetic_candidate_output_provenance(
+        candidate_output=candidate_output,
+        packet=packet,
+        engine_kind=engine_kind,
+        extractor_revision=extractor_revision,
+        configuration_sha256=configuration_sha256,
+        model_inventory_sha256=model_inventory_sha256,
+        parser_revision=parser_revision,
+    )
+    if candidate_output_raw != _canonical_candidate_output_bytes(candidate_output):
+        raise SourceAttestedSyntheticPdfTruthError("source_layout_candidate_execution_invalid")
+    payload: dict[str, object] = {
+        "schema_version": "1.0",
+        "artifact_kind": "source_attested_synthetic_pdf_candidate_execution",
+        "profile_mode": "offline_synthetic_pdf_evaluation",
+        "dataset_id": packet.dataset_id,
+        "dataset_revision": packet.dataset_revision,
+        "dataset_receipt_sha256": receipt_sha256(receipt),
+        "packet_kind": packet.split,
+        "packet_receipt_sha256": packet.packet_receipt_sha256,
+        "layout_truth_receipt_sha256": layout_truth.layout_truth_receipt_sha256,
+        "layout_truth_parser_spec_sha256": layout_truth.parser_spec_sha256,
+        "engine_kind": engine_kind,
+        "extractor_revision": extractor_revision,
+        "configuration_sha256": configuration_sha256,
+        "model_inventory_sha256": model_inventory_sha256,
+        "candidate_parser_revision": parser_revision,
+        "candidate_bundle_sha256": candidate_output.candidate_bundle_sha256,
+        "candidate_output_sha256": sha256_bytes(candidate_output_raw),
+    }
+    payload["candidate_execution_receipt_sha256"] = candidate_execution_receipt_sha256(payload)
+    return SourceAttestedSyntheticCandidateExecutionV1.model_validate(payload)
+
+
+def validate_source_attested_synthetic_candidate_execution(
+    *,
+    execution: SourceAttestedSyntheticCandidateExecutionV1,
+    receipt: DatasetReceiptV1,
+    packet: EvaluationPacketV2,
+    layout_truth: SourceAttestedSyntheticLayoutTruthV1,
+    candidate_output: SyntheticPdfCandidateOutputBundleV1,
+    candidate_output_raw: bytes,
+    expected_dataset_scope: SourceAttestedSyntheticDatasetScopeV1 = (
+        EXPECTED_SOURCE_ATTESTED_SYNTHETIC_DATASET_SCOPE
+    ),
+    required_field_schema: Mapping[
+        SyntheticDocumentType,
+        tuple[tuple[str, Literal["text-v1", "numeric-v1", "identifier-v1"]], ...],
+    ] = SOURCE_ATTESTED_REQUIRED_FIELDS,
+) -> None:
+    """Replay an execution receipt without logging or returning OCR content."""
+
+    expected = build_source_attested_synthetic_candidate_execution(
+        receipt=receipt,
+        packet=packet,
+        layout_truth=layout_truth,
+        candidate_output=candidate_output,
+        candidate_output_raw=candidate_output_raw,
+        engine_kind=execution.engine_kind,
+        extractor_revision=execution.extractor_revision,
+        configuration_sha256=execution.configuration_sha256,
+        model_inventory_sha256=execution.model_inventory_sha256,
+        parser_revision=execution.candidate_parser_revision,
+        expected_dataset_scope=expected_dataset_scope,
+        required_field_schema=required_field_schema,
+    )
+    if execution != expected:
+        raise SourceAttestedSyntheticPdfTruthError(
+            "source_layout_candidate_execution_binding_mismatch"
+        )
 
 
 class SourceAttestedSyntheticOcrMetricsV1(_WireModel):
@@ -1107,7 +1709,9 @@ class SourceAttestedSyntheticOcrEvaluationResultV1(_WireModel):
     extractor_revision: str = Field(min_length=1, max_length=128, pattern=_IDENTIFIER)
     configuration_sha256: str = Field(pattern=_SHA256)
     model_inventory_sha256: str = Field(pattern=_SHA256)
+    candidate_parser_revision: str = Field(min_length=1, max_length=128, pattern=_IDENTIFIER)
     candidate_bundle_sha256: str = Field(pattern=_SHA256)
+    candidate_execution_receipt_sha256: str = Field(pattern=_SHA256)
     evaluation_result_sha256: str = Field(pattern=_SHA256)
     passed: bool
     metrics: SourceAttestedSyntheticOcrMetricsV1
@@ -1168,7 +1772,9 @@ class SourceAttestedDevelopmentCandidateResultV1(_WireModel):
     extractor_revision: str = Field(min_length=1, max_length=128, pattern=_IDENTIFIER)
     configuration_sha256: str = Field(pattern=_SHA256)
     model_inventory_sha256: str = Field(pattern=_SHA256)
+    candidate_parser_revision: str = Field(min_length=1, max_length=128, pattern=_IDENTIFIER)
     candidate_bundle_sha256: str = Field(pattern=_SHA256)
+    candidate_execution_receipt_sha256: str = Field(pattern=_SHA256)
     evaluation_result_sha256: str = Field(pattern=_SHA256)
     passed: bool
 
@@ -1190,6 +1796,7 @@ class SourceAttestedSyntheticDevelopmentSelectionV1(_WireModel):
     development_packet_receipt_sha256: str = Field(pattern=_SHA256)
     layout_truth_receipt_sha256: str = Field(pattern=_SHA256)
     layout_truth_parser_spec_sha256: str = Field(pattern=_SHA256)
+    candidate_parser_revision: str = Field(min_length=1, max_length=128, pattern=_IDENTIFIER)
     candidate_results: list[SourceAttestedDevelopmentCandidateResultV1] = Field(
         min_length=3, max_length=3
     )
@@ -1217,11 +1824,18 @@ class SourceAttestedSyntheticDevelopmentSelectionV1(_WireModel):
                 and item.extractor_revision == self.selected_extractor_revision
                 and item.configuration_sha256 == self.selected_configuration_sha256
                 and item.model_inventory_sha256 == self.selected_model_inventory_sha256
+                and item.candidate_parser_revision == self.candidate_parser_revision
                 and item.evaluation_result_sha256 == self.selected_evaluation_result_sha256
             )
         ]
         if len(selected) != 1 or not selected[0].passed:
             raise ValueError("source-attested selected engine is not a passing development member")
+        if {item.candidate_parser_revision for item in self.candidate_results} != {
+            self.candidate_parser_revision
+        }:
+            raise ValueError(
+                "source-attested development candidates must share one parser revision"
+            )
         if self.development_selection_receipt_sha256 != development_selection_receipt_sha256(self):
             raise ValueError("source-attested development selection SHA-256 mismatch")
         return self
@@ -1270,6 +1884,7 @@ class SourceAttestedSyntheticSealedRunV1(_WireModel):
     selected_development_evaluation_result_sha256: str = Field(pattern=_SHA256)
     candidate_bundle_sha256: str = Field(pattern=_SHA256)
     candidate_parser_revision: str = Field(min_length=1, max_length=128, pattern=_IDENTIFIER)
+    candidate_execution_receipt_sha256: str = Field(pattern=_SHA256)
     sealed_candidate_reservation_sha256: str = Field(pattern=_SHA256)
     sealed_run_receipt_sha256: str = Field(pattern=_SHA256)
 
@@ -1330,59 +1945,45 @@ def _levenshtein_distance(reference: str, candidate: str) -> int:
     return previous[-1]
 
 
-def score_source_attested_synthetic_pdf_candidate_output(
-    *,
-    receipt: DatasetReceiptV1,
-    packet: EvaluationPacketV2,
-    layout_truth: SourceAttestedSyntheticLayoutTruthV1,
-    candidate_output: SyntheticPdfCandidateOutputBundleV1,
-    engine_kind: EngineKind,
-    extractor_revision: str,
-    configuration_sha256: str,
-    model_inventory_sha256: str,
-    parser_revision: str,
-    development_selection: SourceAttestedSyntheticDevelopmentSelectionV1 | None = None,
-    sealed_run: SourceAttestedSyntheticSealedRunV1 | None = None,
-) -> SourceAttestedSyntheticOcrEvaluationResultV1:
-    """Score one local candidate against final-PDF source-layout truth.
+class SourceAttestedSyntheticCandidateRescoreV1(_WireModel):
+    """Content-free output from replaying one canonical local candidate."""
 
-    Native text-layer candidates are permitted as diagnostics.  The result's
-    fixed scope makes clear that their score is content-stream compatibility,
-    not independent optical OCR evidence.
+    candidate_parser_revision: str = Field(min_length=1, max_length=128, pattern=_IDENTIFIER)
+    candidate_bundle_sha256: str = Field(pattern=_SHA256)
+    candidate_output_sha256: str = Field(pattern=_SHA256)
+    metrics: SourceAttestedSyntheticOcrMetricsV1
+
+
+def _parse_canonical_synthetic_candidate_output_raw(
+    candidate_output_raw: bytes,
+) -> SyntheticPdfCandidateOutputBundleV1:
+    """Parse one candidate only when its raw local file is canonical.
+
+    The caller deliberately receives no OCR text from this helper.  The raw
+    bytes stay in memory, are hash-bound by the execution receipt, and must
+    never be written to a transcript or general log.
     """
 
-    validate_source_attested_layout_truth_for_evaluation(
-        receipt=receipt, packet=packet, truth=layout_truth
-    )
-    validate_synthetic_candidate_output_provenance(
-        candidate_output=candidate_output,
-        packet=packet,
-        engine_kind=engine_kind,
-        extractor_revision=extractor_revision,
-        configuration_sha256=configuration_sha256,
-        model_inventory_sha256=model_inventory_sha256,
-        parser_revision=parser_revision,
-    )
-    if packet.split == "development":
-        if development_selection is not None or sealed_run is not None:
-            raise SourceAttestedSyntheticPdfTruthError(
-                "source_layout_development_receipt_not_permitted"
-            )
-    else:
-        if development_selection is None or sealed_run is None:
-            raise SourceAttestedSyntheticPdfTruthError("source_layout_sealed_receipt_required")
-        _validate_sealed_run_binding(
-            packet=packet,
-            layout_truth=layout_truth,
-            candidate_output=candidate_output,
-            engine_kind=engine_kind,
-            extractor_revision=extractor_revision,
-            configuration_sha256=configuration_sha256,
-            model_inventory_sha256=model_inventory_sha256,
-            parser_revision=parser_revision,
-            development_selection=development_selection,
-            sealed_run=sealed_run,
+    try:
+        candidate_output = SyntheticPdfCandidateOutputBundleV1.model_validate_json(
+            candidate_output_raw
         )
+    except (TypeError, ValueError, ValidationError) as error:
+        raise SourceAttestedSyntheticPdfTruthError(
+            "source_layout_candidate_output_invalid"
+        ) from error
+    if candidate_output_raw != _canonical_candidate_output_bytes(candidate_output):
+        raise SourceAttestedSyntheticPdfTruthError("source_layout_candidate_output_not_canonical")
+    return candidate_output
+
+
+def _score_source_attested_candidate_against_layout_truth(
+    *,
+    layout_truth: SourceAttestedSyntheticLayoutTruthV1,
+    candidate_output: SyntheticPdfCandidateOutputBundleV1,
+) -> SourceAttestedSyntheticOcrMetricsV1:
+    """Calculate fixed metrics after all source/provenance checks have passed."""
+
     candidate = candidate_output_from_synthetic_bundle(candidate_output)
     candidate_by_asset = {item.asset_id: item for item in candidate.documents}
     truth_by_asset = {item.asset_id: item for item in layout_truth.records}
@@ -1424,12 +2025,141 @@ def score_source_attested_synthetic_pdf_candidate_output(
         raise SourceAttestedSyntheticPdfTruthError("source_layout_release_target_missing")
     true_positive = len(source_cells & candidate_cells)
     denominator = len(source_cells) + len(candidate_cells)
-    table_f1 = 0.0 if denominator == 0 else (2.0 * true_positive) / denominator
-    metrics = SourceAttestedSyntheticOcrMetricsV1(
+    return SourceAttestedSyntheticOcrMetricsV1(
         field_exact_match=exact_fields / total_fields,
         ocr_cer=min(1.0, total_distance / total_reference_characters),
-        table_cell_f1=table_f1,
+        table_cell_f1=0.0 if denominator == 0 else (2.0 * true_positive) / denominator,
     )
+
+
+def recompute_source_attested_synthetic_pdf_candidate_metrics(
+    *,
+    receipt: DatasetReceiptV1,
+    packet: EvaluationPacketV2,
+    layout_truth: SourceAttestedSyntheticLayoutTruthV1,
+    candidate_output_raw: bytes,
+    engine_kind: EngineKind,
+    extractor_revision: str,
+    configuration_sha256: str,
+    model_inventory_sha256: str,
+    parser_revision: str,
+    expected_dataset_scope: SourceAttestedSyntheticDatasetScopeV1 = (
+        EXPECTED_SOURCE_ATTESTED_SYNTHETIC_DATASET_SCOPE
+    ),
+    required_field_schema: Mapping[
+        SyntheticDocumentType,
+        tuple[tuple[str, Literal["text-v1", "numeric-v1", "identifier-v1"]], ...],
+    ] = SOURCE_ATTESTED_REQUIRED_FIELDS,
+) -> SourceAttestedSyntheticCandidateRescoreV1:
+    """Re-score raw local candidate bytes without logging or exposing their text.
+
+    This is the replay primitive used by the runtime activation verifier.  It
+    accepts only canonical candidate bytes, rechecks the exact receipt/packet/
+    source-layout chain and emits hashes plus metrics—not candidate contents.
+    """
+
+    validate_source_attested_layout_truth_for_evaluation(
+        receipt=receipt,
+        packet=packet,
+        truth=layout_truth,
+        expected_dataset_scope=expected_dataset_scope,
+        required_field_schema=required_field_schema,
+    )
+    candidate_output = _parse_canonical_synthetic_candidate_output_raw(candidate_output_raw)
+    validate_synthetic_candidate_output_provenance(
+        candidate_output=candidate_output,
+        packet=packet,
+        engine_kind=engine_kind,
+        extractor_revision=extractor_revision,
+        configuration_sha256=configuration_sha256,
+        model_inventory_sha256=model_inventory_sha256,
+        parser_revision=parser_revision,
+    )
+    return SourceAttestedSyntheticCandidateRescoreV1(
+        candidate_parser_revision=candidate_output.parser_revision,
+        candidate_bundle_sha256=candidate_output.candidate_bundle_sha256,
+        candidate_output_sha256=sha256_bytes(candidate_output_raw),
+        metrics=_score_source_attested_candidate_against_layout_truth(
+            layout_truth=layout_truth, candidate_output=candidate_output
+        ),
+    )
+
+
+def score_source_attested_synthetic_pdf_candidate_output(
+    *,
+    receipt: DatasetReceiptV1,
+    packet: EvaluationPacketV2,
+    layout_truth: SourceAttestedSyntheticLayoutTruthV1,
+    candidate_output_raw: bytes,
+    candidate_execution: SourceAttestedSyntheticCandidateExecutionV1,
+    engine_kind: EngineKind,
+    extractor_revision: str,
+    configuration_sha256: str,
+    model_inventory_sha256: str,
+    parser_revision: str,
+    development_selection: SourceAttestedSyntheticDevelopmentSelectionV1 | None = None,
+    sealed_run: SourceAttestedSyntheticSealedRunV1 | None = None,
+    expected_dataset_scope: SourceAttestedSyntheticDatasetScopeV1 = (
+        EXPECTED_SOURCE_ATTESTED_SYNTHETIC_DATASET_SCOPE
+    ),
+    required_field_schema: Mapping[
+        SyntheticDocumentType,
+        tuple[tuple[str, Literal["text-v1", "numeric-v1", "identifier-v1"]], ...],
+    ] = SOURCE_ATTESTED_REQUIRED_FIELDS,
+) -> SourceAttestedSyntheticOcrEvaluationResultV1:
+    """Score one local candidate against final-PDF source-layout truth.
+
+    Native text-layer candidates are permitted as diagnostics.  The result's
+    fixed scope makes clear that their score is content-stream compatibility,
+    not independent optical OCR evidence.
+    """
+
+    candidate_output = _parse_canonical_synthetic_candidate_output_raw(candidate_output_raw)
+    rescore = recompute_source_attested_synthetic_pdf_candidate_metrics(
+        receipt=receipt,
+        packet=packet,
+        layout_truth=layout_truth,
+        candidate_output_raw=candidate_output_raw,
+        engine_kind=engine_kind,
+        extractor_revision=extractor_revision,
+        configuration_sha256=configuration_sha256,
+        model_inventory_sha256=model_inventory_sha256,
+        parser_revision=parser_revision,
+        expected_dataset_scope=expected_dataset_scope,
+        required_field_schema=required_field_schema,
+    )
+    validate_source_attested_synthetic_candidate_execution(
+        execution=candidate_execution,
+        receipt=receipt,
+        packet=packet,
+        layout_truth=layout_truth,
+        candidate_output=candidate_output,
+        candidate_output_raw=candidate_output_raw,
+        expected_dataset_scope=expected_dataset_scope,
+        required_field_schema=required_field_schema,
+    )
+    if packet.split == "development":
+        if development_selection is not None or sealed_run is not None:
+            raise SourceAttestedSyntheticPdfTruthError(
+                "source_layout_development_receipt_not_permitted"
+            )
+    else:
+        if development_selection is None or sealed_run is None:
+            raise SourceAttestedSyntheticPdfTruthError("source_layout_sealed_receipt_required")
+        _validate_sealed_run_binding(
+            packet=packet,
+            layout_truth=layout_truth,
+            candidate_output=candidate_output,
+            candidate_execution=candidate_execution,
+            engine_kind=engine_kind,
+            extractor_revision=extractor_revision,
+            configuration_sha256=configuration_sha256,
+            model_inventory_sha256=model_inventory_sha256,
+            parser_revision=parser_revision,
+            development_selection=development_selection,
+            sealed_run=sealed_run,
+        )
+    metrics = rescore.metrics
     passed = (
         metrics.field_exact_match >= 0.99
         and metrics.ocr_cer <= 0.01
@@ -1458,12 +2188,66 @@ def score_source_attested_synthetic_pdf_candidate_output(
         "extractor_revision": extractor_revision,
         "configuration_sha256": configuration_sha256,
         "model_inventory_sha256": model_inventory_sha256,
+        "candidate_parser_revision": parser_revision,
         "candidate_bundle_sha256": candidate_output.candidate_bundle_sha256,
+        "candidate_execution_receipt_sha256": (
+            candidate_execution.candidate_execution_receipt_sha256
+        ),
         "passed": passed,
         "metrics": metrics.model_dump(mode="json", warnings=False),
     }
     payload["evaluation_result_sha256"] = source_attested_evaluation_result_sha256(payload)
     return SourceAttestedSyntheticOcrEvaluationResultV1.model_validate(payload)
+
+
+def verify_source_attested_synthetic_pdf_evaluation_replay(
+    *,
+    result: SourceAttestedSyntheticOcrEvaluationResultV1,
+    receipt: DatasetReceiptV1,
+    packet: EvaluationPacketV2,
+    layout_truth: SourceAttestedSyntheticLayoutTruthV1,
+    candidate_output_raw: bytes,
+    candidate_execution: SourceAttestedSyntheticCandidateExecutionV1,
+    engine_kind: EngineKind,
+    extractor_revision: str,
+    configuration_sha256: str,
+    model_inventory_sha256: str,
+    parser_revision: str,
+    development_selection: SourceAttestedSyntheticDevelopmentSelectionV1 | None = None,
+    sealed_run: SourceAttestedSyntheticSealedRunV1 | None = None,
+    expected_dataset_scope: SourceAttestedSyntheticDatasetScopeV1 = (
+        EXPECTED_SOURCE_ATTESTED_SYNTHETIC_DATASET_SCOPE
+    ),
+    required_field_schema: Mapping[
+        SyntheticDocumentType,
+        tuple[tuple[str, Literal["text-v1", "numeric-v1", "identifier-v1"]], ...],
+    ] = SOURCE_ATTESTED_REQUIRED_FIELDS,
+) -> None:
+    """Fail closed unless a result exactly matches a fresh raw-candidate replay.
+
+    This pure verifier is intentionally importable by the runtime.  It reads
+    no paths and produces no OCR/document text; callers supply already-read
+    local bytes and may safely surface only its content-free error code.
+    """
+
+    replayed = score_source_attested_synthetic_pdf_candidate_output(
+        receipt=receipt,
+        packet=packet,
+        layout_truth=layout_truth,
+        candidate_output_raw=candidate_output_raw,
+        candidate_execution=candidate_execution,
+        engine_kind=engine_kind,
+        extractor_revision=extractor_revision,
+        configuration_sha256=configuration_sha256,
+        model_inventory_sha256=model_inventory_sha256,
+        parser_revision=parser_revision,
+        development_selection=development_selection,
+        sealed_run=sealed_run,
+        expected_dataset_scope=expected_dataset_scope,
+        required_field_schema=required_field_schema,
+    )
+    if result != replayed:
+        raise SourceAttestedSyntheticPdfTruthError("source_layout_evaluation_replay_mismatch")
 
 
 def select_best_source_attested_synthetic_development_result(
@@ -1482,6 +2266,8 @@ def select_best_source_attested_synthetic_development_result(
         first.dataset_revision,
         first.packet_receipt_sha256,
         first.layout_truth_receipt_sha256,
+        first.layout_truth_parser_spec_sha256,
+        first.candidate_parser_revision,
     )
     if {result.engine_kind for result in results} != expected_engines or any(
         result.packet_kind != "development"
@@ -1490,6 +2276,8 @@ def select_best_source_attested_synthetic_development_result(
             result.dataset_revision,
             result.packet_receipt_sha256,
             result.layout_truth_receipt_sha256,
+            result.layout_truth_parser_spec_sha256,
+            result.candidate_parser_revision,
         )
         != identity
         for result in results
@@ -1553,13 +2341,16 @@ def build_source_attested_synthetic_development_selection(
         "development_packet_receipt_sha256": selected.packet_receipt_sha256,
         "layout_truth_receipt_sha256": selected.layout_truth_receipt_sha256,
         "layout_truth_parser_spec_sha256": selected.layout_truth_parser_spec_sha256,
+        "candidate_parser_revision": selected.candidate_parser_revision,
         "candidate_results": [
             {
                 "engine_kind": item.engine_kind,
                 "extractor_revision": item.extractor_revision,
                 "configuration_sha256": item.configuration_sha256,
                 "model_inventory_sha256": item.model_inventory_sha256,
+                "candidate_parser_revision": item.candidate_parser_revision,
                 "candidate_bundle_sha256": item.candidate_bundle_sha256,
+                "candidate_execution_receipt_sha256": (item.candidate_execution_receipt_sha256),
                 "evaluation_result_sha256": item.evaluation_result_sha256,
                 "passed": item.passed,
             }
@@ -1734,6 +2525,45 @@ def read_canonical_source_attested_synthetic_candidate_bundle(
     return candidate_bundle
 
 
+def write_source_attested_synthetic_candidate_execution(
+    *,
+    execution: SourceAttestedSyntheticCandidateExecutionV1,
+    output_directory: Path,
+) -> Path:
+    """Write the content-free execution sidecar beside local candidate artifacts."""
+
+    directory = _local_output_directory(
+        output_directory, code="source_layout_candidate_execution_directory_invalid"
+    )
+    return _write_hash_named_immutable(
+        directory=directory,
+        digest=execution.candidate_execution_receipt_sha256,
+        payload=execution.model_dump(mode="json", warnings=False),
+        code="source_layout_candidate_execution_immutable_conflict",
+    )
+
+
+def read_canonical_source_attested_synthetic_candidate_execution(
+    path: Path,
+) -> SourceAttestedSyntheticCandidateExecutionV1:
+    try:
+        raw = path.read_bytes()
+        execution = SourceAttestedSyntheticCandidateExecutionV1.model_validate_json(raw)
+    except (OSError, ValidationError) as error:
+        raise SourceAttestedSyntheticPdfTruthError(
+            "source_layout_candidate_execution_invalid"
+        ) from error
+    if raw != canonical_json_file_bytes(execution.model_dump(mode="json", warnings=False)):
+        raise SourceAttestedSyntheticPdfTruthError(
+            "source_layout_candidate_execution_not_canonical"
+        )
+    if path.name != f"{execution.candidate_execution_receipt_sha256}.json":
+        raise SourceAttestedSyntheticPdfTruthError(
+            "source_layout_candidate_execution_filename_invalid"
+        )
+    return execution
+
+
 def write_source_attested_synthetic_layout_truth(
     *, truth: SourceAttestedSyntheticLayoutTruthV1, output_directory: Path
 ) -> Path:
@@ -1863,6 +2693,7 @@ def _validate_development_selection_for_sealed(
     extractor_revision: str,
     configuration_sha256: str,
     model_inventory_sha256: str,
+    parser_revision: str,
 ) -> None:
     if (
         selection.dataset_id != packet.dataset_id
@@ -1876,6 +2707,7 @@ def _validate_development_selection_for_sealed(
         or selection.selected_extractor_revision != extractor_revision
         or selection.selected_configuration_sha256 != configuration_sha256
         or selection.selected_model_inventory_sha256 != model_inventory_sha256
+        or selection.candidate_parser_revision != parser_revision
     ):
         raise SourceAttestedSyntheticPdfTruthError("source_layout_selection_binding_mismatch")
 
@@ -1886,6 +2718,7 @@ def build_source_attested_synthetic_sealed_run(
     layout_truth: SourceAttestedSyntheticLayoutTruthV1,
     development_selection: SourceAttestedSyntheticDevelopmentSelectionV1,
     candidate_output: SyntheticPdfCandidateOutputBundleV1,
+    candidate_execution: SourceAttestedSyntheticCandidateExecutionV1,
     document_preview_root: Path,
     engine_kind: EngineKind,
     extractor_revision: str,
@@ -1902,6 +2735,7 @@ def build_source_attested_synthetic_sealed_run(
         extractor_revision=extractor_revision,
         configuration_sha256=configuration_sha256,
         model_inventory_sha256=model_inventory_sha256,
+        parser_revision=parser_revision,
     )
     if (
         candidate_output.packet_receipt_sha256 != packet.packet_receipt_sha256
@@ -1910,6 +2744,19 @@ def build_source_attested_synthetic_sealed_run(
         or candidate_output.configuration_sha256 != configuration_sha256
         or candidate_output.model_inventory_sha256 != model_inventory_sha256
         or candidate_output.parser_revision != parser_revision
+        or candidate_execution.packet_kind != "sealed"
+        or candidate_execution.dataset_id != packet.dataset_id
+        or candidate_execution.dataset_revision != packet.dataset_revision
+        or candidate_execution.packet_receipt_sha256 != packet.packet_receipt_sha256
+        or candidate_execution.layout_truth_receipt_sha256
+        != layout_truth.layout_truth_receipt_sha256
+        or candidate_execution.layout_truth_parser_spec_sha256 != layout_truth.parser_spec_sha256
+        or candidate_execution.engine_kind != engine_kind
+        or candidate_execution.extractor_revision != extractor_revision
+        or candidate_execution.configuration_sha256 != configuration_sha256
+        or candidate_execution.model_inventory_sha256 != model_inventory_sha256
+        or candidate_execution.candidate_parser_revision != parser_revision
+        or candidate_execution.candidate_bundle_sha256 != candidate_output.candidate_bundle_sha256
     ):
         raise SourceAttestedSyntheticPdfTruthError(
             "source_layout_sealed_candidate_binding_mismatch"
@@ -1943,6 +2790,9 @@ def build_source_attested_synthetic_sealed_run(
         "selected_development_evaluation_result_sha256": development_selection.selected_evaluation_result_sha256,
         "candidate_bundle_sha256": candidate_output.candidate_bundle_sha256,
         "candidate_parser_revision": parser_revision,
+        "candidate_execution_receipt_sha256": (
+            candidate_execution.candidate_execution_receipt_sha256
+        ),
         "sealed_candidate_reservation_sha256": reservation_sha,
     }
     payload["sealed_run_receipt_sha256"] = sealed_run_receipt_sha256(payload)
@@ -2006,6 +2856,7 @@ def _validate_sealed_run_binding(
     packet: EvaluationPacketV2,
     layout_truth: SourceAttestedSyntheticLayoutTruthV1,
     candidate_output: SyntheticPdfCandidateOutputBundleV1,
+    candidate_execution: SourceAttestedSyntheticCandidateExecutionV1,
     engine_kind: EngineKind,
     extractor_revision: str,
     configuration_sha256: str,
@@ -2021,6 +2872,7 @@ def _validate_sealed_run_binding(
         extractor_revision=extractor_revision,
         configuration_sha256=configuration_sha256,
         model_inventory_sha256=model_inventory_sha256,
+        parser_revision=parser_revision,
     )
     if (
         sealed_run.dataset_id != packet.dataset_id
@@ -2038,6 +2890,8 @@ def _validate_sealed_run_binding(
         != development_selection.selected_evaluation_result_sha256
         or sealed_run.candidate_bundle_sha256 != candidate_output.candidate_bundle_sha256
         or sealed_run.candidate_parser_revision != parser_revision
+        or sealed_run.candidate_execution_receipt_sha256
+        != candidate_execution.candidate_execution_receipt_sha256
     ):
         raise SourceAttestedSyntheticPdfTruthError("source_layout_sealed_run_binding_mismatch")
 
@@ -2105,9 +2959,14 @@ def read_canonical_source_attested_synthetic_evaluation_result(
 __all__ = [
     "SOURCE_ATTESTED_EVALUATION_BASIS",
     "SOURCE_ATTESTED_EVALUATION_SCOPE",
+    "SOURCE_ATTESTED_REQUIRED_FIELDS",
+    "EXPECTED_SOURCE_ATTESTED_SYNTHETIC_DATASET_SCOPE",
     "SOURCE_LAYOUT_COMPILER_REVISION",
     "SOURCE_LAYOUT_PARSER_SPEC_REVISION",
     "SOURCE_LAYOUT_TRUTH_KIND",
+    "SourceAttestedSyntheticCandidateExecutionV1",
+    "SourceAttestedSyntheticCandidateRescoreV1",
+    "SourceAttestedSyntheticDatasetScopeV1",
     "SourceAttestedSyntheticGoldRecordV1",
     "SourceAttestedSyntheticLayoutTruthV1",
     "SourceAttestedSyntheticDevelopmentSelectionV1",
@@ -2115,26 +2974,35 @@ __all__ = [
     "SourceAttestedSyntheticOcrMetricsV1",
     "SourceAttestedSyntheticPdfTruthError",
     "SourceAttestedSyntheticSealedRunV1",
+    "build_source_attested_synthetic_candidate_execution",
     "build_source_attested_synthetic_development_selection",
     "build_source_attested_synthetic_sealed_run",
     "compile_source_attested_synthetic_pdf_layout_truth",
+    "candidate_execution_receipt_sha256",
     "development_selection_receipt_sha256",
     "layout_truth_receipt_sha256",
     "read_canonical_source_attested_synthetic_development_selection",
     "read_canonical_source_attested_synthetic_candidate_bundle",
+    "read_canonical_source_attested_synthetic_candidate_execution",
     "read_canonical_source_attested_synthetic_dataset_receipt",
     "read_canonical_source_attested_synthetic_evaluation_result",
     "read_canonical_source_attested_synthetic_layout_truth",
     "read_canonical_source_attested_synthetic_packet",
     "read_canonical_source_attested_synthetic_sealed_run",
+    "recompute_source_attested_synthetic_pdf_candidate_metrics",
     "score_source_attested_synthetic_pdf_candidate_output",
     "sealed_run_receipt_sha256",
     "select_best_source_attested_synthetic_development_result",
     "source_attested_evaluation_result_sha256",
     "source_layout_parser_spec_sha256",
     "validate_source_attested_layout_truth_for_evaluation",
+    "validate_source_attested_synthetic_candidate_execution",
+    "validate_source_attested_synthetic_dataset_scope",
+    "validate_source_attested_synthetic_packet_scope",
+    "verify_source_attested_synthetic_pdf_evaluation_replay",
     "write_source_attested_synthetic_development_selection",
     "write_source_attested_synthetic_candidate_bundle",
+    "write_source_attested_synthetic_candidate_execution",
     "write_source_attested_synthetic_dataset_receipt",
     "write_source_attested_synthetic_evaluation_result",
     "write_source_attested_synthetic_layout_truth",
