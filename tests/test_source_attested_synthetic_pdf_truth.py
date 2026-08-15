@@ -597,9 +597,7 @@ def test_source_truth_rejects_pre_v3_candidate_parser_even_for_test_scope(tmp_pa
     fixture = _fixture(tmp_path)
     truth = _truth(fixture, "development")
     packet = fixture["development_packet"]
-    candidate = _matching_candidate(
-        packet=packet, truth=truth, engine_kind="pdf_text_layer"
-    )
+    candidate = _matching_candidate(packet=packet, truth=truth, engine_kind="pdf_text_layer")
     extractor_revision, configuration_sha256, model_inventory_sha256 = _profile("pdf_text_layer")
 
     with pytest.raises(

@@ -679,9 +679,7 @@ def _write_source_attested_receipt_chain(
         "sealed_run_receipt_sha256": sealed_run_sha256,
     }
     (
-        root
-        / "source-attested-sealed-runs"
-        / f"sealed-run-state-{sealed_packet_sha256}.json"
+        root / "source-attested-sealed-runs" / f"sealed-run-state-{sealed_packet_sha256}.json"
     ).write_bytes(_canonical_local_artifact(sealed_run_state))
     evaluation = _source_attested_evaluation(
         configuration_sha256,

@@ -70,9 +70,7 @@ _SOURCE_CANDIDATE_EXECUTION_DIRECTORY = "source-attested-candidate-executions"
 _SOURCE_EVALUATION_RESULT_DIRECTORY = "source-attested-evaluation-results"
 _SOURCE_DEVELOPMENT_SELECTION_DIRECTORY = "source-attested-development-selections"
 _SOURCE_SEALED_RUN_DIRECTORY = "source-attested-sealed-runs"
-_SOURCE_ATTESTED_CANDIDATE_PARSER_REVISION: Final = (
-    "synthetic-pdf-visible-layout-normalizer-v3"
-)
+_SOURCE_ATTESTED_CANDIDATE_PARSER_REVISION: Final = "synthetic-pdf-visible-layout-normalizer-v3"
 _SEALED_RESERVATION_DIRECTORY = "candidate-run-reservations"
 _SOURCE_LAYOUT_RECORD_COUNTS: Mapping[str, int] = {"development": 60, "sealed": 20}
 _MAX_SOURCE_DATASET_RECEIPT_BYTES = 8 * 1024 * 1024
@@ -2294,9 +2292,7 @@ def _sealed_candidate_reservation_path(root: Path, packet_receipt_sha256: str) -
     return destination
 
 
-def _source_attested_state_path(
-    *, root: Path, directory: str, filename: str, code: str
-) -> Path:
+def _source_attested_state_path(*, root: Path, directory: str, filename: str, code: str) -> Path:
     """Resolve one deterministic create-only evaluator ledger path safely."""
 
     destination = root / directory / filename
@@ -2379,8 +2375,7 @@ def _verify_source_attested_sealed_evaluation_state(
     if (
         value["schema_version"] != "1.0"
         or value["packet_kind"] != "sealed"
-        or _sha256(value["packet_receipt_sha256"], code=code)
-        != evaluation.packet_receipt_sha256
+        or _sha256(value["packet_receipt_sha256"], code=code) != evaluation.packet_receipt_sha256
         or _sha256(value["layout_truth_receipt_sha256"], code=code)
         != evaluation.layout_truth_receipt_sha256
         or _sha256(value["evaluation_result_sha256"], code=code)
