@@ -22,6 +22,7 @@ _MAX_TEXT_CHARACTERS = 500_000
 _SHA256 = re.compile(r"^[a-f0-9]{64}$")
 ServiceMode = Literal["local-development", "functional-uat"]
 GuidanceRegistryVersion = Literal["1.0", "2.0"]
+DocumentPreviewAutoActivationMode = Literal["source-attested-synthetic"]
 # This is intentionally the Data-owned local profile name, rather than an
 # Agent runtime profile name.  The composed V2 + law-history Agent profile
 # therefore resolves to the same expected Evidence profile as review-only
@@ -124,11 +125,15 @@ class ServiceSettings:
     max_document_bytes: int = _MAX_DOCUMENT_BYTES
     max_document_pages: int = _MAX_DOCUMENT_PAGES
     max_document_image_pixels: int = _MAX_DOCUMENT_IMAGE_PIXELS
-    # The sole production opt-in for document previews.  Both values are
-    # required; there is intentionally no environment setting for an engine,
-    # executable, model path, network source, or automatic fallback.
+    # The preserved static approval mode binds one exact pointer byte hash at
+    # process start.  The separate source-attested mode deliberately omits
+    # that hash so one already-running local process can validate and adopt a
+    # newly atomically-written synthetic activation pointer on its next PDF
+    # request.  It is still an explicit opt-in and never selects an engine,
+    # executable, model path, or network source from the environment.
     document_preview_approval_path: Path | None = None
     document_preview_approval_sha256: str | None = None
+    document_preview_auto_activation_mode: DocumentPreviewAutoActivationMode | None = None
     max_documents: int = _MAX_DOCUMENTS
     max_text_characters: int = _MAX_TEXT_CHARACTERS
     body_read_timeout_seconds: float = 15.0
@@ -162,12 +167,21 @@ class ServiceSettings:
             raise ServiceConfigurationError("customs_agent_evidence_profile_invalid")
         has_preview_approval_path = self.document_preview_approval_path is not None
         has_preview_approval_sha256 = self.document_preview_approval_sha256 is not None
-        if has_preview_approval_path != has_preview_approval_sha256:
+        has_preview_auto_activation = self.document_preview_auto_activation_mode is not None
+        if has_preview_auto_activation:
+            if self.document_preview_auto_activation_mode != "source-attested-synthetic":
+                raise ServiceConfigurationError("customs_agent_document_preview_auto_activation_invalid")
+            if not has_preview_approval_path or has_preview_approval_sha256:
+                raise ServiceConfigurationError(
+                    "customs_agent_document_preview_auto_activation_incomplete"
+                )
+        elif has_preview_approval_path != has_preview_approval_sha256:
             raise ServiceConfigurationError("customs_agent_document_preview_approval_incomplete")
         if has_preview_approval_path:
             assert self.document_preview_approval_path is not None
-            assert self.document_preview_approval_sha256 is not None
             _document_preview_approval_path(str(self.document_preview_approval_path))
+        if has_preview_approval_sha256:
+            assert self.document_preview_approval_sha256 is not None
             if _SHA256.fullmatch(self.document_preview_approval_sha256) is None:
                 raise ServiceConfigurationError(
                     "customs_agent_document_preview_approval_sha256_invalid"
@@ -268,11 +282,12 @@ class ServiceSettings:
         has_guidance_registry_version = "GUIDANCE_SERVICE_REGISTRY_VERSION" in source
         has_preview_approval_path = "CUSTOMS_AGENT_DOCUMENT_PREVIEW_APPROVAL_PATH" in source
         has_preview_approval_sha256 = "CUSTOMS_AGENT_DOCUMENT_PREVIEW_APPROVAL_SHA256" in source
+        has_preview_auto_activation = "CUSTOMS_AGENT_DOCUMENT_PREVIEW_AUTO_ACTIVATION" in source
         if has_guidance_base_url != has_guidance_token:
             raise ServiceConfigurationError("guidance_service_peer_incomplete")
         if has_guidance_registry_version != has_guidance_base_url:
             raise ServiceConfigurationError("guidance_registry_version_peer_incomplete")
-        if has_preview_approval_path != has_preview_approval_sha256:
+        if not has_preview_auto_activation and has_preview_approval_path != has_preview_approval_sha256:
             raise ServiceConfigurationError("customs_agent_document_preview_approval_incomplete")
         guidance_base_url: str | None = None
         guidance_service_token: SecretStr | None = None
@@ -280,6 +295,7 @@ class ServiceSettings:
         evidence_profile: EvidenceProfile | None = None
         document_preview_approval_path: Path | None = None
         document_preview_approval_sha256: str | None = None
+        document_preview_auto_activation_mode: DocumentPreviewAutoActivationMode | None = None
         if "CUSTOMS_AGENT_EVIDENCE_PROFILE" in source:
             configured_evidence_profile = _required(source, "CUSTOMS_AGENT_EVIDENCE_PROFILE")
             if configured_evidence_profile not in _EVIDENCE_PROFILES:
@@ -294,10 +310,22 @@ class ServiceSettings:
             if configured_registry_version not in {"1.0", "2.0"}:
                 raise ServiceConfigurationError("guidance_registry_version_invalid")
             guidance_registry_version = cast(GuidanceRegistryVersion, configured_registry_version)
+        if has_preview_auto_activation:
+            configured_auto_activation = _required(
+                source, "CUSTOMS_AGENT_DOCUMENT_PREVIEW_AUTO_ACTIVATION"
+            )
+            if configured_auto_activation != "source-attested-synthetic":
+                raise ServiceConfigurationError("customs_agent_document_preview_auto_activation_invalid")
+            if not has_preview_approval_path or has_preview_approval_sha256:
+                raise ServiceConfigurationError(
+                    "customs_agent_document_preview_auto_activation_incomplete"
+                )
+            document_preview_auto_activation_mode = "source-attested-synthetic"
         if has_preview_approval_path:
             document_preview_approval_path = _document_preview_approval_path(
                 _required(source, "CUSTOMS_AGENT_DOCUMENT_PREVIEW_APPROVAL_PATH")
             )
+        if has_preview_approval_sha256:
             document_preview_approval_sha256 = _required(
                 source, "CUSTOMS_AGENT_DOCUMENT_PREVIEW_APPROVAL_SHA256"
             )
@@ -338,6 +366,7 @@ class ServiceSettings:
             ),
             document_preview_approval_path=document_preview_approval_path,
             document_preview_approval_sha256=document_preview_approval_sha256,
+            document_preview_auto_activation_mode=document_preview_auto_activation_mode,
             max_documents=_integer(
                 source, "CUSTOMS_AGENT_MAX_DOCUMENTS", _MAX_DOCUMENTS, 1, _MAX_DOCUMENTS
             ),

@@ -3048,10 +3048,103 @@ class _PdfTextLayerEngine:
         return candidate
 
 
+@dataclass(slots=True)
+class AutoActivatingSourceAttestedPdfPreviewEngine:
+    """Adopt only a newly verified synthetic activation on a PDF request.
+
+    The normal static path receives an approval hash from the process
+    environment and intentionally never changes.  This separate, explicit
+    local-only mode is for the source-attested synthetic workflow: it derives
+    a fresh hash only from the one fixed active-pointer path, validates the
+    complete immutable evidence chain, then swaps the cached delegate.  A
+    missing, changed, or malformed pointer never falls back to a previously
+    cached engine.
+    """
+
+    approval_path: Path
+    adapter_factory: _AdapterFactory
+    package_version_reader: Callable[[str], str]
+    _lock: threading.RLock = field(default_factory=threading.RLock, init=False, repr=False)
+    _active_pointer_sha256: str | None = field(default=None, init=False, repr=False)
+    _active_engine: ApprovedPdfOnlyPreviewEngine | None = field(default=None, init=False, repr=False)
+
+    def _clear_active(self) -> None:
+        self._active_pointer_sha256 = None
+        self._active_engine = None
+
+    def _read_source_attested_pointer_snapshot(self) -> tuple[bytes, str]:
+        """Read one exact canonical automatic pointer without accepting human shape."""
+
+        code = "document_preview_source_attested_auto_pointer_invalid"
+        # The settings layer enforces the lexical fixed path.  Repeat the
+        # runtime root/symlink check before every read because the pointer is
+        # deliberately allowed to appear after this process starts.
+        _, canonical_approval_path = validate_approval_pointer_path(self.approval_path)
+        raw = _read_regular_file(canonical_approval_path, limit=_MAX_POINTER_BYTES, code=code)
+        value = _strict_json_object(raw, code=code)
+        if raw != _canonical_json_bytes(value, trailing_newline=True):
+            raise DocumentPreviewRuntimeError(code)
+        parse_source_attested_synthetic_pdf_preview_activation(raw)
+        return raw, _sha256_bytes(raw)
+
+    def _current_engine(self) -> ApprovedPdfOnlyPreviewEngine:
+        """Return the exact current pointer engine, or reject it before use."""
+
+        with self._lock:
+            initial_raw, pointer_sha256 = self._read_source_attested_pointer_snapshot()
+            if (
+                self._active_engine is not None
+                and self._active_pointer_sha256 == pointer_sha256
+            ):
+                return self._active_engine
+
+            # Pointer bytes changed.  Drop the previous profile before doing
+            # any work so a new invalid pointer cannot keep serving old OCR.
+            self._clear_active()
+            binding = load_approved_pdf_preview_binding(
+                approval_path=self.approval_path,
+                approval_sha256=pointer_sha256,
+                package_version_reader=self.package_version_reader,
+            )
+            if not isinstance(binding.approval, SourceAttestedSyntheticPdfPreviewActivationV1):
+                raise DocumentPreviewRuntimeError("document_preview_source_attested_auto_pointer_invalid")
+
+            # A writer uses atomic replacement, but re-read after the complete
+            # chain validation to reject a pointer that changed while loading.
+            confirmed_raw, confirmed_sha256 = self._read_source_attested_pointer_snapshot()
+            if confirmed_sha256 != pointer_sha256 or confirmed_raw != initial_raw:
+                raise DocumentPreviewRuntimeError("document_preview_source_attested_auto_pointer_changed")
+            binding.verify_runtime_state()
+            candidate = ApprovedPdfOnlyPreviewEngine(
+                binding=binding,
+                delegate=self.adapter_factory(binding),
+            )
+            self._active_pointer_sha256 = pointer_sha256
+            self._active_engine = candidate
+            return candidate
+
+    def extract(self, preview_input: PreviewInputV1) -> PreviewCandidateV1:
+        if preview_input.metadata.media_type != "application/pdf":
+            raise DocumentPreviewUnavailable("PDF-only source-attested activation")
+        try:
+            engine = self._current_engine()
+            return engine.extract(preview_input)
+        except DocumentPreviewRuntimeError as error:
+            with self._lock:
+                self._clear_active()
+            raise DocumentPreviewUnavailable(error.code) from error
+        except DocumentPreviewUnavailable:
+            # This includes pointer/sidecar drift caught by the cached binding.
+            # Do not retain an old profile after any unavailable outcome.
+            with self._lock:
+                self._clear_active()
+            raise
+
+
 @dataclass(frozen=True, slots=True)
 class DocumentPreviewEngineResolution:
     engine: LocalDocumentPreviewEngine
-    status: Literal["disabled", "approved"]
+    status: Literal["disabled", "approved", "auto-pending"]
     reason_code: str | None = None
 
 
@@ -3084,6 +3177,40 @@ def resolve_approved_pdf_preview_engine(
         return DocumentPreviewEngineResolution(
             DisabledDocumentPreviewEngine(), "disabled", error.code
         )
+
+
+def resolve_document_preview_engine(
+    *,
+    approval_path: Path | None,
+    approval_sha256: str | None,
+    source_attested_auto_activation: bool,
+    adapter_factory: _AdapterFactory = build_default_pdf_preview_adapter,
+    package_version_reader: Callable[[str], str] = importlib.metadata.version,
+) -> DocumentPreviewEngineResolution:
+    """Resolve either the preserved static mode or explicit dynamic synthetic mode."""
+
+    if not source_attested_auto_activation:
+        return resolve_approved_pdf_preview_engine(
+            approval_path=approval_path,
+            approval_sha256=approval_sha256,
+            adapter_factory=adapter_factory,
+            package_version_reader=package_version_reader,
+        )
+    if approval_path is None or approval_sha256 is not None:
+        return DocumentPreviewEngineResolution(
+            DisabledDocumentPreviewEngine(),
+            "disabled",
+            "document_preview_source_attested_auto_activation_incomplete",
+        )
+    return DocumentPreviewEngineResolution(
+        AutoActivatingSourceAttestedPdfPreviewEngine(
+            approval_path=approval_path,
+            adapter_factory=adapter_factory,
+            package_version_reader=package_version_reader,
+        ),
+        "auto-pending",
+        "document_preview_source_attested_auto_pending",
+    )
 
 
 def write_runtime_sidecars(
@@ -3375,6 +3502,7 @@ def write_source_attested_synthetic_pdf_preview_pointer(
 
 
 __all__ = [
+    "AutoActivatingSourceAttestedPdfPreviewEngine",
     "ApprovedPdfOnlyPreviewEngine",
     "ApprovedPdfPreviewBinding",
     "DoclingPdfPreviewAdapter",
@@ -3408,6 +3536,7 @@ __all__ = [
     "parse_sealed_evaluation_result",
     "parse_source_attested_synthetic_pdf_preview_activation",
     "parse_source_attested_synthetic_sealed_evaluation_result",
+    "resolve_document_preview_engine",
     "resolve_approved_pdf_preview_engine",
     "validate_approval_pointer_path",
     "validate_document_preview_root",

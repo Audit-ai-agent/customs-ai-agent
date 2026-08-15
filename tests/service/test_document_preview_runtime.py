@@ -8,6 +8,7 @@ from pathlib import Path
 import pytest
 from pydantic import SecretStr
 
+import customs_ai_agent.service.document_preview_runtime as runtime_module
 from customs_ai_agent.schemas.document_extraction import (
     DocumentPreviewPageV1,
     DocumentSpanV1,
@@ -17,6 +18,7 @@ from customs_ai_agent.schemas.document_extraction import (
 from customs_ai_agent.schemas.document_extraction import DocumentExtractionRequestMetadataV1
 from customs_ai_agent.service.document_extraction import DocumentPreviewUnavailable
 from customs_ai_agent.service.document_preview_runtime import (
+    AutoActivatingSourceAttestedPdfPreviewEngine,
     ApprovedPdfOnlyPreviewEngine,
     DocumentPreviewRuntimeError,
     _docling_preview_pages,
@@ -26,6 +28,7 @@ from customs_ai_agent.service.document_preview_runtime import (
     parse_source_attested_synthetic_pdf_preview_activation,
     parse_source_attested_synthetic_sealed_evaluation_result,
     parse_sealed_evaluation_result,
+    resolve_document_preview_engine,
     resolve_approved_pdf_preview_engine,
     write_approved_pdf_preview_pointer,
     write_runtime_sidecars,
@@ -647,6 +650,53 @@ def _jpeg_input() -> PreviewInputV1:
     )
 
 
+def _source_attested_activation_pointer(*, extractor_revision: str) -> bytes:
+    return _canonical(
+        {
+            "schema_version": "1.0",
+            "activation_kind": "source_attested_synthetic",
+            "status": "activated",
+            "media_type": "application/pdf",
+            "engine": {
+                "kind": "pdf_text_layer",
+                "extractor_revision": extractor_revision,
+                "configuration_sha256": "a" * 64,
+                "model_inventory_sha256": "b" * 64,
+            },
+            "evaluation": {
+                "dataset_id": "synthetic-pdf",
+                "dataset_revision": "synthetic-pdf-r1",
+                "packet_kind": "sealed",
+                "packet_receipt_sha256": "c" * 64,
+                "evaluation_scope": "synthetic_content_stream_compatibility",
+                "layout_truth_kind": "pdf_content_stream_layout_v1",
+                "layout_truth_receipt_sha256": "d" * 64,
+                "layout_truth_parser_spec_sha256": "e" * 64,
+                "development_selection_receipt_sha256": "f" * 64,
+                "sealed_run_receipt_sha256": "1" * 64,
+                "evaluation_basis": "source_attested_synthetic",
+                "evaluation_result_sha256": "2" * 64,
+            },
+        },
+        newline=True,
+    )
+
+
+def _replace_pointer(path: Path, raw: bytes) -> None:
+    temporary = path.parent / f".{path.name}.replacement"
+    temporary.write_bytes(raw)
+    temporary.replace(path)
+
+
+class _DynamicFakeBinding:
+    def __init__(self, approval: object) -> None:
+        self.approval = approval
+        self.verify_calls = 0
+
+    def verify_runtime_state(self) -> None:
+        self.verify_calls += 1
+
+
 def test_approved_binding_requires_exact_sidecars_and_pdf_only_runtime(tmp_path: Path) -> None:
     approval_path, approval_sha256 = _approved(tmp_path)
     binding = load_approved_pdf_preview_binding(
@@ -681,6 +731,143 @@ def test_runtime_pointer_drift_fails_closed_without_calling_adapter(tmp_path: Pa
         engine.extract(_pdf_input())
 
     assert fake.calls == 0
+
+
+def test_source_attested_auto_engine_activates_then_clears_cache_on_bad_pointer(
+    tmp_path: Path,
+) -> None:
+    """A running opt-in engine never needs an environment SHA update or restart."""
+
+    root = _root(tmp_path)
+    root.mkdir(parents=True)
+    configuration_sha256, inventory_sha256 = write_runtime_sidecars(
+        document_preview_root=root,
+        configuration_value=_configuration(),
+        inventory_value=_inventory(),
+        package_version_reader=_package_version,
+    )
+    chain = _write_source_attested_receipt_chain(
+        root=root,
+        configuration_sha256=configuration_sha256,
+        inventory_sha256=inventory_sha256,
+    )
+    evaluation = chain["evaluation"]
+    assert isinstance(evaluation, bytes)
+    activation_path = root / "approvals" / "pdf-preview-active.json"
+    delegates: list[_FakePdfEngine] = []
+
+    def adapter_factory(binding: object) -> _FakePdfEngine:
+        approval = getattr(binding, "approval")
+        delegate = _FakePdfEngine(getattr(approval, "extractor_revision"))
+        delegates.append(delegate)
+        return delegate
+
+    engine = AutoActivatingSourceAttestedPdfPreviewEngine(
+        approval_path=activation_path,
+        adapter_factory=adapter_factory,
+        package_version_reader=_package_version,
+    )
+    with pytest.raises(DocumentPreviewUnavailable):
+        engine.extract(_pdf_input())
+    assert delegates == []
+
+    write_source_attested_synthetic_pdf_preview_pointer(
+        document_preview_root=root,
+        evaluation_raw=evaluation,
+        configuration_sha256=configuration_sha256,
+        model_inventory_sha256=inventory_sha256,
+        package_version_reader=_package_version,
+    )
+    assert engine.extract(_pdf_input()).extractor_revision == "pdf-text-test-v1"
+    assert len(delegates) == 1
+    assert delegates[0].calls == 1
+
+    _replace_pointer(activation_path, b"{}\n")
+    with pytest.raises(DocumentPreviewUnavailable):
+        engine.extract(_pdf_input())
+    assert len(delegates) == 1
+    assert delegates[0].calls == 1
+
+    # A valid atomic replacement can recover, but must re-load rather than
+    # retaining the instance that preceded the invalid pointer.
+    write_source_attested_synthetic_pdf_preview_pointer(
+        document_preview_root=root,
+        evaluation_raw=evaluation,
+        configuration_sha256=configuration_sha256,
+        model_inventory_sha256=inventory_sha256,
+        package_version_reader=_package_version,
+    )
+    assert engine.extract(_pdf_input()).extractor_revision == "pdf-text-test-v1"
+    assert len(delegates) == 2
+    assert delegates[1].calls == 1
+
+    # A human-approved pointer is structurally valid for the preserved static
+    # mode, but this dynamic source-attested mode must reject it before a
+    # cached delegate can be called.
+    write_approved_pdf_preview_pointer(
+        document_preview_root=root,
+        approval_id="human-approval-1",
+        evaluation_raw=_evaluation(configuration_sha256, inventory_sha256),
+        configuration_sha256=configuration_sha256,
+        model_inventory_sha256=inventory_sha256,
+        package_version_reader=_package_version,
+    )
+    with pytest.raises(DocumentPreviewUnavailable):
+        engine.extract(_pdf_input())
+    assert len(delegates) == 2
+    assert delegates[1].calls == 1
+
+
+def test_source_attested_auto_engine_validates_hot_swap_and_mid_load_change(
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    """Only a fully stable replacement pointer reaches a new delegate."""
+
+    activation_path = _root(tmp_path) / "approvals" / "pdf-preview-active.json"
+    activation_path.parent.mkdir(parents=True)
+    first = _source_attested_activation_pointer(extractor_revision="auto-first-v1")
+    second = _source_attested_activation_pointer(extractor_revision="auto-second-v1")
+    activation_path.write_bytes(first)
+    loader_calls: list[str] = []
+    delegates: list[_FakePdfEngine] = []
+    mutate_during_load = False
+
+    def loader(**_kwargs: object) -> _DynamicFakeBinding:
+        nonlocal mutate_during_load
+        raw = activation_path.read_bytes()
+        approval = parse_source_attested_synthetic_pdf_preview_activation(raw)
+        loader_calls.append(approval.extractor_revision)
+        if mutate_during_load:
+            _replace_pointer(activation_path, second)
+        return _DynamicFakeBinding(approval)
+
+    def adapter_factory(binding: object) -> _FakePdfEngine:
+        approval = getattr(binding, "approval")
+        delegate = _FakePdfEngine(getattr(approval, "extractor_revision"))
+        delegates.append(delegate)
+        return delegate
+
+    monkeypatch.setattr(runtime_module, "load_approved_pdf_preview_binding", loader)
+    engine = AutoActivatingSourceAttestedPdfPreviewEngine(
+        approval_path=activation_path,
+        adapter_factory=adapter_factory,
+        package_version_reader=_package_version,
+    )
+
+    assert engine.extract(_pdf_input()).extractor_revision == "auto-first-v1"
+    _replace_pointer(activation_path, second)
+    assert engine.extract(_pdf_input()).extractor_revision == "auto-second-v1"
+    assert loader_calls == ["auto-first-v1", "auto-second-v1"]
+    assert [delegate.calls for delegate in delegates] == [1, 1]
+
+    _replace_pointer(activation_path, first)
+    mutate_during_load = True
+    with pytest.raises(DocumentPreviewUnavailable):
+        engine.extract(_pdf_input())
+    # The confirmation read occurs before adapter construction, so a pointer
+    # changed while loading cannot even create a third delegate.
+    assert loader_calls == ["auto-first-v1", "auto-second-v1", "auto-first-v1"]
+    assert [delegate.calls for delegate in delegates] == [1, 1]
 
 
 def test_source_attested_synthetic_pointer_activates_pdf_only_without_human_gold(
@@ -1240,7 +1427,7 @@ def test_sealed_evaluation_must_be_canonical_passing_and_bound() -> None:
         parse_sealed_evaluation_result(_canonical(value, newline=True))
 
 
-def test_settings_expose_only_paired_local_approval_opt_in(tmp_path: Path) -> None:
+def test_settings_keep_static_pin_and_allow_only_explicit_source_auto_mode(tmp_path: Path) -> None:
     pointer = _root(tmp_path) / "approvals" / "pdf-preview-active.json"
     # Deliberately low-entropy dummy: it satisfies the service's distinct-character
     # guard without resembling a credential to secret scanners.
@@ -1254,6 +1441,23 @@ def test_settings_expose_only_paired_local_approval_opt_in(tmp_path: Path) -> No
     )
 
     assert settings.document_preview_approval_path == pointer
+    assert settings.document_preview_auto_activation_mode is None
+    automatic = ServiceSettings(
+        bearer_token=SecretStr(token),
+        evidence_base_url="http://127.0.0.1:18083",
+        evidence_service_token=SecretStr(token),
+        document_preview_approval_path=pointer,
+        document_preview_auto_activation_mode="source-attested-synthetic",
+    )
+    assert automatic.document_preview_approval_sha256 is None
+    assert automatic.document_preview_auto_activation_mode == "source-attested-synthetic"
+    resolution = resolve_document_preview_engine(
+        approval_path=pointer,
+        approval_sha256=None,
+        source_attested_auto_activation=True,
+        package_version_reader=_package_version,
+    )
+    assert resolution.status == "auto-pending"
     with pytest.raises(
         ServiceConfigurationError, match="customs_agent_document_preview_approval_incomplete"
     ):
@@ -1273,6 +1477,53 @@ def test_settings_expose_only_paired_local_approval_opt_in(tmp_path: Path) -> No
             document_preview_approval_path=tmp_path / "outside.json",
             document_preview_approval_sha256="c" * 64,
         )
+    with pytest.raises(
+        ServiceConfigurationError,
+        match="customs_agent_document_preview_auto_activation_incomplete",
+    ):
+        ServiceSettings(
+            bearer_token=SecretStr(token),
+            evidence_base_url="http://127.0.0.1:18083",
+            evidence_service_token=SecretStr(token),
+            document_preview_auto_activation_mode="source-attested-synthetic",
+        )
+    with pytest.raises(
+        ServiceConfigurationError,
+        match="customs_agent_document_preview_auto_activation_incomplete",
+    ):
+        ServiceSettings(
+            bearer_token=SecretStr(token),
+            evidence_base_url="http://127.0.0.1:18083",
+            evidence_service_token=SecretStr(token),
+            document_preview_approval_path=pointer,
+            document_preview_approval_sha256="c" * 64,
+            document_preview_auto_activation_mode="source-attested-synthetic",
+        )
+
+
+def test_settings_environment_requires_xor_between_static_hash_and_auto_mode(tmp_path: Path) -> None:
+    pointer = _root(tmp_path) / "approvals" / "pdf-preview-active.json"
+    token = "aaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaBCDEFGHIJKL"
+    environment = {
+        "CUSTOMS_AGENT_SERVICE_BEARER_TOKEN": token,
+        "EVIDENCE_SERVICE_BASE_URL": "http://127.0.0.1:18083",
+        "EVIDENCE_SERVICE_TOKEN": token,
+        "CUSTOMS_AGENT_DOCUMENT_PREVIEW_APPROVAL_PATH": str(pointer),
+        "CUSTOMS_AGENT_DOCUMENT_PREVIEW_AUTO_ACTIVATION": "source-attested-synthetic",
+    }
+    automatic = ServiceSettings.from_environment(environment)
+    assert automatic.document_preview_auto_activation_mode == "source-attested-synthetic"
+    assert automatic.document_preview_approval_sha256 is None
+
+    with_hash = {
+        **environment,
+        "CUSTOMS_AGENT_DOCUMENT_PREVIEW_APPROVAL_SHA256": "c" * 64,
+    }
+    with pytest.raises(
+        ServiceConfigurationError,
+        match="customs_agent_document_preview_auto_activation_incomplete",
+    ):
+        ServiceSettings.from_environment(with_hash)
 
 
 def test_local_adapter_network_guard_blocks_socket_connection() -> None:

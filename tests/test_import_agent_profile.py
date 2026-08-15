@@ -202,6 +202,53 @@ def _run_peer_boundary_check(
     )
 
 
+def _run_preview_auto_importer_check(
+    workspace: Path,
+    *,
+    enable: bool,
+    preserve_and_clear: bool = False,
+) -> subprocess.CompletedProcess[str]:
+    if _POWERSHELL is None:
+        pytest.skip("PowerShell is required to test the Agent profile importer")
+
+    importer = workspace / "customs-ai-agent" / "tools" / "Import-AgentProfile.ps1"
+    pointer = workspace / "_local" / "data" / "document-preview" / "approvals" / "pdf-preview-active.json"
+    switch = " -EnableSourceAttestedPdfPreviewAutoActivation" if enable else ""
+    if preserve_and_clear:
+        command = (
+            "& { $ErrorActionPreference = 'Stop'; "
+            f"$env:CUSTOMS_AGENT_DOCUMENT_PREVIEW_APPROVAL_PATH = {_powershell_literal(str(pointer))}; "
+            "$env:CUSTOMS_AGENT_DOCUMENT_PREVIEW_APPROVAL_SHA256 = 'cccccccccccccccccccccccccccccccccccccccccccccccccccccccccccccccc'; "
+            f". {_powershell_literal(str(importer))} -Profile 'dev-fixture'; "
+            "$static = ($env:CUSTOMS_AGENT_DOCUMENT_PREVIEW_APPROVAL_PATH -eq "
+            f"{_powershell_literal(str(pointer))} -and $env:CUSTOMS_AGENT_DOCUMENT_PREVIEW_APPROVAL_SHA256 -eq 'cccccccccccccccccccccccccccccccccccccccccccccccccccccccccccccccc' -and "
+            "-not (Test-Path -LiteralPath 'Env:CUSTOMS_AGENT_DOCUMENT_PREVIEW_AUTO_ACTIVATION')); "
+            "$env:CUSTOMS_AGENT_DOCUMENT_PREVIEW_AUTO_ACTIVATION = 'source-attested-synthetic'; "
+            f". {_powershell_literal(str(importer))} -Profile 'dev-fixture'; "
+            "$cleared = (-not (Test-Path -LiteralPath 'Env:CUSTOMS_AGENT_DOCUMENT_PREVIEW_AUTO_ACTIVATION') -and "
+            "-not (Test-Path -LiteralPath 'Env:CUSTOMS_AGENT_DOCUMENT_PREVIEW_APPROVAL_PATH') -and "
+            "-not (Test-Path -LiteralPath 'Env:CUSTOMS_AGENT_DOCUMENT_PREVIEW_APPROVAL_SHA256')); "
+            "if ($static -and $cleared) { [Console]::Out.Write('PREVIEW_ENV_OK') } else { [Console]::Out.Write('PREVIEW_ENV_BAD') } }"
+        )
+    else:
+        command = (
+            "& { $ErrorActionPreference = 'Stop'; "
+            f". {_powershell_literal(str(importer))} -Profile 'dev-fixture'{switch}; "
+            "$ok = ($env:CUSTOMS_AGENT_DOCUMENT_PREVIEW_AUTO_ACTIVATION -eq 'source-attested-synthetic' -and "
+            f"$env:CUSTOMS_AGENT_DOCUMENT_PREVIEW_APPROVAL_PATH -eq {_powershell_literal(str(pointer))} -and "
+            "-not (Test-Path -LiteralPath 'Env:CUSTOMS_AGENT_DOCUMENT_PREVIEW_APPROVAL_SHA256')); "
+            "if ($ok) { [Console]::Out.Write('PREVIEW_AUTO_OK') } else { [Console]::Out.Write('PREVIEW_AUTO_BAD') } }"
+        )
+    return subprocess.run(
+        [_POWERSHELL, "-NoProfile", "-NonInteractive", "-Command", command],
+        cwd=workspace,
+        env=os.environ.copy(),
+        capture_output=True,
+        text=True,
+        check=False,
+    )
+
+
 def test_functional_uat_imports_only_the_canonical_local_key(tmp_path: Path) -> None:
     workspace = _write_workspace(
         tmp_path,
@@ -258,6 +305,26 @@ def test_dev_fixture_does_not_read_the_functional_uat_key_file(tmp_path: Path) -
     assert result.returncode == 0
     assert result.stdout == "KEY_ABSENT"
     assert _TEST_VALUE not in result.stdout + result.stderr
+
+
+def test_importer_explicitly_enables_fixed_source_attested_preview_discovery(
+    tmp_path: Path,
+) -> None:
+    workspace = _write_workspace(tmp_path, profile="dev-fixture", secret_contents=None)
+    result = _run_preview_auto_importer_check(workspace, enable=True)
+
+    assert result.returncode == 0
+    assert result.stdout == "PREVIEW_AUTO_OK"
+    assert _SERVICE_TOKEN not in result.stdout + result.stderr
+
+
+def test_importer_preserves_static_preview_pair_but_clears_stale_auto_mode(tmp_path: Path) -> None:
+    workspace = _write_workspace(tmp_path, profile="dev-fixture", secret_contents=None)
+    result = _run_preview_auto_importer_check(workspace, enable=False, preserve_and_clear=True)
+
+    assert result.returncode == 0
+    assert result.stdout == "PREVIEW_ENV_OK"
+    assert _SERVICE_TOKEN not in result.stdout + result.stderr
 
 
 def test_functional_uat_rejects_a_non_regular_canonical_secret_path(tmp_path: Path) -> None:
