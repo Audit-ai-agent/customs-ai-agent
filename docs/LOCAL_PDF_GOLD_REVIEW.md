@@ -23,11 +23,11 @@
 
 ```powershell
 uv run --locked --no-sync --group dev python tools/review_document_gold.py `
-  --receipt <workspace>/_local/data/receipts/<dataset>/<revision>/dataset-receipt.json `
-  --packet <workspace>/_local/data/evaluation/<dataset>/<revision>/document-preview-development-stratified-v2.json `
+  --receipt <workspace>/_local/data/document-preview/<pdf-dataset>/metadata/dataset-receipt.json `
+  --packet <workspace>/_local/data/document-preview/ocr-gold/<dataset>/<revision>/stratified-v2/packets/<development-packet>.json `
   --dataset-root <workspace>/_local/data/document-preview/<pdf-dataset> `
-  --output-directory <workspace>/_local/data/gold-review/<dataset>/<revision> `
-  --gold-draft <workspace>/_local/data/document-preview/gold/<seeded-draft>.json
+  --output-directory <workspace>/_local/data/document-preview/ocr-gold/<dataset>/<revision>/stratified-v2/review-drafts `
+  --gold-draft <workspace>/_local/data/document-preview/ocr-gold/<dataset>/<revision>/stratified-v2/drafts/<seeded-draft>.json
 ```
 
 브라우저는 도구가 표시한 loopback 주소에서만 연다. 장기 실행 server나 외부 OCR
@@ -78,12 +78,12 @@ draft는 모두 `_local/data/` 아래에 있어야 하며, 이 명령은 네트�
 
 ```powershell
 uv run --locked --no-sync --group dev python tools/finalize_synthetic_pdf_ocr_gold.py `
-  --receipt <workspace>/_local/data/receipts/<dataset>/<revision>/dataset-receipt.json `
-  --packet <workspace>/_local/data/evaluation/<dataset>/<revision>/document-preview-development-stratified-v2.json `
-  --seeded-gold <workspace>/_local/data/document-preview/gold/<seeded-draft>.json `
+  --receipt <workspace>/_local/data/document-preview/<pdf-dataset>/metadata/dataset-receipt.json `
+  --packet <workspace>/_local/data/document-preview/ocr-gold/<dataset>/<revision>/stratified-v2/packets/<development-packet>.json `
+  --seeded-gold <workspace>/_local/data/document-preview/ocr-gold/<dataset>/<revision>/stratified-v2/drafts/<seeded-draft>.json `
   --source-directory <workspace>/_local/data/document-preview/<pdf-dataset> `
-  --review-draft-directory <workspace>/_local/data/gold-review/<dataset>/<revision>/drafts `
-  --output-directory <workspace>/_local/data/document-preview/gold-approved `
+  --review-draft-directory <workspace>/_local/data/document-preview/ocr-gold/<dataset>/<revision>/stratified-v2/review-drafts/drafts `
+  --output-directory <workspace>/_local/data/document-preview/ocr-gold/<dataset>/<revision>/stratified-v2/human-adjudicated `
   --approval-id <opaque-approval-id> `
   --reviewer-id <opaque-reviewer-id> `
   --confirm-human-adjudication

@@ -260,7 +260,9 @@ def test_sealed_evaluation_must_be_canonical_passing_and_bound() -> None:
 
 def test_settings_expose_only_paired_local_approval_opt_in(tmp_path: Path) -> None:
     pointer = _root(tmp_path) / "approvals" / "pdf-preview-active.json"
-    token = "Abcdefghijklmnopqrstuvwxyz0123456789ABCDEFGHIJK"
+    # Deliberately low-entropy dummy: it satisfies the service's distinct-character
+    # guard without resembling a credential to secret scanners.
+    token = "aaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaBCDEFGHIJKL"
     settings = ServiceSettings(
         bearer_token=SecretStr(token),
         evidence_base_url="http://127.0.0.1:18083",
