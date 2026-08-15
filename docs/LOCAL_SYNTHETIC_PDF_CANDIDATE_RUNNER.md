@@ -27,9 +27,12 @@
    - `_local/data/document-preview/model-inventories/<sha256>.json`
 
 3. 실행기는 sidecar의 canonical byte/hash, package version, local model
-   artifact byte/hash, 설정된 model directory를 모두 다시 확인합니다.
-   active pointer는 필요하지 않습니다. 평가는 승인보다 먼저 수행되기
-   때문입니다.
+   artifact byte/hash, 설정된 model directory를 모두 다시 확인합니다. PaddleOCR와
+   Docling의 각 설정 directory는 하위까지 재귀적으로 검사하며, 실제 regular file
+   집합이 inventory의 path·size·hash 선언과 정확히 같아야 합니다. 미신고 file,
+   누락 file, symlink 또는 Windows junction(reparse point)은 후보 실행 전에
+   fail-closed 합니다. active pointer는 필요하지 않습니다. 평가는 승인보다 먼저
+   수행되기 때문입니다.
 
 ## 개발 평가 실행
 

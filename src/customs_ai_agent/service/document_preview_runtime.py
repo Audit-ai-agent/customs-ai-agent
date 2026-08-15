@@ -240,17 +240,33 @@ def _relative_model_path(value: object, *, code: str) -> str:
     return candidate.as_posix()
 
 
+def _is_link_or_reparse_point(metadata: os.stat_result) -> bool:
+    """Return whether an ``lstat`` result can redirect a local model path.
+
+    ``Path.is_symlink`` does not identify Windows directory junctions.  Those
+    are reparse points too, so treating them as ordinary directories would let
+    a model inventory point outside the approved immutable tree.
+    """
+
+    reparse_point = getattr(stat, "FILE_ATTRIBUTE_REPARSE_POINT", 0)
+    attributes = getattr(metadata, "st_file_attributes", 0)
+    return stat.S_ISLNK(metadata.st_mode) or bool(reparse_point and attributes & reparse_point)
+
+
 def _assert_no_symlink(path: Path, *, code: str) -> None:
-    """Reject a symlink in any existing component from its volume root."""
+    """Reject a link or reparse point in every existing path component."""
 
     current = Path(path.anchor)
     for part in path.parts[1:]:
         current /= part
         try:
-            if current.exists() and current.is_symlink():
-                raise DocumentPreviewRuntimeError(code)
+            metadata = current.lstat()
+        except FileNotFoundError:
+            continue
         except OSError as error:
             raise DocumentPreviewRuntimeError(code) from error
+        if _is_link_or_reparse_point(metadata):
+            raise DocumentPreviewRuntimeError(code)
 
 
 def _assert_document_preview_root(root: Path, *, must_exist: bool) -> Path:
@@ -2402,25 +2418,132 @@ def verify_inventory_packages(
 
 def _configuration_directories_exist(
     root: Path, configuration: RuntimeConfigurationV1, inventory: ModelInventoryV1
-) -> None:
+) -> tuple[tuple[str, Path], ...]:
     if configuration.engine_kind == "pdf_text_layer":
-        return
+        return ()
     configured = [
         value
         for key, value in configuration.options.items()
         if key.endswith("_directory") and isinstance(value, str)
     ]
     artifact_paths = [item.relative_path for item in inventory.artifacts]
+    directories: list[tuple[str, Path]] = []
     for relative in configured:
         path = _artifact_path(root, relative)
         try:
-            if not path.is_dir() or path.is_symlink():
+            metadata = path.lstat()
+            if not stat.S_ISDIR(metadata.st_mode) or _is_link_or_reparse_point(metadata):
                 raise DocumentPreviewRuntimeError("document_preview_configuration_invalid")
         except OSError as error:
             raise DocumentPreviewRuntimeError("document_preview_configuration_invalid") from error
         prefix = f"{relative.rstrip('/')}/"
         if not any(item == relative or item.startswith(prefix) for item in artifact_paths):
             raise DocumentPreviewRuntimeError("document_preview_configuration_invalid")
+        directories.append((relative, path))
+    return tuple(directories)
+
+
+def _model_relative_path_key(relative_path: str) -> tuple[str, ...]:
+    """Normalize a declared local relative path for the host filesystem."""
+
+    parts = Path(relative_path).parts
+    if os.name == "nt":
+        return tuple(part.casefold() for part in parts)
+    return tuple(parts)
+
+
+def _is_relative_descendant(
+    candidate: tuple[str, ...], directory: tuple[str, ...]
+) -> bool:
+    return len(candidate) > len(directory) and candidate[: len(directory)] == directory
+
+
+def _walk_regular_model_files(
+    *, root: Path, directory: Path
+) -> frozenset[tuple[str, ...]]:
+    """Return every regular file below one configured model directory.
+
+    The model folder is an immutable inventory boundary, not a cache.  A
+    symlink, junction, device, or other non-regular entry is therefore a
+    provenance failure even when its target happens to be inside ``_local``.
+    """
+
+    discovered: set[tuple[str, ...]] = set()
+    pending = [directory]
+    while pending:
+        current = pending.pop()
+        try:
+            for child in current.iterdir():
+                metadata = child.lstat()
+                if _is_link_or_reparse_point(metadata):
+                    raise DocumentPreviewRuntimeError("document_preview_model_artifact_invalid")
+                if stat.S_ISDIR(metadata.st_mode):
+                    pending.append(child)
+                    continue
+                if not stat.S_ISREG(metadata.st_mode):
+                    raise DocumentPreviewRuntimeError("document_preview_model_artifact_invalid")
+                try:
+                    relative = child.relative_to(root).as_posix()
+                except ValueError as error:
+                    raise DocumentPreviewRuntimeError(
+                        "document_preview_model_artifact_invalid"
+                    ) from error
+                discovered.add(_model_relative_path_key(relative))
+        except DocumentPreviewRuntimeError:
+            raise
+        except OSError as error:
+            raise DocumentPreviewRuntimeError("document_preview_model_artifact_invalid") from error
+    return frozenset(discovered)
+
+
+def _verify_configured_model_directory_inventory(
+    root: Path,
+    configuration: RuntimeConfigurationV1,
+    inventory: ModelInventoryV1,
+    *,
+    configured_directories: tuple[tuple[str, Path], ...] | None = None,
+) -> None:
+    """Require an exact declared-file set in every configured model directory.
+
+    Hash/size validation is performed separately by
+    :func:`_verify_inventory_artifacts`.  This companion check closes the
+    important gap that a declared subset could otherwise leave arbitrary,
+    unverified model files available to PaddleOCR or Docling at runtime.
+    """
+
+    directories = configured_directories
+    if directories is None:
+        directories = _configuration_directories_exist(root, configuration, inventory)
+    declared = {_model_relative_path_key(item.relative_path) for item in inventory.artifacts}
+    if len(declared) != len(inventory.artifacts):
+        raise DocumentPreviewRuntimeError("document_preview_model_artifact_invalid")
+    for relative, directory in directories:
+        directory_key = _model_relative_path_key(relative)
+        expected = {
+            artifact_path
+            for artifact_path in declared
+            if _is_relative_descendant(artifact_path, directory_key)
+        }
+        if not expected or _walk_regular_model_files(root=root, directory=directory) != expected:
+            raise DocumentPreviewRuntimeError("document_preview_model_artifact_invalid")
+
+
+def verify_configured_model_directory_artifacts(
+    root: Path, configuration: RuntimeConfigurationV1, inventory: ModelInventoryV1
+) -> tuple[_ArtifactFingerprint, ...]:
+    """Verify the exact, fully hashed local model material for one profile.
+
+    This shared internal boundary is used by both evaluation and activation so
+    an unapproved regular file cannot be seen by an evaluator but rejected
+    only later by the serving runtime.
+    """
+
+    directories = _configuration_directories_exist(root, configuration, inventory)
+    fingerprints = _verify_inventory_artifacts(root, inventory)
+    _verify_configured_model_directory_inventory(
+        root, configuration, inventory, configured_directories=directories
+    )
+    return fingerprints
 
 
 def _check_evaluation_binding(
@@ -2492,9 +2615,11 @@ class ApprovedPdfPreviewBinding:
         """Fail closed on pointer/sidecar drift without rehashing huge models.
 
         Model artifacts are fully rehashed at activation.  Request-time checks
-        compare their regular-file size and nanosecond mtime to the approved
-        fingerprints; pointer/config/inventory/evaluation sidecars are small
-        and are re-read and rehashed on every preview request.
+        require the configured model directories to retain the exact declared
+        regular-file set, then compare declared files' size and nanosecond
+        mtime to the approved fingerprints.  Pointer/config/inventory/
+        evaluation sidecars are small and are re-read and rehashed on every
+        preview request.
         """
 
         approval_raw = _read_regular_file(
@@ -2549,6 +2674,12 @@ class ApprovedPdfPreviewBinding:
             raise DocumentPreviewRuntimeError(
                 "document_preview_source_attested_receipts_runtime_changed"
             )
+        try:
+            _verify_configured_model_directory_inventory(
+                self.root, self.configuration, self.inventory
+            )
+        except DocumentPreviewRuntimeError as error:
+            raise DocumentPreviewRuntimeError("document_preview_model_runtime_changed") from error
         for fingerprint in self.artifact_fingerprints:
             _assert_no_symlink(fingerprint.path, code="document_preview_model_runtime_changed")
             try:
@@ -2618,8 +2749,7 @@ def load_approved_pdf_preview_binding(
         else None
     )
     verify_inventory_packages(inventory, package_version_reader=package_version_reader)
-    _configuration_directories_exist(root, configuration, inventory)
-    fingerprints = _verify_inventory_artifacts(root, inventory)
+    fingerprints = verify_configured_model_directory_artifacts(root, configuration, inventory)
     return ApprovedPdfPreviewBinding(
         root=root,
         approval_path=canonical_approval_path,
@@ -3230,8 +3360,7 @@ def write_runtime_sidecars(
     if configuration.engine_kind != inventory.engine_kind:
         raise DocumentPreviewRuntimeError("document_preview_provisioning_kind_mismatch")
     verify_inventory_packages(inventory, package_version_reader=package_version_reader)
-    _configuration_directories_exist(root, configuration, inventory)
-    _verify_inventory_artifacts(root, inventory)
+    verify_configured_model_directory_artifacts(root, configuration, inventory)
     configuration_sha256 = _sha256_bytes(configuration_raw)
     inventory_sha256 = _sha256_bytes(inventory_raw)
     _write_immutable_json(
@@ -3292,8 +3421,7 @@ def write_approved_pdf_preview_pointer(
     configuration = parse_runtime_configuration(configuration_raw)
     inventory = parse_model_inventory(inventory_raw)
     verify_inventory_packages(inventory, package_version_reader=package_version_reader)
-    _configuration_directories_exist(root, configuration, inventory)
-    _verify_inventory_artifacts(root, inventory)
+    verify_configured_model_directory_artifacts(root, configuration, inventory)
     evaluation = parse_sealed_evaluation_result(evaluation_raw)
     if (
         configuration.engine_kind != evaluation.engine_kind
@@ -3415,8 +3543,7 @@ def write_source_attested_synthetic_pdf_preview_pointer(
     configuration = parse_runtime_configuration(configuration_raw)
     inventory = parse_model_inventory(inventory_raw)
     verify_inventory_packages(inventory, package_version_reader=package_version_reader)
-    _configuration_directories_exist(root, configuration, inventory)
-    _verify_inventory_artifacts(root, inventory)
+    verify_configured_model_directory_artifacts(root, configuration, inventory)
     evaluation = parse_source_attested_synthetic_sealed_evaluation_result(evaluation_raw)
     if (
         configuration.engine_kind != evaluation.engine_kind

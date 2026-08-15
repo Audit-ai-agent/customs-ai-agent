@@ -39,7 +39,6 @@ from customs_ai_agent.evaluation.document_ocr_quality import (
     SyntheticPdfCandidateOutputBundleV1,
     candidate_bundle_sha256,
     canonical_json_file_bytes,
-    sha256_file,
     verify_receipt_source_assets,
 )
 from customs_ai_agent.schemas.document_extraction import (
@@ -59,6 +58,7 @@ from customs_ai_agent.service.document_preview_runtime import (
     parse_model_inventory,
     parse_runtime_configuration,
     validate_document_preview_root,
+    verify_configured_model_directory_artifacts,
     verify_inventory_packages,
 )
 
@@ -276,56 +276,6 @@ def _runtime_sidecar(
     return resolved, raw, digest
 
 
-def _artifact_path(root: Path, relative_path: str, *, code: str) -> Path:
-    candidate = root / Path(relative_path)
-    _reject_symlink_components(candidate, code=code)
-    try:
-        resolved = candidate.resolve(strict=True)
-        resolved.relative_to(root)
-    except (OSError, ValueError) as error:
-        raise SyntheticPdfCandidateRunnerError(code) from error
-    return resolved
-
-
-def _verify_local_inventory_artifacts(*, root: Path, inventory: ModelInventoryV1) -> None:
-    for artifact in inventory.artifacts:
-        path = _artifact_path(
-            root, artifact.relative_path, code="candidate_model_inventory_invalid"
-        )
-        try:
-            metadata = path.stat()
-        except OSError as error:
-            raise SyntheticPdfCandidateRunnerError("candidate_model_inventory_invalid") from error
-        if (
-            not stat.S_ISREG(metadata.st_mode)
-            or metadata.st_size != artifact.byte_size
-            or sha256_file(path) != artifact.sha256
-        ):
-            raise SyntheticPdfCandidateRunnerError("candidate_model_inventory_invalid")
-
-
-def _verify_configured_model_directories(
-    *, root: Path, configuration: RuntimeConfigurationV1, inventory: ModelInventoryV1
-) -> None:
-    if configuration.engine_kind == "pdf_text_layer":
-        return
-    artifact_paths = {artifact.relative_path for artifact in inventory.artifacts}
-    for key, value in configuration.options.items():
-        if not key.endswith("_directory") or not isinstance(value, str):
-            continue
-        path = _artifact_path(root, value, code="candidate_runtime_configuration_invalid")
-        try:
-            if not path.is_dir() or path.is_symlink():
-                raise SyntheticPdfCandidateRunnerError("candidate_runtime_configuration_invalid")
-        except OSError as error:
-            raise SyntheticPdfCandidateRunnerError(
-                "candidate_runtime_configuration_invalid"
-            ) from error
-        prefix = f"{value.rstrip('/')}/"
-        if not any(item == value or item.startswith(prefix) for item in artifact_paths):
-            raise SyntheticPdfCandidateRunnerError("candidate_runtime_configuration_invalid")
-
-
 def load_unapproved_local_candidate_profile(
     *,
     document_preview_root: Path,
@@ -364,10 +314,15 @@ def load_unapproved_local_candidate_profile(
         or configuration.engine_kind != inventory.engine_kind
     ):
         raise SyntheticPdfCandidateRunnerError("candidate_engine_profile_mismatch")
-    _verify_configured_model_directories(
-        root=root, configuration=configuration, inventory=inventory
-    )
-    _verify_local_inventory_artifacts(root=root, inventory=inventory)
+    try:
+        verify_configured_model_directory_artifacts(root, configuration, inventory)
+    except DocumentPreviewRuntimeError as error:
+        code = (
+            "candidate_runtime_configuration_invalid"
+            if error.code == "document_preview_configuration_invalid"
+            else "candidate_model_inventory_invalid"
+        )
+        raise SyntheticPdfCandidateRunnerError(code) from error
     return EvaluationRuntimeProfileV1(
         document_preview_root=root,
         engine_kind=engine_kind,

@@ -89,7 +89,13 @@ def _inventory() -> dict[str, object]:
     }
 
 
-def _evaluation(configuration_sha256: str, inventory_sha256: str) -> bytes:
+def _evaluation(
+    configuration_sha256: str,
+    inventory_sha256: str,
+    *,
+    engine_kind: str = "pdf_text_layer",
+    extractor_revision: str = "pdf-text-test-v1",
+) -> bytes:
     unsigned: dict[str, object] = {
         "schema_version": "1.0",
         "dataset_id": "synthetic-pdf",
@@ -97,8 +103,8 @@ def _evaluation(configuration_sha256: str, inventory_sha256: str) -> bytes:
         "packet_kind": "sealed",
         "packet_receipt_sha256": "a" * 64,
         "gold_receipt_sha256": "b" * 64,
-        "engine_kind": "pdf_text_layer",
-        "extractor_revision": "pdf-text-test-v1",
+        "engine_kind": engine_kind,
+        "extractor_revision": extractor_revision,
         "configuration_sha256": configuration_sha256,
         "model_inventory_sha256": inventory_sha256,
         "passed": True,
@@ -731,6 +737,81 @@ def test_runtime_pointer_drift_fails_closed_without_calling_adapter(tmp_path: Pa
         engine.extract(_pdf_input())
 
     assert fake.calls == 0
+
+
+def test_runtime_rejects_an_added_file_in_the_active_docling_model_directory(
+    tmp_path: Path,
+) -> None:
+    """A serving binding rechecks the exact inventory set before each preview."""
+
+    root = _root(tmp_path)
+    model_path = root / "models" / "docling" / "model.bin"
+    model_path.parent.mkdir(parents=True)
+    model_bytes = b"docling-test-model"
+    model_path.write_bytes(model_bytes)
+    configuration = {
+        "schema_version": "1.0",
+        "engine_kind": "docling",
+        "extractor_revision": "docling-test-v1",
+        "options": {"artifacts_directory": "models/docling", "ocr_enabled": True},
+    }
+    inventory = {
+        "schema_version": "1.0",
+        "engine_kind": "docling",
+        "packages": [
+            {
+                "name": "pypdf",
+                "version": "test-v1",
+                "license_id": "BSD-3-Clause",
+                "source_uri": "https://pypi.org/project/pypdf/",
+            },
+            {
+                "name": "docling",
+                "version": "test-v1",
+                "license_id": "MIT",
+                "source_uri": "https://pypi.org/project/docling/",
+            },
+        ],
+        "artifacts": [
+            {
+                "artifact_id": "docling-model",
+                "relative_path": "models/docling/model.bin",
+                "sha256": hashlib.sha256(model_bytes).hexdigest(),
+                "byte_size": len(model_bytes),
+                "license_id": "MIT",
+                "source_uri": "https://example.test/docling/model",
+            }
+        ],
+    }
+    configuration_sha256, inventory_sha256 = write_runtime_sidecars(
+        document_preview_root=root,
+        configuration_value=configuration,
+        inventory_value=inventory,
+        package_version_reader=_package_version,
+    )
+    approval_sha256, _approval = write_approved_pdf_preview_pointer(
+        document_preview_root=root,
+        approval_id="human-approval-docling",
+        evaluation_raw=_evaluation(
+            configuration_sha256,
+            inventory_sha256,
+            engine_kind="docling",
+            extractor_revision="docling-test-v1",
+        ),
+        configuration_sha256=configuration_sha256,
+        model_inventory_sha256=inventory_sha256,
+        package_version_reader=_package_version,
+    )
+    binding = load_approved_pdf_preview_binding(
+        approval_path=root / "approvals" / "pdf-preview-active.json",
+        approval_sha256=approval_sha256,
+        package_version_reader=_package_version,
+    )
+
+    (root / "models" / "docling" / "untracked-model.bin").write_bytes(b"untracked")
+
+    with pytest.raises(DocumentPreviewRuntimeError, match="document_preview_model_runtime_changed"):
+        binding.verify_runtime_state()
 
 
 def test_source_attested_auto_engine_activates_then_clears_cache_on_bad_pointer(

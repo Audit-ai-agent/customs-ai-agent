@@ -4,6 +4,8 @@ import hashlib
 import inspect
 import json
 import socket
+import stat
+from types import SimpleNamespace
 from dataclasses import dataclass
 from datetime import date
 from pathlib import Path
@@ -29,9 +31,14 @@ from customs_ai_agent.evaluation.synthetic_pdf_candidate_runner import (
     EvaluationRuntimeProfileV1,
     SyntheticPdfCandidateRunnerError,
     build_default_synthetic_pdf_candidate_adapter,
+    load_unapproved_local_candidate_profile,
     normalize_synthetic_pdf_docling_table_cells,
     normalize_synthetic_pdf_fields,
     run_synthetic_pdf_ocr_candidate,
+)
+from customs_ai_agent.service.document_preview_runtime import (
+    DocumentPreviewRuntimeError,
+    write_runtime_sidecars,
 )
 from tools.run_synthetic_pdf_ocr_candidate import _parser, main
 
@@ -327,6 +334,102 @@ def test_runner_binds_every_engine_profile_and_preserves_adapter_cells(
     ]
     assert bundle.documents[0].table_cells[0].text == "Widget"
     assert adapter.calls == 1
+
+
+@pytest.mark.parametrize(
+    ("engine_kind", "configured_directory"),
+    [
+        ("paddleocr", "models/det"),
+        ("docling", "models/docling"),
+    ],
+)
+def test_model_directory_inventory_rejects_an_undeclared_regular_file(
+    tmp_path: Path, engine_kind: str, configured_directory: str
+) -> None:
+    """Provisioning and candidate execution share the same exact-set gate."""
+
+    fixture = _fixture(tmp_path, engine_kind=engine_kind)
+    root = fixture["root"]
+    configuration_path = fixture["configuration_path"]
+    inventory_path = fixture["inventory_path"]
+    assert isinstance(root, Path)
+    assert isinstance(configuration_path, Path)
+    assert isinstance(inventory_path, Path)
+    configuration_value = json.loads(configuration_path.read_text(encoding="utf-8"))
+    inventory_value = json.loads(inventory_path.read_text(encoding="utf-8"))
+    (root / configured_directory / "not-in-inventory.bin").write_bytes(b"untracked")
+
+    with pytest.raises(
+        DocumentPreviewRuntimeError, match="document_preview_model_artifact_invalid"
+    ):
+        write_runtime_sidecars(
+            document_preview_root=root,
+            configuration_value=configuration_value,
+            inventory_value=inventory_value,
+            package_version_reader=lambda _name: "test-v1",
+        )
+    with pytest.raises(SyntheticPdfCandidateRunnerError, match="candidate_model_inventory_invalid"):
+        load_unapproved_local_candidate_profile(
+            document_preview_root=root,
+            configuration_path=configuration_path,
+            inventory_path=inventory_path,
+            engine_kind=engine_kind,  # type: ignore[arg-type]
+            package_version_reader=lambda _name: "test-v1",
+        )
+
+
+def test_model_directory_inventory_rejects_a_missing_declared_file(tmp_path: Path) -> None:
+    fixture = _fixture(tmp_path, engine_kind="docling")
+    root = fixture["root"]
+    configuration_path = fixture["configuration_path"]
+    inventory_path = fixture["inventory_path"]
+    assert isinstance(root, Path)
+    assert isinstance(configuration_path, Path)
+    assert isinstance(inventory_path, Path)
+    (root / "models" / "docling" / "model.bin").unlink()
+
+    with pytest.raises(SyntheticPdfCandidateRunnerError, match="candidate_model_inventory_invalid"):
+        load_unapproved_local_candidate_profile(
+            document_preview_root=root,
+            configuration_path=configuration_path,
+            inventory_path=inventory_path,
+            engine_kind="docling",
+            package_version_reader=lambda _name: "test-v1",
+        )
+
+
+def test_model_directory_inventory_rejects_a_symlink_entry(
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    """Exercise the link branch even where Windows disallows test symlinks."""
+
+    fixture = _fixture(tmp_path, engine_kind="docling")
+    root = fixture["root"]
+    configuration_path = fixture["configuration_path"]
+    inventory_path = fixture["inventory_path"]
+    assert isinstance(root, Path)
+    assert isinstance(configuration_path, Path)
+    assert isinstance(inventory_path, Path)
+    link_entry = root / "models" / "docling" / "redirected-model.bin"
+    link_entry.write_bytes(b"placeholder")
+    path_type = type(link_entry)
+    original_lstat = path_type.lstat
+
+    def fake_lstat(path: Path) -> object:
+        if path == link_entry:
+            return SimpleNamespace(st_mode=stat.S_IFLNK, st_file_attributes=0)
+        return original_lstat(path)
+
+    monkeypatch.setattr(path_type, "lstat", fake_lstat)
+
+    with pytest.raises(SyntheticPdfCandidateRunnerError, match="candidate_model_inventory_invalid"):
+        load_unapproved_local_candidate_profile(
+            document_preview_root=root,
+            configuration_path=configuration_path,
+            inventory_path=inventory_path,
+            engine_kind="docling",
+            package_version_reader=lambda _name: "test-v1",
+        )
 
 
 def test_candidate_bundle_cannot_be_relabelled_at_evaluation(tmp_path: Path) -> None:
