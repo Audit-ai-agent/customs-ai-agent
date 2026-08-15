@@ -17,7 +17,10 @@ existing content-free ``unavailable`` preview result instead of a fallback.
 
 from __future__ import annotations
 
+import base64
+import csv
 import hashlib
+import importlib
 import importlib.metadata
 import io
 import json
@@ -26,10 +29,11 @@ import os
 import re
 import socket
 import stat
+import sys
 import threading
 from contextlib import contextmanager
 from dataclasses import dataclass, field
-from pathlib import Path
+from pathlib import Path, PurePosixPath
 from typing import Any, Callable, Final, Iterator, Literal, Mapping, Protocol, Sequence, cast
 from urllib.parse import urlparse
 
@@ -80,6 +84,7 @@ _FIELD_EXACT_MATCH_MIN = 0.99
 _OCR_CER_MAX = 0.01
 _TABLE_CELL_F1_MIN = 0.98
 _NETWORK_GUARD_LOCK = threading.Lock()
+_BYTECODE_GUARD_LOCK = threading.Lock()
 _NETWORK_GUARD_STATE = threading.local()
 _NETWORK_GUARD_INSTALLED = False
 _ORIGINAL_SOCKET_CONNECT = socket.socket.connect
@@ -2982,16 +2987,187 @@ _DOCLING_EXECUTION_PACKAGES = frozenset(
 )
 
 
+_PADDLE_EXECUTION_PACKAGES = frozenset(
+    {
+        # PaddleOCR 2.9.1's declared runtime requirements in the pinned
+        # uv.lock, plus the PDF rasterizer/parser and inference runtime that
+        # this adapter imports directly. The engine may select different code
+        # paths for a document, so do not reduce this to modules loaded by one
+        # sample run.
+        "albucore",
+        "albumentations",
+        "beautifulsoup4",
+        "cython",
+        "fire",
+        "fonttools",
+        "imgaug",
+        "lmdb",
+        "numpy",
+        # All three distributions can own the same ``cv2`` import tree in a
+        # locked Windows environment. Require each recorded version, then
+        # separately verify that the actually imported bytes are contributed
+        # by the designated contrib wheel; silently accepting an install-order
+        # dependent provider would make candidate output non-reproducible.
+        "opencv-contrib-python",
+        "opencv-python",
+        "opencv-python-headless",
+        "paddleocr",
+        "paddlepaddle",
+        "pillow",
+        "pyclipper",
+        "pypdf",
+        "pypdfium2",
+        "python-docx",
+        "pyyaml",
+        "rapidfuzz",
+        "requests",
+        "scikit-image",
+        "shapely",
+        "tqdm",
+    }
+)
+_PADDLE_CV2_PROVIDER = "opencv-contrib-python"
+
+
 def _required_packages(kind: ApprovedPdfEngineKind) -> frozenset[str]:
     if kind == "pdf_text_layer":
         return frozenset({"pypdf"})
     if kind == "paddleocr":
-        return frozenset({"pypdf", "paddleocr", "paddlepaddle", "pypdfium2"})
+        return _PADDLE_EXECUTION_PACKAGES
     return _DOCLING_EXECUTION_PACKAGES
 
 
 def _normalized_distribution_name(name: str) -> str:
     return name.casefold().replace("_", "-")
+
+
+def _recorded_cv2_tree_matches_designated_provider(
+    *,
+    distribution_reader: Callable[[str], Any] = importlib.metadata.distribution,
+    module_importer: Callable[[str], Any] = importlib.import_module,
+) -> None:
+    """Verify the selected ``cv2`` tree against the designated wheel RECORD.
+
+    ``opencv-contrib-python``, ``opencv-python``, and
+    ``opencv-python-headless`` can all install ``cv2``. Distribution versions
+    alone cannot prove which wheel's files remain after an install or repair.
+    The locked Paddle profile designates contrib as its provider and validates
+    the exact regular-file set plus every hash-bearing ``cv2/`` record entry
+    before a profile can be used. Links, Windows reparse points, missing
+    files, and extra files are all rejected.
+
+    This intentionally verifies the imported provider tree, not an unbounded
+    site-packages SBOM. The remaining interpreter environment is governed by
+    the operator's ``uv sync --locked`` installation boundary.
+    """
+
+    try:
+        distribution = distribution_reader(_PADDLE_CV2_PROVIDER)
+        # Some OpenCV builds can load optional resources while importing.
+        # Treat that import as model-runtime work and keep it inside the same
+        # per-thread network denial boundary as the adapter itself. Disable
+        # Python bytecode output while importing so a pristine RECORD-bound
+        # tree is not changed by the verifier itself.
+        with _BYTECODE_GUARD_LOCK:
+            previous_dont_write_bytecode = sys.dont_write_bytecode
+            sys.dont_write_bytecode = True
+            try:
+                with local_files_only():
+                    module = module_importer("cv2")
+            finally:
+                sys.dont_write_bytecode = previous_dont_write_bytecode
+        module_file = Path(str(getattr(module, "__file__", ""))).resolve(strict=True)
+        installation_root = Path(str(distribution.locate_file(""))).resolve(strict=True)
+        provider_root = Path(str(distribution.locate_file("cv2"))).resolve(strict=True)
+        if (
+            not provider_root.is_dir()
+            or module_file != provider_root / "__init__.py"
+            or module_file.parent != provider_root
+            or provider_root.parent != installation_root
+        ):
+            raise DocumentPreviewRuntimeError("document_preview_runtime_dependency_unavailable")
+
+        record = distribution.read_text("RECORD")
+        if not record:
+            raise DocumentPreviewRuntimeError("document_preview_runtime_dependency_unavailable")
+        expected_entries: dict[str, tuple[str, int]] = {}
+        for row in csv.reader(io.StringIO(record)):
+            if len(row) != 3:
+                raise DocumentPreviewRuntimeError("document_preview_runtime_dependency_unavailable")
+            relative_path, expected_hash, expected_size = row
+            if not relative_path.startswith("cv2/"):
+                continue
+            record_path = PurePosixPath(relative_path)
+            if (
+                len(record_path.parts) < 2
+                or record_path.parts[0] != "cv2"
+                or record_path.is_absolute()
+                or relative_path != record_path.as_posix()
+                or any(part in {"", ".", ".."} for part in record_path.parts)
+                or not expected_hash.startswith("sha256=")
+                or not expected_size.isdecimal()
+            ):
+                raise DocumentPreviewRuntimeError("document_preview_runtime_dependency_unavailable")
+            path_from_cv2 = PurePosixPath(*record_path.parts[1:]).as_posix()
+            if path_from_cv2 in expected_entries:
+                raise DocumentPreviewRuntimeError("document_preview_runtime_dependency_unavailable")
+            expected_entries[path_from_cv2] = (expected_hash, int(expected_size))
+        if not expected_entries:
+            raise DocumentPreviewRuntimeError("document_preview_runtime_dependency_unavailable")
+
+        provider_metadata = provider_root.lstat()
+        if _is_link_or_reparse_point(provider_metadata) or not stat.S_ISDIR(
+            provider_metadata.st_mode
+        ):
+            raise DocumentPreviewRuntimeError("document_preview_runtime_dependency_unavailable")
+        actual_entries: dict[str, tuple[Path, os.stat_result]] = {}
+        directories = [provider_root]
+        while directories:
+            current = directories.pop()
+            current_metadata = current.lstat()
+            if _is_link_or_reparse_point(current_metadata) or not stat.S_ISDIR(
+                current_metadata.st_mode
+            ):
+                raise DocumentPreviewRuntimeError("document_preview_runtime_dependency_unavailable")
+            for child in current.iterdir():
+                metadata = child.lstat()
+                if _is_link_or_reparse_point(metadata):
+                    raise DocumentPreviewRuntimeError(
+                        "document_preview_runtime_dependency_unavailable"
+                    )
+                if stat.S_ISDIR(metadata.st_mode):
+                    directories.append(child)
+                    continue
+                if not stat.S_ISREG(metadata.st_mode):
+                    raise DocumentPreviewRuntimeError(
+                        "document_preview_runtime_dependency_unavailable"
+                    )
+                relative_path = child.relative_to(provider_root).as_posix()
+                if relative_path in actual_entries:
+                    raise DocumentPreviewRuntimeError(
+                        "document_preview_runtime_dependency_unavailable"
+                    )
+                actual_entries[relative_path] = (child, metadata)
+
+        if set(actual_entries) != set(expected_entries):
+            raise DocumentPreviewRuntimeError("document_preview_runtime_dependency_unavailable")
+        for relative_path, (artifact_path, metadata) in actual_entries.items():
+            expected_hash, expected_byte_size = expected_entries[relative_path]
+            if metadata.st_size != expected_byte_size:
+                raise DocumentPreviewRuntimeError("document_preview_runtime_dependency_unavailable")
+            actual_hash = (
+                base64.urlsafe_b64encode(bytes.fromhex(_hash_file(artifact_path)))
+                .decode("ascii")
+                .rstrip("=")
+            )
+            if expected_hash != f"sha256={actual_hash}":
+                raise DocumentPreviewRuntimeError("document_preview_runtime_dependency_unavailable")
+    except DocumentPreviewRuntimeError:
+        raise
+    except Exception as error:
+        raise DocumentPreviewRuntimeError(
+            "document_preview_runtime_dependency_unavailable"
+        ) from error
 
 
 def verify_inventory_packages(
@@ -3015,6 +3191,8 @@ def verify_inventory_packages(
             ) from error
         if installed != item.version:
             raise DocumentPreviewRuntimeError("document_preview_runtime_dependency_unavailable")
+    if inventory.engine_kind == "paddleocr":
+        _recorded_cv2_tree_matches_designated_provider()
 
 
 def _configuration_directories_exist(
