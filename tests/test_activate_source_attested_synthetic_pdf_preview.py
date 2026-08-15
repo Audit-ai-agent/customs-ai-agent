@@ -69,6 +69,7 @@ def _result(configuration_sha256: str, inventory_sha256: str) -> bytes:
         "layout_truth_parser_spec_sha256": "c" * 64,
         "development_selection_receipt_sha256": "d" * 64,
         "sealed_run_receipt_sha256": "e" * 64,
+        "candidate_bundle_sha256": "f" * 64,
         "engine_kind": "pdf_text_layer",
         "extractor_revision": "pdf-text-test-v1",
         "configuration_sha256": configuration_sha256,

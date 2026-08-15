@@ -21,6 +21,7 @@ from customs_ai_agent.service.document_preview_runtime import (
     DocumentPreviewRuntimeError,
     _docling_preview_pages,
     load_approved_pdf_preview_binding,
+    load_source_attested_synthetic_receipt_binding,
     local_files_only,
     parse_source_attested_synthetic_pdf_preview_activation,
     parse_source_attested_synthetic_sealed_evaluation_result,
@@ -42,6 +43,14 @@ def _canonical(value: object, *, newline: bool = False) -> bytes:
         sort_keys=True,
     ).encode("utf-8")
     return encoded + (b"\n" if newline else b"")
+
+
+def _canonical_local_artifact(value: object) -> bytes:
+    """Match the source-attested evaluator's readable immutable files."""
+
+    return (
+        json.dumps(value, ensure_ascii=False, allow_nan=False, indent=2, sort_keys=True) + "\n"
+    ).encode("utf-8")
 
 
 def _root(tmp_path: Path) -> Path:
@@ -108,10 +117,14 @@ def _source_attested_evaluation(
     inventory_sha256: str,
     *,
     evaluation_scope: str = "synthetic_content_stream_compatibility",
+    packet_receipt_sha256: str = "a" * 64,
     layout_truth_receipt_sha256: str = "c" * 64,
     layout_truth_parser_spec_sha256: str = "d" * 64,
     development_selection_receipt_sha256: str = "e" * 64,
     sealed_run_receipt_sha256: str = "f" * 64,
+    candidate_bundle_sha256: str = "1" * 64,
+    engine_kind: str = "pdf_text_layer",
+    extractor_revision: str = "pdf-text-test-v1",
 ) -> bytes:
     unsigned: dict[str, object] = {
         "schema_version": "1.0",
@@ -119,15 +132,16 @@ def _source_attested_evaluation(
         "dataset_id": "synthetic-pdf",
         "dataset_revision": "synthetic-pdf-r1",
         "packet_kind": "sealed",
-        "packet_receipt_sha256": "a" * 64,
+        "packet_receipt_sha256": packet_receipt_sha256,
         "evaluation_scope": evaluation_scope,
         "layout_truth_kind": "pdf_content_stream_layout_v1",
         "layout_truth_receipt_sha256": layout_truth_receipt_sha256,
         "layout_truth_parser_spec_sha256": layout_truth_parser_spec_sha256,
         "development_selection_receipt_sha256": development_selection_receipt_sha256,
         "sealed_run_receipt_sha256": sealed_run_receipt_sha256,
-        "engine_kind": "pdf_text_layer",
-        "extractor_revision": "pdf-text-test-v1",
+        "candidate_bundle_sha256": candidate_bundle_sha256,
+        "engine_kind": engine_kind,
+        "extractor_revision": extractor_revision,
         "configuration_sha256": configuration_sha256,
         "model_inventory_sha256": inventory_sha256,
         "passed": True,
@@ -141,7 +155,7 @@ def _source_attested_evaluation(
         **unsigned,
         "evaluation_result_sha256": hashlib.sha256(_canonical(unsigned)).hexdigest(),
     }
-    return _canonical(value, newline=True)
+    return _canonical_local_artifact(value)
 
 
 def _self_digest(value: dict[str, object], field: str) -> str:
@@ -150,43 +164,131 @@ def _self_digest(value: dict[str, object], field: str) -> str:
     return hashlib.sha256(_canonical(unsigned)).hexdigest()
 
 
+def _write_source_attested_evaluation_artifact(*, root: Path, raw: bytes) -> None:
+    """Persist the evaluator's required pretty, hash-named source result."""
+
+    value = json.loads(raw)
+    result_sha256 = str(value["evaluation_result_sha256"])
+    destination = root / "source-attested-evaluation-results" / f"{result_sha256}.json"
+    destination.parent.mkdir(parents=True, exist_ok=True)
+    destination.write_bytes(_canonical_local_artifact(value))
+
+
 def _write_source_attested_receipt_chain(
     *, root: Path, configuration_sha256: str, inventory_sha256: str
-) -> tuple[str, str, str]:
-    parser_spec_sha256 = "c" * 64
-    sealed_packet_receipt_sha256 = "a" * 64
-    development_packet_receipt_sha256 = "b" * 64
+) -> dict[str, str | bytes]:
+    """Build a complete local source-attested chain, not hash-shaped placeholders."""
 
-    def write_layout_truth(*, split: str, packet_receipt_sha256: str, source_offset: int) -> str:
-        records: list[dict[str, object]] = []
-        strata = [
-            (fixture_kind, document_type)
-            for fixture_kind in ("clean", "error")
-            for document_type in ("bill_of_lading", "invoice", "packing_list")
-        ]
-        # The real compiler owns deterministic selection.  The fixtures
-        # merely reproduce the fixed shape: 60 development (10/stratum) and
-        # 20 sealed (three/stratum plus two deterministic extras).
+    parser_spec_sha256 = "c" * 64
+    error_labels_sha256 = "2" * 64
+    candidate_parser_revision = "synthetic-pdf-label-normalizer-v2"
+    strata = [
+        (fixture_kind, document_type)
+        for fixture_kind in ("clean", "error")
+        for document_type in ("bill_of_lading", "invoice", "packing_list")
+    ]
+
+    def make_records(*, split: str, source_offset: int) -> list[dict[str, object]]:
         per_stratum = 10 if split == "development" else 3
         selected_strata = [stratum for stratum in strata for _ in range(per_stratum)]
         if split == "sealed":
             selected_strata.extend([strata[0], strata[4]])
+        records: list[dict[str, object]] = []
         for index, (fixture_kind, document_type) in enumerate(selected_strata):
-            record: dict[str, object] = {
-                "asset_id": f"asset-{split}-{index:02d}",
-                "source_sha256": f"{source_offset + index:064x}",
-                "fixture_kind": fixture_kind,
-                "document_type": document_type,
-                "set_id": f"set-{split}-{index:02d}",
-                "content_stream_sha256": f"{source_offset + 1000 + index:064x}",
+            records.append(
+                {
+                    "asset_id": f"asset-{split}-{index:02d}",
+                    "source_sha256": f"{source_offset + index:064x}",
+                    "fixture_kind": fixture_kind,
+                    "document_type": document_type,
+                    "set_id": f"set-{split}-{index:02d}",
+                }
+            )
+        return records
+
+    development_records = make_records(split="development", source_offset=100)
+    sealed_records = make_records(split="sealed", source_offset=1000)
+    receipt: dict[str, object] = {
+        "schema_version": "1.0",
+        "dataset_id": "synthetic-pdf",
+        "dataset_revision": "synthetic-pdf-r1",
+        "received_as_of": "2026-08-16",
+        "assets": [
+            {
+                "asset_id": record["asset_id"],
+                "relative_path": f"fixtures/{record['asset_id']}.pdf",
+                "media_type": "application/pdf",
+                "byte_size": 1,
+                "sha256": record["source_sha256"],
+                "triplet_id": None,
+                "source_role": "preview_candidate",
+            }
+            for record in [*development_records, *sealed_records]
+        ],
+    }
+    dataset_receipt_sha256 = hashlib.sha256(_canonical(receipt)).hexdigest()
+    dataset_receipt_path = (
+        root / "source-attested-dataset-receipts" / f"{dataset_receipt_sha256}.json"
+    )
+    dataset_receipt_path.parent.mkdir(parents=True, exist_ok=True)
+    dataset_receipt_path.write_bytes(_canonical_local_artifact(receipt))
+
+    def write_packet(*, split: str, records: list[dict[str, object]]) -> tuple[dict[str, object], str]:
+        packet: dict[str, object] = {
+            "schema_version": "2.0",
+            "packet_kind": "stratified-v2",
+            "split": split,
+            "dataset_id": "synthetic-pdf",
+            "dataset_revision": "synthetic-pdf-r1",
+            "receipt_sha256": dataset_receipt_sha256,
+            "error_labels_sha256": error_labels_sha256,
+            "prepared_as_of": "2026-08-16",
+            "items": [
+                {
+                    "asset_id": record["asset_id"],
+                    "source_sha256": record["source_sha256"],
+                    "media_type": "application/pdf",
+                    "fixture_kind": record["fixture_kind"],
+                    "document_type": record["document_type"],
+                    "set_id": record["set_id"],
+                }
+                for record in records
+            ],
+            "required_gates": ["field_exact_match", "ocr_cer", "table_cell_f1"],
+            "release_thresholds": {
+                "field_exact_match_min": 0.99,
+                "ocr_cer_max": 0.01,
+                "table_cell_f1_min": 0.98,
+            },
+        }
+        packet["packet_receipt_sha256"] = _self_digest(packet, "packet_receipt_sha256")
+        packet_sha256 = str(packet["packet_receipt_sha256"])
+        path = root / "source-attested-packets" / f"{packet_sha256}.json"
+        path.parent.mkdir(parents=True, exist_ok=True)
+        path.write_bytes(_canonical_local_artifact(packet))
+        return packet, packet_sha256
+
+    development_packet, development_packet_sha256 = write_packet(
+        split="development", records=development_records
+    )
+    sealed_packet, sealed_packet_sha256 = write_packet(split="sealed", records=sealed_records)
+
+    def write_layout_truth(
+        *, split: str, packet_sha256: str, records: list[dict[str, object]], source_offset: int
+    ) -> str:
+        layout_records: list[dict[str, object]] = []
+        for index, record in enumerate(records):
+            layout_record: dict[str, object] = {
+                **record,
+                "content_stream_sha256": f"{source_offset + index:064x}",
                 "fields": [{"field": "value"}],
                 "spans": [{"text": "value"}],
                 "table_cells": [{"text": "value"}],
             }
-            record["source_truth_record_sha256"] = _self_digest(
-                record, "source_truth_record_sha256"
+            layout_record["source_truth_record_sha256"] = _self_digest(
+                layout_record, "source_truth_record_sha256"
             )
-            records.append(record)
+            layout_records.append(layout_record)
         layout: dict[str, object] = {
             "schema_version": "1.0",
             "artifact_kind": "source_attested_synthetic_pdf_layout_truth",
@@ -197,58 +299,141 @@ def _write_source_attested_receipt_chain(
             "parser_spec_sha256": parser_spec_sha256,
             "dataset_id": "synthetic-pdf",
             "dataset_revision": "synthetic-pdf-r1",
-            "dataset_receipt_sha256": "d" * 64,
+            "dataset_receipt_sha256": dataset_receipt_sha256,
             "packet_kind": "stratified-v2",
             "packet_split": split,
-            "packet_receipt_sha256": packet_receipt_sha256,
+            "packet_receipt_sha256": packet_sha256,
             "clean_manifest_sha256": "1" * 64,
-            "error_labels_sha256": "2" * 64,
+            "error_labels_sha256": error_labels_sha256,
             "source_manifest_mismatch_count": 0,
             "source_manifest_mismatch_receipt_sha256": "3" * 64,
-            "records": records,
+            "records": layout_records,
         }
         layout["layout_truth_receipt_sha256"] = _self_digest(layout, "layout_truth_receipt_sha256")
         layout_sha256 = str(layout["layout_truth_receipt_sha256"])
-        layout_path = root / "source-layout-truths" / f"{layout_sha256}.json"
-        layout_path.parent.mkdir(parents=True, exist_ok=True)
-        layout_path.write_bytes(_canonical(layout, newline=True))
+        path = root / "source-layout-truths" / f"{layout_sha256}.json"
+        path.parent.mkdir(parents=True, exist_ok=True)
+        path.write_bytes(_canonical_local_artifact(layout))
         return layout_sha256
 
     development_layout_sha256 = write_layout_truth(
         split="development",
-        packet_receipt_sha256=development_packet_receipt_sha256,
-        source_offset=100,
+        packet_sha256=development_packet_sha256,
+        records=development_records,
+        source_offset=10_000,
     )
     layout_sha256 = write_layout_truth(
-        split="sealed", packet_receipt_sha256=sealed_packet_receipt_sha256, source_offset=1000
+        split="sealed",
+        packet_sha256=sealed_packet_sha256,
+        records=sealed_records,
+        source_offset=20_000,
     )
 
-    candidates = [
-        {
-            "engine_kind": "pdf_text_layer",
-            "extractor_revision": "pdf-text-test-v1",
-            "configuration_sha256": configuration_sha256,
-            "model_inventory_sha256": inventory_sha256,
-            "evaluation_result_sha256": "4" * 64,
-            "passed": True,
-        },
-        {
-            "engine_kind": "paddleocr",
-            "extractor_revision": "paddle-test-v1",
-            "configuration_sha256": "5" * 64,
-            "model_inventory_sha256": "6" * 64,
-            "evaluation_result_sha256": "7" * 64,
-            "passed": False,
-        },
-        {
-            "engine_kind": "docling",
-            "extractor_revision": "docling-test-v1",
-            "configuration_sha256": "8" * 64,
-            "model_inventory_sha256": "9" * 64,
-            "evaluation_result_sha256": "a" * 64,
-            "passed": False,
-        },
+    def write_candidate_bundle(
+        *,
+        packet: dict[str, object],
+        records: list[dict[str, object]],
+        engine_kind: str,
+        extractor_revision: str,
+        candidate_configuration_sha256: str,
+        candidate_inventory_sha256: str,
+    ) -> str:
+        bundle: dict[str, object] = {
+            "schema_version": "1.0",
+            "artifact_kind": "synthetic_pdf_candidate_output",
+            "profile_mode": "offline_synthetic_pdf_evaluation",
+            "parser_revision": candidate_parser_revision,
+            "dataset_id": "synthetic-pdf",
+            "dataset_revision": "synthetic-pdf-r1",
+            "packet_receipt_sha256": packet["packet_receipt_sha256"],
+            "engine_kind": engine_kind,
+            "extractor_revision": extractor_revision,
+            "configuration_sha256": candidate_configuration_sha256,
+            "model_inventory_sha256": candidate_inventory_sha256,
+            "documents": [
+                {
+                    "asset_id": record["asset_id"],
+                    "source_sha256": record["source_sha256"],
+                    "fields": [],
+                    "spans": [],
+                    "table_cells": [],
+                }
+                for record in records
+            ],
+        }
+        bundle["candidate_bundle_sha256"] = _self_digest(bundle, "candidate_bundle_sha256")
+        bundle_sha256 = str(bundle["candidate_bundle_sha256"])
+        path = root / "source-attested-candidate-bundles" / f"{bundle_sha256}.json"
+        path.parent.mkdir(parents=True, exist_ok=True)
+        path.write_bytes(_canonical_local_artifact(bundle))
+        return bundle_sha256
+
+    development_profiles = [
+        ("pdf_text_layer", "pdf-text-test-v1", configuration_sha256, inventory_sha256, 1.0, 0.0, 1.0),
+        ("paddleocr", "paddle-test-v1", "5" * 64, "6" * 64, 0.995, 0.005, 0.985),
+        ("docling", "docling-test-v1", "7" * 64, "8" * 64, 0.99, 0.01, 0.98),
     ]
+    candidates: list[dict[str, object]] = []
+    for (
+        engine_kind,
+        extractor_revision,
+        candidate_configuration_sha256,
+        candidate_inventory_sha256,
+        field_exact_match,
+        ocr_cer,
+        table_cell_f1,
+    ) in development_profiles:
+        candidate_bundle_sha256 = write_candidate_bundle(
+            packet=development_packet,
+            records=development_records,
+            engine_kind=engine_kind,
+            extractor_revision=extractor_revision,
+            candidate_configuration_sha256=candidate_configuration_sha256,
+            candidate_inventory_sha256=candidate_inventory_sha256,
+        )
+        result: dict[str, object] = {
+            "schema_version": "1.0",
+            "evaluation_basis": "source_attested_synthetic",
+            "dataset_id": "synthetic-pdf",
+            "dataset_revision": "synthetic-pdf-r1",
+            "packet_kind": "development",
+            "packet_receipt_sha256": development_packet_sha256,
+            "evaluation_scope": "synthetic_content_stream_compatibility",
+            "layout_truth_kind": "pdf_content_stream_layout_v1",
+            "layout_truth_receipt_sha256": development_layout_sha256,
+            "layout_truth_parser_spec_sha256": parser_spec_sha256,
+            "development_selection_receipt_sha256": None,
+            "sealed_run_receipt_sha256": None,
+            "engine_kind": engine_kind,
+            "extractor_revision": extractor_revision,
+            "configuration_sha256": candidate_configuration_sha256,
+            "model_inventory_sha256": candidate_inventory_sha256,
+            "candidate_bundle_sha256": candidate_bundle_sha256,
+            "passed": True,
+            "metrics": {
+                "field_exact_match": field_exact_match,
+                "ocr_cer": ocr_cer,
+                "table_cell_f1": table_cell_f1,
+            },
+        }
+        result["evaluation_result_sha256"] = _self_digest(result, "evaluation_result_sha256")
+        result_sha256 = str(result["evaluation_result_sha256"])
+        result_path = root / "source-attested-evaluation-results" / f"{result_sha256}.json"
+        result_path.parent.mkdir(parents=True, exist_ok=True)
+        result_path.write_bytes(_canonical_local_artifact(result))
+        candidates.append(
+            {
+                "engine_kind": engine_kind,
+                "extractor_revision": extractor_revision,
+                "configuration_sha256": candidate_configuration_sha256,
+                "model_inventory_sha256": candidate_inventory_sha256,
+                "evaluation_result_sha256": result_sha256,
+                "candidate_bundle_sha256": candidate_bundle_sha256,
+                "passed": True,
+            }
+        )
+
+    selected = candidates[0]
     selection: dict[str, object] = {
         "schema_version": "1.0",
         "artifact_kind": "source_attested_synthetic_pdf_development_selection",
@@ -257,46 +442,51 @@ def _write_source_attested_receipt_chain(
         "layout_truth_kind": "pdf_content_stream_layout_v1",
         "dataset_id": "synthetic-pdf",
         "dataset_revision": "synthetic-pdf-r1",
-        "development_packet_receipt_sha256": development_packet_receipt_sha256,
+        "development_packet_receipt_sha256": development_packet_sha256,
         "layout_truth_receipt_sha256": development_layout_sha256,
         "layout_truth_parser_spec_sha256": parser_spec_sha256,
         "candidate_results": candidates,
-        "selected_engine_kind": "pdf_text_layer",
-        "selected_extractor_revision": "pdf-text-test-v1",
-        "selected_configuration_sha256": configuration_sha256,
-        "selected_model_inventory_sha256": inventory_sha256,
-        "selected_evaluation_result_sha256": "4" * 64,
+        "selected_engine_kind": selected["engine_kind"],
+        "selected_extractor_revision": selected["extractor_revision"],
+        "selected_configuration_sha256": selected["configuration_sha256"],
+        "selected_model_inventory_sha256": selected["model_inventory_sha256"],
+        "selected_evaluation_result_sha256": selected["evaluation_result_sha256"],
     }
     selection["development_selection_receipt_sha256"] = _self_digest(
         selection, "development_selection_receipt_sha256"
     )
     selection_sha256 = str(selection["development_selection_receipt_sha256"])
     selection_path = root / "source-attested-development-selections" / f"{selection_sha256}.json"
-    selection_path.parent.mkdir(parents=True)
-    selection_path.write_bytes(_canonical(selection, newline=True))
+    selection_path.parent.mkdir(parents=True, exist_ok=True)
+    selection_path.write_bytes(_canonical_local_artifact(selection))
 
+    sealed_candidate_bundle_sha256 = write_candidate_bundle(
+        packet=sealed_packet,
+        records=sealed_records,
+        engine_kind="pdf_text_layer",
+        extractor_revision="pdf-text-test-v1",
+        candidate_configuration_sha256=configuration_sha256,
+        candidate_inventory_sha256=inventory_sha256,
+    )
     reservation: dict[str, object] = {
         "schema_version": "1.0",
         "artifact_kind": "sealed_synthetic_pdf_candidate_reservation",
         "profile_mode": "offline_synthetic_pdf_evaluation",
-        "parser_revision": "synthetic-pdf-label-normalizer-v2",
+        "parser_revision": candidate_parser_revision,
         "dataset_id": "synthetic-pdf",
         "dataset_revision": "synthetic-pdf-r1",
         "packet_kind": "sealed",
-        "packet_receipt_sha256": sealed_packet_receipt_sha256,
+        "packet_receipt_sha256": sealed_packet_sha256,
         "engine_kind": "pdf_text_layer",
         "extractor_revision": "pdf-text-test-v1",
         "configuration_sha256": configuration_sha256,
         "model_inventory_sha256": inventory_sha256,
     }
-    reservation_raw = _canonical(reservation, newline=True)
+    reservation_raw = _canonical_local_artifact(reservation)
     reservation_sha256 = hashlib.sha256(reservation_raw).hexdigest()
-    reservation_path = (
-        root / "candidate-run-reservations" / f"sealed-{sealed_packet_receipt_sha256}.json"
-    )
-    reservation_path.parent.mkdir(parents=True)
+    reservation_path = root / "candidate-run-reservations" / f"sealed-{sealed_packet_sha256}.json"
+    reservation_path.parent.mkdir(parents=True, exist_ok=True)
     reservation_path.write_bytes(reservation_raw)
-
     sealed_run: dict[str, object] = {
         "schema_version": "1.0",
         "artifact_kind": "source_attested_synthetic_pdf_sealed_run",
@@ -305,25 +495,46 @@ def _write_source_attested_receipt_chain(
         "layout_truth_kind": "pdf_content_stream_layout_v1",
         "dataset_id": "synthetic-pdf",
         "dataset_revision": "synthetic-pdf-r1",
-        "sealed_packet_receipt_sha256": sealed_packet_receipt_sha256,
+        "sealed_packet_receipt_sha256": sealed_packet_sha256,
         "layout_truth_receipt_sha256": layout_sha256,
         "layout_truth_parser_spec_sha256": parser_spec_sha256,
         "development_selection_receipt_sha256": selection_sha256,
-        "selected_engine_kind": "pdf_text_layer",
-        "selected_extractor_revision": "pdf-text-test-v1",
-        "selected_configuration_sha256": configuration_sha256,
-        "selected_model_inventory_sha256": inventory_sha256,
-        "selected_development_evaluation_result_sha256": "4" * 64,
-        "candidate_bundle_sha256": "d" * 64,
-        "candidate_parser_revision": "synthetic-pdf-label-normalizer-v2",
+        "selected_engine_kind": selected["engine_kind"],
+        "selected_extractor_revision": selected["extractor_revision"],
+        "selected_configuration_sha256": selected["configuration_sha256"],
+        "selected_model_inventory_sha256": selected["model_inventory_sha256"],
+        "selected_development_evaluation_result_sha256": selected["evaluation_result_sha256"],
+        "candidate_bundle_sha256": sealed_candidate_bundle_sha256,
+        "candidate_parser_revision": candidate_parser_revision,
         "sealed_candidate_reservation_sha256": reservation_sha256,
     }
     sealed_run["sealed_run_receipt_sha256"] = _self_digest(sealed_run, "sealed_run_receipt_sha256")
     sealed_run_sha256 = str(sealed_run["sealed_run_receipt_sha256"])
     sealed_run_path = root / "source-attested-sealed-runs" / f"{sealed_run_sha256}.json"
-    sealed_run_path.parent.mkdir(parents=True)
-    sealed_run_path.write_bytes(_canonical(sealed_run, newline=True))
-    return layout_sha256, selection_sha256, sealed_run_sha256
+    sealed_run_path.parent.mkdir(parents=True, exist_ok=True)
+    sealed_run_path.write_bytes(_canonical_local_artifact(sealed_run))
+    evaluation = _source_attested_evaluation(
+        configuration_sha256,
+        inventory_sha256,
+        packet_receipt_sha256=sealed_packet_sha256,
+        layout_truth_receipt_sha256=layout_sha256,
+        layout_truth_parser_spec_sha256=parser_spec_sha256,
+        development_selection_receipt_sha256=selection_sha256,
+        sealed_run_receipt_sha256=sealed_run_sha256,
+        candidate_bundle_sha256=sealed_candidate_bundle_sha256,
+    )
+    _write_source_attested_evaluation_artifact(root=root, raw=evaluation)
+    return {
+        "dataset_receipt_sha256": dataset_receipt_sha256,
+        "development_packet_receipt_sha256": development_packet_sha256,
+        "sealed_packet_receipt_sha256": sealed_packet_sha256,
+        "development_layout_sha256": development_layout_sha256,
+        "layout_sha256": layout_sha256,
+        "selection_sha256": selection_sha256,
+        "sealed_run_sha256": sealed_run_sha256,
+        "sealed_candidate_bundle_sha256": sealed_candidate_bundle_sha256,
+        "evaluation": evaluation,
+    }
 
 
 def _approved(tmp_path: Path) -> tuple[Path, str]:
@@ -361,19 +572,13 @@ def _source_attested_activated(tmp_path: Path) -> tuple[Path, str]:
         inventory_value=_inventory(),
         package_version_reader=_package_version,
     )
-    layout_sha256, selection_sha256, sealed_run_sha256 = _write_source_attested_receipt_chain(
+    chain = _write_source_attested_receipt_chain(
         root=root,
         configuration_sha256=configuration_sha256,
         inventory_sha256=inventory_sha256,
     )
-    evaluation = _source_attested_evaluation(
-        configuration_sha256,
-        inventory_sha256,
-        layout_truth_receipt_sha256=layout_sha256,
-        layout_truth_parser_spec_sha256="c" * 64,
-        development_selection_receipt_sha256=selection_sha256,
-        sealed_run_receipt_sha256=sealed_run_sha256,
-    )
+    evaluation = chain["evaluation"]
+    assert isinstance(evaluation, bytes)
     activation_sha256, _activation = write_source_attested_synthetic_pdf_preview_pointer(
         document_preview_root=root,
         evaluation_raw=evaluation,
@@ -595,11 +800,14 @@ def test_source_attested_writer_rejects_development_selection_without_three_engi
         inventory_value=_inventory(),
         package_version_reader=_package_version,
     )
-    layout_sha256, selection_sha256, sealed_run_sha256 = _write_source_attested_receipt_chain(
+    chain = _write_source_attested_receipt_chain(
         root=root,
         configuration_sha256=configuration_sha256,
         inventory_sha256=inventory_sha256,
     )
+    layout_sha256 = str(chain["layout_sha256"])
+    selection_sha256 = str(chain["selection_sha256"])
+    sealed_run_sha256 = str(chain["sealed_run_sha256"])
     selection_path = root / "source-attested-development-selections" / f"{selection_sha256}.json"
     invalid_selection = json.loads(selection_path.read_bytes())
     invalid_selection["candidate_results"][2]["engine_kind"] = "paddleocr"
@@ -609,7 +817,7 @@ def test_source_attested_writer_rejects_development_selection_without_three_engi
     invalid_selection_sha256 = str(invalid_selection["development_selection_receipt_sha256"])
     (
         root / "source-attested-development-selections" / f"{invalid_selection_sha256}.json"
-    ).write_bytes(_canonical(invalid_selection, newline=True))
+    ).write_bytes(_canonical_local_artifact(invalid_selection))
     evaluation = _source_attested_evaluation(
         configuration_sha256,
         inventory_sha256,
@@ -617,7 +825,10 @@ def test_source_attested_writer_rejects_development_selection_without_three_engi
         layout_truth_parser_spec_sha256="c" * 64,
         development_selection_receipt_sha256=invalid_selection_sha256,
         sealed_run_receipt_sha256=sealed_run_sha256,
+        packet_receipt_sha256=str(chain["sealed_packet_receipt_sha256"]),
+        candidate_bundle_sha256=str(chain["sealed_candidate_bundle_sha256"]),
     )
+    _write_source_attested_evaluation_artifact(root=root, raw=evaluation)
 
     with pytest.raises(
         DocumentPreviewRuntimeError,
@@ -686,11 +897,14 @@ def test_source_attested_writer_rejects_a_valid_but_mismatched_sealed_run_receip
         inventory_value=_inventory(),
         package_version_reader=_package_version,
     )
-    layout_sha256, selection_sha256, sealed_run_sha256 = _write_source_attested_receipt_chain(
+    chain = _write_source_attested_receipt_chain(
         root=root,
         configuration_sha256=configuration_sha256,
         inventory_sha256=inventory_sha256,
     )
+    layout_sha256 = str(chain["layout_sha256"])
+    selection_sha256 = str(chain["selection_sha256"])
+    sealed_run_sha256 = str(chain["sealed_run_sha256"])
     sealed_run_path = root / "source-attested-sealed-runs" / f"{sealed_run_sha256}.json"
     mismatched_run = json.loads(sealed_run_path.read_bytes())
     mismatched_run["selected_configuration_sha256"] = "f" * 64
@@ -699,7 +913,7 @@ def test_source_attested_writer_rejects_a_valid_but_mismatched_sealed_run_receip
     )
     mismatched_run_sha256 = str(mismatched_run["sealed_run_receipt_sha256"])
     (root / "source-attested-sealed-runs" / f"{mismatched_run_sha256}.json").write_bytes(
-        _canonical(mismatched_run, newline=True)
+        _canonical_local_artifact(mismatched_run)
     )
     evaluation = _source_attested_evaluation(
         configuration_sha256,
@@ -708,7 +922,10 @@ def test_source_attested_writer_rejects_a_valid_but_mismatched_sealed_run_receip
         layout_truth_parser_spec_sha256="c" * 64,
         development_selection_receipt_sha256=selection_sha256,
         sealed_run_receipt_sha256=mismatched_run_sha256,
+        packet_receipt_sha256=str(chain["sealed_packet_receipt_sha256"]),
+        candidate_bundle_sha256=str(chain["sealed_candidate_bundle_sha256"]),
     )
+    _write_source_attested_evaluation_artifact(root=root, raw=evaluation)
 
     with pytest.raises(
         DocumentPreviewRuntimeError,
@@ -722,6 +939,245 @@ def test_source_attested_writer_rejects_a_valid_but_mismatched_sealed_run_receip
             package_version_reader=_package_version,
         )
     assert not (root / "approvals" / "pdf-preview-active.json").exists()
+
+
+def test_source_attested_writer_rejects_missing_hash_named_dataset_receipt(tmp_path: Path) -> None:
+    root = _root(tmp_path)
+    root.mkdir(parents=True)
+    configuration_sha256, inventory_sha256 = write_runtime_sidecars(
+        document_preview_root=root,
+        configuration_value=_configuration(),
+        inventory_value=_inventory(),
+        package_version_reader=_package_version,
+    )
+    chain = _write_source_attested_receipt_chain(
+        root=root,
+        configuration_sha256=configuration_sha256,
+        inventory_sha256=inventory_sha256,
+    )
+    dataset_path = (
+        root
+        / "source-attested-dataset-receipts"
+        / f"{chain['dataset_receipt_sha256']}.json"
+    )
+    dataset_path.unlink()
+    evaluation = chain["evaluation"]
+    assert isinstance(evaluation, bytes)
+
+    with pytest.raises(
+        DocumentPreviewRuntimeError,
+        match="document_preview_source_attested_dataset_receipt_invalid",
+    ):
+        write_source_attested_synthetic_pdf_preview_pointer(
+            document_preview_root=root,
+            evaluation_raw=evaluation,
+            configuration_sha256=configuration_sha256,
+            model_inventory_sha256=inventory_sha256,
+            package_version_reader=_package_version,
+        )
+    assert not (root / "approvals" / "pdf-preview-active.json").exists()
+
+
+@pytest.mark.parametrize(
+    ("artifact_kind", "expected_code"),
+    [
+        ("dataset", "document_preview_source_attested_dataset_receipt_invalid"),
+        ("development_result", "document_preview_source_attested_development_evaluation_invalid"),
+        ("sealed_candidate", "document_preview_source_attested_candidate_bundle_invalid"),
+    ],
+)
+def test_source_attested_writer_rejects_tampered_actual_evidence_artifact(
+    tmp_path: Path, artifact_kind: str, expected_code: str
+) -> None:
+    root = _root(tmp_path)
+    root.mkdir(parents=True)
+    configuration_sha256, inventory_sha256 = write_runtime_sidecars(
+        document_preview_root=root,
+        configuration_value=_configuration(),
+        inventory_value=_inventory(),
+        package_version_reader=_package_version,
+    )
+    chain = _write_source_attested_receipt_chain(
+        root=root,
+        configuration_sha256=configuration_sha256,
+        inventory_sha256=inventory_sha256,
+    )
+    if artifact_kind == "dataset":
+        target = (
+            root
+            / "source-attested-dataset-receipts"
+            / f"{chain['dataset_receipt_sha256']}.json"
+        )
+    elif artifact_kind == "development_result":
+        selection_path = (
+            root
+            / "source-attested-development-selections"
+            / f"{chain['selection_sha256']}.json"
+        )
+        selection = json.loads(selection_path.read_bytes())
+        development_result_sha256 = selection["candidate_results"][0]["evaluation_result_sha256"]
+        target = (
+            root
+            / "source-attested-evaluation-results"
+            / f"{development_result_sha256}.json"
+        )
+    else:
+        target = (
+            root
+            / "source-attested-candidate-bundles"
+            / f"{chain['sealed_candidate_bundle_sha256']}.json"
+        )
+    target.write_bytes(b"{}\n")
+    evaluation = chain["evaluation"]
+    assert isinstance(evaluation, bytes)
+
+    with pytest.raises(DocumentPreviewRuntimeError, match=expected_code):
+        write_source_attested_synthetic_pdf_preview_pointer(
+            document_preview_root=root,
+            evaluation_raw=evaluation,
+            configuration_sha256=configuration_sha256,
+            model_inventory_sha256=inventory_sha256,
+            package_version_reader=_package_version,
+        )
+    assert not (root / "approvals" / "pdf-preview-active.json").exists()
+
+
+def test_source_attested_loader_recomputes_development_selection_rank(tmp_path: Path) -> None:
+    root = _root(tmp_path)
+    root.mkdir(parents=True)
+    configuration_sha256, inventory_sha256 = write_runtime_sidecars(
+        document_preview_root=root,
+        configuration_value=_configuration(),
+        inventory_value=_inventory(),
+        package_version_reader=_package_version,
+    )
+    chain = _write_source_attested_receipt_chain(
+        root=root,
+        configuration_sha256=configuration_sha256,
+        inventory_sha256=inventory_sha256,
+    )
+    selection_path = (
+        root / "source-attested-development-selections" / f"{chain['selection_sha256']}.json"
+    )
+    forged_selection = json.loads(selection_path.read_bytes())
+    lower_ranked = forged_selection["candidate_results"][1]
+    forged_selection["selected_engine_kind"] = lower_ranked["engine_kind"]
+    forged_selection["selected_extractor_revision"] = lower_ranked["extractor_revision"]
+    forged_selection["selected_configuration_sha256"] = lower_ranked["configuration_sha256"]
+    forged_selection["selected_model_inventory_sha256"] = lower_ranked["model_inventory_sha256"]
+    forged_selection["selected_evaluation_result_sha256"] = lower_ranked[
+        "evaluation_result_sha256"
+    ]
+    forged_selection["development_selection_receipt_sha256"] = _self_digest(
+        forged_selection, "development_selection_receipt_sha256"
+    )
+    forged_selection_sha256 = str(forged_selection["development_selection_receipt_sha256"])
+    (
+        root / "source-attested-development-selections" / f"{forged_selection_sha256}.json"
+    ).write_bytes(_canonical_local_artifact(forged_selection))
+
+    sealed_run_path = root / "source-attested-sealed-runs" / f"{chain['sealed_run_sha256']}.json"
+    forged_run = json.loads(sealed_run_path.read_bytes())
+    forged_run["development_selection_receipt_sha256"] = forged_selection_sha256
+    forged_run["selected_engine_kind"] = lower_ranked["engine_kind"]
+    forged_run["selected_extractor_revision"] = lower_ranked["extractor_revision"]
+    forged_run["selected_configuration_sha256"] = lower_ranked["configuration_sha256"]
+    forged_run["selected_model_inventory_sha256"] = lower_ranked["model_inventory_sha256"]
+    forged_run["selected_development_evaluation_result_sha256"] = lower_ranked[
+        "evaluation_result_sha256"
+    ]
+    forged_run["sealed_run_receipt_sha256"] = _self_digest(
+        forged_run, "sealed_run_receipt_sha256"
+    )
+    forged_run_sha256 = str(forged_run["sealed_run_receipt_sha256"])
+    (root / "source-attested-sealed-runs" / f"{forged_run_sha256}.json").write_bytes(
+        _canonical_local_artifact(forged_run)
+    )
+    forged_evaluation = _source_attested_evaluation(
+        str(lower_ranked["configuration_sha256"]),
+        str(lower_ranked["model_inventory_sha256"]),
+        engine_kind=str(lower_ranked["engine_kind"]),
+        extractor_revision=str(lower_ranked["extractor_revision"]),
+        packet_receipt_sha256=str(chain["sealed_packet_receipt_sha256"]),
+        layout_truth_receipt_sha256=str(chain["layout_sha256"]),
+        layout_truth_parser_spec_sha256="c" * 64,
+        development_selection_receipt_sha256=forged_selection_sha256,
+        sealed_run_receipt_sha256=forged_run_sha256,
+        candidate_bundle_sha256=str(chain["sealed_candidate_bundle_sha256"]),
+    )
+    _write_source_attested_evaluation_artifact(root=root, raw=forged_evaluation)
+
+    with pytest.raises(
+        DocumentPreviewRuntimeError,
+        match="document_preview_source_attested_development_selection_mismatch",
+    ):
+        load_source_attested_synthetic_receipt_binding(
+            root=root,
+            evaluation=parse_source_attested_synthetic_sealed_evaluation_result(forged_evaluation),
+        )
+
+
+def test_source_attested_loader_rejects_a_rehashed_candidate_with_incomplete_source_coverage(
+    tmp_path: Path,
+) -> None:
+    root = _root(tmp_path)
+    root.mkdir(parents=True)
+    configuration_sha256, inventory_sha256 = write_runtime_sidecars(
+        document_preview_root=root,
+        configuration_value=_configuration(),
+        inventory_value=_inventory(),
+        package_version_reader=_package_version,
+    )
+    chain = _write_source_attested_receipt_chain(
+        root=root,
+        configuration_sha256=configuration_sha256,
+        inventory_sha256=inventory_sha256,
+    )
+    candidate_path = (
+        root
+        / "source-attested-candidate-bundles"
+        / f"{chain['sealed_candidate_bundle_sha256']}.json"
+    )
+    incomplete_candidate = json.loads(candidate_path.read_bytes())
+    incomplete_candidate["documents"] = incomplete_candidate["documents"][:-1]
+    incomplete_candidate["candidate_bundle_sha256"] = _self_digest(
+        incomplete_candidate, "candidate_bundle_sha256"
+    )
+    incomplete_candidate_sha256 = str(incomplete_candidate["candidate_bundle_sha256"])
+    (
+        root / "source-attested-candidate-bundles" / f"{incomplete_candidate_sha256}.json"
+    ).write_bytes(_canonical_local_artifact(incomplete_candidate))
+
+    sealed_run_path = root / "source-attested-sealed-runs" / f"{chain['sealed_run_sha256']}.json"
+    rewritten_run = json.loads(sealed_run_path.read_bytes())
+    rewritten_run["candidate_bundle_sha256"] = incomplete_candidate_sha256
+    rewritten_run["sealed_run_receipt_sha256"] = _self_digest(
+        rewritten_run, "sealed_run_receipt_sha256"
+    )
+    rewritten_run_sha256 = str(rewritten_run["sealed_run_receipt_sha256"])
+    (root / "source-attested-sealed-runs" / f"{rewritten_run_sha256}.json").write_bytes(
+        _canonical_local_artifact(rewritten_run)
+    )
+    rewritten_evaluation = _source_attested_evaluation(
+        configuration_sha256,
+        inventory_sha256,
+        packet_receipt_sha256=str(chain["sealed_packet_receipt_sha256"]),
+        layout_truth_receipt_sha256=str(chain["layout_sha256"]),
+        layout_truth_parser_spec_sha256="c" * 64,
+        development_selection_receipt_sha256=str(chain["selection_sha256"]),
+        sealed_run_receipt_sha256=rewritten_run_sha256,
+        candidate_bundle_sha256=incomplete_candidate_sha256,
+    )
+    _write_source_attested_evaluation_artifact(root=root, raw=rewritten_evaluation)
+
+    with pytest.raises(
+        DocumentPreviewRuntimeError,
+        match="document_preview_source_attested_candidate_bundle_binding_mismatch",
+    ):
+        load_source_attested_synthetic_receipt_binding(
+            root=root,
+            evaluation=parse_source_attested_synthetic_sealed_evaluation_result(rewritten_evaluation),
+        )
 
 
 def test_source_attested_writer_rejects_manual_human_evaluation(tmp_path: Path) -> None:

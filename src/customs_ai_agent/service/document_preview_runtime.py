@@ -33,6 +33,8 @@ from pathlib import Path
 from typing import Any, Callable, Iterator, Literal, Mapping, Protocol, Sequence, cast
 from urllib.parse import urlparse
 
+from pydantic import ValidationError
+
 from customs_ai_agent.schemas.document_extraction import (
     BoundingBoxV1,
     DocumentExtractionWarningV1,
@@ -61,10 +63,17 @@ _MAX_LAYOUT_TRUTH_RECEIPT_BYTES = 8 * 1024 * 1024
 _PREVIEW_ROOT_PARTS = ("_local", "data", "document-preview")
 _APPROVAL_FILENAME = "pdf-preview-active.json"
 _SOURCE_LAYOUT_TRUTH_DIRECTORY = "source-layout-truths"
+_SOURCE_DATASET_RECEIPT_DIRECTORY = "source-attested-dataset-receipts"
+_SOURCE_PACKET_DIRECTORY = "source-attested-packets"
+_SOURCE_CANDIDATE_BUNDLE_DIRECTORY = "source-attested-candidate-bundles"
+_SOURCE_EVALUATION_RESULT_DIRECTORY = "source-attested-evaluation-results"
 _SOURCE_DEVELOPMENT_SELECTION_DIRECTORY = "source-attested-development-selections"
 _SOURCE_SEALED_RUN_DIRECTORY = "source-attested-sealed-runs"
 _SEALED_RESERVATION_DIRECTORY = "candidate-run-reservations"
 _SOURCE_LAYOUT_RECORD_COUNTS: Mapping[str, int] = {"development": 60, "sealed": 20}
+_MAX_SOURCE_DATASET_RECEIPT_BYTES = 8 * 1024 * 1024
+_MAX_SOURCE_PACKET_BYTES = 2 * 1024 * 1024
+_MAX_SOURCE_CANDIDATE_BUNDLE_BYTES = 32 * 1024 * 1024
 _FIELD_EXACT_MATCH_MIN = 0.99
 _OCR_CER_MAX = 0.01
 _TABLE_CELL_F1_MIN = 0.98
@@ -133,6 +142,28 @@ def _canonical_json_bytes(value: object, *, trailing_newline: bool = False) -> b
         sort_keys=True,
     ).encode("utf-8")
     return encoded + (b"\n" if trailing_newline else b"")
+
+
+def _canonical_local_artifact_file_bytes(value: object) -> bytes:
+    """Return the source evaluator's immutable local artifact representation.
+
+    Runtime sidecars use compact JSON.  The source-attested evaluator instead
+    writes its receipts, packets, candidate bundles, and results as one exact
+    pretty JSON representation.  Keep that distinction explicit: accepting a
+    compact reserialization here would make a hash-named source artifact less
+    auditable and would diverge from the evaluator's create-only writer.
+    """
+
+    return (
+        json.dumps(
+            value,
+            ensure_ascii=False,
+            allow_nan=False,
+            indent=2,
+            sort_keys=True,
+        )
+        + "\n"
+    ).encode("utf-8")
 
 
 def _sha256_bytes(value: bytes) -> str:
@@ -314,6 +345,24 @@ def _read_canonical_hash_named_receipt(
     raw = _read_regular_file(path, limit=limit, code=code)
     value = _strict_json_object(raw, code=code)
     if raw != _canonical_json_bytes(value, trailing_newline=True):
+        raise DocumentPreviewRuntimeError(code)
+    return path, raw, value
+
+
+def _read_canonical_source_attested_artifact(
+    *,
+    root: Path,
+    directory: str,
+    digest: str,
+    limit: int,
+    code: str,
+) -> tuple[Path, bytes, dict[str, object]]:
+    """Read only one source evaluator artifact from its fixed local path."""
+
+    path = _sidecar_path(root, directory, digest)
+    raw = _read_regular_file(path, limit=limit, code=code)
+    value = _strict_json_object(raw, code=code)
+    if raw != _canonical_local_artifact_file_bytes(value):
         raise DocumentPreviewRuntimeError(code)
     return path, raw, value
 
@@ -501,6 +550,7 @@ class SourceAttestedSyntheticSealedEvaluationResultV1:
     layout_truth_parser_spec_sha256: str
     development_selection_receipt_sha256: str
     sealed_run_receipt_sha256: str
+    candidate_bundle_sha256: str
     engine_kind: ApprovedPdfEngineKind
     extractor_revision: str
     configuration_sha256: str
@@ -509,6 +559,77 @@ class SourceAttestedSyntheticSealedEvaluationResultV1:
     field_exact_match: float
     ocr_cer: float
     table_cell_f1: float
+
+
+@dataclass(frozen=True, slots=True)
+class SourceAttestedSyntheticDevelopmentEvaluationResultV1:
+    """One exact development candidate result, retained without OCR content."""
+
+    dataset_id: str
+    dataset_revision: str
+    packet_receipt_sha256: str
+    layout_truth_receipt_sha256: str
+    layout_truth_parser_spec_sha256: str
+    candidate_bundle_sha256: str
+    engine_kind: ApprovedPdfEngineKind
+    extractor_revision: str
+    configuration_sha256: str
+    model_inventory_sha256: str
+    evaluation_result_sha256: str
+    passed: bool
+    field_exact_match: float
+    ocr_cer: float
+    table_cell_f1: float
+
+
+@dataclass(frozen=True, slots=True)
+class SourceAttestedDatasetAssetV1:
+    asset_id: str
+    source_sha256: str
+    media_type: str
+    source_role: str
+
+
+@dataclass(frozen=True, slots=True)
+class SourceAttestedDatasetReceiptV1:
+    dataset_id: str
+    dataset_revision: str
+    dataset_receipt_sha256: str
+    assets: tuple[SourceAttestedDatasetAssetV1, ...]
+
+
+@dataclass(frozen=True, slots=True)
+class SourceAttestedPacketItemV1:
+    asset_id: str
+    source_sha256: str
+    fixture_kind: Literal["clean", "error"]
+    document_type: Literal["bill_of_lading", "invoice", "packing_list"]
+    set_id: str
+
+
+@dataclass(frozen=True, slots=True)
+class SourceAttestedPacketV1:
+    dataset_id: str
+    dataset_revision: str
+    dataset_receipt_sha256: str
+    packet_split: Literal["development", "sealed"]
+    packet_receipt_sha256: str
+    error_labels_sha256: str
+    items: tuple[SourceAttestedPacketItemV1, ...]
+
+
+@dataclass(frozen=True, slots=True)
+class SourceAttestedCandidateBundleV1:
+    dataset_id: str
+    dataset_revision: str
+    packet_receipt_sha256: str
+    parser_revision: str
+    engine_kind: ApprovedPdfEngineKind
+    extractor_revision: str
+    configuration_sha256: str
+    model_inventory_sha256: str
+    candidate_bundle_sha256: str
+    source_assets: tuple[tuple[str, str], ...]
 
 
 @dataclass(frozen=True, slots=True)
@@ -529,6 +650,7 @@ class SourceAttestedLayoutTruthReceiptV1:
     dataset_receipt_sha256: str
     packet_split: Literal["development", "sealed"]
     packet_receipt_sha256: str
+    error_labels_sha256: str
     parser_spec_sha256: str
     records: tuple[SourceAttestedLayoutRecordV1, ...]
     receipt_sha256: str
@@ -541,6 +663,7 @@ class SourceAttestedDevelopmentCandidateResultV1:
     configuration_sha256: str
     model_inventory_sha256: str
     evaluation_result_sha256: str
+    candidate_bundle_sha256: str
     passed: bool
 
 
@@ -577,14 +700,27 @@ class SourceAttestedSealedRunReceiptV1:
 
 @dataclass(frozen=True, slots=True)
 class SourceAttestedSyntheticReceiptBindingV1:
+    dataset_receipt_path: Path
+    dataset_receipt: SourceAttestedDatasetReceiptV1
+    development_packet_path: Path
+    development_packet: SourceAttestedPacketV1
+    sealed_packet_path: Path
+    sealed_packet: SourceAttestedPacketV1
     development_layout_truth_path: Path
     development_layout_truth: SourceAttestedLayoutTruthReceiptV1
     layout_truth_path: Path
     layout_truth: SourceAttestedLayoutTruthReceiptV1
     development_selection_path: Path
     development_selection: SourceAttestedDevelopmentSelectionReceiptV1
+    development_evaluation_paths: tuple[Path, ...]
+    development_evaluations: tuple[SourceAttestedSyntheticDevelopmentEvaluationResultV1, ...]
+    development_candidate_paths: tuple[Path, ...]
+    development_candidates: tuple[SourceAttestedCandidateBundleV1, ...]
     sealed_run_path: Path
     sealed_run: SourceAttestedSealedRunReceiptV1
+    sealed_candidate_path: Path
+    sealed_candidate: SourceAttestedCandidateBundleV1
+    sealed_evaluation_path: Path
     sealed_reservation_path: Path
 
 
@@ -1017,7 +1153,10 @@ def parse_source_attested_synthetic_sealed_evaluation_result(
 
     code = "document_preview_source_attested_evaluation_invalid"
     value = _strict_json_object(raw, code=code)
-    if raw != _canonical_json_bytes(value, trailing_newline=True):
+    if raw not in {
+        _canonical_json_bytes(value, trailing_newline=True),
+        _canonical_local_artifact_file_bytes(value),
+    }:
         raise DocumentPreviewRuntimeError(code)
     _require_exact_keys(
         value,
@@ -1039,6 +1178,7 @@ def parse_source_attested_synthetic_sealed_evaluation_result(
             "configuration_sha256",
             "model_inventory_sha256",
             "evaluation_result_sha256",
+            "candidate_bundle_sha256",
             "passed",
             "metrics",
         },
@@ -1096,11 +1236,112 @@ def parse_source_attested_synthetic_sealed_evaluation_result(
             value["development_selection_receipt_sha256"], code=code
         ),
         sealed_run_receipt_sha256=_sha256(value["sealed_run_receipt_sha256"], code=code),
+        candidate_bundle_sha256=_sha256(value["candidate_bundle_sha256"], code=code),
         engine_kind=_engine_kind(value["engine_kind"], code=code),
         extractor_revision=_identifier(value["extractor_revision"], code=code),
         configuration_sha256=_sha256(value["configuration_sha256"], code=code),
         model_inventory_sha256=_sha256(value["model_inventory_sha256"], code=code),
         evaluation_result_sha256=embedded_sha,
+        field_exact_match=field_exact_match,
+        ocr_cer=ocr_cer,
+        table_cell_f1=table_cell_f1,
+    )
+
+
+def parse_source_attested_synthetic_development_evaluation_result(
+    raw: bytes,
+) -> SourceAttestedSyntheticDevelopmentEvaluationResultV1:
+    """Parse one source-attested development result without its OCR payload.
+
+    Development artifacts deliberately retain the same strict result shape as
+    a sealed result, but their two sealed-only receipt fields are *exactly*
+    ``null``.  This prevents a sealed passing result being repackaged as one
+    of the three candidates used for deterministic selection.
+    """
+
+    code = "document_preview_source_attested_development_evaluation_invalid"
+    value = _strict_json_object(raw, code=code)
+    if raw not in {
+        _canonical_json_bytes(value, trailing_newline=True),
+        _canonical_local_artifact_file_bytes(value),
+    }:
+        raise DocumentPreviewRuntimeError(code)
+    _require_exact_keys(
+        value,
+        {
+            "schema_version",
+            "evaluation_basis",
+            "dataset_id",
+            "dataset_revision",
+            "packet_kind",
+            "packet_receipt_sha256",
+            "evaluation_scope",
+            "layout_truth_kind",
+            "layout_truth_receipt_sha256",
+            "layout_truth_parser_spec_sha256",
+            "development_selection_receipt_sha256",
+            "sealed_run_receipt_sha256",
+            "engine_kind",
+            "extractor_revision",
+            "configuration_sha256",
+            "model_inventory_sha256",
+            "evaluation_result_sha256",
+            "candidate_bundle_sha256",
+            "passed",
+            "metrics",
+        },
+        code=code,
+    )
+    if (
+        value["schema_version"] != "1.0"
+        or value["evaluation_basis"] != "source_attested_synthetic"
+        or value["packet_kind"] != "development"
+        or value["evaluation_scope"] != "synthetic_content_stream_compatibility"
+        or value["layout_truth_kind"] != "pdf_content_stream_layout_v1"
+        or value["development_selection_receipt_sha256"] is not None
+        or value["sealed_run_receipt_sha256"] is not None
+        or not isinstance(value["passed"], bool)
+    ):
+        raise DocumentPreviewRuntimeError(code)
+    metrics_value = value["metrics"]
+    if not isinstance(metrics_value, dict):
+        raise DocumentPreviewRuntimeError(code)
+    metrics = cast(dict[str, object], metrics_value)
+    _require_exact_keys(metrics, {"field_exact_match", "ocr_cer", "table_cell_f1"}, code=code)
+    embedded_sha = _sha256(value["evaluation_result_sha256"], code=code)
+    unsigned = dict(value)
+    unsigned.pop("evaluation_result_sha256")
+    if _sha256_bytes(_canonical_json_bytes(unsigned)) != embedded_sha:
+        raise DocumentPreviewRuntimeError(code)
+    field_exact_match = _finite_number(metrics["field_exact_match"], code=code)
+    ocr_cer = _finite_number(metrics["ocr_cer"], code=code)
+    table_cell_f1 = _finite_number(metrics["table_cell_f1"], code=code)
+    if not (
+        0.0 <= field_exact_match <= 1.0 and 0.0 <= ocr_cer <= 1.0 and 0.0 <= table_cell_f1 <= 1.0
+    ):
+        raise DocumentPreviewRuntimeError(code)
+    passed = (
+        field_exact_match >= _FIELD_EXACT_MATCH_MIN
+        and ocr_cer <= _OCR_CER_MAX
+        and table_cell_f1 >= _TABLE_CELL_F1_MIN
+    )
+    if value["passed"] is not passed:
+        raise DocumentPreviewRuntimeError(code)
+    return SourceAttestedSyntheticDevelopmentEvaluationResultV1(
+        dataset_id=_identifier(value["dataset_id"], code=code),
+        dataset_revision=_identifier(value["dataset_revision"], code=code),
+        packet_receipt_sha256=_sha256(value["packet_receipt_sha256"], code=code),
+        layout_truth_receipt_sha256=_sha256(value["layout_truth_receipt_sha256"], code=code),
+        layout_truth_parser_spec_sha256=_sha256(
+            value["layout_truth_parser_spec_sha256"], code=code
+        ),
+        candidate_bundle_sha256=_sha256(value["candidate_bundle_sha256"], code=code),
+        engine_kind=_engine_kind(value["engine_kind"], code=code),
+        extractor_revision=_identifier(value["extractor_revision"], code=code),
+        configuration_sha256=_sha256(value["configuration_sha256"], code=code),
+        model_inventory_sha256=_sha256(value["model_inventory_sha256"], code=code),
+        evaluation_result_sha256=embedded_sha,
+        passed=passed,
         field_exact_match=field_exact_match,
         ocr_cer=ocr_cer,
         table_cell_f1=table_cell_f1,
@@ -1237,7 +1478,7 @@ def _parse_source_attested_layout_truth_receipt(
         or value["packet_split"] not in _SOURCE_LAYOUT_RECORD_COUNTS
         or not isinstance(value["source_manifest_mismatch_count"], int)
         or isinstance(value["source_manifest_mismatch_count"], bool)
-        or value["source_manifest_mismatch_count"] != 0
+        or value["source_manifest_mismatch_count"] < 0
         or not isinstance(value["records"], list)
     ):
         raise DocumentPreviewRuntimeError(code)
@@ -1264,6 +1505,7 @@ def _parse_source_attested_layout_truth_receipt(
         dataset_receipt_sha256=_sha256(value["dataset_receipt_sha256"], code=code),
         packet_split=packet_split,
         packet_receipt_sha256=_sha256(value["packet_receipt_sha256"], code=code),
+        error_labels_sha256=_sha256(value["error_labels_sha256"], code=code),
         parser_spec_sha256=_sha256(value["parser_spec_sha256"], code=code),
         records=records,
         receipt_sha256=receipt_sha256,
@@ -1285,6 +1527,7 @@ def _source_attested_development_candidate(
             "configuration_sha256",
             "model_inventory_sha256",
             "evaluation_result_sha256",
+            "candidate_bundle_sha256",
             "passed",
         },
         code=code,
@@ -1297,6 +1540,7 @@ def _source_attested_development_candidate(
         configuration_sha256=_sha256(candidate["configuration_sha256"], code=code),
         model_inventory_sha256=_sha256(candidate["model_inventory_sha256"], code=code),
         evaluation_result_sha256=_sha256(candidate["evaluation_result_sha256"], code=code),
+        candidate_bundle_sha256=_sha256(candidate["candidate_bundle_sha256"], code=code),
         passed=candidate["passed"],
     )
 
@@ -1360,16 +1604,24 @@ def _parse_source_attested_development_selection_receipt(
         or {item.engine_kind for item in candidates} != _ENGINE_KINDS
     ):
         raise DocumentPreviewRuntimeError(code)
-    selected = SourceAttestedDevelopmentCandidateResultV1(
-        engine_kind=_engine_kind(value["selected_engine_kind"], code=code),
-        extractor_revision=_identifier(value["selected_extractor_revision"], code=code),
-        configuration_sha256=_sha256(value["selected_configuration_sha256"], code=code),
-        model_inventory_sha256=_sha256(value["selected_model_inventory_sha256"], code=code),
-        evaluation_result_sha256=_sha256(value["selected_evaluation_result_sha256"], code=code),
-        passed=True,
-    )
-    if selected not in candidates:
+    selected_matches = [
+        candidate
+        for candidate in candidates
+        if (
+            candidate.engine_kind == _engine_kind(value["selected_engine_kind"], code=code)
+            and candidate.extractor_revision
+            == _identifier(value["selected_extractor_revision"], code=code)
+            and candidate.configuration_sha256
+            == _sha256(value["selected_configuration_sha256"], code=code)
+            and candidate.model_inventory_sha256
+            == _sha256(value["selected_model_inventory_sha256"], code=code)
+            and candidate.evaluation_result_sha256
+            == _sha256(value["selected_evaluation_result_sha256"], code=code)
+        )
+    ]
+    if len(selected_matches) != 1 or not selected_matches[0].passed:
         raise DocumentPreviewRuntimeError(code)
+    selected = selected_matches[0]
     return SourceAttestedDevelopmentSelectionReceiptV1(
         dataset_id=_identifier(value["dataset_id"], code=code),
         dataset_revision=_identifier(value["dataset_revision"], code=code),
@@ -1457,6 +1709,323 @@ def _parse_source_attested_sealed_run_receipt(
     )
 
 
+def _load_source_attested_dataset_receipt(
+    *, root: Path, dataset_receipt_sha256: str
+) -> tuple[Path, SourceAttestedDatasetReceiptV1]:
+    code = "document_preview_source_attested_dataset_receipt_invalid"
+    # Import only after this runtime module has initialized.  The evaluation
+    # package also exposes local runner utilities which import this module, so
+    # a top-level import would create an import cycle during service startup.
+    from customs_ai_agent.evaluation.document_gold import DatasetReceiptV1, receipt_sha256
+
+    path, raw, _value = _read_canonical_source_attested_artifact(
+        root=root,
+        directory=_SOURCE_DATASET_RECEIPT_DIRECTORY,
+        digest=dataset_receipt_sha256,
+        limit=_MAX_SOURCE_DATASET_RECEIPT_BYTES,
+        code=code,
+    )
+    try:
+        receipt = DatasetReceiptV1.model_validate_json(raw)
+    except ValidationError as error:
+        raise DocumentPreviewRuntimeError(code) from error
+    if (
+        raw
+        != _canonical_local_artifact_file_bytes(receipt.model_dump(mode="json", warnings=False))
+        or receipt_sha256(receipt) != dataset_receipt_sha256
+    ):
+        raise DocumentPreviewRuntimeError(code)
+    assets = tuple(
+        SourceAttestedDatasetAssetV1(
+            asset_id=_identifier(asset.asset_id, code=code),
+            source_sha256=_sha256(asset.sha256, code=code),
+            media_type=asset.media_type,
+            source_role=asset.source_role,
+        )
+        for asset in receipt.assets
+    )
+    return path, SourceAttestedDatasetReceiptV1(
+        dataset_id=_identifier(receipt.dataset_id, code=code),
+        dataset_revision=_identifier(receipt.dataset_revision, code=code),
+        dataset_receipt_sha256=dataset_receipt_sha256,
+        assets=assets,
+    )
+
+
+def _load_source_attested_packet(
+    *, root: Path, expected_packet_receipt_sha256: str
+) -> tuple[Path, SourceAttestedPacketV1]:
+    code = "document_preview_source_attested_packet_invalid"
+    from customs_ai_agent.evaluation.document_ocr_quality import (
+        EvaluationPacketV2,
+        packet_receipt_sha256,
+    )
+
+    path, raw, _value = _read_canonical_source_attested_artifact(
+        root=root,
+        directory=_SOURCE_PACKET_DIRECTORY,
+        digest=expected_packet_receipt_sha256,
+        limit=_MAX_SOURCE_PACKET_BYTES,
+        code=code,
+    )
+    try:
+        packet = EvaluationPacketV2.model_validate_json(raw)
+    except ValidationError as error:
+        raise DocumentPreviewRuntimeError(code) from error
+    if (
+        raw
+        != _canonical_local_artifact_file_bytes(packet.model_dump(mode="json", warnings=False))
+        or packet_receipt_sha256(packet) != expected_packet_receipt_sha256
+    ):
+        raise DocumentPreviewRuntimeError(code)
+    items = tuple(
+        SourceAttestedPacketItemV1(
+            asset_id=_identifier(item.asset_id, code=code),
+            source_sha256=_sha256(item.source_sha256, code=code),
+            fixture_kind=cast(Literal["clean", "error"], item.fixture_kind),
+            document_type=cast(
+                Literal["bill_of_lading", "invoice", "packing_list"], item.document_type
+            ),
+            set_id=_identifier(item.set_id, code=code),
+        )
+        for item in packet.items
+    )
+    return path, SourceAttestedPacketV1(
+        dataset_id=_identifier(packet.dataset_id, code=code),
+        dataset_revision=_identifier(packet.dataset_revision, code=code),
+        dataset_receipt_sha256=_sha256(packet.receipt_sha256, code=code),
+        packet_split=cast(Literal["development", "sealed"], packet.split),
+        packet_receipt_sha256=expected_packet_receipt_sha256,
+        error_labels_sha256=_sha256(packet.error_labels_sha256, code=code),
+        items=items,
+    )
+
+
+def _load_source_attested_candidate_bundle(
+    *, root: Path, candidate_bundle_sha256_value: str
+) -> tuple[Path, SourceAttestedCandidateBundleV1]:
+    code = "document_preview_source_attested_candidate_bundle_invalid"
+    from customs_ai_agent.evaluation.document_ocr_quality import (
+        SyntheticPdfCandidateOutputBundleV1,
+        candidate_bundle_sha256,
+    )
+
+    path, raw, _value = _read_canonical_source_attested_artifact(
+        root=root,
+        directory=_SOURCE_CANDIDATE_BUNDLE_DIRECTORY,
+        digest=candidate_bundle_sha256_value,
+        limit=_MAX_SOURCE_CANDIDATE_BUNDLE_BYTES,
+        code=code,
+    )
+    try:
+        candidate = SyntheticPdfCandidateOutputBundleV1.model_validate_json(raw)
+    except ValidationError as error:
+        raise DocumentPreviewRuntimeError(code) from error
+    if (
+        raw
+        != _canonical_local_artifact_file_bytes(candidate.model_dump(mode="json", warnings=False))
+        or candidate_bundle_sha256(candidate) != candidate_bundle_sha256_value
+    ):
+        raise DocumentPreviewRuntimeError(code)
+    source_assets = tuple(
+        (
+            _identifier(document.asset_id, code=code),
+            _sha256(document.source_sha256, code=code),
+        )
+        for document in candidate.documents
+    )
+    if len(source_assets) != len(set(source_assets)):
+        raise DocumentPreviewRuntimeError(code)
+    return path, SourceAttestedCandidateBundleV1(
+        dataset_id=_identifier(candidate.dataset_id, code=code),
+        dataset_revision=_identifier(candidate.dataset_revision, code=code),
+        packet_receipt_sha256=_sha256(candidate.packet_receipt_sha256, code=code),
+        parser_revision=_identifier(candidate.parser_revision, code=code),
+        engine_kind=_engine_kind(candidate.engine_kind, code=code),
+        extractor_revision=_identifier(candidate.extractor_revision, code=code),
+        configuration_sha256=_sha256(candidate.configuration_sha256, code=code),
+        model_inventory_sha256=_sha256(candidate.model_inventory_sha256, code=code),
+        candidate_bundle_sha256=candidate_bundle_sha256_value,
+        source_assets=source_assets,
+    )
+
+
+def _load_source_attested_development_evaluation(
+    *, root: Path, evaluation_result_sha256: str
+) -> tuple[Path, SourceAttestedSyntheticDevelopmentEvaluationResultV1]:
+    code = "document_preview_source_attested_development_evaluation_invalid"
+    path, raw, _value = _read_canonical_source_attested_artifact(
+        root=root,
+        directory=_SOURCE_EVALUATION_RESULT_DIRECTORY,
+        digest=evaluation_result_sha256,
+        limit=_MAX_EVALUATION_BYTES,
+        code=code,
+    )
+    return path, parse_source_attested_synthetic_development_evaluation_result(raw)
+
+
+def _load_source_attested_sealed_evaluation(
+    *, root: Path, evaluation_result_sha256: str
+) -> tuple[Path, SourceAttestedSyntheticSealedEvaluationResultV1]:
+    code = "document_preview_source_attested_evaluation_invalid"
+    path, raw, _value = _read_canonical_source_attested_artifact(
+        root=root,
+        directory=_SOURCE_EVALUATION_RESULT_DIRECTORY,
+        digest=evaluation_result_sha256,
+        limit=_MAX_EVALUATION_BYTES,
+        code=code,
+    )
+    return path, parse_source_attested_synthetic_sealed_evaluation_result(raw)
+
+
+def _validate_source_attested_packet_coverage(
+    *,
+    dataset_receipt: SourceAttestedDatasetReceiptV1,
+    packet: SourceAttestedPacketV1,
+    layout_truth: SourceAttestedLayoutTruthReceiptV1,
+    expected_split: Literal["development", "sealed"],
+) -> None:
+    """Bind a packet's complete PDF inventory to its receipt and layout truth."""
+
+    code = "document_preview_source_attested_packet_binding_mismatch"
+    if (
+        packet.packet_split != expected_split
+        or layout_truth.packet_split != expected_split
+        or packet.dataset_id != dataset_receipt.dataset_id
+        or packet.dataset_revision != dataset_receipt.dataset_revision
+        or packet.dataset_receipt_sha256 != dataset_receipt.dataset_receipt_sha256
+        or layout_truth.dataset_id != dataset_receipt.dataset_id
+        or layout_truth.dataset_revision != dataset_receipt.dataset_revision
+        or layout_truth.dataset_receipt_sha256 != dataset_receipt.dataset_receipt_sha256
+        or layout_truth.packet_receipt_sha256 != packet.packet_receipt_sha256
+        or layout_truth.error_labels_sha256 != packet.error_labels_sha256
+    ):
+        raise DocumentPreviewRuntimeError(code)
+    assets_by_id = {asset.asset_id: asset for asset in dataset_receipt.assets}
+    packet_by_id = {item.asset_id: item for item in packet.items}
+    layout_by_id = {record.asset_id: record for record in layout_truth.records}
+    if len(packet_by_id) != len(packet.items) or set(packet_by_id) != set(layout_by_id):
+        raise DocumentPreviewRuntimeError(code)
+    for asset_id, item in packet_by_id.items():
+        asset = assets_by_id.get(asset_id)
+        layout = layout_by_id.get(asset_id)
+        if (
+            asset is None
+            or asset.source_sha256 != item.source_sha256
+            or asset.media_type != "application/pdf"
+            or asset.source_role != "preview_candidate"
+            or layout is None
+            or layout.source_sha256 != item.source_sha256
+            or layout.fixture_kind != item.fixture_kind
+            or layout.document_type != item.document_type
+            or layout.set_id != item.set_id
+        ):
+            raise DocumentPreviewRuntimeError(code)
+
+
+def _validate_source_attested_candidate_coverage(
+    *,
+    candidate: SourceAttestedCandidateBundleV1,
+    packet: SourceAttestedPacketV1,
+    engine_kind: ApprovedPdfEngineKind,
+    extractor_revision: str,
+    configuration_sha256: str,
+    model_inventory_sha256: str,
+    expected_parser_revision: str | None = None,
+) -> None:
+    """Prove an OCR bundle covers exactly the already-bound packet, no more."""
+
+    code = "document_preview_source_attested_candidate_bundle_binding_mismatch"
+    packet_assets = {(item.asset_id, item.source_sha256) for item in packet.items}
+    if (
+        candidate.dataset_id != packet.dataset_id
+        or candidate.dataset_revision != packet.dataset_revision
+        or candidate.packet_receipt_sha256 != packet.packet_receipt_sha256
+        or candidate.engine_kind != engine_kind
+        or candidate.extractor_revision != extractor_revision
+        or candidate.configuration_sha256 != configuration_sha256
+        or candidate.model_inventory_sha256 != model_inventory_sha256
+        or (expected_parser_revision is not None and candidate.parser_revision != expected_parser_revision)
+        or len(candidate.source_assets) != len(packet_assets)
+        or set(candidate.source_assets) != packet_assets
+    ):
+        raise DocumentPreviewRuntimeError(code)
+
+
+def _validate_source_attested_development_result(
+    *,
+    result: SourceAttestedSyntheticDevelopmentEvaluationResultV1,
+    selection_member: SourceAttestedDevelopmentCandidateResultV1,
+    candidate: SourceAttestedCandidateBundleV1,
+    development_packet: SourceAttestedPacketV1,
+    development_layout_truth: SourceAttestedLayoutTruthReceiptV1,
+    selection: SourceAttestedDevelopmentSelectionReceiptV1,
+) -> None:
+    code = "document_preview_source_attested_development_evaluation_binding_mismatch"
+    if (
+        result.dataset_id != development_packet.dataset_id
+        or result.dataset_revision != development_packet.dataset_revision
+        or result.packet_receipt_sha256 != development_packet.packet_receipt_sha256
+        or result.layout_truth_receipt_sha256 != development_layout_truth.receipt_sha256
+        or result.layout_truth_parser_spec_sha256
+        != development_layout_truth.parser_spec_sha256
+        or result.layout_truth_parser_spec_sha256
+        != selection.layout_truth_parser_spec_sha256
+        or result.engine_kind != selection_member.engine_kind
+        or result.extractor_revision != selection_member.extractor_revision
+        or result.configuration_sha256 != selection_member.configuration_sha256
+        or result.model_inventory_sha256 != selection_member.model_inventory_sha256
+        or result.evaluation_result_sha256 != selection_member.evaluation_result_sha256
+        or result.candidate_bundle_sha256 != selection_member.candidate_bundle_sha256
+        or result.passed != selection_member.passed
+    ):
+        raise DocumentPreviewRuntimeError(code)
+    _validate_source_attested_candidate_coverage(
+        candidate=candidate,
+        packet=development_packet,
+        engine_kind=result.engine_kind,
+        extractor_revision=result.extractor_revision,
+        configuration_sha256=result.configuration_sha256,
+        model_inventory_sha256=result.model_inventory_sha256,
+    )
+    if candidate.candidate_bundle_sha256 != result.candidate_bundle_sha256:
+        raise DocumentPreviewRuntimeError(code)
+
+
+def _recompute_source_attested_development_selection(
+    *,
+    results: tuple[SourceAttestedSyntheticDevelopmentEvaluationResultV1, ...],
+    selection: SourceAttestedDevelopmentSelectionReceiptV1,
+) -> SourceAttestedSyntheticDevelopmentEvaluationResultV1:
+    """Apply the fixed metric ordering from verified raw development results."""
+
+    code = "document_preview_source_attested_development_selection_mismatch"
+    if len(results) != len(_ENGINE_KINDS) or {result.engine_kind for result in results} != _ENGINE_KINDS:
+        raise DocumentPreviewRuntimeError(code)
+    passing = [result for result in results if result.passed]
+    if not passing:
+        raise DocumentPreviewRuntimeError(code)
+    expected = sorted(
+        passing,
+        key=lambda result: (
+            -result.field_exact_match,
+            result.ocr_cer,
+            -result.table_cell_f1,
+            result.engine_kind,
+        ),
+    )[0]
+    if (
+        selection.selected.engine_kind != expected.engine_kind
+        or selection.selected.extractor_revision != expected.extractor_revision
+        or selection.selected.configuration_sha256 != expected.configuration_sha256
+        or selection.selected.model_inventory_sha256 != expected.model_inventory_sha256
+        or selection.selected.evaluation_result_sha256 != expected.evaluation_result_sha256
+        or selection.selected.candidate_bundle_sha256 != expected.candidate_bundle_sha256
+    ):
+        raise DocumentPreviewRuntimeError(code)
+    return expected
+
+
 def _sealed_candidate_reservation_path(root: Path, packet_receipt_sha256: str) -> Path:
     destination = root / _SEALED_RESERVATION_DIRECTORY / f"sealed-{packet_receipt_sha256}.json"
     _assert_no_symlink(destination, code="document_preview_source_attested_reservation_invalid")
@@ -1482,7 +2051,7 @@ def _verify_source_attested_sealed_reservation(
     if _sha256_bytes(raw) != sealed_run.sealed_candidate_reservation_sha256:
         raise DocumentPreviewRuntimeError(code)
     value = _strict_json_object(raw, code=code)
-    if raw != _canonical_json_bytes(value, trailing_newline=True):
+    if raw != _canonical_local_artifact_file_bytes(value):
         raise DocumentPreviewRuntimeError(code)
     _require_exact_keys(
         value,
@@ -1526,9 +2095,29 @@ def load_source_attested_synthetic_receipt_binding(
     root: Path,
     evaluation: SourceAttestedSyntheticSealedEvaluationResultV1,
 ) -> SourceAttestedSyntheticReceiptBindingV1:
-    """Load the complete immutable evidence chain for automatic activation."""
+    """Load every immutable input that made automatic activation possible.
 
-    layout_path, _layout_raw, layout_value = _read_canonical_hash_named_receipt(
+    A source-attested sealed result is intentionally insufficient on its own:
+    its metrics only become meaningful after the runtime has independently
+    loaded the selected source PDFs' receipt, both packets, both distinct
+    content-stream layout receipts, all three development candidates/results,
+    the sealed candidate, and the one-shot reservation.  No data in this path
+    is supplied by a caller or inferred from the active pointer.
+    """
+
+    binding_code = "document_preview_source_attested_receipt_binding_mismatch"
+
+    # The generic runtime copy is compact JSON.  The source evaluator keeps a
+    # separate, hash-named pretty canonical copy.  Require semantic equality
+    # so a caller cannot activate a result that was never persisted by the
+    # source-attested evaluation workflow.
+    sealed_evaluation_path, sealed_evaluation = _load_source_attested_sealed_evaluation(
+        root=root, evaluation_result_sha256=evaluation.evaluation_result_sha256
+    )
+    if sealed_evaluation != evaluation:
+        raise DocumentPreviewRuntimeError(binding_code)
+
+    layout_path, _layout_raw, layout_value = _read_canonical_source_attested_artifact(
         root=root,
         directory=_SOURCE_LAYOUT_TRUTH_DIRECTORY,
         digest=evaluation.layout_truth_receipt_sha256,
@@ -1539,7 +2128,7 @@ def load_source_attested_synthetic_receipt_binding(
         value=layout_value,
         receipt_sha256=evaluation.layout_truth_receipt_sha256,
     )
-    selection_path, _selection_raw, selection_value = _read_canonical_hash_named_receipt(
+    selection_path, _selection_raw, selection_value = _read_canonical_source_attested_artifact(
         root=root,
         directory=_SOURCE_DEVELOPMENT_SELECTION_DIRECTORY,
         digest=evaluation.development_selection_receipt_sha256,
@@ -1551,7 +2140,7 @@ def load_source_attested_synthetic_receipt_binding(
         receipt_sha256=evaluation.development_selection_receipt_sha256,
     )
     development_layout_path, _development_layout_raw, development_layout_value = (
-        _read_canonical_hash_named_receipt(
+        _read_canonical_source_attested_artifact(
             root=root,
             directory=_SOURCE_LAYOUT_TRUTH_DIRECTORY,
             digest=selection.layout_truth_receipt_sha256,
@@ -1563,7 +2152,7 @@ def load_source_attested_synthetic_receipt_binding(
         value=development_layout_value,
         receipt_sha256=selection.layout_truth_receipt_sha256,
     )
-    sealed_run_path, _sealed_run_raw, sealed_run_value = _read_canonical_hash_named_receipt(
+    sealed_run_path, _sealed_run_raw, sealed_run_value = _read_canonical_source_attested_artifact(
         root=root,
         directory=_SOURCE_SEALED_RUN_DIRECTORY,
         digest=evaluation.sealed_run_receipt_sha256,
@@ -1574,6 +2163,30 @@ def load_source_attested_synthetic_receipt_binding(
         value=sealed_run_value,
         receipt_sha256=evaluation.sealed_run_receipt_sha256,
     )
+
+    dataset_receipt_path, dataset_receipt = _load_source_attested_dataset_receipt(
+        root=root, dataset_receipt_sha256=layout_truth.dataset_receipt_sha256
+    )
+    development_packet_path, development_packet = _load_source_attested_packet(
+        root=root,
+        expected_packet_receipt_sha256=selection.development_packet_receipt_sha256,
+    )
+    sealed_packet_path, sealed_packet = _load_source_attested_packet(
+        root=root, expected_packet_receipt_sha256=evaluation.packet_receipt_sha256
+    )
+    _validate_source_attested_packet_coverage(
+        dataset_receipt=dataset_receipt,
+        packet=development_packet,
+        layout_truth=development_layout_truth,
+        expected_split="development",
+    )
+    _validate_source_attested_packet_coverage(
+        dataset_receipt=dataset_receipt,
+        packet=sealed_packet,
+        layout_truth=layout_truth,
+        expected_split="sealed",
+    )
+
     if (
         layout_truth.packet_split != "sealed"
         or layout_truth.dataset_id != evaluation.dataset_id
@@ -1589,6 +2202,8 @@ def load_source_attested_synthetic_receipt_binding(
         or development_layout_truth.parser_spec_sha256 != selection.layout_truth_parser_spec_sha256
         or selection.dataset_id != evaluation.dataset_id
         or selection.dataset_revision != evaluation.dataset_revision
+        # Development and sealed layout *receipt hashes* are intentionally
+        # different (60 vs 20 documents), but their parser spec must be one.
         or selection.layout_truth_parser_spec_sha256 != evaluation.layout_truth_parser_spec_sha256
         or selection.selected.engine_kind != evaluation.engine_kind
         or selection.selected.extractor_revision != evaluation.extractor_revision
@@ -1607,24 +2222,81 @@ def load_source_attested_synthetic_receipt_binding(
         or sealed_run.model_inventory_sha256 != evaluation.model_inventory_sha256
         or sealed_run.selected_development_evaluation_result_sha256
         != selection.selected.evaluation_result_sha256
+        or sealed_run.candidate_bundle_sha256 != evaluation.candidate_bundle_sha256
         or {record.asset_id for record in development_layout_truth.records}
         & {record.asset_id for record in layout_truth.records}
         or {record.source_sha256 for record in development_layout_truth.records}
         & {record.source_sha256 for record in layout_truth.records}
     ):
-        raise DocumentPreviewRuntimeError(
-            "document_preview_source_attested_receipt_binding_mismatch"
+        raise DocumentPreviewRuntimeError(binding_code)
+
+    development_evaluation_paths: list[Path] = []
+    development_evaluations: list[SourceAttestedSyntheticDevelopmentEvaluationResultV1] = []
+    development_candidate_paths: list[Path] = []
+    development_candidates: list[SourceAttestedCandidateBundleV1] = []
+    for member in selection.candidate_results:
+        evaluation_path, development_result = _load_source_attested_development_evaluation(
+            root=root, evaluation_result_sha256=member.evaluation_result_sha256
         )
+        candidate_path, development_candidate = _load_source_attested_candidate_bundle(
+            root=root, candidate_bundle_sha256_value=member.candidate_bundle_sha256
+        )
+        _validate_source_attested_development_result(
+            result=development_result,
+            selection_member=member,
+            candidate=development_candidate,
+            development_packet=development_packet,
+            development_layout_truth=development_layout_truth,
+            selection=selection,
+        )
+        development_evaluation_paths.append(evaluation_path)
+        development_evaluations.append(development_result)
+        development_candidate_paths.append(candidate_path)
+        development_candidates.append(development_candidate)
+    selected_development_result = _recompute_source_attested_development_selection(
+        results=tuple(development_evaluations), selection=selection
+    )
+    if selected_development_result.evaluation_result_sha256 != sealed_run.selected_development_evaluation_result_sha256:
+        raise DocumentPreviewRuntimeError(binding_code)
+
+    sealed_candidate_path, sealed_candidate = _load_source_attested_candidate_bundle(
+        root=root, candidate_bundle_sha256_value=sealed_run.candidate_bundle_sha256
+    )
+    _validate_source_attested_candidate_coverage(
+        candidate=sealed_candidate,
+        packet=sealed_packet,
+        engine_kind=evaluation.engine_kind,
+        extractor_revision=evaluation.extractor_revision,
+        configuration_sha256=evaluation.configuration_sha256,
+        model_inventory_sha256=evaluation.model_inventory_sha256,
+        expected_parser_revision=sealed_run.candidate_parser_revision,
+    )
+    if sealed_candidate.candidate_bundle_sha256 != evaluation.candidate_bundle_sha256:
+        raise DocumentPreviewRuntimeError(binding_code)
+
     reservation_path = _verify_source_attested_sealed_reservation(root=root, sealed_run=sealed_run)
     return SourceAttestedSyntheticReceiptBindingV1(
+        dataset_receipt_path=dataset_receipt_path,
+        dataset_receipt=dataset_receipt,
+        development_packet_path=development_packet_path,
+        development_packet=development_packet,
+        sealed_packet_path=sealed_packet_path,
+        sealed_packet=sealed_packet,
         development_layout_truth_path=development_layout_path,
         development_layout_truth=development_layout_truth,
         layout_truth_path=layout_path,
         layout_truth=layout_truth,
         development_selection_path=selection_path,
         development_selection=selection,
+        development_evaluation_paths=tuple(development_evaluation_paths),
+        development_evaluations=tuple(development_evaluations),
+        development_candidate_paths=tuple(development_candidate_paths),
+        development_candidates=tuple(development_candidates),
         sealed_run_path=sealed_run_path,
         sealed_run=sealed_run,
+        sealed_candidate_path=sealed_candidate_path,
+        sealed_candidate=sealed_candidate,
+        sealed_evaluation_path=sealed_evaluation_path,
         sealed_reservation_path=reservation_path,
     )
 
