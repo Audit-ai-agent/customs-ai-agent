@@ -56,6 +56,9 @@ from customs_ai_agent.evaluation.document_ocr_quality import (
     validate_synthetic_candidate_output_provenance,
     verify_receipt_source_assets,
 )
+from customs_ai_agent.evaluation.supervised_template_contract import (
+    SUPERVISED_TEMPLATE_EXTRACTOR_REVISION,
+)
 
 
 _IDENTIFIER = r"^[A-Za-z0-9][A-Za-z0-9._:-]{0,127}$"
@@ -108,6 +111,17 @@ SOURCE_LAYOUT_PARSER_SPEC_REVISION: Final[
 SOURCE_ATTESTED_CANDIDATE_PARSER_REVISION: Final[
     Literal["synthetic-pdf-supervised-template-normalizer-v11"]
 ] = "synthetic-pdf-supervised-template-normalizer-v11"
+# The actual r1 development packet is not an engine bake-off.  It validates
+# one fixed, family-safe supervised native-PDF profile.  Keeping this identity
+# beside the source-truth scope makes an older text-layer extractor or an
+# unrelated OCR engine ineligible even if it can mint a self-consistent result
+# chain.
+SOURCE_ATTESTED_SUPERVISED_TEMPLATE_ENGINE_KIND: Final[Literal["pdf_text_layer"]] = (
+    "pdf_text_layer"
+)
+SOURCE_ATTESTED_SUPERVISED_TEMPLATE_EXTRACTOR_REVISION: Final[
+    Literal["pypdf-5.3.1-supervised-template-r1-v1"]
+] = SUPERVISED_TEMPLATE_EXTRACTOR_REVISION
 
 # This automatic path has one deliberately narrow approval target.  These
 # values are a compact identity for the existing human-checked, 2,000-set PDF
@@ -181,6 +195,33 @@ def _require_source_attested_candidate_parser_revision(parser_revision: str) -> 
         raise SourceAttestedSyntheticPdfTruthError(
             "source_layout_candidate_parser_revision_invalid"
         )
+
+
+def _is_canonical_r1_development_packet(
+    *, dataset_id: str, dataset_revision: str, packet_receipt_sha256: str
+) -> bool:
+    """Whether a selection is for the one production r1 development packet.
+
+    The source-truth schemas remain injectable for hermetic tests.  Production
+    callers separately pin this exact corpus and packet, so only this identity
+    receives the single-profile rule below; synthetic unit fixtures retain the
+    historical three-engine exercise without becoming production-eligible.
+    """
+
+    return (
+        dataset_id == SOURCE_ATTESTED_SYNTHETIC_DATASET_ID
+        and dataset_revision == SOURCE_ATTESTED_SYNTHETIC_DATASET_REVISION
+        and packet_receipt_sha256 == SOURCE_ATTESTED_SYNTHETIC_DEVELOPMENT_PACKET_RECEIPT_SHA256
+    )
+
+
+def _is_fixed_supervised_template_profile(
+    *, engine_kind: EngineKind, extractor_revision: str
+) -> bool:
+    return (
+        engine_kind == SOURCE_ATTESTED_SUPERVISED_TEMPLATE_ENGINE_KIND
+        and extractor_revision == SOURCE_ATTESTED_SUPERVISED_TEMPLATE_EXTRACTOR_REVISION
+    )
 
 
 class _WireModel(BaseModel):
@@ -2107,7 +2148,13 @@ class SourceAttestedDevelopmentCandidateResultV1(_WireModel):
 
 
 class SourceAttestedSyntheticDevelopmentSelectionV1(_WireModel):
-    """Immutable all-three-engine development choice for a source-truth run."""
+    """Immutable development validation binding for a source-truth run.
+
+    The canonical r1 packet validates one fixed supervised native-PDF profile;
+    it does not rank alternatives.  The broader one-to-three member shape is
+    retained solely so hermetic fixtures can continue exercising the legacy
+    three-engine selection path without weakening the production identity.
+    """
 
     schema_version: Literal["1.0"] = "1.0"
     artifact_kind: Literal["source_attested_synthetic_pdf_development_selection"] = (
@@ -2125,7 +2172,7 @@ class SourceAttestedSyntheticDevelopmentSelectionV1(_WireModel):
     layout_truth_parser_spec_sha256: str = Field(pattern=_SHA256)
     candidate_parser_revision: str = Field(min_length=1, max_length=128, pattern=_IDENTIFIER)
     candidate_results: list[SourceAttestedDevelopmentCandidateResultV1] = Field(
-        min_length=3, max_length=3
+        min_length=1, max_length=3
     )
     selected_engine_kind: EngineKind
     selected_extractor_revision: str = Field(min_length=1, max_length=128, pattern=_IDENTIFIER)
@@ -2140,11 +2187,29 @@ class SourceAttestedSyntheticDevelopmentSelectionV1(_WireModel):
             raise ValueError("source-attested candidate parser revision is not approved")
         if self.layout_truth_parser_spec_sha256 != source_layout_parser_spec_sha256():
             raise ValueError("source-attested selection parser specification SHA-256 mismatch")
-        expected_engines = {"pdf_text_layer", "paddleocr", "docling"}
-        if {item.engine_kind for item in self.candidate_results} != expected_engines:
-            raise ValueError(
-                "source-attested selection requires exactly three unique engine results"
-            )
+        if _is_canonical_r1_development_packet(
+            dataset_id=self.dataset_id,
+            dataset_revision=self.dataset_revision,
+            packet_receipt_sha256=self.development_packet_receipt_sha256,
+        ):
+            if (
+                len(self.candidate_results) != 1
+                or not self.candidate_results[0].passed
+                or not _is_fixed_supervised_template_profile(
+                    engine_kind=self.candidate_results[0].engine_kind,
+                    extractor_revision=self.candidate_results[0].extractor_revision,
+                )
+            ):
+                raise ValueError(
+                    "canonical r1 selection requires one passing fixed supervised "
+                    "pdf_text_layer profile"
+                )
+        else:
+            expected_engines = {"pdf_text_layer", "paddleocr", "docling"}
+            if {item.engine_kind for item in self.candidate_results} != expected_engines:
+                raise ValueError(
+                    "source-attested selection requires exactly three unique engine results"
+                )
         selected = [
             item
             for item in self.candidate_results
@@ -2610,11 +2675,15 @@ def verify_source_attested_synthetic_pdf_evaluation_replay(
 def select_best_source_attested_synthetic_development_result(
     results: Sequence[SourceAttestedSyntheticOcrEvaluationResultV1],
 ) -> SourceAttestedSyntheticOcrEvaluationResultV1:
-    """Apply the fixed all-three-engine selection rule to source-attested runs."""
+    """Validate the r1 fixed profile or rank a hermetic fixture's engines.
 
-    expected_engines = {"pdf_text_layer", "paddleocr", "docling"}
-    if len(results) != len(expected_engines):
-        raise SourceAttestedSyntheticPdfTruthError("source_layout_development_result_set_invalid")
+    The canonical r1 development packet has a deliberately narrow contract:
+    it carries exactly one passing supervised ``pdf_text_layer`` result.  It
+    is therefore profile validation, not a comparison or ranking of engines.
+    The old deterministic three-engine ranking remains only for injectable
+    non-production fixtures used to test generic receipt handling.
+    """
+
     first = results[0] if results else None
     if first is None or first.packet_kind != "development":
         raise SourceAttestedSyntheticPdfTruthError("source_layout_development_result_set_invalid")
@@ -2627,7 +2696,7 @@ def select_best_source_attested_synthetic_development_result(
         first.layout_truth_parser_spec_sha256,
         first.candidate_parser_revision,
     )
-    if {result.engine_kind for result in results} != expected_engines or any(
+    if any(
         result.packet_kind != "development"
         or (
             result.dataset_id,
@@ -2640,6 +2709,29 @@ def select_best_source_attested_synthetic_development_result(
         != identity
         for result in results
     ):
+        raise SourceAttestedSyntheticPdfTruthError("source_layout_development_result_set_invalid")
+    if _is_canonical_r1_development_packet(
+        dataset_id=first.dataset_id,
+        dataset_revision=first.dataset_revision,
+        packet_receipt_sha256=first.packet_receipt_sha256,
+    ):
+        if len(results) != 1 or not _is_fixed_supervised_template_profile(
+            engine_kind=first.engine_kind,
+            extractor_revision=first.extractor_revision,
+        ):
+            raise SourceAttestedSyntheticPdfTruthError(
+                "source_layout_supervised_development_profile_invalid"
+            )
+        if not first.passed:
+            raise SourceAttestedSyntheticPdfTruthError(
+                "source_layout_supervised_development_gate_failed"
+            )
+        return first
+
+    expected_engines = {"pdf_text_layer", "paddleocr", "docling"}
+    if len(results) != len(expected_engines) or {
+        result.engine_kind for result in results
+    } != expected_engines:
         raise SourceAttestedSyntheticPdfTruthError("source_layout_development_result_set_invalid")
     passing = [result for result in results if result.passed]
     if not passing:
@@ -2658,7 +2750,11 @@ def select_best_source_attested_synthetic_development_result(
 def build_source_attested_synthetic_development_selection(
     *, results: Sequence[SourceAttestedSyntheticOcrEvaluationResultV1]
 ) -> SourceAttestedSyntheticDevelopmentSelectionV1:
-    """Bind one deterministic winner to all three immutable development runs."""
+    """Bind the selected development profile and its immutable evidence.
+
+    On the canonical r1 packet this persists a single fixed-profile result;
+    it is intentionally not an engine ranking artifact.
+    """
 
     selected = select_best_source_attested_synthetic_development_result(results)
     _require_source_attested_candidate_parser_revision(selected.candidate_parser_revision)
@@ -3056,6 +3152,18 @@ def _validate_development_selection_for_sealed(
     parser_revision: str,
 ) -> None:
     _require_source_attested_candidate_parser_revision(parser_revision)
+    # Pydantic models are passed by reference and may have been mutated after
+    # their initial construction.  Revalidate the complete receipt before a
+    # sealed run consumes its one-shot reservation, including the canonical
+    # r1 single-profile rule.
+    try:
+        SourceAttestedSyntheticDevelopmentSelectionV1.model_validate(
+            selection.model_dump(mode="json", warnings=False)
+        )
+    except ValidationError as error:
+        raise SourceAttestedSyntheticPdfTruthError(
+            "source_layout_selection_binding_mismatch"
+        ) from error
     if (
         selection.dataset_id != packet.dataset_id
         or selection.dataset_revision != packet.dataset_revision
@@ -3324,6 +3432,8 @@ __all__ = [
     "SOURCE_ATTESTED_EVALUATION_BASIS",
     "SOURCE_ATTESTED_EVALUATION_SCOPE",
     "SOURCE_ATTESTED_REQUIRED_FIELDS",
+    "SOURCE_ATTESTED_SUPERVISED_TEMPLATE_ENGINE_KIND",
+    "SOURCE_ATTESTED_SUPERVISED_TEMPLATE_EXTRACTOR_REVISION",
     "EXPECTED_SOURCE_ATTESTED_SYNTHETIC_DATASET_SCOPE",
     "SOURCE_LAYOUT_COMPILER_REVISION",
     "SOURCE_LAYOUT_PARSER_SPEC_REVISION",
