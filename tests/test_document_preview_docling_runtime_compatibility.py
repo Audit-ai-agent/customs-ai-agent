@@ -14,6 +14,7 @@ from pathlib import Path
 
 import pytest
 
+import customs_ai_agent.service.document_preview_runtime as runtime_module
 
 _COMPATIBILITY_PINS = {
     "docling-core[chunking]": "2.13.1",
@@ -51,8 +52,68 @@ def test_installed_docling_profile_imports_document_converter_with_legacy_bbox()
     for distribution, version in expected_versions.items():
         assert importlib.metadata.version(distribution) == version
 
+    from docling.backend.pypdfium2_backend import PyPdfiumDocumentBackend
     from docling_core.types.legacy_doc.base import BoundingBox
-    from docling.document_converter import DocumentConverter
+    from docling.document_converter import DocumentConverter, PdfFormatOption
 
     assert BoundingBox is not None
     assert DocumentConverter is not None
+    assert PdfFormatOption(backend=PyPdfiumDocumentBackend).backend is PyPdfiumDocumentBackend
+
+
+def test_installed_docling_profile_exposes_direct_structured_table_grid() -> None:
+    """The pinned object model supports the no-Markdown extraction boundary."""
+
+    if importlib.util.find_spec("docling") is None:
+        pytest.skip("the optional document-preview-docling profile is not installed")
+
+    from docling_core.types.doc import (
+        BoundingBox,
+        CoordOrigin,
+        DocItemLabel,
+        DoclingDocument,
+        PageItem,
+        ProvenanceItem,
+        Size,
+        TableCell,
+        TableData,
+    )
+
+    bbox = BoundingBox(l=10, t=20, r=60, b=40, coord_origin=CoordOrigin.TOPLEFT)
+    provenance = ProvenanceItem(page_no=1, bbox=bbox, charspan=(0, 1))
+    table_data = TableData(
+        num_rows=2,
+        num_cols=1,
+        table_cells=[
+            TableCell(
+                text="Item",
+                bbox=bbox,
+                start_row_offset_idx=0,
+                end_row_offset_idx=1,
+                start_col_offset_idx=0,
+                end_col_offset_idx=1,
+            ),
+            TableCell(
+                text="Widget",
+                bbox=bbox,
+                start_row_offset_idx=1,
+                end_row_offset_idx=2,
+                start_col_offset_idx=0,
+                end_col_offset_idx=1,
+            ),
+        ],
+    )
+    document = DoclingDocument(
+        name="structured-test",
+        pages={1: PageItem(page_no=1, size=Size(width=100, height=100))},
+    )
+    document.add_text(label=DocItemLabel.TEXT, text="Invoice", prov=provenance)
+    document.add_table(data=table_data, prov=provenance)
+
+    extraction = runtime_module._extract_docling_structured_document(document)
+
+    assert [span.text for span in extraction.pages[0].spans] == ["Invoice", "Item", "Widget"]
+    assert [(cell.row_index, cell.column_index, cell.text) for cell in extraction.table_cells] == [
+        (0, 0, "Item"),
+        (1, 0, "Widget"),
+    ]

@@ -74,10 +74,10 @@ _MAX_DATASET_RECEIPT_BYTES = 8 * 1024 * 1024
 _MAX_JSON_BYTES = 1 * 1024 * 1024
 _MAX_SOURCE_BYTES = 32 * 1024 * 1024
 _PROFILE_MODE: Literal["offline_synthetic_pdf_evaluation"] = "offline_synthetic_pdf_evaluation"
-# v3 binds the visible label/value and table-header/body transform.  It is
-# deliberately a candidate-only revision: historical v1/v2 bundles cannot be
-# relabelled as outputs from the stricter layout parser.
-SYNTHETIC_PDF_LABEL_NORMALIZER_REVISION = "synthetic-pdf-visible-layout-normalizer-v3"
+# v5 binds the visible label/value transform and the direct-Docling five-column
+# table projection.  It is deliberately a candidate-only revision: historical
+# bundles cannot be relabelled as outputs from the stricter layout parser.
+SYNTHETIC_PDF_LABEL_NORMALIZER_REVISION = "synthetic-pdf-visible-layout-normalizer-v5"
 
 
 class SyntheticPdfCandidateRunnerError(ValueError):
@@ -107,6 +107,36 @@ class CandidateExtractionV1:
 
     spans: tuple[CandidateSpanV1, ...]
     table_cells: tuple[CandidateTableCellV1, ...] = ()
+
+
+def select_synthetic_pdf_candidate_table_cells(
+    *,
+    table_cells: Sequence[CandidateTableCellV1],
+) -> list[CandidateTableCellV1]:
+    """Select one direct Docling table by coordinates, never by its text.
+
+    This is intentionally a candidate-only structural projection.  A target
+    has exactly five observed cells in each of row 0 and row 1, at columns
+    0--4.  Later rows may exist only as partial footer rows: each is a
+    non-empty strict subset of those same five columns.  A second complete
+    five-column row, a row/column gap, a sixth column, or duplicate cell
+    coordinate rejects that table.  Zero or multiple structural targets are
+    omitted rather than guessed.
+
+    The selected header/body pair is reindexed to the stable page-one/table-one
+    slot.  The predicate reads neither document type nor cell text, so it
+    cannot depend on raw header labels, Gold, CSV, source truth, or a PDF
+    content stream.
+    """
+
+    targets: list[tuple[CandidateTableCellV1, ...]] = []
+    for _table_key, table in sorted(_direct_docling_table_cells_by_coordinate(table_cells).items()):
+        target = _direct_docling_five_column_target_pair(table)
+        if target is not None:
+            targets.append(target)
+    if len(targets) != 1:
+        return []
+    return _reindexed_direct_docling_target_pair(cells=targets[0])
 
 
 class SyntheticPdfCandidateAdapter(Protocol):
@@ -158,10 +188,31 @@ class _DoclingCandidateAdapter:
         self.adapter.verify_native_runtime()
 
     def extract_pdf(self, preview_input: PreviewInputV1) -> CandidateExtractionV1:
-        # The current runtime adapter exposes preview spans only.  It does not
-        # invent table coordinates; a future local Docling adapter may return a
-        # CandidateExtractionV1 directly while preserving real table cells.
-        return _candidate_from_preview(self.adapter.extract_raster_or_image(preview_input))
+        # Preview and candidate evaluation consume the same direct Docling
+        # object-model projection.  Do not re-parse a document-global Markdown
+        # export here: that loses page provenance and can invent table layout.
+        extraction = self.adapter.extract_structured_pdf(preview_input)
+        spans = tuple(
+            CandidateSpanV1(
+                page_number=page.page_number,
+                text=span.text,
+                bbox=span.bbox,
+                reading_order=span.reading_order,
+            )
+            for page in extraction.pages
+            for span in page.spans
+        )
+        table_cells = tuple(
+            CandidateTableCellV1(
+                page_number=cell.page_number,
+                table_index=cell.table_index,
+                row_index=cell.row_index,
+                column_index=cell.column_index,
+                text=cell.text,
+            )
+            for cell in extraction.table_cells
+        )
+        return CandidateExtractionV1(spans=spans, table_cells=table_cells)
 
 
 def build_default_synthetic_pdf_candidate_adapter(
@@ -562,11 +613,16 @@ _VISIBLE_TABLE_HEADERS: dict[SyntheticDocumentType, tuple[tuple[str, tuple[str, 
 
 _INLINE_LABEL_VALUE = re.compile(r"^\s*(?P<label>.+?)\s*(?::|#|\s[-–—]\s)\s*(?P<value>\S.*?)\s*$")
 _HTML_BREAK = re.compile(r"<br\s*/?>", re.IGNORECASE)
-_QUANTITY_WITH_UNIT = re.compile(
-    r"^\s*(?P<quantity>[+-]?(?:\d{1,3}(?:,\d{3})+|\d+)(?:\.\d+)?)\s+(?P<unit>[A-Za-z]+)\s*$"
-)
-_QUANTITY_ONLY = re.compile(r"^\s*(?P<quantity>[+-]?(?:\d{1,3}(?:,\d{3})+|\d+)(?:\.\d+)?)\s*$")
+_QUANTITY_TOKEN = r"[+-]?(?:\d{1,3}(?:,\d{3})+|\d+)(?:\.\d+)?"
+_QUANTITY_WITH_UNIT = re.compile(rf"^\s*(?P<quantity>{_QUANTITY_TOKEN})\s+(?P<unit>[A-Za-z]+)\s*$")
+_QUANTITY_ONLY = re.compile(rf"^\s*(?P<quantity>{_QUANTITY_TOKEN})\s*$")
 _UNIT_ONLY = re.compile(r"^\s*(?P<unit>[A-Za-z]+)\s*$")
+# This deliberately finds only standalone token pairs.  It is used solely by
+# the Packing List table-cell fallback below, where exactly one *terminal*
+# pair is required; label matching and emitted values never use this rewrite.
+_TERMINAL_QUANTITY_WITH_ASCII_UNIT = re.compile(
+    rf"(?<!\S)(?P<quantity>{_QUANTITY_TOKEN})\s+(?P<unit>[A-Za-z]+)(?!\S)"
+)
 
 
 @dataclass(frozen=True, slots=True)
@@ -580,7 +636,12 @@ class _VisibleLine:
 def _normalized_visible_label(value: str) -> str:
     """Normalize only form/header typography, never an emitted field value."""
 
-    return " ".join(re.sub(r"[^a-z0-9/]+", " ", value.casefold()).replace(" ", " ").split())
+    normalized = re.sub(r"[^a-z0-9/]+", " ", value.casefold())
+    # Labels such as ``L/C`` and ``L / C`` identify the same rendered form
+    # header.  This is intentionally label-only: a field value containing a
+    # slash keeps the candidate engine's spelling unchanged.
+    normalized = re.sub(r"\s*/\s*", "/", normalized)
+    return " ".join(normalized.split())
 
 
 def _visible_value(value: str) -> str | None:
@@ -714,6 +775,64 @@ def _table_cells_by_layout(
     return tables
 
 
+def _direct_docling_table_cells_by_coordinate(
+    table_cells: Sequence[CandidateTableCellV1],
+) -> dict[tuple[int, int], dict[tuple[int, int], CandidateTableCellV1]]:
+    """Group direct cells without looking at their raw values or labels."""
+
+    tables: dict[tuple[int, int], dict[tuple[int, int], CandidateTableCellV1]] = {}
+    invalid_tables: set[tuple[int, int]] = set()
+    for cell in table_cells:
+        table_key = (cell.page_number, cell.table_index)
+        coordinate = (cell.row_index, cell.column_index)
+        table = tables.setdefault(table_key, {})
+        if coordinate in table:
+            invalid_tables.add(table_key)
+            continue
+        table[coordinate] = cell
+    for table_key in invalid_tables:
+        tables.pop(table_key, None)
+    return tables
+
+
+def _direct_docling_five_column_target_pair(
+    table: dict[tuple[int, int], CandidateTableCellV1],
+) -> tuple[CandidateTableCellV1, ...] | None:
+    """Return one exact five-column header/body pair, if the grid is safe.
+
+    Direct Docling grids can retain footer fragments after the actual one-line
+    item.  The first two rows must still be a complete 5x2 rectangle.  A
+    footer is allowed only after that pair and only when it is structurally
+    partial; the function intentionally does not inspect its values.
+    """
+
+    if not table:
+        return None
+    row_indexes = {row_index for row_index, _column_index in table}
+    if row_indexes != set(range(max(row_indexes) + 1)) or not {0, 1}.issubset(row_indexes):
+        return None
+    expected_columns = set(range(5))
+    for row_index in (0, 1):
+        columns = {
+            column_index
+            for candidate_row_index, column_index in table
+            if candidate_row_index == row_index
+        }
+        if columns != expected_columns:
+            return None
+    for row_index in range(2, max(row_indexes) + 1):
+        columns = {
+            column_index
+            for candidate_row_index, column_index in table
+            if candidate_row_index == row_index
+        }
+        if not columns or not columns < expected_columns:
+            return None
+    return tuple(
+        table[(row_index, column_index)] for row_index in (0, 1) for column_index in range(5)
+    )
+
+
 def _single_row_table_header_map(
     *, document_type: SyntheticDocumentType, table: dict[tuple[int, int], str]
 ) -> dict[str, str] | None:
@@ -745,6 +864,15 @@ def _single_row_table_header_map(
 def _append_packing_list_good_with_quantity(
     *, candidates: dict[str, list[str]], value: str
 ) -> None:
+    """Split the synthetic Packing List item cell only when it is unambiguous.
+
+    The normal layout has a visible line break between the good and its
+    quantity/unit.  Some local Markdown output flattens that one cell.  For
+    that strictly limited case, accept exactly one terminal numeric + ASCII
+    unit token pair.  More than one pair, a non-terminal pair, a missing good,
+    or a non-ASCII unit stays absent rather than guessing an item boundary.
+    """
+
     fragments = [
         _visible_value(fragment)
         for fragment in _HTML_BREAK.sub("\n", value)
@@ -753,16 +881,31 @@ def _append_packing_list_good_with_quantity(
         .split("\n")
     ]
     nonempty = [fragment for fragment in fragments if fragment is not None]
-    if len(nonempty) < 2:
+    if len(nonempty) >= 2:
+        quantity_unit = nonempty[-1]
+        if _QUANTITY_WITH_UNIT.fullmatch(quantity_unit) is None:
+            return
+        good = _visible_value(" ".join(nonempty[:-1]))
+        if good is None:
+            return
+        candidates.setdefault("good", []).append(good)
+        _append_quantity_and_unit(candidates=candidates, value=quantity_unit)
         return
-    quantity_unit = nonempty[-1]
-    if _QUANTITY_WITH_UNIT.fullmatch(quantity_unit) is None:
+    if len(nonempty) != 1:
         return
-    good = _visible_value(" ".join(nonempty[:-1]))
+
+    flattened = nonempty[0]
+    terminal_pairs = list(_TERMINAL_QUANTITY_WITH_ASCII_UNIT.finditer(flattened))
+    if len(terminal_pairs) != 1:
+        return
+    terminal_pair = terminal_pairs[0]
+    if terminal_pair.end() != len(flattened):
+        return
+    good = _visible_value(flattened[: terminal_pair.start()])
     if good is None:
         return
     candidates.setdefault("good", []).append(good)
-    _append_quantity_and_unit(candidates=candidates, value=quantity_unit)
+    _append_quantity_and_unit(candidates=candidates, value=terminal_pair.group(0))
 
 
 def _append_table_candidates(
@@ -907,6 +1050,13 @@ def normalize_synthetic_pdf_fields(
     return fields
 
 
+@dataclass(frozen=True, slots=True)
+class _DoclingMarkdownPipeTable:
+    """One explicit pipe table before document-type target selection."""
+
+    rows: tuple[tuple[str, ...], ...]
+
+
 def _markdown_pipe_cells(line: str) -> list[str] | None:
     """Parse one complete Markdown pipe row without inferring table geometry."""
 
@@ -943,35 +1093,62 @@ def _is_markdown_separator_row(cells: Sequence[str]) -> bool:
     return bool(cells) and all(re.fullmatch(r":?-{3,}:?", cell.replace(" ", "")) for cell in cells)
 
 
-def normalize_synthetic_pdf_docling_table_cells(
-    *, spans: Sequence[CandidateSpanV1]
-) -> list[CandidateTableCellV1]:
-    """Extract only explicit Docling Markdown pipe tables from page-one spans.
+def _candidate_table_layout_to_rows(
+    table: dict[tuple[int, int], str],
+) -> _DoclingMarkdownPipeTable | None:
+    """Use only a complete direct grid; never infer missing cell coordinates."""
 
-    The pinned runtime's Docling adapter exports one document-global Markdown
-    stream and conservatively places every chunk on page 1.  Rejoining those
-    chunks exactly restores that stream even when a 8,000-character boundary
-    splits a row.  The parser emits a cell only for a complete header +
-    separator + at least one equally wide data row.  It never uses Gold, CSV,
-    coordinates, or a guessed table boundary.
+    if not table:
+        return None
+    row_indexes = {row for row, _column in table}
+    column_indexes = {column for _row, column in table}
+    if (
+        min(row_indexes, default=-1) != 0
+        or min(column_indexes, default=-1) != 0
+        or row_indexes != set(range(max(row_indexes) + 1))
+        or column_indexes != set(range(max(column_indexes) + 1))
+    ):
+        return None
+    rows: list[tuple[str, ...]] = []
+    for row_index in range(max(row_indexes) + 1):
+        row = tuple(
+            table.get((row_index, column_index), "")
+            for column_index in range(max(column_indexes) + 1)
+        )
+        if any(not value for value in row):
+            return None
+        rows.append(row)
+    return _DoclingMarkdownPipeTable(rows=tuple(rows))
 
-    Coordinate convention shared with the local Gold reviewer:
-    ``page_number=1``; ``table_index`` starts at 1 in Markdown order;
-    ``row_index=0`` is the header, data rows follow at 1; ``column_index`` is
-    zero-based.  The Markdown separator row is not a cell.
-    """
 
-    markdown = "".join(
-        span.text
-        for span in sorted(spans, key=lambda span: (span.page_number, span.reading_order))
-        if span.page_number == 1
+def _docling_table_is_complete_target(
+    *, document_type: SyntheticDocumentType, table: _DoclingMarkdownPipeTable
+) -> bool:
+    """Accept only one explicit one-line-item table for the document contract."""
+
+    layout = {
+        (row_index, column_index): text
+        for row_index, row in enumerate(table.rows)
+        for column_index, text in enumerate(row)
+    }
+    values = _single_row_table_header_map(document_type=document_type, table=layout)
+    if values is None:
+        return False
+    if document_type == "bill_of_lading":
+        return {"container_no", "seal_no", "containers", "good", "gross_weight"}.issubset(values)
+    if document_type == "invoice":
+        return {"good", "qty_unit", "unit_price", "amount"}.issubset(values)
+    return {"cartons", "net_weight", "gross_weight", "cbm"}.issubset(values) and (
+        "good_with_quantity" in values or {"good", "qty_unit"}.issubset(values)
     )
-    if not markdown:
-        return []
+
+
+def _parse_docling_markdown_pipe_tables(markdown: str) -> list[_DoclingMarkdownPipeTable]:
+    """Read complete explicit pipe tables without assigning output coordinates."""
+
     lines = markdown.replace("\r\n", "\n").replace("\r", "\n").split("\n")
-    cells: list[CandidateTableCellV1] = []
+    tables: list[_DoclingMarkdownPipeTable] = []
     line_index = 0
-    table_index = 0
     in_fenced_code = False
     while line_index + 1 < len(lines):
         line = lines[line_index]
@@ -1005,20 +1182,84 @@ def normalize_synthetic_pdf_docling_table_cells(
         if not data_rows:
             line_index += 1
             continue
-        table_index += 1
-        for row_index, row in enumerate([header, *data_rows]):
-            for column_index, text in enumerate(row):
-                cells.append(
-                    CandidateTableCellV1(
-                        page_number=1,
-                        table_index=table_index,
-                        row_index=row_index,
-                        column_index=column_index,
-                        text=text,
-                    )
-                )
+        tables.append(
+            _DoclingMarkdownPipeTable(rows=tuple(tuple(row) for row in [header, *data_rows]))
+        )
         line_index = next_index
-    return cells
+    return tables
+
+
+def _reindexed_docling_table_cells(
+    *, table: _DoclingMarkdownPipeTable
+) -> list[CandidateTableCellV1]:
+    """Materialize the single selected table in the fixed Gold coordinate slot."""
+
+    return [
+        CandidateTableCellV1(
+            page_number=1,
+            table_index=1,
+            row_index=row_index,
+            column_index=column_index,
+            text=text,
+        )
+        for row_index, row in enumerate(table.rows)
+        for column_index, text in enumerate(row)
+    ]
+
+
+def _reindexed_direct_docling_target_pair(
+    *, cells: Sequence[CandidateTableCellV1]
+) -> list[CandidateTableCellV1]:
+    """Copy the already-validated direct header/body pair into its fixed slot."""
+
+    return [
+        CandidateTableCellV1(
+            page_number=1,
+            table_index=1,
+            row_index=cell.row_index,
+            column_index=cell.column_index,
+            text=cell.text,
+        )
+        for cell in cells
+    ]
+
+
+def normalize_synthetic_pdf_docling_table_cells(
+    *, document_type: SyntheticDocumentType, spans: Sequence[CandidateSpanV1]
+) -> list[CandidateTableCellV1]:
+    """Select one complete document-type pipe table from page-one Markdown.
+
+    The pinned runtime's Docling adapter exports one document-global Markdown
+    stream and conservatively places every chunk on page 1.  Rejoining those
+    chunks exactly restores that stream even when a 8,000-character boundary
+    splits a row.  A candidate must have the complete visible document-type
+    headers and exactly one body row.  If zero or more than one table meets
+    that target, no cells are emitted.  Unrelated Markdown tables do not shift
+    the selected table's coordinates.
+
+    Coordinate convention shared with the local Gold reviewer:
+    ``page_number=1``; the one selected target has ``table_index=1``;
+    ``row_index=0`` is the header, the single data row is 1; ``column_index``
+    is zero-based.  The Markdown separator row is not a cell.  The parser
+    uses only the document type and candidate spans; it has no Gold, CSV, or
+    source-truth input.
+    """
+
+    markdown = "".join(
+        span.text
+        for span in sorted(spans, key=lambda span: (span.page_number, span.reading_order))
+        if span.page_number == 1
+    )
+    if not markdown:
+        return []
+    targets = [
+        table
+        for table in _parse_docling_markdown_pipe_tables(markdown)
+        if _docling_table_is_complete_target(document_type=document_type, table=table)
+    ]
+    if len(targets) != 1:
+        return []
+    return _reindexed_docling_table_cells(table=targets[0])
 
 
 def _build_candidate_bundle(
@@ -1209,13 +1450,23 @@ def run_synthetic_pdf_ocr_candidate(
             raise SyntheticPdfCandidateRunnerError("candidate_engine_execution_failed") from error
         except Exception as error:
             raise SyntheticPdfCandidateRunnerError("candidate_engine_execution_failed") from error
-        # Preserve a future adapter's explicit structured cells.  The current
-        # Docling adapter has only Markdown spans, so use its strict synthetic
-        # pipe-table parser as the sole fallback.  PDF text/PaddleOCR are not
-        # assigned guessed cells and consequently fail F1 when they emit none.
-        table_cells = list(extracted.table_cells)
-        if not table_cells and profile.engine_kind == "docling":
-            table_cells = normalize_synthetic_pdf_docling_table_cells(spans=extracted.spans)
+        # Adapter-provided structured cells are the only table evidence.  The
+        # runner never derives grid coordinates from Markdown, Gold, CSV, or
+        # a PDF content stream.  Docling can emit several form tables, so only
+        # its fixed synthetic target table is selected and reindexed.  Other
+        # adapters preserve any future verified structured cells unchanged.
+        raw_table_cells = tuple(extracted.table_cells)
+        if profile.engine_kind == "docling":
+            try:
+                table_cells = select_synthetic_pdf_candidate_table_cells(
+                    table_cells=raw_table_cells
+                )
+            except Exception as error:
+                raise SyntheticPdfCandidateRunnerError(
+                    "candidate_table_selection_invalid"
+                ) from error
+        else:
+            table_cells = list(raw_table_cells)
         fields = normalize_synthetic_pdf_fields(
             document_type=item.document_type,
             spans=extracted.spans,
@@ -1264,5 +1515,6 @@ __all__ = [
     "normalize_synthetic_pdf_fields",
     "reserve_sealed_candidate_run",
     "run_synthetic_pdf_ocr_candidate",
+    "select_synthetic_pdf_candidate_table_cells",
     "write_synthetic_pdf_candidate_output",
 ]

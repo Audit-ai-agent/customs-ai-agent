@@ -31,6 +31,11 @@ content stream을 독립적인 pinned parser와 template profile로 읽어 만�
   고정 `" / "` 구분자로 결합한다. 이 변환 규칙도 parser-spec self-hash에 포함된다.
   run 수·좌표·table geometry·token 개수가 달라져 모호해지면 PDF preview는
   `unavailable`로 남는다.
+- candidate parser revision은 정확히
+  `synthetic-pdf-visible-layout-normalizer-v5`만 허용한다. 따라서 v4 또는 그 이전의
+  candidate/execution/result/selection/sealed-run이 모든 SHA와 서로 일치해도
+  새 자동 pointer를 만들 수 없다. v5가 아닌 revision은 source-truth writer와
+  runtime loader 양쪽에서 fail-closed 한다.
 - `error` stratum은 error label만으로 인정하지 않는다. 같은 set/document의
   clean sibling과 decoded content stream이 실제로 달라야 하며, label의
   `correct_value → wrong_value`가 해당 source field에 실제로 렌더링된 것도
@@ -43,8 +48,11 @@ content stream을 독립적인 pinned parser와 template profile로 읽어 만�
 - PaddleOCR 후보는 `PP-OCRv4`, CPU 1 thread와 detection/recognition/classifier
   세 local directory를 모두 configuration·inventory에 고정한다. Docling 후보는
   CPU 1 thread의 local layout/table parser로만 동작하며 EasyOCR downloader를 피하기 위해
-  `ocr_enabled: false`와 table structure `fast`를 고정한다. 이 둘의 실제 실행 profile은
-  source-attested runtime에서도 fallback 없이 그대로 사용된다.
+  `ocr_enabled: false`, table structure `fast`, `pdf_backend: "pypdfium2"`를 고정한다.
+  adapter는 `PyPdfiumDocumentBackend`를 직접 선택하므로 기본 `DoclingParseV2`와 다른
+  backend는 fallback 후보가 아니다. StandardPdfPipeline native GLM의 Windows 경계는
+  별도로 남으므로 ASCII-only environment preflight도 계속 필요하다. 이 둘의 실제 실행
+  profile은 source-attested runtime에서도 fallback 없이 그대로 사용된다.
 
 ## 불변 local artifact
 

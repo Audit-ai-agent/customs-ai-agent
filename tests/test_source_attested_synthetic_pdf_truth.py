@@ -59,7 +59,6 @@ from customs_ai_agent.evaluation.source_attested_synthetic_pdf_truth import (
     write_source_attested_synthetic_sealed_run,
 )
 from customs_ai_agent.evaluation.synthetic_pdf_candidate_runner import (
-    SYNTHETIC_PDF_LABEL_NORMALIZER_REVISION,
     SyntheticPdfCandidateRunnerError,
 )
 from tools.evaluate_source_attested_synthetic_pdf import evaluate_source_attested_synthetic_pdf
@@ -118,6 +117,8 @@ _BODY_RECTS = (
     (400.0, 377.8898, 80.0, 150.0),
     (480.0, 377.8898, 70.27559, 150.0),
 )
+
+_SOURCE_ATTESTED_TEST_PARSER_REVISION = SOURCE_ATTESTED_CANDIDATE_PARSER_REVISION
 
 _TEST_INVOICE_REQUIRED_FIELDS = (
     ("exporter_name", "text-v1"),
@@ -422,7 +423,7 @@ def _matching_candidate(*, packet: EvaluationPacketV2, truth, engine_kind: str):
         "schema_version": "1.0",
         "artifact_kind": "synthetic_pdf_candidate_output",
         "profile_mode": "offline_synthetic_pdf_evaluation",
-        "parser_revision": SYNTHETIC_PDF_LABEL_NORMALIZER_REVISION,
+        "parser_revision": _SOURCE_ATTESTED_TEST_PARSER_REVISION,
         "dataset_id": packet.dataset_id,
         "dataset_revision": packet.dataset_revision,
         "packet_receipt_sha256": packet.packet_receipt_sha256,
@@ -454,7 +455,7 @@ def _execution(
         extractor_revision=extractor_revision,
         configuration_sha256=configuration_sha256,
         model_inventory_sha256=model_inventory_sha256,
-        parser_revision=SYNTHETIC_PDF_LABEL_NORMALIZER_REVISION,
+        parser_revision=_SOURCE_ATTESTED_TEST_PARSER_REVISION,
         expected_dataset_scope=_test_scope(fixture),
         required_field_schema=_TEST_REQUIRED_FIELD_SCHEMA,
     )
@@ -481,7 +482,7 @@ def _score(*, fixture: dict[str, object], split: str, truth, engine_kind: str):
         extractor_revision=extractor_revision,
         configuration_sha256=configuration_sha256,
         model_inventory_sha256=model_inventory_sha256,
-        parser_revision=SYNTHETIC_PDF_LABEL_NORMALIZER_REVISION,
+        parser_revision=_SOURCE_ATTESTED_TEST_PARSER_REVISION,
         expected_dataset_scope=_test_scope(fixture),
         required_field_schema=_TEST_REQUIRED_FIELD_SCHEMA,
     )
@@ -588,10 +589,12 @@ def test_rendered_field_contract_exposes_bl13_invoice15_and_pl12() -> None:
     assert "containers" not in {
         field_name for field_name, _normalizer in SOURCE_ATTESTED_REQUIRED_FIELDS["packing_list"]
     }
-    assert SOURCE_ATTESTED_CANDIDATE_PARSER_REVISION == SYNTHETIC_PDF_LABEL_NORMALIZER_REVISION
+    assert SOURCE_ATTESTED_CANDIDATE_PARSER_REVISION == (
+        "synthetic-pdf-visible-layout-normalizer-v5"
+    )
 
 
-def test_source_truth_rejects_pre_v3_candidate_parser_even_for_test_scope(tmp_path: Path) -> None:
+def test_source_truth_rejects_v4_candidate_parser_even_for_test_scope(tmp_path: Path) -> None:
     """A coherent older parser cannot create new source-attested evidence."""
 
     fixture = _fixture(tmp_path)
@@ -613,7 +616,7 @@ def test_source_truth_rejects_pre_v3_candidate_parser_even_for_test_scope(tmp_pa
             extractor_revision=extractor_revision,
             configuration_sha256=configuration_sha256,
             model_inventory_sha256=model_inventory_sha256,
-            parser_revision="synthetic-pdf-label-normalizer-v2",
+            parser_revision="synthetic-pdf-visible-layout-normalizer-v4",
             expected_dataset_scope=_test_scope(fixture),
             required_field_schema=_TEST_REQUIRED_FIELD_SCHEMA,
         )
@@ -655,7 +658,7 @@ def test_raw_candidate_rescore_and_execution_receipt_are_replay_bound(tmp_path: 
         extractor_revision=extractor_revision,
         configuration_sha256=configuration_sha256,
         model_inventory_sha256=model_inventory_sha256,
-        parser_revision=SYNTHETIC_PDF_LABEL_NORMALIZER_REVISION,
+        parser_revision=_SOURCE_ATTESTED_TEST_PARSER_REVISION,
         expected_dataset_scope=_test_scope(fixture),
         required_field_schema=_TEST_REQUIRED_FIELD_SCHEMA,
     )
@@ -685,7 +688,7 @@ def test_raw_candidate_rescore_and_execution_receipt_are_replay_bound(tmp_path: 
         extractor_revision=extractor_revision,
         configuration_sha256=configuration_sha256,
         model_inventory_sha256=model_inventory_sha256,
-        parser_revision=SYNTHETIC_PDF_LABEL_NORMALIZER_REVISION,
+        parser_revision=_SOURCE_ATTESTED_TEST_PARSER_REVISION,
         expected_dataset_scope=_test_scope(fixture),
         required_field_schema=_TEST_REQUIRED_FIELD_SCHEMA,
     )
@@ -701,7 +704,7 @@ def test_raw_candidate_rescore_and_execution_receipt_are_replay_bound(tmp_path: 
             extractor_revision=extractor_revision,
             configuration_sha256=configuration_sha256,
             model_inventory_sha256=model_inventory_sha256,
-            parser_revision=SYNTHETIC_PDF_LABEL_NORMALIZER_REVISION,
+            parser_revision=_SOURCE_ATTESTED_TEST_PARSER_REVISION,
             expected_dataset_scope=_test_scope(fixture),
             required_field_schema=_TEST_REQUIRED_FIELD_SCHEMA,
         )
@@ -727,7 +730,7 @@ def test_raw_candidate_rescore_and_execution_receipt_are_replay_bound(tmp_path: 
             extractor_revision=extractor_revision,
             configuration_sha256=configuration_sha256,
             model_inventory_sha256=model_inventory_sha256,
-            parser_revision=SYNTHETIC_PDF_LABEL_NORMALIZER_REVISION,
+            parser_revision=_SOURCE_ATTESTED_TEST_PARSER_REVISION,
             expected_dataset_scope=_test_scope(fixture),
             required_field_schema=_TEST_REQUIRED_FIELD_SCHEMA,
         )
@@ -791,7 +794,7 @@ def test_three_engine_selection_and_distinct_sealed_layout_receipts_are_bound(
                 "schema_version": "1.0",
                 "artifact_kind": "sealed_synthetic_pdf_candidate_reservation",
                 "profile_mode": "offline_synthetic_pdf_evaluation",
-                "parser_revision": SYNTHETIC_PDF_LABEL_NORMALIZER_REVISION,
+                "parser_revision": _SOURCE_ATTESTED_TEST_PARSER_REVISION,
                 "dataset_id": sealed_packet.dataset_id,
                 "dataset_revision": sealed_packet.dataset_revision,
                 "packet_kind": "sealed",
@@ -814,7 +817,7 @@ def test_three_engine_selection_and_distinct_sealed_layout_receipts_are_bound(
         extractor_revision=extractor_revision,
         configuration_sha256=configuration_sha256,
         model_inventory_sha256=model_inventory_sha256,
-        parser_revision=SYNTHETIC_PDF_LABEL_NORMALIZER_REVISION,
+        parser_revision=_SOURCE_ATTESTED_TEST_PARSER_REVISION,
     )
     assert sealed_run.layout_truth_receipt_sha256 == sealed_truth.layout_truth_receipt_sha256
     assert sealed_run.layout_truth_receipt_sha256 != selection.layout_truth_receipt_sha256
@@ -832,7 +835,7 @@ def test_three_engine_selection_and_distinct_sealed_layout_receipts_are_bound(
         extractor_revision=extractor_revision,
         configuration_sha256=configuration_sha256,
         model_inventory_sha256=model_inventory_sha256,
-        parser_revision=SYNTHETIC_PDF_LABEL_NORMALIZER_REVISION,
+        parser_revision=_SOURCE_ATTESTED_TEST_PARSER_REVISION,
         development_selection=selection,
         sealed_run=sealed_run,
         expected_dataset_scope=_test_scope(fixture),
@@ -871,7 +874,7 @@ def test_source_evaluator_refuses_runner_parser_revision_drift(
 
     monkeypatch.setattr(
         "tools.evaluate_source_attested_synthetic_pdf.SYNTHETIC_PDF_LABEL_NORMALIZER_REVISION",
-        "synthetic-pdf-label-normalizer-v2",
+        "synthetic-pdf-visible-layout-normalizer-v4",
     )
     with pytest.raises(
         SyntheticPdfCandidateRunnerError,
@@ -892,6 +895,13 @@ def test_source_evaluator_refuses_runner_parser_revision_drift(
 def test_explicit_auto_activation_runs_only_after_a_passing_sealed_result(
     tmp_path: Path, monkeypatch: pytest.MonkeyPatch
 ) -> None:
+    # The candidate-runner revision is upgraded in the paired v5 change.
+    # Keep this source-attested chain test focused on the writer/runtime
+    # boundary while asserting that exact paired revision.
+    monkeypatch.setattr(
+        "tools.evaluate_source_attested_synthetic_pdf.SYNTHETIC_PDF_LABEL_NORMALIZER_REVISION",
+        _SOURCE_ATTESTED_TEST_PARSER_REVISION,
+    )
     fixture = _fixture(tmp_path)
     preview_root = fixture["preview_root"]
     preview_root.mkdir(parents=True)
@@ -946,7 +956,7 @@ def test_explicit_auto_activation_runs_only_after_a_passing_sealed_result(
                 "schema_version": "1.0",
                 "artifact_kind": "sealed_synthetic_pdf_candidate_reservation",
                 "profile_mode": "offline_synthetic_pdf_evaluation",
-                "parser_revision": SYNTHETIC_PDF_LABEL_NORMALIZER_REVISION,
+                "parser_revision": _SOURCE_ATTESTED_TEST_PARSER_REVISION,
                 "dataset_id": sealed_packet.dataset_id,
                 "dataset_revision": sealed_packet.dataset_revision,
                 "packet_kind": "sealed",

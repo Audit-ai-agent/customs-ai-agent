@@ -66,6 +66,7 @@ def _configuration(root: Path, engine_kind: str) -> tuple[Path, dict[str, object
     else:
         options = {
             "artifacts_directory": "models/docling",
+            "pdf_backend": "pypdfium2",
             "ocr_enabled": False,
             "device": "cpu",
             "num_threads": 1,

@@ -75,7 +75,7 @@ _SOURCE_CANDIDATE_EXECUTION_DIRECTORY = "source-attested-candidate-executions"
 _SOURCE_EVALUATION_RESULT_DIRECTORY = "source-attested-evaluation-results"
 _SOURCE_DEVELOPMENT_SELECTION_DIRECTORY = "source-attested-development-selections"
 _SOURCE_SEALED_RUN_DIRECTORY = "source-attested-sealed-runs"
-_SOURCE_ATTESTED_CANDIDATE_PARSER_REVISION: Final = "synthetic-pdf-visible-layout-normalizer-v3"
+_SOURCE_ATTESTED_CANDIDATE_PARSER_REVISION: Final = "synthetic-pdf-visible-layout-normalizer-v5"
 _SEALED_RESERVATION_DIRECTORY = "candidate-run-reservations"
 _SOURCE_LAYOUT_RECORD_COUNTS: Mapping[str, int] = {"development": 60, "sealed": 20}
 _MAX_SOURCE_DATASET_RECEIPT_BYTES = 8 * 1024 * 1024
@@ -92,6 +92,7 @@ _ORIGINAL_SOCKET_CONNECT = socket.socket.connect
 _ORIGINAL_SOCKET_CONNECT_EX = socket.socket.connect_ex
 
 _DOCLING_NATIVE_PACKAGE_NAMES: Final = ("docling_parse", "deepsearch_glm")
+_DOCLING_PDF_BACKEND: Final = "pypdfium2"
 
 ApprovedPdfEngineKind = Literal["pdf_text_layer", "paddleocr", "docling"]
 
@@ -878,6 +879,7 @@ def _parse_options(value: object, *, kind: ApprovedPdfEngineKind) -> Mapping[str
     if kind == "docling":
         allowed = {
             "artifacts_directory",
+            "pdf_backend",
             "ocr_enabled",
             "device",
             "num_threads",
@@ -887,6 +889,7 @@ def _parse_options(value: object, *, kind: ApprovedPdfEngineKind) -> Mapping[str
         if (
             not {
                 "artifacts_directory",
+                "pdf_backend",
                 "ocr_enabled",
                 "device",
                 "num_threads",
@@ -901,7 +904,8 @@ def _parse_options(value: object, *, kind: ApprovedPdfEngineKind) -> Mapping[str
         # pinned local PDF structure/table parser, not an optical OCR engine,
         # so only the explicitly offline mode is admissible.
         if (
-            options["ocr_enabled"] is not False
+            options["pdf_backend"] != _DOCLING_PDF_BACKEND
+            or options["ocr_enabled"] is not False
             or options["device"] != "cpu"
             or options["num_threads"] != 1
             or options["do_table_structure"] is not True
@@ -912,6 +916,7 @@ def _parse_options(value: object, *, kind: ApprovedPdfEngineKind) -> Mapping[str
             "artifacts_directory": _relative_model_path(
                 options["artifacts_directory"], code="document_preview_configuration_invalid"
             ),
+            "pdf_backend": _DOCLING_PDF_BACKEND,
             "ocr_enabled": False,
             "device": "cpu",
             "num_threads": 1,
@@ -1281,8 +1286,9 @@ def _source_attested_candidate_parser_revision(value: object, *, code: str) -> s
 
     Equality across receipts is necessary but not sufficient: a fully
     self-consistent older parser could otherwise mint a new automatic pointer.
-    The v3 parser is the only candidate normalizer whose rendered 13/15/12
-    field contract has been accepted for this narrow synthetic scope.
+    The v5 parser is the only candidate normalizer whose rendered 13/15/12
+    field contract has been accepted for this narrow synthetic scope.  Its
+    direct-Docling structural projection makes a coherent v4 chain ineligible.
     """
 
     revision = _identifier(value, code=code)
@@ -3576,42 +3582,364 @@ def _chunks(text: str, *, size: int = 8_000) -> list[str]:
     return [normalized[index : index + size] for index in range(0, len(normalized), size)]
 
 
-def _docling_preview_pages(
-    *, page_numbers: Sequence[int], markdown_text: str
-) -> list[DocumentPreviewPageV1]:
-    """Preserve every bounded Docling markdown chunk without inventing pages.
+@dataclass(frozen=True, slots=True)
+class _DoclingPageGeometry:
+    """Validated Docling page geometry used for page-relative provenance."""
 
-    ``export_to_markdown`` is document-global in the pinned Docling API, so it
-    does not safely expose a page boundary for every chunk.  Assigning all
-    chunks to the first admitted page is conservative and retains the complete
-    candidate text; assigning later chunks to guessed pages would corrupt
-    page/span provenance.  Table cells remain unavailable until an adapter
-    exposes real structured coordinates.
+    page_number: int
+    width: int
+    height: int
+
+
+@dataclass(frozen=True, slots=True)
+class _DoclingStructuredTableCell:
+    """One direct table-grid cell retained for the evaluation-only adapter."""
+
+    page_number: int
+    table_index: int
+    row_index: int
+    column_index: int
+    text: str
+
+
+@dataclass(frozen=True, slots=True)
+class _DoclingStructuredExtraction:
+    """One in-memory Docling result shared by preview and candidate paths.
+
+    The public preview contract deliberately exposes only pages and spans.
+    Table cells stay internal here so the evaluation adapter can score the
+    exact same conversion without re-parsing a Markdown export.
     """
 
-    chunks = _chunks(markdown_text)
-    return [
-        DocumentPreviewPageV1(
-            page_number=page_number,
-            width=1,
-            height=1,
-            coordinate_unit="pdf_points",
-            spans=(
-                [
-                    DocumentSpanV1(
-                        span_id=f"page-1-span-{ordinal}",
-                        ordinal=ordinal,
-                        reading_order=ordinal,
-                        text=chunk,
-                    )
-                    for ordinal, chunk in enumerate(chunks, start=1)
-                ]
-                if page_number == 1
-                else []
-            ),
+    pages: tuple[DocumentPreviewPageV1, ...]
+    table_cells: tuple[_DoclingStructuredTableCell, ...]
+
+
+def _docling_structured_output_invalid() -> DocumentPreviewExecutionError:
+    """Return one content-free failure for malformed converter output."""
+
+    return DocumentPreviewExecutionError("Docling structured output is invalid")
+
+
+def _docling_page_dimension(value: object) -> int:
+    if isinstance(value, bool) or not isinstance(value, (int, float)):
+        raise _docling_structured_output_invalid()
+    dimension = float(value)
+    if not math.isfinite(dimension) or not 0 < dimension <= 100_000:
+        raise _docling_structured_output_invalid()
+    return math.ceil(dimension)
+
+
+def _docling_page_geometries(document: object) -> dict[int, _DoclingPageGeometry]:
+    """Accept only contiguous Docling pages with explicit finite dimensions."""
+
+    page_values = getattr(document, "pages", None)
+    if not isinstance(page_values, Mapping) or not page_values:
+        raise _docling_structured_output_invalid()
+    geometries: dict[int, _DoclingPageGeometry] = {}
+    for raw_page_number, page in page_values.items():
+        if (
+            isinstance(raw_page_number, bool)
+            or not isinstance(raw_page_number, int)
+            or raw_page_number < 1
+            or raw_page_number in geometries
+        ):
+            raise _docling_structured_output_invalid()
+        size = getattr(page, "size", None)
+        width = _docling_page_dimension(getattr(size, "width", None))
+        height = _docling_page_dimension(getattr(size, "height", None))
+        geometries[raw_page_number] = _DoclingPageGeometry(
+            page_number=raw_page_number,
+            width=width,
+            height=height,
         )
-        for page_number in page_numbers
-    ]
+    page_numbers = sorted(geometries)
+    if page_numbers != list(range(1, len(page_numbers) + 1)):
+        raise _docling_structured_output_invalid()
+    return geometries
+
+
+def _docling_coordinate(value: object) -> float:
+    if isinstance(value, bool) or not isinstance(value, (int, float)):
+        raise _docling_structured_output_invalid()
+    coordinate = float(value)
+    if not math.isfinite(coordinate):
+        raise _docling_structured_output_invalid()
+    return coordinate
+
+
+def _docling_normalized_bbox(bbox: object, *, geometry: _DoclingPageGeometry) -> BoundingBoxV1:
+    """Convert one verified Docling bbox without clipping or guessing it."""
+
+    left = _docling_coordinate(getattr(bbox, "l", None))
+    top = _docling_coordinate(getattr(bbox, "t", None))
+    right = _docling_coordinate(getattr(bbox, "r", None))
+    bottom = _docling_coordinate(getattr(bbox, "b", None))
+    raw_origin = getattr(bbox, "coord_origin", None)
+    origin = getattr(raw_origin, "value", raw_origin)
+    if origin == "BOTTOMLEFT":
+        top, bottom = geometry.height - top, geometry.height - bottom
+    elif origin != "TOPLEFT":
+        raise _docling_structured_output_invalid()
+    if not (0 <= left < right <= geometry.width and 0 <= top < bottom <= geometry.height):
+        raise _docling_structured_output_invalid()
+    return BoundingBoxV1(
+        x=left / geometry.width,
+        y=top / geometry.height,
+        width=(right - left) / geometry.width,
+        height=(bottom - top) / geometry.height,
+    )
+
+
+def _docling_single_provenance(
+    item: object, *, geometries: Mapping[int, _DoclingPageGeometry]
+) -> tuple[int, BoundingBoxV1]:
+    """Require one unambiguous page and bbox for every emitted item."""
+
+    provenance_values = getattr(item, "prov", None)
+    if (
+        not isinstance(provenance_values, Sequence)
+        or isinstance(provenance_values, (str, bytes))
+        or len(provenance_values) != 1
+    ):
+        raise _docling_structured_output_invalid()
+    provenance = provenance_values[0]
+    page_number = getattr(provenance, "page_no", None)
+    if (
+        isinstance(page_number, bool)
+        or not isinstance(page_number, int)
+        or page_number not in geometries
+    ):
+        raise _docling_structured_output_invalid()
+    return page_number, _docling_normalized_bbox(
+        getattr(provenance, "bbox", None), geometry=geometries[page_number]
+    )
+
+
+def _docling_append_span(
+    *,
+    spans_by_page: Mapping[int, list[DocumentSpanV1]],
+    page_number: int,
+    text: str,
+    bbox: BoundingBoxV1 | None,
+) -> None:
+    """Append bounded, raw Docling text while preserving page reading order."""
+
+    for chunk in _chunks(text):
+        spans = spans_by_page[page_number]
+        ordinal = len(spans) + 1
+        spans.append(
+            DocumentSpanV1(
+                span_id=f"page-{page_number}-span-{ordinal}",
+                ordinal=ordinal,
+                reading_order=ordinal,
+                text=chunk,
+                bbox=bbox,
+            )
+        )
+
+
+def _is_docling_table_item(item: object) -> bool:
+    """Recognize the optional dependency's TableItem without importing it."""
+
+    data = getattr(item, "data", None)
+    return data is not None and all(
+        hasattr(data, attribute)
+        # Do not probe the computed ``grid`` property here: it materializes a
+        # row/column matrix.  Dimensions are bounded before accessing it.
+        for attribute in ("table_cells", "num_rows", "num_cols")
+    )
+
+
+def _docling_table_dimension(value: object) -> int:
+    if isinstance(value, bool) or not isinstance(value, int) or not 0 <= value <= 10_000:
+        raise _docling_structured_output_invalid()
+    return value
+
+
+def _docling_sequence(value: object) -> Sequence[object]:
+    if not isinstance(value, Sequence) or isinstance(value, (str, bytes)):
+        raise _docling_structured_output_invalid()
+    return value
+
+
+def _docling_table_cell_text(cell: object) -> str:
+    text = getattr(cell, "text", None)
+    if not isinstance(text, str):
+        raise _docling_structured_output_invalid()
+    normalized = text.strip()
+    if len(normalized) > 8_000:
+        raise _docling_structured_output_invalid()
+    return normalized
+
+
+def _docling_table_cell_bbox(
+    cell: object, *, geometry: _DoclingPageGeometry
+) -> BoundingBoxV1 | None:
+    bbox = getattr(cell, "bbox", None)
+    if bbox is None:
+        return None
+    return _docling_normalized_bbox(bbox, geometry=geometry)
+
+
+def _docling_table_cell_offsets(
+    cell: object, *, rows: int, columns: int
+) -> tuple[int, int, int, int]:
+    values = (
+        getattr(cell, "start_row_offset_idx", None),
+        getattr(cell, "end_row_offset_idx", None),
+        getattr(cell, "start_col_offset_idx", None),
+        getattr(cell, "end_col_offset_idx", None),
+    )
+    if any(isinstance(value, bool) or not isinstance(value, int) for value in values):
+        raise _docling_structured_output_invalid()
+    start_row = cast(int, values[0])
+    end_row = cast(int, values[1])
+    start_column = cast(int, values[2])
+    end_column = cast(int, values[3])
+    if not (0 <= start_row < end_row <= rows and 0 <= start_column < end_column <= columns):
+        raise _docling_structured_output_invalid()
+    return start_row, end_row, start_column, end_column
+
+
+def _docling_table_cells(
+    *,
+    item: object,
+    table_index: int,
+    page_number: int,
+    geometry: _DoclingPageGeometry,
+    spans_by_page: Mapping[int, list[DocumentSpanV1]],
+) -> list[_DoclingStructuredTableCell]:
+    """Read Docling's real grid and raw cells without Markdown reconstruction."""
+
+    data = getattr(item, "data", None)
+    rows = _docling_table_dimension(getattr(data, "num_rows", None))
+    columns = _docling_table_dimension(getattr(data, "num_cols", None))
+    if (rows == 0) != (columns == 0) or rows * columns > 10_000:
+        raise _docling_structured_output_invalid()
+    raw_cells = _docling_sequence(getattr(data, "table_cells", None))
+    if len(raw_cells) > rows * columns:
+        raise _docling_structured_output_invalid()
+    raw_spans: list[tuple[tuple[int, int, int, int], str, BoundingBoxV1 | None]] = []
+    raw_grid_cells: dict[tuple[int, int], str] = {}
+    for raw_cell in raw_cells:
+        offsets = _docling_table_cell_offsets(raw_cell, rows=rows, columns=columns)
+        text = _docling_table_cell_text(raw_cell)
+        bbox = _docling_table_cell_bbox(raw_cell, geometry=geometry)
+        start_row, end_row, start_column, end_column = offsets
+        for row_index in range(start_row, end_row):
+            for column_index in range(start_column, end_column):
+                coordinate = (row_index, column_index)
+                if coordinate in raw_grid_cells:
+                    raise _docling_structured_output_invalid()
+                raw_grid_cells[coordinate] = text
+        if text:
+            raw_spans.append((offsets, text, bbox))
+
+    grid = _docling_sequence(getattr(data, "grid", None))
+    if len(grid) != rows:
+        raise _docling_structured_output_invalid()
+    cells: list[_DoclingStructuredTableCell] = []
+    for row_index, row in enumerate(grid):
+        row_values = _docling_sequence(row)
+        if len(row_values) != columns:
+            raise _docling_structured_output_invalid()
+        for column_index, cell in enumerate(row_values):
+            text = _docling_table_cell_text(cell)
+            # The grid cell's bbox remains a required validity check even
+            # though table-cell F1 retains only the coordinate/text tuple.
+            _docling_table_cell_bbox(cell, geometry=geometry)
+            if raw_grid_cells.get((row_index, column_index), "") != text:
+                raise _docling_structured_output_invalid()
+            if text:
+                cells.append(
+                    _DoclingStructuredTableCell(
+                        page_number=page_number,
+                        table_index=table_index,
+                        row_index=row_index,
+                        column_index=column_index,
+                        text=text,
+                    )
+                )
+    for _offsets, text, bbox in sorted(raw_spans, key=lambda value: value[0]):
+        _docling_append_span(
+            spans_by_page=spans_by_page,
+            page_number=page_number,
+            text=text,
+            bbox=bbox,
+        )
+    return cells
+
+
+def _extract_docling_structured_document(document: object) -> _DoclingStructuredExtraction:
+    """Extract page-bound text and table cells from Docling's object model.
+
+    This is intentionally a narrow, local-only bridge.  It reads no source
+    truth, CSV, content stream, or Markdown representation.  Every emitted
+    text value is tied to one Docling provenance record; malformed structure
+    is an execution failure rather than an inferred page or table coordinate.
+    """
+
+    try:
+        geometries = _docling_page_geometries(document)
+        spans_by_page: dict[int, list[DocumentSpanV1]] = {
+            page_number: [] for page_number in geometries
+        }
+        iterate_items = getattr(document, "iterate_items", None)
+        if not callable(iterate_items):
+            raise _docling_structured_output_invalid()
+        table_index = 0
+        table_cells: list[_DoclingStructuredTableCell] = []
+        for entry in iterate_items():
+            if (
+                not isinstance(entry, Sequence)
+                or isinstance(entry, (str, bytes))
+                or len(entry) != 2
+            ):
+                raise _docling_structured_output_invalid()
+            item = entry[0]
+            if _is_docling_table_item(item):
+                table_index += 1
+                page_number, _ = _docling_single_provenance(item, geometries=geometries)
+                table_cells.extend(
+                    _docling_table_cells(
+                        item=item,
+                        table_index=table_index,
+                        page_number=page_number,
+                        geometry=geometries[page_number],
+                        spans_by_page=spans_by_page,
+                    )
+                )
+                continue
+            text = getattr(item, "text", None)
+            if text is None:
+                continue
+            if not isinstance(text, str):
+                raise _docling_structured_output_invalid()
+            if not text.strip():
+                continue
+            page_number, bbox = _docling_single_provenance(item, geometries=geometries)
+            _docling_append_span(
+                spans_by_page=spans_by_page,
+                page_number=page_number,
+                text=text,
+                bbox=bbox,
+            )
+        pages = tuple(
+            DocumentPreviewPageV1(
+                page_number=geometry.page_number,
+                width=geometry.width,
+                height=geometry.height,
+                coordinate_unit="pdf_points",
+                spans=spans_by_page[geometry.page_number],
+            )
+            for geometry in (geometries[page_number] for page_number in sorted(geometries))
+        )
+        return _DoclingStructuredExtraction(pages=pages, table_cells=tuple(table_cells))
+    except DocumentPreviewExecutionError:
+        raise
+    except Exception as error:
+        raise _docling_structured_output_invalid() from error
 
 
 def _pdf_page_dimensions(page: object) -> tuple[int, int]:
@@ -3849,10 +4177,15 @@ class DoclingPdfPreviewAdapter:
 
     def _docling_converter(self) -> object:
         with self._lock:
+            if self.options.get("pdf_backend") != _DOCLING_PDF_BACKEND:
+                raise DocumentPreviewUnavailable("Docling PDF backend configuration is invalid")
             if self._converter is not None:
                 return self._converter
             _require_docling_native_ascii_package_paths()
             try:
+                from docling.backend.pypdfium2_backend import (  # type: ignore[import-not-found]
+                    PyPdfiumDocumentBackend,
+                )
                 from docling.datamodel.base_models import DocumentStream, InputFormat  # type: ignore[import-not-found]
                 from docling.datamodel.pipeline_options import (  # type: ignore[import-not-found]
                     AcceleratorDevice,
@@ -3892,7 +4225,10 @@ class DoclingPdfPreviewAdapter:
                     self._converter = (
                         DocumentConverter(
                             format_options={
-                                InputFormat.PDF: PdfFormatOption(pipeline_options=pipeline)
+                                InputFormat.PDF: PdfFormatOption(
+                                    backend=PyPdfiumDocumentBackend,
+                                    pipeline_options=pipeline,
+                                )
                             }
                         ),
                         DocumentStream,
@@ -3958,25 +4294,28 @@ class DoclingPdfPreviewAdapter:
                 ) from error
             self._native_runtime_verified = True
 
-    def extract_raster_or_image(self, preview_input: PreviewInputV1) -> PreviewCandidateV1:
+    def extract_structured_pdf(self, preview_input: PreviewInputV1) -> _DoclingStructuredExtraction:
+        """Convert one PDF into the shared, page-bound Docling representation."""
+
         if preview_input.metadata.media_type != "application/pdf":
             raise DocumentPreviewUnavailable("PDF-only approval")
         self.verify_native_runtime()
         try:
             result = self._convert_pdf_bytes(preview_input.content)
             document = result.document
-            page_values = getattr(document, "pages", {})
-            page_numbers = sorted(int(number) for number in page_values) if page_values else [1]
-            pages = _docling_preview_pages(
-                page_numbers=page_numbers,
-                markdown_text=str(document.export_to_markdown()),
-            )
+            return _extract_docling_structured_document(document)
         except DocumentPreviewUnavailable:
+            raise
+        except DocumentPreviewExecutionError:
             raise
         except Exception as error:
             raise DocumentPreviewExecutionError("Docling execution failed") from error
-        if not pages or page_numbers != list(range(1, len(page_numbers) + 1)):
-            raise DocumentPreviewInputError("Docling PDF pages are invalid")
+
+    def extract_raster_or_image(self, preview_input: PreviewInputV1) -> PreviewCandidateV1:
+        """Return the public preview projection of the shared structured result."""
+
+        extraction = self.extract_structured_pdf(preview_input)
+        pages = list(extraction.pages)
         has_text = any(page.spans for page in pages)
         return PreviewCandidateV1(
             status="preview_ready" if has_text else "needs_review",
