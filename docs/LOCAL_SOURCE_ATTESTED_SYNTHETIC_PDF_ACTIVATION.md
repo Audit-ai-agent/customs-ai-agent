@@ -1,5 +1,9 @@
 # 합성 PDF source-attested 자동 활성화
 
+현재 r1 v11 감독형 profile의 문서 field, 학습·개발·봉인 평가 결과, 그리고 일반화
+한계는 [`R1_SUPERVISED_NATIVE_PDF_EVALUATION.md`](R1_SUPERVISED_NATIVE_PDF_EVALUATION.md)에
+별도로 설명한다. 이 문서는 activation artifact와 runtime fail-closed 경계에 집중한다.
+
 이 경로는 사람이 PDF를 다시 검수하지 않아도 되는 **합성 PDF 전용** 품질
 활성화 경로다. 기존 사람이 만든 합성 source truth와 final PDF의 authored
 content stream에서 만든 layout truth를 해시로 결속한다. 사람이 검수한 Gold
@@ -55,9 +59,11 @@ provenance field, 다른 scope/kind는 이 경로에서 모두 거부된다. 반
 - `source-layout-truths/<development-layout-truth-sha>.json`: 개발 60개 전체의
   source PDF SHA와 6개 strata(각 10개)를 보존한다. 봉인 packet과 PDF SHA/asset ID가
   겹치면 거부한다.
-- `source-attested-development-selections/<selection-sha>.json`: 정확히
-  `pdf_text_layer`, `paddleocr`, `docling` 세 후보와 선택된 passing 후보의 engine,
-  revision, configuration, inventory, development result hash를 결속한다.
+- `source-attested-development-selections/<selection-sha>.json`: canonical r1 v11에서는
+  정확히 하나의 passing `pdf_text_layer` supervised profile의 engine, revision,
+  configuration, inventory, development result hash를 결속한다. 과거 또는 noncanonical
+  비교 경로에서의 `pdf_text_layer`·`paddleocr`·`docling` 세 후보 규칙은 이 r1 v11
+  선택 계약에 적용하지 않는다.
 - `source-attested-sealed-runs/<sealed-run-sha>.json`: 선택 결과, 봉인 layout,
   candidate bundle/parser 및 engine/configuration/inventory를 결속한다.
 - `candidate-run-reservations/sealed-<sealed-packet-sha>.json`: 봉인 후보 실행을

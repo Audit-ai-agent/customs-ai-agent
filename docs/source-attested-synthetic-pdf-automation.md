@@ -10,6 +10,13 @@ native template 후보를 비교하는
 문서, 스캔 품질, 손글씨, 도장 중첩 또는 독립 optical OCR 품질을 보장하지
 않는다. JPEG/PNG는 이 경로에 포함되지 않으며 계속 `unavailable`이다.
 
+현재 r1 v11 감독형 profile의 실제 문서 field, 학습 분리, 개발·봉인 결과와
+한계를 이해하기 쉬운 형태로 정리한 안내는
+[`R1_SUPERVISED_NATIVE_PDF_EVALUATION.md`](R1_SUPERVISED_NATIVE_PDF_EVALUATION.md)를
+참조한다. 아래의 여러 엔진 비교·실행 설명은 이전 후보를 검증하고 감사하기 위한
+일반 경로를 포함한다. canonical r1 v11 활성화는 순위로 세 엔진을 고르는 방식이
+아니라, 고정된 supervised `pdf_text_layer` profile 하나만 허용한다.
+
 ## 안전 경계
 
 - PDF, layout truth, candidate OCR, 모델, receipt는 모두 Git 밖

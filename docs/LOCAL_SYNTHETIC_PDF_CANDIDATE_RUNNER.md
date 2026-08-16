@@ -150,9 +150,14 @@ uv run python tools/evaluate_synthetic_pdf_ocr.py `
   --engine-kind pdf_text_layer
 ```
 
-개발 선택은 `pdf_text_layer`, `paddleocr`, `docling` 결과가 각각 정확히
-한 개씩 있어야만 수행됩니다. 누락·중복·서로 다른 packet/Gold receipt는
-선택 실패입니다.
+이 문서에서 설명하는 `pdf_text_layer`·`paddleocr`·`docling` 세 후보 비교는
+human-Gold, legacy 또는 noncanonical 비교 경로에 적용한다. canonical r1 v11
+감독형 경로는 세 결과를 순위로 비교하지 않는다. 정확히 하나의 고정 supervised
+`pdf_text_layer` profile만 허용하며, 자세한 field·학습·평가 범위는
+[`R1_SUPERVISED_NATIVE_PDF_EVALUATION.md`](R1_SUPERVISED_NATIVE_PDF_EVALUATION.md),
+활성화 결속은
+[`LOCAL_SOURCE_ATTESTED_SYNTHETIC_PDF_ACTIVATION.md`](LOCAL_SOURCE_ATTESTED_SYNTHETIC_PDF_ACTIVATION.md)를
+따른다.
 
 ## field와 table의 제한
 
