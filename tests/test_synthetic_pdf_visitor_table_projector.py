@@ -79,6 +79,28 @@ def _fragmented_grid(
     return spans
 
 
+def _anchor_row(
+    *,
+    xs: list[float],
+    y: float,
+    reading_orders: list[int],
+    prefix: str,
+) -> list[CandidateSpanV1]:
+    assert len(xs) == len(reading_orders)
+    return [
+        _span(
+            text=f"{prefix}-{column_index}",
+            reading_order=reading_order,
+            x=x,
+            y=y,
+            bbox=None,
+            anchor_x=x,
+            anchor_y=y,
+        )
+        for column_index, (x, reading_order) in enumerate(zip(xs, reading_orders))
+    ]
+
+
 @pytest.mark.parametrize("columns", [5, 6], ids=["five-columns", "six-columns"])
 @pytest.mark.parametrize("geometry", ["bbox", "anchor"], ids=["public-bbox", "local-anchor"])
 def test_projects_one_fragmented_structural_grid_without_document_type_or_text_predicate(
@@ -112,6 +134,160 @@ def test_uses_reading_order_for_header_when_vertical_coordinates_are_reversed() 
     assert [cell.text for cell in cells[:5]] == [
         f"opaque-header-{index}-aopaque-header-{index}-b" for index in range(5)
     ]
+
+
+def test_anchor_path_coalesces_coincident_callbacks_into_six_columns() -> None:
+    spans: list[CandidateSpanV1] = []
+    reading_order = 1
+    for column_index in range(6):
+        x = 0.06 + column_index * 0.14
+        for fragment_index in range(2 if column_index < 5 else 1):
+            spans.append(
+                _span(
+                    text=f"opaque-header-{column_index}-{fragment_index}",
+                    reading_order=reading_order,
+                    x=x,
+                    y=0.40,
+                    bbox=None,
+                    anchor_x=x,
+                    anchor_y=0.40,
+                )
+            )
+            reading_order += 1
+    spans.extend(
+        _anchor_row(
+            xs=[0.06 + column_index * 0.14 for column_index in range(6)],
+            y=0.46,
+            reading_orders=list(range(reading_order, reading_order + 6)),
+            prefix="opaque-body",
+        )
+    )
+
+    cells = project_synthetic_pdf_visitor_table_cells(spans=spans)
+
+    assert [(cell.row_index, cell.column_index) for cell in cells] == [
+        (row_index, column_index) for row_index in (0, 1) for column_index in range(6)
+    ]
+
+
+def test_anchor_path_accepts_same_column_profile_despite_text_start_alignment_shift() -> None:
+    # These starts are visibly in the same five slots but differ too much for
+    # a rectangle-center comparison.  The normalized profile and envelope are
+    # intentionally the structural predicate instead.
+    spans = [
+        *_anchor_row(
+            xs=[0.1084, 0.3388, 0.5819, 0.7131, 0.8437],
+            y=0.40,
+            reading_orders=[1, 2, 3, 4, 5],
+            prefix="opaque-header",
+        ),
+        *_anchor_row(
+            xs=[0.0805, 0.2567, 0.6083, 0.7606, 0.8297],
+            y=0.46,
+            reading_orders=[6, 7, 8, 9, 10],
+            prefix="opaque-body",
+        ),
+    ]
+
+    assert len(project_synthetic_pdf_visitor_table_cells(spans=spans)) == 10
+
+
+def test_anchor_path_accepts_only_strict_columnwise_interleaving() -> None:
+    xs = [0.08, 0.27, 0.48, 0.69, 0.88]
+    spans = [
+        *_anchor_row(
+            xs=xs,
+            y=0.40,
+            reading_orders=[1, 3, 5, 7, 9],
+            prefix="opaque-header",
+        ),
+        *_anchor_row(
+            xs=xs,
+            y=0.46,
+            reading_orders=[2, 4, 6, 8, 10],
+            prefix="opaque-body",
+        ),
+    ]
+
+    assert len(project_synthetic_pdf_visitor_table_cells(spans=spans)) == 10
+
+
+def test_anchor_path_rejects_nonalternating_interleaved_callbacks() -> None:
+    xs = [0.08, 0.27, 0.48, 0.69, 0.88]
+    spans = [
+        *_anchor_row(
+            xs=xs,
+            y=0.40,
+            reading_orders=[1, 4, 5, 8, 9],
+            prefix="opaque-header",
+        ),
+        *_anchor_row(
+            xs=xs,
+            y=0.46,
+            reading_orders=[2, 3, 6, 7, 10],
+            prefix="opaque-body",
+        ),
+    ]
+
+    assert project_synthetic_pdf_visitor_table_cells(spans=spans) == []
+
+
+def test_anchor_path_keeps_only_embedded_partial_lane_continuations() -> None:
+    xs = [0.08, 0.27, 0.48, 0.69, 0.88]
+    spans = [
+        *_anchor_row(
+            xs=xs,
+            y=0.40,
+            reading_orders=[1, 2, 3, 4, 5],
+            prefix="opaque-header",
+        ),
+        *_anchor_row(
+            xs=xs,
+            y=0.46,
+            reading_orders=[6, 7, 9, 10, 11],
+            prefix="opaque-body",
+        ),
+        _span(
+            text="opaque-body-1-more",
+            reading_order=8,
+            x=xs[1],
+            y=0.47,
+            bbox=None,
+            anchor_x=xs[1],
+            anchor_y=0.47,
+        ),
+    ]
+
+    cells = project_synthetic_pdf_visitor_table_cells(spans=spans)
+
+    assert len(cells) == 10
+    assert cells[6].text == "opaque-body-1opaque-body-1-more"
+
+
+def test_anchor_path_rejects_equally_good_overlapping_grid_pairs() -> None:
+    xs = [0.08, 0.27, 0.48, 0.69, 0.88]
+    spans = [
+        *_anchor_row(
+            xs=xs,
+            y=0.40,
+            reading_orders=[1, 2, 3, 4, 5],
+            prefix="opaque-first",
+        ),
+        *_anchor_row(
+            xs=xs,
+            y=0.46,
+            reading_orders=[6, 7, 8, 9, 10],
+            prefix="opaque-second",
+        ),
+        *_anchor_row(
+            xs=xs,
+            y=0.52,
+            reading_orders=[11, 12, 13, 14, 15],
+            prefix="opaque-third",
+        ),
+    ]
+
+    assert project_synthetic_pdf_visitor_table_cells(spans=spans) == []
 
 
 def test_bbox_path_has_priority_when_anchors_do_not_form_a_grid() -> None:
