@@ -52,7 +52,7 @@ def _root(tmp_path: Path) -> Path:
 def _configuration(root: Path, engine_kind: str) -> tuple[Path, dict[str, object]]:
     if engine_kind == "pdf_text_layer":
         options: dict[str, object] = {}
-        extractor_revision = "pdf-text-test-v1"
+        extractor_revision = "pypdf-5.3.1-text-layer-v1"
     elif engine_kind == "paddleocr":
         options = {
             "det_model_directory": "models/paddle/det",

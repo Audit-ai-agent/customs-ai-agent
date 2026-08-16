@@ -19,6 +19,7 @@ from customs_ai_agent.evaluation.document_gold import (
     receipt_sha256,
 )
 from customs_ai_agent.evaluation.document_ocr_quality import (
+    CandidateFieldV1,
     CandidateSpanV1,
     CandidateTableCellV1,
     EvaluationPacketV2,
@@ -37,6 +38,7 @@ from customs_ai_agent.evaluation.synthetic_pdf_candidate_runner import (
     build_default_synthetic_pdf_candidate_adapter,
     load_local_synthetic_pdf_evaluation_inputs,
     load_unapproved_local_candidate_profile,
+    merge_synthetic_pdf_candidate_fields,
     normalize_synthetic_pdf_docling_table_cells,
     normalize_synthetic_pdf_fields,
     run_synthetic_pdf_ocr_candidate,
@@ -147,7 +149,7 @@ def _profile_sidecars(root: Path, engine_kind: str) -> tuple[Path, Path]:
         configuration = {
             "schema_version": "1.0",
             "engine_kind": engine_kind,
-            "extractor_revision": "native-test-v1",
+            "extractor_revision": "pypdf-5.3.1-text-layer-visitor-v2",
             "options": {},
         }
         inventory = {
@@ -530,7 +532,7 @@ def _run(
 
 
 @pytest.mark.parametrize("engine_kind", ["pdf_text_layer", "paddleocr", "docling"])
-def test_runner_binds_every_engine_profile_and_preserves_adapter_cells(
+def test_runner_binds_every_engine_profile_and_keeps_only_verified_table_evidence(
     tmp_path: Path, engine_kind: str
 ) -> None:
     fixture = _fixture(tmp_path, engine_kind=engine_kind)
@@ -551,9 +553,10 @@ def test_runner_binds_every_engine_profile_and_preserves_adapter_cells(
         "amount",
         "total",
     ]
-    if engine_kind == "docling":
+    if engine_kind in {"docling", "pdf_text_layer"}:
         # A single unclassified cell cannot be passed through as a synthetic
-        # target table; direct Docling cells need one complete visible target.
+        # target table.  Docling needs one direct structural target; native
+        # text-layer candidates need one projector-produced visitor grid.
         assert bundle.documents[0].table_cells == []
     else:
         assert bundle.documents[0].table_cells[0].text == "Widget"
@@ -1121,11 +1124,12 @@ def test_docling_markdown_table_normalizer_rejects_no_or_malformed_table(text: s
     )
 
 
-def _direct_docling_five_column_cells(
+def _direct_candidate_table_cells(
     *,
     table_index: int,
     opaque_prefix: str,
     page_number: int = 1,
+    columns: int = 5,
     trailing_rows: tuple[tuple[int, ...], ...] = (),
 ) -> list[CandidateTableCellV1]:
     """Build coordinate-only fixtures; values are not header aliases."""
@@ -1139,7 +1143,7 @@ def _direct_docling_five_column_cells(
             text=f"{opaque_prefix}-{row_index}-{column_index}",
         )
         for row_index in (0, 1)
-        for column_index in range(5)
+        for column_index in range(columns)
     ]
     for row_index, columns in enumerate(trailing_rows, start=2):
         cells.extend(
@@ -1156,16 +1160,16 @@ def _direct_docling_five_column_cells(
 
 
 @pytest.mark.parametrize(
-    ("document_type", "opaque_prefix"),
+    ("document_type", "opaque_prefix", "columns"),
     [
-        ("bill_of_lading", "bl"),
-        ("invoice", "invoice"),
-        ("packing_list", "packing"),
+        ("bill_of_lading", "bl", 6),
+        ("invoice", "invoice", 5),
+        ("packing_list", "packing", 5),
     ],
     ids=["B/L", "Invoice", "Packing-List"],
 )
-def test_v5_direct_docling_selector_reindexes_one_structural_target_for_every_document_type(
-    document_type: str, opaque_prefix: str
+def test_v6_structured_selector_reindexes_one_structural_target_for_every_document_type(
+    document_type: str, opaque_prefix: str, columns: int
 ) -> None:
     """All fixed document forms use the same coordinate-only direct policy."""
 
@@ -1177,23 +1181,23 @@ def test_v5_direct_docling_selector_reindexes_one_structural_target_for_every_do
             column_index=0,
             text=f"unrelated-{document_type}",
         ),
-        *_direct_docling_five_column_cells(table_index=7, opaque_prefix=opaque_prefix),
+        *_direct_candidate_table_cells(table_index=7, opaque_prefix=opaque_prefix, columns=columns),
     ]
 
     selected = select_synthetic_pdf_candidate_table_cells(table_cells=raw_cells)
 
-    assert len(selected) == 10
+    assert len(selected) == columns * 2
     assert {(cell.page_number, cell.table_index) for cell in selected} == {(1, 1)}
     assert {(cell.row_index, cell.column_index) for cell in selected} == {
-        (row_index, column_index) for row_index in (0, 1) for column_index in range(5)
+        (row_index, column_index) for row_index in (0, 1) for column_index in range(columns)
     }
     assert [cell.text for cell in selected] == [
         cell.text for cell in raw_cells if cell.table_index == 7
     ]
 
 
-def test_v5_direct_docling_selector_allows_trailing_partial_footer_rows() -> None:
-    raw_cells = _direct_docling_five_column_cells(
+def test_v6_structured_selector_allows_trailing_partial_footer_rows() -> None:
+    raw_cells = _direct_candidate_table_cells(
         table_index=7,
         opaque_prefix="target",
         trailing_rows=((0, 1), (2,)),
@@ -1205,11 +1209,11 @@ def test_v5_direct_docling_selector_allows_trailing_partial_footer_rows() -> Non
     assert [cell.text for cell in selected] == [cell.text for cell in raw_cells[:10]]
 
 
-@pytest.mark.parametrize("malformation", ["missing", "duplicate", "row_gap", "sixth_column"])
-def test_v5_direct_docling_selector_rejects_missing_duplicate_or_nonrectangular_coordinates(
+@pytest.mark.parametrize("malformation", ["missing", "duplicate", "row_gap", "seventh_column"])
+def test_v6_structured_selector_rejects_missing_duplicate_or_nonrectangular_coordinates(
     malformation: str,
 ) -> None:
-    raw_cells = _direct_docling_five_column_cells(table_index=7, opaque_prefix="target")
+    raw_cells = _direct_candidate_table_cells(table_index=7, opaque_prefix="target")
     if malformation == "missing":
         raw_cells = [cell for cell in raw_cells if (cell.row_index, cell.column_index) != (1, 4)]
     elif malformation == "duplicate":
@@ -1230,7 +1234,7 @@ def test_v5_direct_docling_selector_rejects_missing_duplicate_or_nonrectangular_
                 page_number=1,
                 table_index=7,
                 row_index=1,
-                column_index=5,
+                column_index=6,
                 text="outside",
             )
         )
@@ -1238,8 +1242,8 @@ def test_v5_direct_docling_selector_rejects_missing_duplicate_or_nonrectangular_
     assert select_synthetic_pdf_candidate_table_cells(table_cells=raw_cells) == []
 
 
-def test_v5_direct_docling_selector_rejects_an_extra_complete_five_column_body_row() -> None:
-    raw_cells = _direct_docling_five_column_cells(
+def test_v6_structured_selector_rejects_an_extra_complete_five_column_body_row() -> None:
+    raw_cells = _direct_candidate_table_cells(
         table_index=7,
         opaque_prefix="target",
         trailing_rows=(tuple(range(5)),),
@@ -1248,13 +1252,13 @@ def test_v5_direct_docling_selector_rejects_an_extra_complete_five_column_body_r
     assert select_synthetic_pdf_candidate_table_cells(table_cells=raw_cells) == []
 
 
-def test_v5_direct_docling_selector_rejects_zero_or_multiple_structural_targets() -> None:
+def test_v6_structured_selector_rejects_zero_or_multiple_structural_targets() -> None:
     assert select_synthetic_pdf_candidate_table_cells(table_cells=[]) == []
     assert (
         select_synthetic_pdf_candidate_table_cells(
             table_cells=[
-                *_direct_docling_five_column_cells(table_index=1, opaque_prefix="first"),
-                *_direct_docling_five_column_cells(table_index=2, opaque_prefix="second"),
+                *_direct_candidate_table_cells(table_index=1, opaque_prefix="first"),
+                *_direct_candidate_table_cells(table_index=2, opaque_prefix="second"),
             ]
         )
         == []
@@ -1300,6 +1304,96 @@ def test_docling_runner_routes_raw_structured_cells_through_selection_hook(
 
     assert isinstance(seen["table_cells"], tuple)
     assert [cell.text for cell in bundle.documents[0].table_cells] == ["selected-only"]
+
+
+def test_native_text_layer_runner_routes_only_visitor_spans_through_geometry_projector(
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    fixture = _fixture(tmp_path, engine_kind="pdf_text_layer")
+    seen: dict[str, object] = {}
+    projected = _table_cells(
+        headers=("opaque-0", "opaque-1", "opaque-2", "opaque-3", "opaque-4"),
+        values=("opaque-5", "opaque-6", "opaque-7", "opaque-8", "opaque-9"),
+    )
+
+    def project(*, spans: object) -> list[CandidateTableCellV1]:
+        seen["spans"] = spans
+        return list(projected)
+
+    def select(*, table_cells: object) -> list[CandidateTableCellV1]:
+        seen["table_cells"] = table_cells
+        return list(projected)
+
+    monkeypatch.setattr(
+        candidate_runner_module,
+        "project_synthetic_pdf_visitor_table_cells",
+        project,
+    )
+    monkeypatch.setattr(
+        candidate_runner_module,
+        "select_synthetic_pdf_candidate_table_cells",
+        select,
+    )
+
+    summary = _run(fixture, _FakeAdapter(include_table_cells=False))
+    output = fixture["output_directory"] / summary["candidate_file"]  # type: ignore[operator]
+    bundle = SyntheticPdfCandidateOutputBundleV1.model_validate_json(output.read_bytes())
+
+    assert isinstance(seen["spans"], tuple)
+    assert seen["table_cells"] == projected
+    assert bundle.documents[0].table_cells == list(projected)
+
+
+def test_native_text_layer_runner_uses_positioned_field_projection(
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    fixture = _fixture(tmp_path, engine_kind="pdf_text_layer")
+    seen: dict[str, object] = {}
+
+    def project(*, document_type: object, spans: object) -> list[CandidateFieldV1]:
+        seen["document_type"] = document_type
+        seen["spans"] = spans
+        return [CandidateFieldV1(field_name="inv_no", value="INV-001")]
+
+    monkeypatch.setattr(
+        candidate_runner_module,
+        "project_native_pdf_text_layer_fields",
+        project,
+    )
+    monkeypatch.setattr(
+        candidate_runner_module,
+        "project_synthetic_pdf_visitor_table_cells",
+        lambda *, spans: [],
+    )
+
+    summary = _run(fixture, _FakeAdapter(include_table_cells=False))
+    output = fixture["output_directory"] / summary["candidate_file"]  # type: ignore[operator]
+    bundle = SyntheticPdfCandidateOutputBundleV1.model_validate_json(output.read_bytes())
+
+    assert seen["document_type"] == "invoice"
+    assert isinstance(seen["spans"], tuple)
+    assert {field.field_name for field in bundle.documents[0].fields} >= {"inv_no"}
+
+
+def test_merge_candidate_fields_keeps_only_equal_or_single_raw_values() -> None:
+    merged = merge_synthetic_pdf_candidate_fields(
+        [
+            CandidateFieldV1(field_name="same", value="value"),
+            CandidateFieldV1(field_name="left_only", value="left"),
+            CandidateFieldV1(field_name="conflict", value="first"),
+        ],
+        [
+            CandidateFieldV1(field_name="same", value="value"),
+            CandidateFieldV1(field_name="right_only", value="right"),
+            CandidateFieldV1(field_name="conflict", value="second"),
+        ],
+    )
+
+    assert [(field.field_name, field.value) for field in merged] == [
+        ("same", "value"),
+        ("left_only", "left"),
+        ("right_only", "right"),
+    ]
 
 
 def test_runner_rejects_source_drift_before_adapter_invocation(tmp_path: Path) -> None:

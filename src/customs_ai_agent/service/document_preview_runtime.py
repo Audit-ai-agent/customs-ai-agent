@@ -33,7 +33,7 @@ import stat
 import sys
 import threading
 from contextlib import contextmanager
-from dataclasses import dataclass, field
+from dataclasses import dataclass, field, replace
 from pathlib import Path, PurePosixPath
 from typing import Any, Callable, Final, Iterator, Literal, Mapping, Protocol, Sequence, cast
 from urllib.parse import urlparse
@@ -75,7 +75,7 @@ _SOURCE_CANDIDATE_EXECUTION_DIRECTORY = "source-attested-candidate-executions"
 _SOURCE_EVALUATION_RESULT_DIRECTORY = "source-attested-evaluation-results"
 _SOURCE_DEVELOPMENT_SELECTION_DIRECTORY = "source-attested-development-selections"
 _SOURCE_SEALED_RUN_DIRECTORY = "source-attested-sealed-runs"
-_SOURCE_ATTESTED_CANDIDATE_PARSER_REVISION: Final = "synthetic-pdf-visible-layout-normalizer-v5"
+_SOURCE_ATTESTED_CANDIDATE_PARSER_REVISION: Final = "synthetic-pdf-visible-layout-normalizer-v8"
 _SEALED_RESERVATION_DIRECTORY = "candidate-run-reservations"
 _SOURCE_LAYOUT_RECORD_COUNTS: Mapping[str, int] = {"development": 60, "sealed": 20}
 _MAX_SOURCE_DATASET_RECEIPT_BYTES = 8 * 1024 * 1024
@@ -84,6 +84,20 @@ _MAX_SOURCE_CANDIDATE_BUNDLE_BYTES = 32 * 1024 * 1024
 _FIELD_EXACT_MATCH_MIN = 0.99
 _OCR_CER_MAX = 0.01
 _TABLE_CELL_F1_MIN = 0.98
+# The text-layer adapter has two materially different extraction algorithms.
+# These names are part of the approved-engine evidence, not cosmetic labels:
+# a pointer approved against the historic aggregate ``extract_text`` result
+# must never silently begin serving visitor-callback fragments after a code
+# update.  Keep the legacy revision loadable for existing human approvals;
+# candidate-only visitor geometry is available only from the explicit v2.
+_PDF_TEXT_LAYER_LEGACY_EXTRACTOR_REVISION: Final = "pypdf-5.3.1-text-layer-v1"
+_PDF_TEXT_LAYER_VISITOR_EXTRACTOR_REVISION: Final = "pypdf-5.3.1-text-layer-visitor-v2"
+_PDF_TEXT_LAYER_EXTRACTOR_REVISIONS: Final[frozenset[str]] = frozenset(
+    {
+        _PDF_TEXT_LAYER_LEGACY_EXTRACTOR_REVISION,
+        _PDF_TEXT_LAYER_VISITOR_EXTRACTOR_REVISION,
+    }
+)
 _NETWORK_GUARD_LOCK = threading.Lock()
 _BYTECODE_GUARD_LOCK = threading.Lock()
 _NETWORK_GUARD_STATE = threading.local()
@@ -936,11 +950,14 @@ def parse_runtime_configuration(raw: bytes) -> RuntimeConfigurationV1:
     if value["schema_version"] != "1.0":
         raise DocumentPreviewRuntimeError("document_preview_configuration_invalid")
     kind = _engine_kind(value["engine_kind"], code="document_preview_configuration_invalid")
+    extractor_revision = _identifier(
+        value["extractor_revision"], code="document_preview_configuration_invalid"
+    )
+    if kind == "pdf_text_layer" and extractor_revision not in _PDF_TEXT_LAYER_EXTRACTOR_REVISIONS:
+        raise DocumentPreviewRuntimeError("document_preview_configuration_invalid")
     return RuntimeConfigurationV1(
         engine_kind=kind,
-        extractor_revision=_identifier(
-            value["extractor_revision"], code="document_preview_configuration_invalid"
-        ),
+        extractor_revision=extractor_revision,
         options=_parse_options(value["options"], kind=kind),
     )
 
@@ -1286,9 +1303,10 @@ def _source_attested_candidate_parser_revision(value: object, *, code: str) -> s
 
     Equality across receipts is necessary but not sufficient: a fully
     self-consistent older parser could otherwise mint a new automatic pointer.
-    The v5 parser is the only candidate normalizer whose rendered 13/15/12
+    The v8 parser is the only candidate normalizer whose rendered 13/15/12
     field contract has been accepted for this narrow synthetic scope.  Its
-    direct-Docling structural projection makes a coherent v4 chain ineligible.
+    direct structured-table selection plus native visitor anchor/field
+    projection make a coherent v7 chain ineligible.
     """
 
     revision = _identifier(value, code=code)
@@ -3954,20 +3972,22 @@ def _pdf_page_dimensions(page: object) -> tuple[int, int]:
     return width, height
 
 
-@dataclass(slots=True)
-class PdfTextLayerPreviewAdapter:
-    """Pinned local ``pypdf`` extraction with no raster/OCR fallback."""
+def _extract_pdf_text_layer_legacy(preview_input: PreviewInputV1) -> PreviewCandidateV1 | None:
+    """Preserve the approved v1 aggregate ``pypdf`` extraction semantics.
 
-    extractor_revision: str
+    This path intentionally keeps the original ``page.extract_text()`` call
+    and its whole-page ``_chunks`` projection.  It is separate from the v2
+    visitor path because the two algorithms can produce different text spans
+    for exactly the same PDF and must therefore never share an engine
+    revision.
+    """
 
-    def extract_pdf_text_layer(self, preview_input: PreviewInputV1) -> PreviewCandidateV1 | None:
-        if preview_input.metadata.media_type != "application/pdf":
-            return None
-        try:
-            from pypdf import PdfReader  # type: ignore[import-not-found]
-        except ImportError as error:
-            raise DocumentPreviewUnavailable("pypdf is not provisioned") from error
-        try:
+    try:
+        from pypdf import PdfReader  # type: ignore[import-not-found]
+    except ImportError as error:
+        raise DocumentPreviewUnavailable("pypdf is not provisioned") from error
+    try:
+        with local_files_only():
             reader = PdfReader(io.BytesIO(preview_input.content), strict=True)
             if reader.is_encrypted:
                 raise DocumentPreviewInputError("encrypted PDF preview is unavailable")
@@ -3995,20 +4015,287 @@ class PdfTextLayerPreviewAdapter:
                         spans=spans,
                     )
                 )
-        except DocumentPreviewInputError:
-            raise
-        except Exception as error:
-            raise DocumentPreviewInputError("PDF text layer cannot be safely decoded") from error
-        if not pages:
-            raise DocumentPreviewInputError("PDF has no pages")
-        if not has_text:
+    except DocumentPreviewInputError:
+        raise
+    except Exception:
+        # A parser exception can include source text.  Preserve the legacy
+        # extraction output while keeping the existing content-free error
+        # boundary for logs and transcripts.
+        raise DocumentPreviewInputError("PDF text layer cannot be safely decoded") from None
+    if not pages:
+        raise DocumentPreviewInputError("PDF has no pages")
+    if not has_text:
+        return None
+    return PreviewCandidateV1(
+        status="preview_ready",
+        extractor_revision=_PDF_TEXT_LAYER_LEGACY_EXTRACTOR_REVISION,
+        pages=pages,
+        warnings=[DocumentExtractionWarningV1(code="text_layer_used")],
+    )
+
+
+def _pdf_text_visitor_fragment(value: object) -> str | None:
+    """Keep a visitor fragment verbatim except for its terminal line break.
+
+    ``pypdf`` uses a trailing LF (and sometimes CRLF) to delimit text-showing
+    operations.  It is an extraction artifact rather than content that belongs
+    in the individual callback fragment.  Leading whitespace and all other
+    characters remain untouched so this path cannot silently rewrite a native
+    text layer.
+    """
+
+    if not isinstance(value, str):
+        raise DocumentPreviewInputError("PDF text visitor output is invalid")
+    trimmed = value.rstrip("\r\n")
+    return trimmed or None
+
+
+_PDF_TEXT_VISITOR_IDENTITY_MATRIX: Final[tuple[float, float, float, float, float, float]] = (
+    1.0,
+    0.0,
+    0.0,
+    1.0,
+    0.0,
+    0.0,
+)
+
+
+@dataclass(frozen=True, slots=True)
+class _PdfTextLayerVisitorAnchor:
+    """One internal-only normalized text start point, with top-origin ``y``."""
+
+    x: float
+    y: float
+
+
+@dataclass(frozen=True, slots=True)
+class _PdfTextLayerVisitorFragment:
+    """One local visitor fragment before it is projected to public preview spans."""
+
+    page_number: int
+    ordinal: int
+    text: str
+    anchor: _PdfTextLayerVisitorAnchor | None
+
+
+@dataclass(frozen=True, slots=True)
+class _PdfTextLayerVisitorPage:
+    """One internal-only page result shared by preview and candidate paths."""
+
+    page_number: int
+    width: int
+    height: int
+    fragments: tuple[_PdfTextLayerVisitorFragment, ...]
+
+
+def _pdf_text_visitor_matrix(
+    value: object,
+) -> tuple[float, float, float, float, float, float] | None:
+    """Accept one finite six-value PDF matrix without coercing arbitrary values."""
+
+    if not isinstance(value, Sequence) or isinstance(value, (str, bytes)) or len(value) != 6:
+        return None
+    coordinates: list[float] = []
+    for coordinate in value:
+        if isinstance(coordinate, bool) or not isinstance(coordinate, (int, float)):
+            return None
+        numeric = float(coordinate)
+        if not math.isfinite(numeric):
+            return None
+        coordinates.append(numeric)
+    return cast(tuple[float, float, float, float, float, float], tuple(coordinates))
+
+
+def _pdf_text_visitor_anchor(
+    *, current_matrix: object, text_matrix: object, width: int, height: int
+) -> _PdfTextLayerVisitorAnchor | None:
+    """Return a strict local anchor without inventing a public text rectangle.
+
+    ``pypdf`` gives the text matrix's start point, but only an identity CTM
+    keeps that point directly aligned to the unrotated page coordinates used
+    here.  Any other transformation, malformed matrix, or out-of-page point
+    is deliberately omitted.  The internal anchor is never placed on the
+    public ``DocumentSpanV1`` wire model.
+    """
+
+    current = _pdf_text_visitor_matrix(current_matrix)
+    text = _pdf_text_visitor_matrix(text_matrix)
+    if current != _PDF_TEXT_VISITOR_IDENTITY_MATRIX or text is None:
+        return None
+    x, y = text[4], text[5]
+    if not 0 <= x <= width or not 0 <= y <= height:
+        return None
+    return _PdfTextLayerVisitorAnchor(x=x / width, y=(height - y) / height)
+
+
+def _pdf_text_visitor_fragments(
+    *, page: object, page_number: int, width: int, height: int
+) -> tuple[_PdfTextLayerVisitorFragment, ...]:
+    """Extract local callback fragments and only their proven start anchors.
+
+    A start anchor belongs only to the first emitted chunk of one callback;
+    later chunks have no proven advance and therefore receive ``None``.
+    """
+
+    fragments: list[_PdfTextLayerVisitorFragment] = []
+
+    def visitor(
+        text: object,
+        current_matrix: object,
+        text_matrix: object,
+        _font_dictionary: object,
+        _font_size: object,
+    ) -> None:
+        fragment = _pdf_text_visitor_fragment(text)
+        if fragment is None:
+            return
+        anchor = _pdf_text_visitor_anchor(
+            current_matrix=current_matrix,
+            text_matrix=text_matrix,
+            width=width,
+            height=height,
+        )
+        for offset in range(0, len(fragment), 8_000):
+            if len(fragments) >= 10_000:
+                raise DocumentPreviewInputError("PDF text layer has too many fragments")
+            ordinal = len(fragments) + 1
+            fragments.append(
+                _PdfTextLayerVisitorFragment(
+                    page_number=page_number,
+                    ordinal=ordinal,
+                    text=fragment[offset : offset + 8_000],
+                    anchor=anchor if offset == 0 else None,
+                )
+            )
+
+    extract_text = getattr(page, "extract_text", None)
+    if not callable(extract_text):
+        raise DocumentPreviewInputError("PDF text layer cannot be safely decoded")
+    extract_text(visitor_text=visitor)
+    return tuple(fragments)
+
+
+def _extract_pdf_text_layer_visitor_pages(
+    preview_input: PreviewInputV1,
+) -> tuple[_PdfTextLayerVisitorPage, ...]:
+    """Run the one local pypdf visitor conversion shared by both consumers."""
+
+    try:
+        from pypdf import PdfReader  # type: ignore[import-not-found]
+    except ImportError as error:
+        raise DocumentPreviewUnavailable("pypdf is not provisioned") from error
+    try:
+        with local_files_only():
+            reader = PdfReader(io.BytesIO(preview_input.content), strict=True)
+            if reader.is_encrypted:
+                raise DocumentPreviewInputError("encrypted PDF preview is unavailable")
+            pages: list[_PdfTextLayerVisitorPage] = []
+            for index, page in enumerate(reader.pages, start=1):
+                width, height = _pdf_page_dimensions(page)
+                pages.append(
+                    _PdfTextLayerVisitorPage(
+                        page_number=index,
+                        width=width,
+                        height=height,
+                        fragments=_pdf_text_visitor_fragments(
+                            page=page,
+                            page_number=index,
+                            width=width,
+                            height=height,
+                        ),
+                    )
+                )
+    except DocumentPreviewInputError:
+        raise
+    except Exception:
+        # A parser exception may include a raw text fragment.  Do not retain it
+        # in the normal preview error chain where a transcript or general log
+        # could expose document content.
+        raise DocumentPreviewInputError("PDF text layer cannot be safely decoded") from None
+    if not pages:
+        raise DocumentPreviewInputError("PDF has no pages")
+    return tuple(pages)
+
+
+@dataclass(slots=True)
+class PdfTextLayerPreviewAdapter:
+    """Pinned local ``pypdf`` extraction selected by approved revision only."""
+
+    extractor_revision: str
+
+    def extract_pdf_text_layer_fragments(
+        self, preview_input: PreviewInputV1
+    ) -> tuple[_PdfTextLayerVisitorFragment, ...]:
+        """Return local-only visitor output for candidate evaluation reuse.
+
+        This deliberately does not change the public preview wire contract.
+        It shares the exact pypdf conversion path with ``extract_pdf_text_layer``
+        but retains a fail-closed, internal start anchor for a later local
+        candidate projection.
+        """
+
+        if self.extractor_revision != _PDF_TEXT_LAYER_VISITOR_EXTRACTOR_REVISION:
+            raise DocumentPreviewUnavailable(
+                "PDF text visitor is unavailable for this extractor revision"
+            )
+        if preview_input.metadata.media_type != "application/pdf":
+            return ()
+        pages = _extract_pdf_text_layer_visitor_pages(preview_input)
+        return tuple(fragment for page in pages for fragment in page.fragments)
+
+    def extract_pdf_text_layer(self, preview_input: PreviewInputV1) -> PreviewCandidateV1 | None:
+        if self.extractor_revision not in _PDF_TEXT_LAYER_EXTRACTOR_REVISIONS:
+            raise DocumentPreviewUnavailable("PDF text layer extractor revision is unavailable")
+        if preview_input.metadata.media_type != "application/pdf":
+            return None
+        if self.extractor_revision == _PDF_TEXT_LAYER_LEGACY_EXTRACTOR_REVISION:
+            return _extract_pdf_text_layer_legacy(preview_input)
+        visitor_pages = _extract_pdf_text_layer_visitor_pages(preview_input)
+        if not any(page.fragments for page in visitor_pages):
             return None
         return PreviewCandidateV1(
             status="preview_ready",
             extractor_revision=self.extractor_revision,
-            pages=pages,
+            pages=[
+                DocumentPreviewPageV1(
+                    page_number=page.page_number,
+                    width=page.width,
+                    height=page.height,
+                    coordinate_unit="pdf_points",
+                    spans=[
+                        DocumentSpanV1(
+                            span_id=f"page-{fragment.page_number}-span-{fragment.ordinal}",
+                            ordinal=fragment.ordinal,
+                            reading_order=fragment.ordinal,
+                            text=fragment.text,
+                        )
+                        for fragment in page.fragments
+                    ],
+                )
+                for page in visitor_pages
+            ],
             warnings=[DocumentExtractionWarningV1(code="text_layer_used")],
         )
+
+
+@dataclass(frozen=True, slots=True)
+class _LegacyPdfTextLayerFallbackAdapter:
+    """Keep human-approved raster profiles on their historic native-text path.
+
+    A human approval for PaddleOCR or Docling historically reported its
+    selected profile revision even when a native PDF text layer satisfied the
+    request before raster OCR.  The parser is nevertheless explicitly fixed
+    to text-layer v1 here; a raster profile revision must never select the
+    visitor parser by accident.
+    """
+
+    extractor_revision: str
+
+    def extract_pdf_text_layer(self, preview_input: PreviewInputV1) -> PreviewCandidateV1 | None:
+        candidate = _extract_pdf_text_layer_legacy(preview_input)
+        if candidate is None:
+            return None
+        return replace(candidate, extractor_revision=self.extractor_revision)
 
 
 def _normalized_bbox(points: object, *, width: int, height: int) -> dict[str, float] | None:
@@ -4382,12 +4669,11 @@ def build_default_pdf_preview_adapter(
     """
 
     revision = binding.approval.extractor_revision
-    text_layer = PdfTextLayerPreviewAdapter(extractor_revision=revision)
     direct_source_attested_profile = isinstance(
         binding.approval, SourceAttestedSyntheticPdfPreviewActivationV1
     )
     if binding.approval.engine_kind == "pdf_text_layer":
-        return _PdfTextLayerEngine(text_layer)
+        return _PdfTextLayerEngine(PdfTextLayerPreviewAdapter(extractor_revision=revision))
     if binding.approval.engine_kind == "paddleocr":
         paddle = PaddleOcrPdfPreviewAdapter(
             extractor_revision=revision,
@@ -4396,7 +4682,9 @@ def build_default_pdf_preview_adapter(
         )
         if direct_source_attested_profile:
             return _DirectRasterOcrEngine(paddle)
-        return LayeredLocalPreviewEngine(text_layer, paddle)
+        return LayeredLocalPreviewEngine(
+            _LegacyPdfTextLayerFallbackAdapter(extractor_revision=revision), paddle
+        )
     if binding.approval.engine_kind == "docling":
         docling = DoclingPdfPreviewAdapter(
             extractor_revision=revision,
@@ -4405,7 +4693,9 @@ def build_default_pdf_preview_adapter(
         )
         if direct_source_attested_profile:
             return _DirectRasterOcrEngine(docling)
-        return LayeredLocalPreviewEngine(text_layer, docling)
+        return LayeredLocalPreviewEngine(
+            _LegacyPdfTextLayerFallbackAdapter(extractor_revision=revision), docling
+        )
     raise DocumentPreviewRuntimeError("document_preview_approval_binding_mismatch")
 
 

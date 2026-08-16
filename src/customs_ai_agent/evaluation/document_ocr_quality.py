@@ -403,7 +403,22 @@ class GoldSpanV2(_WireModel):
 
 
 class CandidateSpanV1(GoldSpanV2):
-    pass
+    """One local candidate span, with optional native-visitor geometry anchors.
+
+    ``anchor_x`` and ``anchor_y`` are evaluation-only normalized text-matrix
+    start points.  They are deliberately absent from ``GoldSpanV2`` and the
+    public preview contract: a native visitor may have a usable text matrix
+    even when it cannot derive a trustworthy public text bounding box.
+    """
+
+    anchor_x: float | None = Field(default=None, ge=0, le=1)
+    anchor_y: float | None = Field(default=None, ge=0, le=1)
+
+    @model_validator(mode="after")
+    def _anchor_pair_is_complete(self) -> "CandidateSpanV1":
+        if (self.anchor_x is None) != (self.anchor_y is None):
+            raise ValueError("candidate span anchors must be both present or both absent")
+        return self
 
 
 class GoldTableCellV2(_WireModel):
