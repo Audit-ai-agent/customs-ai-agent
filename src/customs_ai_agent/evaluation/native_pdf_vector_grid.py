@@ -519,10 +519,15 @@ def _form_regions_from_rectangles(
     )
 
 
-def extract_native_pdf_vector_grid(
-    *, preview_input: PreviewInputV1
+def extract_native_pdf_vector_grid_from_pdf_bytes(
+    *, pdf_bytes: bytes
 ) -> NativePdfVectorGridExtraction:
-    """Read a PDF's native text/vector evidence without source-truth inputs.
+    """Read native text/vector evidence from selected PDF bytes only.
+
+    This byte-only seam lets an offline semantic model consume the same
+    candidate evidence without receiving request metadata, asset identifiers,
+    or a filesystem path.  It remains deliberately independent from Gold,
+    CSV, source truth, and template-coordinate inputs.
 
     The first page may contribute one direct 5/6-column table candidate.  All
     text-show operations remain candidate spans, including on later pages.
@@ -530,12 +535,12 @@ def extract_native_pdf_vector_grid(
     partial coordinate approximation.
     """
 
-    if preview_input.metadata.media_type != "application/pdf":
-        return NativePdfVectorGridExtraction(pages=(), spans=(), table_cells=(), form_regions=())
+    if not isinstance(pdf_bytes, bytes) or not pdf_bytes:
+        raise NativePdfVectorGridError("native_vector_pdf_invalid")
     try:
         from pypdf import PdfReader  # type: ignore[import-not-found]
 
-        reader = PdfReader(io.BytesIO(preview_input.content), strict=True)
+        reader = PdfReader(io.BytesIO(pdf_bytes), strict=True)
         if reader.is_encrypted:
             raise NativePdfVectorGridError("native_vector_encrypted_pdf")
         pages = tuple(reader.pages)
@@ -588,10 +593,26 @@ def extract_native_pdf_vector_grid(
     )
 
 
+def extract_native_pdf_vector_grid(
+    *, preview_input: PreviewInputV1
+) -> NativePdfVectorGridExtraction:
+    """Read a PDF preview input's native text/vector evidence.
+
+    The preview boundary retains its media-type no-op behavior.  Parsing is
+    delegated to the byte-only implementation so non-preview callers cannot
+    accidentally acquire request metadata as an inference dependency.
+    """
+
+    if preview_input.metadata.media_type != "application/pdf":
+        return NativePdfVectorGridExtraction(pages=(), spans=(), table_cells=(), form_regions=())
+    return extract_native_pdf_vector_grid_from_pdf_bytes(pdf_bytes=preview_input.content)
+
+
 __all__ = [
     "NativePdfVectorGridError",
     "NativePdfVectorGridExtraction",
     "NativePdfVectorFormRegion",
     "NativePdfVectorGridPage",
     "extract_native_pdf_vector_grid",
+    "extract_native_pdf_vector_grid_from_pdf_bytes",
 ]

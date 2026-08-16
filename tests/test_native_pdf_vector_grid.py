@@ -141,6 +141,20 @@ def test_extracts_one_generic_five_column_grid_with_text_anchors(
     assert extraction.table_cells[-1].text == "cell-1-4"
 
 
+def test_byte_only_seam_extracts_without_preview_request_metadata(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    operations = _grid_operations(columns=5)
+    _install_fake_pypdf(monkeypatch, [_FakePage(operations, width=200, height=120)])
+
+    extraction = vector_grid.extract_native_pdf_vector_grid_from_pdf_bytes(
+        pdf_bytes=b"%PDF-byte-only-native-vector-grid"
+    )
+
+    assert len(extraction.spans) == 10
+    assert len(extraction.table_cells) == 10
+
+
 def test_grid_detection_is_translation_and_scale_invariant(
     monkeypatch: pytest.MonkeyPatch,
 ) -> None:
