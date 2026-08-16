@@ -8,11 +8,13 @@ by a document-preview runtime.  It creates two immutable local artifacts:
 * compact semantic-slot labels derived directly from the final PDF content
   stream.
 
-The records contain field names, source-run ordinals, transforms, and hashes
-of normalized values.  They never persist PDF text or field values.  A future
-trainer must read the immutable source PDF independently and is responsible
-for proving that it never trains on development, sealed, or clean/error
-counterpart-family assets.
+The records contain only semantic field names, field normalizers, and hashes
+of normalized values, plus training-record identity and split binding.  They
+never persist PDF text or field values, source-run ordinals, source-parser
+transforms, coordinates, or a source-template profile.  A future trainer must
+discover its own candidate-native selectors and transforms from immutable
+training PDFs, and prove that it never trains on development, sealed, or
+clean/error counterpart-family assets.
 """
 
 from __future__ import annotations
@@ -49,7 +51,6 @@ from customs_ai_agent.evaluation.source_attested_synthetic_pdf_truth import (
     _read_verified_source_pdf,
     _require_profile,
     _write_hash_named_immutable,
-    source_layout_parser_spec_sha256,
     validate_source_attested_synthetic_dataset_scope,
     validate_source_attested_synthetic_packet_scope,
 )
@@ -164,31 +165,12 @@ class SourceAttestedSupervisedTemplateTrainingSplitV1(_WireModel):
         return self
 
 
-ValueTransform = Literal[
-    "raw-v1",
-    "single-numeric-token-v1",
-    "single-alpha-token-v1",
-    "join-slash-v1",
-]
-
-
 class SupervisedTemplateTrainingFieldLabelV1(_WireModel):
-    """One content-free semantic target for a source-PDF text-run slot."""
+    """One content-free semantic target without a source layout selector."""
 
     field_name: str = Field(min_length=1, max_length=128, pattern=_IDENTIFIER)
     normalizer: FieldNormalizer
-    source_run_reading_orders: list[int] = Field(min_length=1, max_length=8)
-    value_transform: ValueTransform
     normalized_value_sha256: str = Field(pattern=_SHA256)
-
-    @model_validator(mode="after")
-    def _source_runs_are_unique(self) -> "SupervisedTemplateTrainingFieldLabelV1":
-        if (
-            len(self.source_run_reading_orders) != len(set(self.source_run_reading_orders))
-            or any(not 1 <= reading_order <= 100_000 for reading_order in self.source_run_reading_orders)
-        ):
-            raise ValueError("training field label source runs must be unique")
-        return self
 
 
 class SupervisedTemplateTrainingLabelRecordV1(_WireModel):
@@ -239,7 +221,6 @@ class SourceAttestedSupervisedTemplateTrainingLabelsV1(_WireModel):
     dataset_revision: str = Field(min_length=1, max_length=128, pattern=_IDENTIFIER)
     dataset_receipt_sha256: str = Field(pattern=_SHA256)
     training_split_receipt_sha256: str = Field(pattern=_SHA256)
-    source_layout_parser_spec_sha256: str = Field(pattern=_SHA256)
     record_count: int = Field(ge=1, le=100_000)
     field_label_count: int = Field(ge=1, le=1_000_000)
     records: list[SupervisedTemplateTrainingLabelRecordV1] = Field(
@@ -249,8 +230,6 @@ class SourceAttestedSupervisedTemplateTrainingLabelsV1(_WireModel):
 
     @model_validator(mode="after")
     def _is_complete_and_bound(self) -> "SourceAttestedSupervisedTemplateTrainingLabelsV1":
-        if self.source_layout_parser_spec_sha256 != source_layout_parser_spec_sha256():
-            raise ValueError("training labels parser specification SHA-256 mismatch")
         records = self.records
         if [record.asset_id for record in records] != sorted(record.asset_id for record in records):
             raise ValueError("training label records must be sorted")
@@ -641,8 +620,6 @@ def build_source_attested_supervised_template_training_labels(
                 SupervisedTemplateTrainingFieldLabelV1(
                     field_name=slot.field_name,
                     normalizer=slot.normalizer,
-                    source_run_reading_orders=[anchor.reading_order for anchor in slot.source_runs],
-                    value_transform=slot.value_transform,
                     normalized_value_sha256=sha256_bytes(normalized_value.encode("utf-8")),
                 )
             )
@@ -670,7 +647,6 @@ def build_source_attested_supervised_template_training_labels(
         "dataset_revision": receipt.dataset_revision,
         "dataset_receipt_sha256": receipt_sha256(receipt),
         "training_split_receipt_sha256": training_split.training_split_receipt_sha256,
-        "source_layout_parser_spec_sha256": source_layout_parser_spec_sha256(),
         "record_count": len(records),
         "field_label_count": sum(len(record.field_labels) for record in records),
         "records": [record.model_dump(mode="json") for record in records],

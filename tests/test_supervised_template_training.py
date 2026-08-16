@@ -293,6 +293,9 @@ def test_labels_are_pdf_derived_compact_and_immutable(tmp_path: Path) -> None:
     assert {record.asset_id for record in labels.records} == {"c-3-inv", "e-3-inv"}
     encoded = canonical_json_file_bytes(labels.model_dump(mode="json"))
     assert b"private-marker" not in encoded
+    assert b"source_run_reading_orders" not in encoded
+    assert b"value_transform" not in encoded
+    assert b"source_layout_parser_spec_sha256" not in encoded
     preview_root = tmp_path / "workspace" / "_local" / "data" / "document-preview"
     preview_root.mkdir()
     split_path = write_source_attested_supervised_template_training_split(
