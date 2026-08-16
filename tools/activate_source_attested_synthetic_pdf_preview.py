@@ -1,4 +1,4 @@
-"""Activate a passing synthetic content-stream compatibility result locally.
+"""Activate a passing supervised native-template compatibility result locally.
 
 This command is the automatic counterpart to the preserved human approval
 tool.  It does not download packages or models, read Gold/review material, or
@@ -98,7 +98,7 @@ def main(argv: Sequence[str] | None = None) -> int:
             {
                 "status": "activated",
                 "activation_kind": "source_attested_synthetic",
-                "evaluation_scope": "synthetic_content_stream_compatibility",
+                "evaluation_scope": "synthetic_r1_supervised_native_template_compatibility",
                 "media_type": "application/pdf",
                 "activation_sha256": activation_sha256,
                 "runtime_network": "disabled",

@@ -89,7 +89,9 @@ _SOURCE_CANDIDATE_EXECUTION_DIRECTORY = "source-attested-candidate-executions"
 _SOURCE_EVALUATION_RESULT_DIRECTORY = "source-attested-evaluation-results"
 _SOURCE_DEVELOPMENT_SELECTION_DIRECTORY = "source-attested-development-selections"
 _SOURCE_SEALED_RUN_DIRECTORY = "source-attested-sealed-runs"
-_SOURCE_ATTESTED_CANDIDATE_PARSER_REVISION: Final = "synthetic-pdf-visible-layout-normalizer-v10"
+_SOURCE_ATTESTED_CANDIDATE_PARSER_REVISION: Final = (
+    "synthetic-pdf-supervised-template-normalizer-v11"
+)
 _SEALED_RESERVATION_DIRECTORY = "candidate-run-reservations"
 _SOURCE_LAYOUT_RECORD_COUNTS: Mapping[str, int] = {"development": 60, "sealed": 20}
 _MAX_SOURCE_DATASET_RECEIPT_BYTES = 8 * 1024 * 1024
@@ -621,7 +623,7 @@ class SourceAttestedSyntheticPdfPreviewActivationV1:
     dataset_id: str
     dataset_revision: str
     packet_receipt_sha256: str
-    evaluation_scope: Literal["synthetic_content_stream_compatibility"]
+    evaluation_scope: Literal["synthetic_r1_supervised_native_template_compatibility"]
     layout_truth_kind: Literal["pdf_content_stream_layout_v1"]
     layout_truth_receipt_sha256: str
     layout_truth_parser_spec_sha256: str
@@ -637,7 +639,7 @@ class SourceAttestedSyntheticSealedEvaluationResultV1:
     dataset_id: str
     dataset_revision: str
     packet_receipt_sha256: str
-    evaluation_scope: Literal["synthetic_content_stream_compatibility"]
+    evaluation_scope: Literal["synthetic_r1_supervised_native_template_compatibility"]
     layout_truth_kind: Literal["pdf_content_stream_layout_v1"]
     layout_truth_receipt_sha256: str
     layout_truth_parser_spec_sha256: str
@@ -1302,7 +1304,8 @@ def parse_source_attested_synthetic_pdf_preview_activation(
     if (
         evaluation["packet_kind"] != "sealed"
         or evaluation["evaluation_basis"] != "source_attested_synthetic"
-        or evaluation["evaluation_scope"] != "synthetic_content_stream_compatibility"
+        or evaluation["evaluation_scope"]
+        != "synthetic_r1_supervised_native_template_compatibility"
         or evaluation["layout_truth_kind"] != "pdf_content_stream_layout_v1"
     ):
         raise DocumentPreviewRuntimeError(code)
@@ -1315,7 +1318,8 @@ def parse_source_attested_synthetic_pdf_preview_activation(
         dataset_revision=_identifier(evaluation["dataset_revision"], code=code),
         packet_receipt_sha256=_sha256(evaluation["packet_receipt_sha256"], code=code),
         evaluation_scope=cast(
-            Literal["synthetic_content_stream_compatibility"], evaluation["evaluation_scope"]
+            Literal["synthetic_r1_supervised_native_template_compatibility"],
+            evaluation["evaluation_scope"],
         ),
         layout_truth_kind=cast(
             Literal["pdf_content_stream_layout_v1"], evaluation["layout_truth_kind"]
@@ -1440,10 +1444,10 @@ def _source_attested_candidate_parser_revision(value: object, *, code: str) -> s
 
     Equality across receipts is necessary but not sufficient: a fully
     self-consistent older parser could otherwise mint a new automatic pointer.
-    The v10 parser is the only candidate normalizer whose rendered 13/15/12
-    field contract has been accepted for this narrow synthetic scope.  Its
-    separately reviewed behavior supersedes v8, so a coherent v8 chain
-    remains ineligible.
+    The v11 parser is the only candidate normalizer whose supervised native
+    template 13/15/12 field contract has been accepted for this narrow
+    synthetic scope.  It supersedes v10, so a coherent v10 chain remains
+    ineligible.
     """
 
     revision = _identifier(value, code=code)
@@ -1610,7 +1614,8 @@ def parse_source_attested_synthetic_sealed_evaluation_result(
         value["schema_version"] != "1.0"
         or value["evaluation_basis"] != "source_attested_synthetic"
         or value["packet_kind"] != "sealed"
-        or value["evaluation_scope"] != "synthetic_content_stream_compatibility"
+        or value["evaluation_scope"]
+        != "synthetic_r1_supervised_native_template_compatibility"
         or value["layout_truth_kind"] != "pdf_content_stream_layout_v1"
         or value["passed"] is not True
     ):
@@ -1639,7 +1644,8 @@ def parse_source_attested_synthetic_sealed_evaluation_result(
         dataset_revision=_identifier(value["dataset_revision"], code=code),
         packet_receipt_sha256=_sha256(value["packet_receipt_sha256"], code=code),
         evaluation_scope=cast(
-            Literal["synthetic_content_stream_compatibility"], value["evaluation_scope"]
+            Literal["synthetic_r1_supervised_native_template_compatibility"],
+            value["evaluation_scope"],
         ),
         layout_truth_kind=cast(Literal["pdf_content_stream_layout_v1"], value["layout_truth_kind"]),
         layout_truth_receipt_sha256=_sha256(value["layout_truth_receipt_sha256"], code=code),
@@ -1721,7 +1727,8 @@ def parse_source_attested_synthetic_development_evaluation_result(
         value["schema_version"] != "1.0"
         or value["evaluation_basis"] != "source_attested_synthetic"
         or value["packet_kind"] != "development"
-        or value["evaluation_scope"] != "synthetic_content_stream_compatibility"
+        or value["evaluation_scope"]
+        != "synthetic_r1_supervised_native_template_compatibility"
         or value["layout_truth_kind"] != "pdf_content_stream_layout_v1"
         or value["development_selection_receipt_sha256"] is not None
         or value["sealed_run_receipt_sha256"] is not None
@@ -1901,7 +1908,8 @@ def _parse_source_attested_layout_truth_receipt(
         value["schema_version"] != "1.0"
         or value["artifact_kind"] != "source_attested_synthetic_pdf_layout_truth"
         or value["provenance_kind"] != "source_attested_synthetic"
-        or value["evaluation_scope"] != "synthetic_content_stream_compatibility"
+        or value["evaluation_scope"]
+        != "synthetic_r1_supervised_native_template_compatibility"
         or value["layout_truth_kind"] != "pdf_content_stream_layout_v1"
         or value["packet_kind"] != "stratified-v2"
         or not isinstance(value["packet_split"], str)
@@ -2017,7 +2025,8 @@ def _parse_source_attested_development_selection_receipt(
         value["schema_version"] != "1.0"
         or value["artifact_kind"] != "source_attested_synthetic_pdf_development_selection"
         or value["evaluation_basis"] != "source_attested_synthetic"
-        or value["evaluation_scope"] != "synthetic_content_stream_compatibility"
+        or value["evaluation_scope"]
+        != "synthetic_r1_supervised_native_template_compatibility"
         or value["layout_truth_kind"] != "pdf_content_stream_layout_v1"
         or not isinstance(value["candidate_results"], list)
     ):
@@ -2118,7 +2127,8 @@ def _parse_source_attested_sealed_run_receipt(
         value["schema_version"] != "1.0"
         or value["artifact_kind"] != "source_attested_synthetic_pdf_sealed_run"
         or value["evaluation_basis"] != "source_attested_synthetic"
-        or value["evaluation_scope"] != "synthetic_content_stream_compatibility"
+        or value["evaluation_scope"]
+        != "synthetic_r1_supervised_native_template_compatibility"
         or value["layout_truth_kind"] != "pdf_content_stream_layout_v1"
     ):
         raise DocumentPreviewRuntimeError(code)
@@ -5812,7 +5822,7 @@ def write_source_attested_synthetic_pdf_preview_pointer(
             "dataset_revision": evaluation.dataset_revision,
             "packet_kind": "sealed",
             "packet_receipt_sha256": evaluation.packet_receipt_sha256,
-            "evaluation_scope": "synthetic_content_stream_compatibility",
+            "evaluation_scope": "synthetic_r1_supervised_native_template_compatibility",
             "layout_truth_kind": "pdf_content_stream_layout_v1",
             "layout_truth_receipt_sha256": evaluation.layout_truth_receipt_sha256,
             "layout_truth_parser_spec_sha256": evaluation.layout_truth_parser_spec_sha256,

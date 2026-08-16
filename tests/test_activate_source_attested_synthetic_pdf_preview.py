@@ -69,7 +69,7 @@ def _result(configuration_sha256: str, inventory_sha256: str) -> bytes:
         "dataset_revision": "synthetic-pdf-r1",
         "packet_kind": "sealed",
         "packet_receipt_sha256": "a" * 64,
-        "evaluation_scope": "synthetic_content_stream_compatibility",
+        "evaluation_scope": "synthetic_r1_supervised_native_template_compatibility",
         "layout_truth_kind": "pdf_content_stream_layout_v1",
         "layout_truth_receipt_sha256": "b" * 64,
         "layout_truth_parser_spec_sha256": "c" * 64,
@@ -80,7 +80,7 @@ def _result(configuration_sha256: str, inventory_sha256: str) -> bytes:
         "extractor_revision": "pypdf-5.3.1-text-layer-v1",
         "configuration_sha256": configuration_sha256,
         "model_inventory_sha256": inventory_sha256,
-        "candidate_parser_revision": "synthetic-pdf-visible-layout-normalizer-v10",
+        "candidate_parser_revision": "synthetic-pdf-supervised-template-normalizer-v11",
         "candidate_execution_receipt_sha256": "1" * 64,
         "passed": True,
         "metrics": {

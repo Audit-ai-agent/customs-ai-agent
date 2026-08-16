@@ -2,8 +2,9 @@
 
 이 경로는 사람이 재입력한 Gold를 대체하는 일반 OCR 인증이 아니다. 생성기
 소스가 현재 workspace에 없기 때문에, 최종 born-digital 합성 PDF의 제한된
-content stream을 독립적인 pinned parser와 template profile로 읽어 만든
-`synthetic_content_stream_compatibility` 평가다.
+content stream에서 source-attested layout truth를 만들고, 명시적으로 감독 학습한
+native template 후보를 비교하는
+`synthetic_r1_supervised_native_template_compatibility` 평가다.
 
 즉 이 결과는 이 정확한 합성 PDF 템플릿에서의 추출 호환성 증거다. 실제 기업
 문서, 스캔 품질, 손글씨, 도장 중첩 또는 독립 optical OCR 품질을 보장하지
@@ -32,9 +33,9 @@ content stream을 독립적인 pinned parser와 template profile로 읽어 만�
   run 수·좌표·table geometry·token 개수가 달라져 모호해지면 PDF preview는
   `unavailable`로 남는다.
 - candidate parser revision은 정확히
-  `synthetic-pdf-visible-layout-normalizer-v10`만 허용한다. 따라서 v9 또는 그 이전의
+  `synthetic-pdf-supervised-template-normalizer-v11`만 허용한다. 따라서 v10 또는 그 이전의
   candidate/execution/result/selection/sealed-run이 모든 SHA와 서로 일치해도
-  새 자동 pointer를 만들 수 없다. v10가 아닌 revision은 source-truth writer와
+  새 자동 pointer를 만들 수 없다. v11이 아닌 revision은 source-truth writer와
   runtime loader 양쪽에서 fail-closed 한다.
 - `error` stratum은 error label만으로 인정하지 않는다. 같은 set/document의
   clean sibling과 decoded content stream이 실제로 달라야 하며, label의

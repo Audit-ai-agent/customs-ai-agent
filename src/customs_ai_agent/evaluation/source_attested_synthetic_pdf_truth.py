@@ -7,10 +7,11 @@ source that can be parsed without guessing.  A small, pinned parser accepts
 only the one observed fixture profile.  Unsupported syntax, a changed template,
 or an ambiguous table fails closed.
 
-The resulting evaluation is named ``synthetic_content_stream_compatibility``.
-It is useful for comparing local extractors on this exact synthetic template,
-but it is neither an independent optical-OCR certification nor evidence about
-real trade documents.
+The resulting evaluation is named
+``synthetic_r1_supervised_native_template_compatibility``.  It is useful for
+comparing the explicitly supervised native-template extractor on this exact
+synthetic template, but it is neither an independent optical-OCR certification
+nor evidence about real trade documents.
 """
 
 from __future__ import annotations
@@ -82,8 +83,10 @@ _DOCUMENT_FILENAME_SUFFIX: dict[SyntheticDocumentType, str] = {
 SOURCE_ATTESTED_EVALUATION_BASIS: Final[Literal["source_attested_synthetic"]] = (
     "source_attested_synthetic"
 )
-SOURCE_ATTESTED_EVALUATION_SCOPE: Final[Literal["synthetic_content_stream_compatibility"]] = (
-    "synthetic_content_stream_compatibility"
+SOURCE_ATTESTED_EVALUATION_SCOPE: Final[
+    Literal["synthetic_r1_supervised_native_template_compatibility"]
+] = (
+    "synthetic_r1_supervised_native_template_compatibility"
 )
 SOURCE_LAYOUT_TRUTH_KIND: Final[Literal["pdf_content_stream_layout_v1"]] = (
     "pdf_content_stream_layout_v1"
@@ -97,13 +100,14 @@ SOURCE_LAYOUT_PARSER_SPEC_REVISION: Final[
 # This is intentionally fixed at the source-truth writer as well as at the
 # runtime boundary.  Merely requiring every receipt in a chain to agree would
 # let a coherent, older parser version create a new automatic approval.
-# Version 9 is the only normalizer accepted for this scope.  It has a
-# separately reviewed contract for the complete rendered B/L-13, Invoice-15,
-# and Packing-list-12 field surface.  Version 8 or older must not regain
-# eligibility merely by producing a self-consistent chain of newer receipts.
+# Version 11 is the only normalizer accepted for this scope.  It is the
+# separately reviewed supervised-native-template contract for the complete
+# rendered B/L-13, Invoice-15, and Packing-list-12 field surface.  Version 10
+# and every older revision must not regain eligibility merely by producing a
+# self-consistent chain of newer receipts.
 SOURCE_ATTESTED_CANDIDATE_PARSER_REVISION: Final[
-    Literal["synthetic-pdf-visible-layout-normalizer-v10"]
-] = "synthetic-pdf-visible-layout-normalizer-v10"
+    Literal["synthetic-pdf-supervised-template-normalizer-v11"]
+] = "synthetic-pdf-supervised-template-normalizer-v11"
 
 # This automatic path has one deliberately narrow approval target.  These
 # values are a compact identity for the existing human-checked, 2,000-set PDF
@@ -676,7 +680,7 @@ class SourceAttestedSyntheticLayoutTruthV1(_WireModel):
         "source_attested_synthetic_pdf_layout_truth"
     )
     provenance_kind: Literal["source_attested_synthetic"] = SOURCE_ATTESTED_EVALUATION_BASIS
-    evaluation_scope: Literal["synthetic_content_stream_compatibility"] = (
+    evaluation_scope: Literal["synthetic_r1_supervised_native_template_compatibility"] = (
         SOURCE_ATTESTED_EVALUATION_SCOPE
     )
     layout_truth_kind: Literal["pdf_content_stream_layout_v1"] = SOURCE_LAYOUT_TRUTH_KIND
@@ -2018,7 +2022,7 @@ class SourceAttestedSyntheticOcrEvaluationResultV1(_WireModel):
     dataset_revision: str = Field(min_length=1, max_length=128, pattern=_IDENTIFIER)
     packet_kind: Literal["development", "sealed"]
     packet_receipt_sha256: str = Field(pattern=_SHA256)
-    evaluation_scope: Literal["synthetic_content_stream_compatibility"] = (
+    evaluation_scope: Literal["synthetic_r1_supervised_native_template_compatibility"] = (
         SOURCE_ATTESTED_EVALUATION_SCOPE
     )
     layout_truth_kind: Literal["pdf_content_stream_layout_v1"] = SOURCE_LAYOUT_TRUTH_KIND
@@ -2110,7 +2114,7 @@ class SourceAttestedSyntheticDevelopmentSelectionV1(_WireModel):
         "source_attested_synthetic_pdf_development_selection"
     )
     evaluation_basis: Literal["source_attested_synthetic"] = SOURCE_ATTESTED_EVALUATION_BASIS
-    evaluation_scope: Literal["synthetic_content_stream_compatibility"] = (
+    evaluation_scope: Literal["synthetic_r1_supervised_native_template_compatibility"] = (
         SOURCE_ATTESTED_EVALUATION_SCOPE
     )
     layout_truth_kind: Literal["pdf_content_stream_layout_v1"] = SOURCE_LAYOUT_TRUTH_KIND
@@ -2192,7 +2196,7 @@ class SourceAttestedSyntheticSealedRunV1(_WireModel):
         "source_attested_synthetic_pdf_sealed_run"
     )
     evaluation_basis: Literal["source_attested_synthetic"] = SOURCE_ATTESTED_EVALUATION_BASIS
-    evaluation_scope: Literal["synthetic_content_stream_compatibility"] = (
+    evaluation_scope: Literal["synthetic_r1_supervised_native_template_compatibility"] = (
         SOURCE_ATTESTED_EVALUATION_SCOPE
     )
     layout_truth_kind: Literal["pdf_content_stream_layout_v1"] = SOURCE_LAYOUT_TRUTH_KIND

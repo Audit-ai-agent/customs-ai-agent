@@ -9,8 +9,9 @@ content stream에서 만든 layout truth를 해시로 결속한다. 사람이 �
 
 - `evaluation_basis`는 정확히 `source_attested_synthetic`이어야 한다.
 - `layout_truth_kind`는 정확히 `pdf_content_stream_layout_v1`이어야 한다.
-- `evaluation_scope`는 정확히 `synthetic_content_stream_compatibility`이다.
-- 따라서 native PDF text-layer 후보의 통과는 **PDF content-stream 호환성**
+- `evaluation_scope`는 정확히
+  `synthetic_r1_supervised_native_template_compatibility`이다.
+- 따라서 supervised native-template PDF 후보의 통과는 **고정 r1 템플릿 호환성**
   증거이며, 이미지 기반 광학 OCR 품질 증거가 아니다.
 - PDF, 선택한 synthetic dataset revision, sealed packet에만 적용된다. JPEG와
   PNG는 이 pointer가 있어도 계속 `unavailable`이다.
@@ -31,7 +32,7 @@ hash 자체가 같으면 오히려 잘못된 결속이다.
 한다.
 
 - `evaluation_basis: source_attested_synthetic`
-- `evaluation_scope: synthetic_content_stream_compatibility`
+- `evaluation_scope: synthetic_r1_supervised_native_template_compatibility`
 - `layout_truth_kind: pdf_content_stream_layout_v1`
 - `layout_truth_receipt_sha256`
 - `layout_truth_parser_spec_sha256`

@@ -313,13 +313,13 @@ def _source_attested_evaluation(
     configuration_sha256: str,
     inventory_sha256: str,
     *,
-    evaluation_scope: str = "synthetic_content_stream_compatibility",
+    evaluation_scope: str = "synthetic_r1_supervised_native_template_compatibility",
     packet_receipt_sha256: str = "a" * 64,
     layout_truth_receipt_sha256: str = "c" * 64,
     layout_truth_parser_spec_sha256: str = "d" * 64,
     development_selection_receipt_sha256: str = "e" * 64,
     sealed_run_receipt_sha256: str = "f" * 64,
-    candidate_parser_revision: str = "synthetic-pdf-visible-layout-normalizer-v10",
+    candidate_parser_revision: str = "synthetic-pdf-supervised-template-normalizer-v11",
     candidate_bundle_sha256: str = "1" * 64,
     candidate_execution_receipt_sha256: str = "2" * 64,
     engine_kind: str = "pdf_text_layer",
@@ -412,7 +412,7 @@ def _write_source_attested_receipt_chain(
     root: Path,
     configuration_sha256: str,
     inventory_sha256: str,
-    candidate_parser_revision: str = "synthetic-pdf-visible-layout-normalizer-v10",
+    candidate_parser_revision: str = "synthetic-pdf-supervised-template-normalizer-v11",
 ) -> dict[str, str | bytes]:
     """Build a complete local source-attested chain, not hash-shaped placeholders."""
 
@@ -531,7 +531,7 @@ def _write_source_attested_receipt_chain(
             "schema_version": "1.0",
             "artifact_kind": "source_attested_synthetic_pdf_layout_truth",
             "provenance_kind": "source_attested_synthetic",
-            "evaluation_scope": "synthetic_content_stream_compatibility",
+            "evaluation_scope": "synthetic_r1_supervised_native_template_compatibility",
             "layout_truth_kind": "pdf_content_stream_layout_v1",
             "compiler_revision": "test-layout-v1",
             "parser_spec_sha256": parser_spec_sha256,
@@ -700,7 +700,7 @@ def _write_source_attested_receipt_chain(
             "dataset_revision": "synthetic-pdf-r1",
             "packet_kind": "development",
             "packet_receipt_sha256": development_packet_sha256,
-            "evaluation_scope": "synthetic_content_stream_compatibility",
+            "evaluation_scope": "synthetic_r1_supervised_native_template_compatibility",
             "layout_truth_kind": "pdf_content_stream_layout_v1",
             "layout_truth_receipt_sha256": development_layout_sha256,
             "layout_truth_parser_spec_sha256": parser_spec_sha256,
@@ -754,7 +754,7 @@ def _write_source_attested_receipt_chain(
         "schema_version": "1.0",
         "artifact_kind": "source_attested_synthetic_pdf_development_selection",
         "evaluation_basis": "source_attested_synthetic",
-        "evaluation_scope": "synthetic_content_stream_compatibility",
+        "evaluation_scope": "synthetic_r1_supervised_native_template_compatibility",
         "layout_truth_kind": "pdf_content_stream_layout_v1",
         "dataset_id": "synthetic-pdf",
         "dataset_revision": "synthetic-pdf-r1",
@@ -818,7 +818,7 @@ def _write_source_attested_receipt_chain(
         "schema_version": "1.0",
         "artifact_kind": "source_attested_synthetic_pdf_sealed_run",
         "evaluation_basis": "source_attested_synthetic",
-        "evaluation_scope": "synthetic_content_stream_compatibility",
+        "evaluation_scope": "synthetic_r1_supervised_native_template_compatibility",
         "layout_truth_kind": "pdf_content_stream_layout_v1",
         "dataset_id": "synthetic-pdf",
         "dataset_revision": "synthetic-pdf-r1",
@@ -1043,7 +1043,7 @@ def _source_attested_activation_pointer(
                 "dataset_revision": "synthetic-pdf-r1",
                 "packet_kind": "sealed",
                 "packet_receipt_sha256": "c" * 64,
-                "evaluation_scope": "synthetic_content_stream_compatibility",
+                "evaluation_scope": "synthetic_r1_supervised_native_template_compatibility",
                 "layout_truth_kind": "pdf_content_stream_layout_v1",
                 "layout_truth_receipt_sha256": "d" * 64,
                 "layout_truth_parser_spec_sha256": "e" * 64,
@@ -2215,7 +2215,7 @@ def test_source_attested_parser_rejects_missing_scope_and_mixed_human_provenance
             _source_attested_evaluation(
                 "c" * 64,
                 "d" * 64,
-                evaluation_scope="synthetic_optical_ocr",
+                evaluation_scope="synthetic_content_stream_compatibility",
             )
         )
 
@@ -2941,10 +2941,10 @@ def test_source_attested_loader_rejects_execution_receipt_mismatch(tmp_path: Pat
         )
 
 
-def test_source_attested_loader_accepts_one_consistent_visible_layout_v10_chain(
+def test_source_attested_loader_accepts_one_consistent_supervised_template_v11_chain(
     tmp_path: Path,
 ) -> None:
-    """The v10 parser is accepted only when every immutable binding agrees."""
+    """The v11 parser is accepted only when every immutable binding agrees."""
 
     root = _root(tmp_path)
     root.mkdir(parents=True)
@@ -2958,7 +2958,7 @@ def test_source_attested_loader_accepts_one_consistent_visible_layout_v10_chain(
         root=root,
         configuration_sha256=configuration_sha256,
         inventory_sha256=inventory_sha256,
-        candidate_parser_revision="synthetic-pdf-visible-layout-normalizer-v10",
+        candidate_parser_revision="synthetic-pdf-supervised-template-normalizer-v11",
     )
     evaluation = chain["evaluation"]
     assert isinstance(evaluation, bytes)
@@ -2969,16 +2969,16 @@ def test_source_attested_loader_accepts_one_consistent_visible_layout_v10_chain(
     )
 
     assert binding.development_selection.candidate_parser_revision == (
-        "synthetic-pdf-visible-layout-normalizer-v10"
+        "synthetic-pdf-supervised-template-normalizer-v11"
     )
     assert binding.sealed_run.candidate_parser_revision == (
-        "synthetic-pdf-visible-layout-normalizer-v10"
+        "synthetic-pdf-supervised-template-normalizer-v11"
     )
     assert binding.sealed_run_state_path.name.startswith("sealed-run-state-")
     assert binding.sealed_evaluation_state_path.name.startswith("sealed-evaluation-state-")
 
 
-def test_source_attested_loader_rejects_a_coherent_v9_candidate_parser_chain(
+def test_source_attested_loader_rejects_a_coherent_v10_candidate_parser_chain(
     tmp_path: Path,
 ) -> None:
     """Equality alone cannot authorize a fully self-consistent old parser."""
@@ -2995,7 +2995,7 @@ def test_source_attested_loader_rejects_a_coherent_v9_candidate_parser_chain(
         root=root,
         configuration_sha256=configuration_sha256,
         inventory_sha256=inventory_sha256,
-        candidate_parser_revision="synthetic-pdf-visible-layout-normalizer-v9",
+        candidate_parser_revision="synthetic-pdf-visible-layout-normalizer-v10",
     )
     evaluation = chain["evaluation"]
     assert isinstance(evaluation, bytes)
