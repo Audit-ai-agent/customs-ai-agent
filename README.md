@@ -372,6 +372,27 @@ uv run --locked --no-sync --group dev customs-ai-agent-dev-serve
 
 PaddleOCR/Docling은 대용량 wheel·모델·cache가 필요할 수 있습니다. provisioning 도구의 기본 free-space 기준은 12 GiB이며 `--minimum-free-gib`로 더 높은 운영 기준을 지정할 수 있습니다. 여유 공간이 부족하면 다운로드나 부분 설치 전에 중단해야 하며, 일반 Agent runtime은 언제나 no-download 상태를 유지합니다.
 
+Docling `accurate` profile의 TableFormer는 별도 모델 쌍을 요구한다. 아래 도구는 운영자가
+`--confirm-download`를 명시했을 때에만 `ds4sd/docling-models`의 정확한
+`36bebf56681740529abd09f5473a93a69373fbf0` snapshot에서
+`tm_config.json`(7,060 bytes, Git blob SHA-1 검증)과
+`tableformer_accurate.safetensors`(212,758,388 bytes, SHA-256
+`66d8912f290375d3466f91be2048030a16317e84c8f1f69d3dbd7adc6d6cd2a9`)만
+내려받는다. 12 GiB 여유 공간, HTTPS 고정 source, link/junction 부재, byte/hash를
+검증한 뒤에만 `_local/data/document-preview/models/docling/model_artifacts/tableformer/accurate`
+로 원자적으로 게시한다. 기존 대상(정상 파일 또는 drift 포함)은 덮어쓰지 않고 중단한다.
+
+```powershell
+uv run --locked --no-sync --group dev python tools/stage_docling_accurate_tableformer.py `
+  --document-preview-root <workspace>/_local/data/document-preview `
+  --confirm-download
+```
+
+이 명령은 runtime configuration/model inventory sidecar, candidate, evaluation, sealed
+result, approval pointer를 쓰지 않는다. 성공 후에도 accurate 전용 configuration과
+provenance를 staging하고 기존 inventory builder·local-only provisioner·개발 평가를
+각각 별도로 통과해야 한다. 따라서 이 다운로드만으로 preview가 활성화되지 않는다.
+
 ## 확인
 
 ```powershell
