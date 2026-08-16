@@ -39,7 +39,13 @@
    OpenCV 배포본이 공존할 수 있으므로 `opencv-contrib-python`·`opencv-python`·
    `opencv-python-headless`를 빠짐없이 선언하고, 실제 `cv2` 파일이 designated
    contrib wheel `RECORD`의 regular file 집합·hash·size와 일치하지 않으면 후보 실행을 거부한다. active pointer는
-   필요하지 않습니다. 평가는 승인보다 먼저 수행되기 때문입니다.
+   필요하지 않습니다. 평가는 승인보다 먼저 수행되기 때문입니다. 반면 PaddleOCR 3은
+   `paddleocr3-paddlex-3.2` 전용 ASCII-only environment를 쓰며, 고정
+   `paddleocr-3.2.0-ppocrv5-mobile-en-raster216-v1` revision의 56개 activated
+   metadata dependency closure를 version까지 정확히 inventory해야 합니다.
+   `paddlex[ocr-core]`의 전이 dependency가 빠지거나, closure 밖 package가 더 들어가도
+   이 P3 profile은 후보 실행 전에 fail-closed 합니다. P2와 P3은 같은 environment나
+   fallback을 공유하지 않습니다.
 
 ### Windows Docling native path 조건
 
@@ -124,7 +130,7 @@ uv run python tools/run_synthetic_pdf_ocr_candidate.py `
 
 - engine kind와 extractor revision
 - configuration SHA-256와 model inventory SHA-256
-- `synthetic-pdf-visible-layout-normalizer-v9` parser revision
+- `synthetic-pdf-supervised-template-normalizer-v11` parser revision
 - `offline_synthetic_pdf_evaluation` profile mode
 - 모든 위 값과 candidate document를 묶은 `candidate_bundle_sha256`
 
@@ -144,13 +150,39 @@ uv run python tools/evaluate_synthetic_pdf_ocr.py `
   --engine-kind pdf_text_layer
 ```
 
-개발 선택은 `pdf_text_layer`, `paddleocr`, `docling` 결과가 각각 정확히
-한 개씩 있어야만 수행됩니다. 누락·중복·서로 다른 packet/Gold receipt는
-선택 실패입니다.
+이 문서에서 설명하는 `pdf_text_layer`·`paddleocr`·`docling` 세 후보 비교는
+human-Gold, legacy 또는 noncanonical 비교 경로에 적용한다. canonical r1 v11
+감독형 경로는 세 결과를 순위로 비교하지 않는다. 정확히 하나의 고정 supervised
+`pdf_text_layer` profile만 허용하며, 자세한 field·학습·평가 범위는
+[`R1_SUPERVISED_NATIVE_PDF_EVALUATION.md`](R1_SUPERVISED_NATIVE_PDF_EVALUATION.md),
+활성화 결속은
+[`LOCAL_SOURCE_ATTESTED_SYNTHETIC_PDF_ACTIVATION.md`](LOCAL_SOURCE_ATTESTED_SYNTHETIC_PDF_ACTIVATION.md)를
+따른다.
 
 ## field와 table의 제한
 
-`synthetic-pdf-visible-layout-normalizer-v9`은 후보 엔진이 낸 span과
+### native vector/grid text-layer v1
+
+`pypdf-5.3.1-native-vector-grid-v1`은 기존 visitor v2와 다른 명시적
+`pdf_text_layer` revision이다. 기존 승인이나 visitor 결과를 자동으로 바꾸지
+않으며, 이 revision은 별도의 candidate 실행과 같은 Gate 평가를 거쳐야 한다.
+
+- extractor는 **선택된 후보 PDF 자신의** ContentStream에서 text-show anchor와
+  stroked rectangle만 읽는다. Gold, CSV, source truth, manifest, source-layout
+  profile, template coordinate, 고정 text-run index, 다른 문서는 입력이나 import가
+  아니다.
+- table은 5 또는 6개의 같은 열을 가진 상단/header와 하단/body rectangle band가
+  정확히 하나일 때만 만든다. 모든 cell에 anchor text가 하나 이상 있어야 하며,
+  두 grid, 겹치는 anchor, 빈 cell, 지원하지 않는 transform은 추측 없이 table
+  evidence를 비운다.
+- form field는 table 밖 rectangle 안의 visible label과 같은 줄 오른쪽 또는 바로
+  아래의 value block만 사용한다. label 중복, rectangle 겹침, 방향 충돌, 남는
+  text가 있으면 해당 field를 생략한다.
+- 이것은 born-digital PDF의 native text/vector extraction이다. 스캔·이미지의
+  광학 OCR이라고 부르지 않으며, 합성 PDF의 content-stream compatibility 범위를
+  넘는 품질 근거가 아니다.
+
+`synthetic-pdf-supervised-template-normalizer-v11`은 후보 엔진이 낸 span과
 table cell만 읽습니다. B/L 13개, Invoice 15개, Packing List 12개라는
 **렌더링된 field 계약**을 대상으로 다음 두 가지 visible 의미만 사용합니다.
 
@@ -198,8 +230,11 @@ Gold·CSV·source truth·PDF content stream을 보고 셀을 만드는 경로는
 
 page provenance가 하나가 아니거나, page/bbox가 유효 범위를 벗어나거나, grid와
 cell offset이 불완전하면 Docling 후보는 fail-closed 합니다. 빈 cell은 채우지 않으며,
-Gold·CSV·PDF content stream도 읽지 않습니다. Pdf text layer와 PaddleOCR가 자체적으로
-검증된 structured cell을 내지 않으면 여전히 빈 목록이고 F1 Gate를 통과하지 못합니다.
+Gold·CSV·PDF content stream도 읽지 않습니다. visitor text-layer revision과
+PaddleOCR가 자체적으로 검증된 structured cell을 내지 않으면 여전히 빈 목록이고 F1
+Gate를 통과하지 못합니다. 반면 native vector/grid v1은 위의 독립적인
+candidate-PDF rectangle/text-anchor 증거만 사용하며, 같은 selector를 거친 뒤에만
+table cell을 냅니다.
 이는 합성 PDF의 고정된 Docling structure/table output만 측정하는 범위이며 일반 문서
 table 품질을 보장한다는 뜻은 아닙니다.
 

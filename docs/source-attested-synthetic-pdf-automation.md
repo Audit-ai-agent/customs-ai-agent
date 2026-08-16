@@ -2,12 +2,20 @@
 
 이 경로는 사람이 재입력한 Gold를 대체하는 일반 OCR 인증이 아니다. 생성기
 소스가 현재 workspace에 없기 때문에, 최종 born-digital 합성 PDF의 제한된
-content stream을 독립적인 pinned parser와 template profile로 읽어 만든
-`synthetic_content_stream_compatibility` 평가다.
+content stream에서 source-attested layout truth를 만들고, 명시적으로 감독 학습한
+native template 후보를 비교하는
+`synthetic_r1_supervised_native_template_compatibility` 평가다.
 
 즉 이 결과는 이 정확한 합성 PDF 템플릿에서의 추출 호환성 증거다. 실제 기업
 문서, 스캔 품질, 손글씨, 도장 중첩 또는 독립 optical OCR 품질을 보장하지
 않는다. JPEG/PNG는 이 경로에 포함되지 않으며 계속 `unavailable`이다.
+
+현재 r1 v11 감독형 profile의 실제 문서 field, 학습 분리, 개발·봉인 결과와
+한계를 이해하기 쉬운 형태로 정리한 안내는
+[`R1_SUPERVISED_NATIVE_PDF_EVALUATION.md`](R1_SUPERVISED_NATIVE_PDF_EVALUATION.md)를
+참조한다. 아래의 여러 엔진 비교·실행 설명은 이전 후보를 검증하고 감사하기 위한
+일반 경로를 포함한다. canonical r1 v11 활성화는 순위로 세 엔진을 고르는 방식이
+아니라, 고정된 supervised `pdf_text_layer` profile 하나만 허용한다.
 
 ## 안전 경계
 
@@ -32,9 +40,9 @@ content stream을 독립적인 pinned parser와 template profile로 읽어 만�
   run 수·좌표·table geometry·token 개수가 달라져 모호해지면 PDF preview는
   `unavailable`로 남는다.
 - candidate parser revision은 정확히
-  `synthetic-pdf-visible-layout-normalizer-v9`만 허용한다. 따라서 v8 또는 그 이전의
+  `synthetic-pdf-supervised-template-normalizer-v11`만 허용한다. 따라서 v10 또는 그 이전의
   candidate/execution/result/selection/sealed-run이 모든 SHA와 서로 일치해도
-  새 자동 pointer를 만들 수 없다. v9가 아닌 revision은 source-truth writer와
+  새 자동 pointer를 만들 수 없다. v11이 아닌 revision은 source-truth writer와
   runtime loader 양쪽에서 fail-closed 한다.
 - `error` stratum은 error label만으로 인정하지 않는다. 같은 set/document의
   clean sibling과 decoded content stream이 실제로 달라야 하며, label의
@@ -45,12 +53,20 @@ content stream을 독립적인 pinned parser와 template profile로 읽어 만�
 - `clean_manifest.csv`와 `error_labels.csv`는 dataset 결속, strata와 compact
   mismatch receipt용이다. PDF에 실제로 그려진 값을 조용히 고치거나 OCR 후보
   출력으로 정답을 만들지 않는다.
-- PaddleOCR 후보는 `PP-OCRv4`, CPU 1 thread와 detection/recognition/classifier
-  세 local directory를 모두 configuration·inventory에 고정한다. Docling 후보는
-  CPU 1 thread의 local layout/table parser로만 동작하며 EasyOCR downloader를 피하기 위해
-  `ocr_enabled: false`, `table_structure_mode: "fast" | "accurate"`, `pdf_backend: "pypdfium2"`를
-  고정한다. 두 table mode는 서로 다른 configuration·inventory·extractor revision의 별도
-  profile이며 mode 자동 대체는 없다.
+- 기존 PaddleOCR 2.9 후보는 `PP-OCRv4`, CPU 1 thread와
+  detection/recognition/classifier 세 local directory를 모두 configuration·inventory에
+  고정한다. PaddleOCR 3 후보는 `runtime_api: "paddleocr3-paddlex-3.2"`와 CPU 1 thread,
+  `models/paddleocr3/det`·`models/paddleocr3/rec`, `raster_scale: 3`만을 별도
+  configuration·inventory에 고정한다. P3 configuration은
+  `paddleocr-3.2.0-ppocrv5-mobile-en-raster216-v1` revision만 허용하며, inventory는
+  해당 ASCII-only CPython 3.11/Windows AMD64 profile의 56개 metadata dependency
+  closure와 고정 version을 정확히 모두 가져야 한다. 두 Paddle profile은 같은
+  `paddleocr` distribution의 호환되지 않는 API를 쓰므로 environment와 fallback을
+  공유하지 않는다. Docling 후보는 CPU 1 thread의 local
+  layout/table parser로만 동작하며 EasyOCR downloader를 피하기 위해 `ocr_enabled: false`,
+  `table_structure_mode: "fast" | "accurate"`, `pdf_backend: "pypdfium2"`를 고정한다.
+  두 table mode는 서로 다른 configuration·inventory·extractor revision의 별도 profile이며
+  mode 자동 대체는 없다.
   adapter는 `PyPdfiumDocumentBackend`를 직접 선택하므로 기본 `DoclingParseV2`와 다른
   backend는 fallback 후보가 아니다. StandardPdfPipeline native GLM의 Windows 경계는
   별도로 남으므로 ASCII-only environment preflight도 계속 필요하다. 이 둘의 실제 실행

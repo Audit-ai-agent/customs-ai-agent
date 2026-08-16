@@ -164,9 +164,12 @@ def _parse_provenance(
     configuration: RuntimeConfigurationV1,
 ) -> tuple[dict[str, dict[str, str]], dict[str, dict[str, str]]]:
     code = "document_preview_inventory_provenance_invalid"
+    expected_keys = {"schema_version", "engine_kind", "packages", "artifact_directories"}
+    if configuration.runtime_api == "paddleocr3-paddlex-3.2":
+        expected_keys.add("runtime_api")
     provenance = _strict_mapping(
         value,
-        expected={"schema_version", "engine_kind", "packages", "artifact_directories"},
+        expected=expected_keys,
         code=code,
     )
     if (
@@ -174,12 +177,18 @@ def _parse_provenance(
         or provenance["engine_kind"] != configuration.engine_kind
         or not isinstance(provenance["packages"], list)
         or not isinstance(provenance["artifact_directories"], list)
+        or (
+            configuration.runtime_api == "paddleocr3-paddlex-3.2"
+            and provenance.get("runtime_api") != configuration.runtime_api
+        )
     ):
         raise DocumentPreviewRuntimeError(code)
 
     required = {
         _normalized_distribution_name(name): name
-        for name in runtime_module._required_packages(configuration.engine_kind)
+        for name in runtime_module._required_packages(
+            configuration.engine_kind, configuration.runtime_api
+        )
     }
     packages: dict[str, dict[str, str]] = {}
     for raw_item in provenance["packages"]:
@@ -193,10 +202,16 @@ def _parse_provenance(
         source_uri = item["source_uri"]
         if not all(isinstance(part, str) for part in (name, license_id, source_uri)):
             raise DocumentPreviewRuntimeError(code)
-        normalized = _normalized_distribution_name(name)
+        package_name = cast(str, name)
+        package_license_id = cast(str, license_id)
+        package_source_uri = cast(str, source_uri)
+        normalized = _normalized_distribution_name(package_name)
         if normalized not in required or normalized in packages:
             raise DocumentPreviewRuntimeError(code)
-        packages[normalized] = {"license_id": license_id, "source_uri": source_uri}
+        packages[normalized] = {
+            "license_id": package_license_id,
+            "source_uri": package_source_uri,
+        }
     if set(packages) != set(required):
         raise DocumentPreviewRuntimeError(code)
 
@@ -209,26 +224,53 @@ def _parse_provenance(
     ):
         raise DocumentPreviewRuntimeError(code)
     artifact_directories: dict[str, dict[str, str]] = {}
+    supervised_template = (
+        configuration.engine_kind == "pdf_text_layer"
+        and configuration.extractor_revision
+        == runtime_module.SUPERVISED_TEMPLATE_EXTRACTOR_REVISION
+    )
     for raw_item in provenance["artifact_directories"]:
-        item = _strict_mapping(
-            raw_item,
-            expected={"relative_directory", "license_id", "source_uri"},
-            code=code,
+        expected = (
+            {
+                "relative_directory",
+                "provenance_kind",
+                "model_training_receipt_sha256",
+            }
+            if supervised_template
+            else {"relative_directory", "license_id", "source_uri"}
         )
+        item = _strict_mapping(raw_item, expected=expected, code=code)
         relative_directory = item["relative_directory"]
-        license_id = item["license_id"]
-        source_uri = item["source_uri"]
-        if not all(isinstance(part, str) for part in (relative_directory, license_id, source_uri)):
+        if not isinstance(relative_directory, str):
             raise DocumentPreviewRuntimeError(code)
+        relative_directory_text = cast(str, relative_directory)
         if (
-            relative_directory not in configured_directories
-            or relative_directory in artifact_directories
+            relative_directory_text not in configured_directories
+            or relative_directory_text in artifact_directories
         ):
             raise DocumentPreviewRuntimeError(code)
-        artifact_directories[relative_directory] = {
-            "license_id": license_id,
-            "source_uri": source_uri,
-        }
+        if supervised_template:
+            provenance_kind = item["provenance_kind"]
+            training_receipt_sha256 = item["model_training_receipt_sha256"]
+            if (
+                provenance_kind != "locally_trained_source_attested"
+                or not isinstance(training_receipt_sha256, str)
+                or runtime_module._SHA256.fullmatch(training_receipt_sha256) is None
+            ):
+                raise DocumentPreviewRuntimeError(code)
+            artifact_directories[relative_directory_text] = {
+                "provenance_kind": "locally_trained_source_attested",
+                "model_training_receipt_sha256": training_receipt_sha256,
+            }
+        else:
+            license_id = item["license_id"]
+            source_uri = item["source_uri"]
+            if not all(isinstance(part, str) for part in (license_id, source_uri)):
+                raise DocumentPreviewRuntimeError(code)
+            artifact_directories[relative_directory_text] = {
+                "license_id": cast(str, license_id),
+                "source_uri": cast(str, source_uri),
+            }
     if set(artifact_directories) != set(configured_directories):
         raise DocumentPreviewRuntimeError(code)
     return packages, artifact_directories
@@ -320,16 +362,31 @@ def _build_artifacts(
             if relative_path in seen_paths or not stat.S_ISREG(metadata.st_mode):
                 raise DocumentPreviewRuntimeError("document_preview_model_artifact_invalid")
             seen_paths.add(relative_path)
-            artifacts.append(
-                {
-                    "artifact_id": f"artifact-{_sha256_bytes(relative_path.encode('utf-8'))}",
-                    "relative_path": relative_path,
-                    "sha256": _hash_file(path),
-                    "byte_size": metadata.st_size,
-                    "license_id": provenance["license_id"],
-                    "source_uri": provenance["source_uri"],
-                }
-            )
+            sha256 = _hash_file(path)
+            if provenance.get("provenance_kind") == "locally_trained_source_attested":
+                artifacts.append(
+                    {
+                        "artifact_id": f"{runtime_module.SUPERVISED_TEMPLATE_MODEL_KIND}-{sha256}",
+                        "relative_path": relative_path,
+                        "sha256": sha256,
+                        "byte_size": metadata.st_size,
+                        "provenance_kind": "locally_trained_source_attested",
+                        "model_training_receipt_sha256": provenance[
+                            "model_training_receipt_sha256"
+                        ],
+                    }
+                )
+            else:
+                artifacts.append(
+                    {
+                        "artifact_id": f"artifact-{_sha256_bytes(relative_path.encode('utf-8'))}",
+                        "relative_path": relative_path,
+                        "sha256": sha256,
+                        "byte_size": metadata.st_size,
+                        "license_id": provenance["license_id"],
+                        "source_uri": provenance["source_uri"],
+                    }
+                )
     return sorted(artifacts, key=lambda item: cast(str, item["relative_path"]))
 
 
@@ -387,7 +444,9 @@ def build_runtime_inventory(
             value=provenance_value,
             configuration=configuration,
         )
-        required = runtime_module._required_packages(configuration.engine_kind)
+        required = runtime_module._required_packages(
+            configuration.engine_kind, configuration.runtime_api
+        )
         packages = [
             {
                 "name": name,
@@ -409,10 +468,15 @@ def build_runtime_inventory(
                 artifact_directory_provenance=artifact_directory_provenance,
             ),
         }
+        if configuration.runtime_api == "paddleocr3-paddlex-3.2":
+            inventory_value["runtime_api"] = configuration.runtime_api
         inventory_raw = _canonical_json_bytes(inventory_value)
         try:
             inventory = parse_model_inventory(inventory_raw)
-            if inventory.engine_kind != configuration.engine_kind:
+            if (
+                inventory.engine_kind != configuration.engine_kind
+                or inventory.runtime_api != configuration.runtime_api
+            ):
                 raise DocumentPreviewRuntimeError("document_preview_provisioning_kind_mismatch")
             verify_inventory_packages(inventory, package_version_reader=package_version_reader)
             verify_configured_model_directory_artifacts(root, configuration, inventory)

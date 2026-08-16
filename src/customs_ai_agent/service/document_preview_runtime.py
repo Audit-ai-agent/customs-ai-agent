@@ -35,7 +35,18 @@ import threading
 from contextlib import contextmanager
 from dataclasses import dataclass, field, replace
 from pathlib import Path, PurePosixPath
-from typing import Any, Callable, Final, Iterator, Literal, Mapping, Protocol, Sequence, cast
+from typing import (
+    TYPE_CHECKING,
+    Any,
+    Callable,
+    Final,
+    Iterator,
+    Literal,
+    Mapping,
+    Protocol,
+    Sequence,
+    cast,
+)
 from urllib.parse import urlparse
 
 from pydantic import ValidationError
@@ -57,6 +68,12 @@ from customs_ai_agent.service.document_extraction import (
     LocalDocumentPreviewEngine,
 )
 
+if TYPE_CHECKING:
+    from customs_ai_agent.evaluation.native_pdf_vector_grid import NativePdfVectorGridExtraction
+    from customs_ai_agent.evaluation.supervised_template_provenance import (
+        R1SupervisedTemplateProvenanceBinding,
+    )
+
 
 _IDENTIFIER = re.compile(r"^[A-Za-z0-9][A-Za-z0-9._:-]{0,127}$")
 _SHA256 = re.compile(r"^[a-f0-9]{64}$")
@@ -75,7 +92,21 @@ _SOURCE_CANDIDATE_EXECUTION_DIRECTORY = "source-attested-candidate-executions"
 _SOURCE_EVALUATION_RESULT_DIRECTORY = "source-attested-evaluation-results"
 _SOURCE_DEVELOPMENT_SELECTION_DIRECTORY = "source-attested-development-selections"
 _SOURCE_SEALED_RUN_DIRECTORY = "source-attested-sealed-runs"
-_SOURCE_ATTESTED_CANDIDATE_PARSER_REVISION: Final = "synthetic-pdf-visible-layout-normalizer-v9"
+_SOURCE_ATTESTED_CANDIDATE_PARSER_REVISION: Final = (
+    "synthetic-pdf-supervised-template-normalizer-v11"
+)
+# The source-attested automatic pointer has exactly one production corpus and
+# two canonical packet receipts.  Keep the profile pin local to this
+# import-cycle-sensitive module: the evaluation package imports this runtime
+# through the candidate runner, so a top-level contract import would cycle.
+_SOURCE_ATTESTED_SUPERVISED_DATASET_ID: Final = "synthetic-customs-pdf-2000"
+_SOURCE_ATTESTED_SUPERVISED_DATASET_REVISION: Final = "20260811-r1"
+_SOURCE_ATTESTED_SUPERVISED_DEVELOPMENT_PACKET_SHA256: Final = (
+    "5b8a804b022e97df0e58a60c4fadfc9d3637c900f368273b8c1b6ff347c3f7e2"
+)
+_SOURCE_ATTESTED_SUPERVISED_SEALED_PACKET_SHA256: Final = (
+    "174d7fad0040e89ee93d367f31694183049ea649a28515cde7a59458261aa271"
+)
 _SEALED_RESERVATION_DIRECTORY = "candidate-run-reservations"
 _SOURCE_LAYOUT_RECORD_COUNTS: Mapping[str, int] = {"development": 60, "sealed": 20}
 _MAX_SOURCE_DATASET_RECEIPT_BYTES = 8 * 1024 * 1024
@@ -92,10 +123,23 @@ _TABLE_CELL_F1_MIN = 0.98
 # candidate-only visitor geometry is available only from the explicit v2.
 _PDF_TEXT_LAYER_LEGACY_EXTRACTOR_REVISION: Final = "pypdf-5.3.1-text-layer-v1"
 _PDF_TEXT_LAYER_VISITOR_EXTRACTOR_REVISION: Final = "pypdf-5.3.1-text-layer-visitor-v2"
+_PDF_TEXT_LAYER_NATIVE_VECTOR_GRID_EXTRACTOR_REVISION: Final = "pypdf-5.3.1-native-vector-grid-v1"
+_PDF_TEXT_LAYER_SUPERVISED_TEMPLATE_EXTRACTOR_REVISION: Final = (
+    "pypdf-5.3.1-supervised-template-r1-v1"
+)
+# These literals are repeated at this import-cycle-sensitive service boundary.
+# The provenance loader below imports the public evaluation contract lazily and
+# verifies the model's exact identity before any PDF bytes are supplied.
+SUPERVISED_TEMPLATE_EXTRACTOR_REVISION: Final = (
+    _PDF_TEXT_LAYER_SUPERVISED_TEMPLATE_EXTRACTOR_REVISION
+)
+SUPERVISED_TEMPLATE_MODEL_KIND: Final = "native_pdf_semantic_model"
 _PDF_TEXT_LAYER_EXTRACTOR_REVISIONS: Final[frozenset[str]] = frozenset(
     {
         _PDF_TEXT_LAYER_LEGACY_EXTRACTOR_REVISION,
         _PDF_TEXT_LAYER_VISITOR_EXTRACTOR_REVISION,
+        _PDF_TEXT_LAYER_NATIVE_VECTOR_GRID_EXTRACTOR_REVISION,
+        _PDF_TEXT_LAYER_SUPERVISED_TEMPLATE_EXTRACTOR_REVISION,
     }
 )
 _NETWORK_GUARD_LOCK = threading.Lock()
@@ -108,8 +152,16 @@ _ORIGINAL_SOCKET_CONNECT_EX = socket.socket.connect_ex
 _DOCLING_NATIVE_PACKAGE_NAMES: Final = ("docling_parse", "deepsearch_glm")
 _DOCLING_PDF_BACKEND: Final = "pypdfium2"
 _DOCLING_TABLE_STRUCTURE_MODES: Final[frozenset[str]] = frozenset({"fast", "accurate"})
+_PADDLEOCR2_RUNTIME_API: Final = "paddleocr2-2.9"
+_PADDLEOCR3_RUNTIME_API: Final = "paddleocr3-paddlex-3.2"
+# This revision names the complete, fixed P3 extraction contract: the
+# PaddleOCR/PaddleX API family, the two PP-OCRv5 mobile models, and PDFium's
+# 3x (216 dpi) raster input.  It is intentionally not interchangeable with
+# the legacy PaddleOCR 2 sidecars, which retain their existing revisions.
+_PADDLEOCR3_EXTRACTOR_REVISION: Final = "paddleocr-3.2.0-ppocrv5-mobile-en-raster216-v1"
 
 ApprovedPdfEngineKind = Literal["pdf_text_layer", "paddleocr", "docling"]
+PaddleOcrRuntimeApi = Literal["paddleocr2-2.9", "paddleocr3-paddlex-3.2"]
 
 
 class DocumentPreviewRuntimeError(RuntimeError):
@@ -521,6 +573,7 @@ def _write_exact_immutable_bytes(path: Path, payload: bytes, *, limit: int, code
 class RuntimeConfigurationV1:
     engine_kind: ApprovedPdfEngineKind
     extractor_revision: str
+    runtime_api: PaddleOcrRuntimeApi | None
     options: Mapping[str, object]
 
 
@@ -538,13 +591,16 @@ class ModelArtifactV1:
     relative_path: str
     sha256: str
     byte_size: int
-    license_id: str
-    source_uri: str
+    provenance_kind: Literal["external", "locally_trained_source_attested"]
+    license_id: str | None
+    source_uri: str | None
+    model_training_receipt_sha256: str | None
 
 
 @dataclass(frozen=True, slots=True)
 class ModelInventoryV1:
     engine_kind: ApprovedPdfEngineKind
+    runtime_api: PaddleOcrRuntimeApi | None
     packages: tuple[ModelPackageV1, ...]
     artifacts: tuple[ModelArtifactV1, ...]
 
@@ -595,7 +651,7 @@ class SourceAttestedSyntheticPdfPreviewActivationV1:
     dataset_id: str
     dataset_revision: str
     packet_receipt_sha256: str
-    evaluation_scope: Literal["synthetic_content_stream_compatibility"]
+    evaluation_scope: Literal["synthetic_r1_supervised_native_template_compatibility"]
     layout_truth_kind: Literal["pdf_content_stream_layout_v1"]
     layout_truth_receipt_sha256: str
     layout_truth_parser_spec_sha256: str
@@ -611,7 +667,7 @@ class SourceAttestedSyntheticSealedEvaluationResultV1:
     dataset_id: str
     dataset_revision: str
     packet_receipt_sha256: str
-    evaluation_scope: Literal["synthetic_content_stream_compatibility"]
+    evaluation_scope: Literal["synthetic_r1_supervised_native_template_compatibility"]
     layout_truth_kind: Literal["pdf_content_stream_layout_v1"]
     layout_truth_receipt_sha256: str
     layout_truth_parser_spec_sha256: str
@@ -825,15 +881,78 @@ PdfPreviewEvaluationResultV1 = (
 )
 
 
-def _parse_options(value: object, *, kind: ApprovedPdfEngineKind) -> Mapping[str, object]:
+def _parse_paddleocr_runtime_api(
+    value: object,
+    *,
+    kind: ApprovedPdfEngineKind,
+    present: bool,
+    code: str,
+) -> PaddleOcrRuntimeApi | None:
+    """Return one explicit Paddle family without rewriting legacy sidecars.
+
+    Existing PaddleOCR 2.9 sidecars predate ``runtime_api`` and remain valid
+    as the legacy family.  The newer PaddleOCR 3/PaddleX profile must name
+    itself explicitly, so a P3 option set can never select the 2.9 adapter.
+    """
+
+    if kind != "paddleocr":
+        if present:
+            raise DocumentPreviewRuntimeError(code)
+        return None
+    if not present:
+        return _PADDLEOCR2_RUNTIME_API
+    if value != _PADDLEOCR3_RUNTIME_API:
+        raise DocumentPreviewRuntimeError(code)
+    return _PADDLEOCR3_RUNTIME_API
+
+
+def _parse_options(
+    value: object,
+    *,
+    kind: ApprovedPdfEngineKind,
+    runtime_api: PaddleOcrRuntimeApi | None,
+    extractor_revision: str,
+) -> Mapping[str, object]:
     if not isinstance(value, dict):
         raise DocumentPreviewRuntimeError("document_preview_configuration_invalid")
     options = cast(dict[str, object], value)
     if kind == "pdf_text_layer":
+        if extractor_revision == _PDF_TEXT_LAYER_SUPERVISED_TEMPLATE_EXTRACTOR_REVISION:
+            required = {
+                "semantic_model_directory",
+                "semantic_model_artifact",
+                "model_training_receipt_sha256",
+            }
+            if set(options) != required:
+                raise DocumentPreviewRuntimeError("document_preview_configuration_invalid")
+            model_directory = _relative_model_path(
+                options["semantic_model_directory"],
+                code="document_preview_configuration_invalid",
+            )
+            model_artifact = _relative_model_path(
+                options["semantic_model_artifact"],
+                code="document_preview_configuration_invalid",
+            )
+            directory_parts = Path(model_directory).parts
+            if (
+                len(directory_parts) != 3
+                or directory_parts[:2] != ("models", "native-pdf-semantic")
+                or _SHA256.fullmatch(directory_parts[2]) is None
+                or model_artifact != f"{model_directory}/{directory_parts[2]}.json"
+            ):
+                raise DocumentPreviewRuntimeError("document_preview_configuration_invalid")
+            return {
+                "semantic_model_directory": model_directory,
+                "semantic_model_artifact": model_artifact,
+                "model_training_receipt_sha256": _sha256(
+                    options["model_training_receipt_sha256"],
+                    code="document_preview_configuration_invalid",
+                ),
+            }
         if options:
             raise DocumentPreviewRuntimeError("document_preview_configuration_invalid")
         return {}
-    if kind == "paddleocr":
+    if kind == "paddleocr" and runtime_api == _PADDLEOCR2_RUNTIME_API:
         allowed = {
             "det_model_directory",
             "rec_model_directory",
@@ -891,6 +1010,66 @@ def _parse_options(value: object, *, kind: ApprovedPdfEngineKind) -> Mapping[str
                 raise DocumentPreviewRuntimeError("document_preview_configuration_invalid")
             normalized["use_angle_cls"] = options["use_angle_cls"]
         return normalized
+    if kind == "paddleocr" and runtime_api == _PADDLEOCR3_RUNTIME_API:
+        # PaddleOCR 3 delegates this pipeline to PaddleX.  Keep every model
+        # directory and every optional preprocessor explicit: leaving one at
+        # its upstream default can select a non-inventoried model and download
+        # it during constructor or first inference.
+        required = {
+            "text_detection_model_name",
+            "text_detection_model_directory",
+            "text_recognition_model_name",
+            "text_recognition_model_directory",
+            "raster_scale",
+            "device",
+            "cpu_threads",
+            "enable_hpi",
+            "enable_mkldnn",
+            "use_tensorrt",
+            "use_doc_orientation_classify",
+            "use_doc_unwarping",
+            "use_textline_orientation",
+        }
+        if set(options) != required:
+            raise DocumentPreviewRuntimeError("document_preview_configuration_invalid")
+        if (
+            options["text_detection_model_name"] != "PP-OCRv5_mobile_det"
+            or options["text_recognition_model_name"] != "en_PP-OCRv5_mobile_rec"
+            # The extractor revision names its input resolution.  Keep the
+            # raster scale in the configuration hash rather than relying on
+            # pdfium's default (72 dpi).
+            or options["raster_scale"] != 3
+            or options["device"] != "cpu"
+            or options["cpu_threads"] != 1
+            or options["enable_hpi"] is not False
+            or options["enable_mkldnn"] is not False
+            or options["use_tensorrt"] is not False
+            or options["use_doc_orientation_classify"] is not False
+            or options["use_doc_unwarping"] is not False
+            or options["use_textline_orientation"] is not False
+        ):
+            raise DocumentPreviewRuntimeError("document_preview_configuration_invalid")
+        return {
+            "text_detection_model_name": "PP-OCRv5_mobile_det",
+            "text_detection_model_directory": _relative_model_path(
+                options["text_detection_model_directory"],
+                code="document_preview_configuration_invalid",
+            ),
+            "text_recognition_model_name": "en_PP-OCRv5_mobile_rec",
+            "text_recognition_model_directory": _relative_model_path(
+                options["text_recognition_model_directory"],
+                code="document_preview_configuration_invalid",
+            ),
+            "raster_scale": 3,
+            "device": "cpu",
+            "cpu_threads": 1,
+            "enable_hpi": False,
+            "enable_mkldnn": False,
+            "use_tensorrt": False,
+            "use_doc_orientation_classify": False,
+            "use_doc_unwarping": False,
+            "use_textline_orientation": False,
+        }
     if kind == "docling":
         allowed = {
             "artifacts_directory",
@@ -944,23 +1123,40 @@ def _parse_options(value: object, *, kind: ApprovedPdfEngineKind) -> Mapping[str
 
 def parse_runtime_configuration(raw: bytes) -> RuntimeConfigurationV1:
     value = _strict_json_object(raw, code="document_preview_configuration_invalid")
-    _require_exact_keys(
-        value,
-        {"schema_version", "engine_kind", "extractor_revision", "options"},
-        code="document_preview_configuration_invalid",
-    )
+    base_keys = {"schema_version", "engine_kind", "extractor_revision", "options"}
+    runtime_api_present = "runtime_api" in value
+    if set(value) != base_keys | ({"runtime_api"} if runtime_api_present else set()):
+        raise DocumentPreviewRuntimeError("document_preview_configuration_invalid")
     if value["schema_version"] != "1.0":
         raise DocumentPreviewRuntimeError("document_preview_configuration_invalid")
     kind = _engine_kind(value["engine_kind"], code="document_preview_configuration_invalid")
+    runtime_api = _parse_paddleocr_runtime_api(
+        value.get("runtime_api"),
+        kind=kind,
+        present=runtime_api_present,
+        code="document_preview_configuration_invalid",
+    )
     extractor_revision = _identifier(
         value["extractor_revision"], code="document_preview_configuration_invalid"
     )
     if kind == "pdf_text_layer" and extractor_revision not in _PDF_TEXT_LAYER_EXTRACTOR_REVISIONS:
         raise DocumentPreviewRuntimeError("document_preview_configuration_invalid")
+    if (
+        kind == "paddleocr"
+        and runtime_api == _PADDLEOCR3_RUNTIME_API
+        and extractor_revision != _PADDLEOCR3_EXTRACTOR_REVISION
+    ):
+        raise DocumentPreviewRuntimeError("document_preview_configuration_invalid")
     return RuntimeConfigurationV1(
         engine_kind=kind,
         extractor_revision=extractor_revision,
-        options=_parse_options(value["options"], kind=kind),
+        runtime_api=runtime_api,
+        options=_parse_options(
+            value["options"],
+            kind=kind,
+            runtime_api=runtime_api,
+            extractor_revision=extractor_revision,
+        ),
     )
 
 
@@ -996,11 +1192,25 @@ def _parse_artifact(value: object) -> ModelArtifactV1:
     if not isinstance(value, dict):
         raise DocumentPreviewRuntimeError("document_preview_inventory_invalid")
     item = cast(dict[str, object], value)
-    _require_exact_keys(
-        item,
-        {"artifact_id", "relative_path", "sha256", "byte_size", "license_id", "source_uri"},
-        code="document_preview_inventory_invalid",
-    )
+    external_keys = {
+        "artifact_id",
+        "relative_path",
+        "sha256",
+        "byte_size",
+        "license_id",
+        "source_uri",
+    }
+    locally_trained_keys = {
+        "artifact_id",
+        "relative_path",
+        "sha256",
+        "byte_size",
+        "provenance_kind",
+        "model_training_receipt_sha256",
+    }
+    keys = frozenset(item)
+    if keys not in {frozenset(external_keys), frozenset(locally_trained_keys)}:
+        raise DocumentPreviewRuntimeError("document_preview_inventory_invalid")
     byte_size = item["byte_size"]
     if (
         isinstance(byte_size, bool)
@@ -1008,33 +1218,60 @@ def _parse_artifact(value: object) -> ModelArtifactV1:
         or not 1 <= byte_size <= 8 * 1024**3
     ):
         raise DocumentPreviewRuntimeError("document_preview_inventory_invalid")
+    artifact_id = _identifier(item["artifact_id"], code="document_preview_inventory_invalid")
+    relative_path = _relative_model_path(
+        item["relative_path"], code="document_preview_inventory_invalid"
+    )
+    sha256 = _sha256(item["sha256"], code="document_preview_inventory_invalid")
+    if keys == external_keys:
+        return ModelArtifactV1(
+            artifact_id=artifact_id,
+            relative_path=relative_path,
+            sha256=sha256,
+            byte_size=byte_size,
+            provenance_kind="external",
+            license_id=_identifier(item["license_id"], code="document_preview_inventory_invalid"),
+            source_uri=_validate_https_source(
+                item["source_uri"], code="document_preview_inventory_invalid"
+            ),
+            model_training_receipt_sha256=None,
+        )
+    if item["provenance_kind"] != "locally_trained_source_attested":
+        raise DocumentPreviewRuntimeError("document_preview_inventory_invalid")
     return ModelArtifactV1(
-        artifact_id=_identifier(item["artifact_id"], code="document_preview_inventory_invalid"),
-        relative_path=_relative_model_path(
-            item["relative_path"], code="document_preview_inventory_invalid"
-        ),
-        sha256=_sha256(item["sha256"], code="document_preview_inventory_invalid"),
+        artifact_id=artifact_id,
+        relative_path=relative_path,
+        sha256=sha256,
         byte_size=byte_size,
-        license_id=_identifier(item["license_id"], code="document_preview_inventory_invalid"),
-        source_uri=_validate_https_source(
-            item["source_uri"], code="document_preview_inventory_invalid"
+        provenance_kind="locally_trained_source_attested",
+        license_id=None,
+        source_uri=None,
+        model_training_receipt_sha256=_sha256(
+            item["model_training_receipt_sha256"],
+            code="document_preview_inventory_invalid",
         ),
     )
 
 
 def parse_model_inventory(raw: bytes) -> ModelInventoryV1:
     value = _strict_json_object(raw, code="document_preview_inventory_invalid")
-    _require_exact_keys(
-        value,
-        {"schema_version", "engine_kind", "packages", "artifacts"},
-        code="document_preview_inventory_invalid",
-    )
+    base_keys = {"schema_version", "engine_kind", "packages", "artifacts"}
+    runtime_api_present = "runtime_api" in value
+    if set(value) != base_keys | ({"runtime_api"} if runtime_api_present else set()):
+        raise DocumentPreviewRuntimeError("document_preview_inventory_invalid")
     if (
         value["schema_version"] != "1.0"
         or not isinstance(value["packages"], list)
         or not isinstance(value["artifacts"], list)
     ):
         raise DocumentPreviewRuntimeError("document_preview_inventory_invalid")
+    kind = _engine_kind(value["engine_kind"], code="document_preview_inventory_invalid")
+    runtime_api = _parse_paddleocr_runtime_api(
+        value.get("runtime_api"),
+        kind=kind,
+        present=runtime_api_present,
+        code="document_preview_inventory_invalid",
+    )
     packages = tuple(_parse_package(item) for item in value["packages"])
     artifacts = tuple(_parse_artifact(item) for item in value["artifacts"])
     if not packages:
@@ -1049,7 +1286,8 @@ def parse_model_inventory(raw: bytes) -> ModelInventoryV1:
     ):
         raise DocumentPreviewRuntimeError("document_preview_inventory_invalid")
     return ModelInventoryV1(
-        engine_kind=_engine_kind(value["engine_kind"], code="document_preview_inventory_invalid"),
+        engine_kind=kind,
+        runtime_api=runtime_api,
         packages=packages,
         artifacts=artifacts,
     )
@@ -1167,20 +1405,34 @@ def parse_source_attested_synthetic_pdf_preview_activation(
     if (
         evaluation["packet_kind"] != "sealed"
         or evaluation["evaluation_basis"] != "source_attested_synthetic"
-        or evaluation["evaluation_scope"] != "synthetic_content_stream_compatibility"
+        or evaluation["evaluation_scope"] != "synthetic_r1_supervised_native_template_compatibility"
         or evaluation["layout_truth_kind"] != "pdf_content_stream_layout_v1"
     ):
         raise DocumentPreviewRuntimeError(code)
+    engine_kind = _engine_kind(engine["kind"], code=code)
+    extractor_revision = _identifier(engine["extractor_revision"], code=code)
+    dataset_id = _identifier(evaluation["dataset_id"], code=code)
+    dataset_revision = _identifier(evaluation["dataset_revision"], code=code)
+    packet_receipt_sha256 = _sha256(evaluation["packet_receipt_sha256"], code=code)
+    _require_canonical_supervised_source_attested_profile(
+        dataset_id=dataset_id,
+        dataset_revision=dataset_revision,
+        packet_receipt_sha256=packet_receipt_sha256,
+        engine_kind=engine_kind,
+        extractor_revision=extractor_revision,
+        code=code,
+    )
     return SourceAttestedSyntheticPdfPreviewActivationV1(
-        engine_kind=_engine_kind(engine["kind"], code=code),
-        extractor_revision=_identifier(engine["extractor_revision"], code=code),
+        engine_kind=engine_kind,
+        extractor_revision=extractor_revision,
         configuration_sha256=_sha256(engine["configuration_sha256"], code=code),
         model_inventory_sha256=_sha256(engine["model_inventory_sha256"], code=code),
-        dataset_id=_identifier(evaluation["dataset_id"], code=code),
-        dataset_revision=_identifier(evaluation["dataset_revision"], code=code),
-        packet_receipt_sha256=_sha256(evaluation["packet_receipt_sha256"], code=code),
+        dataset_id=dataset_id,
+        dataset_revision=dataset_revision,
+        packet_receipt_sha256=packet_receipt_sha256,
         evaluation_scope=cast(
-            Literal["synthetic_content_stream_compatibility"], evaluation["evaluation_scope"]
+            Literal["synthetic_r1_supervised_native_template_compatibility"],
+            evaluation["evaluation_scope"],
         ),
         layout_truth_kind=cast(
             Literal["pdf_content_stream_layout_v1"], evaluation["layout_truth_kind"]
@@ -1305,16 +1557,63 @@ def _source_attested_candidate_parser_revision(value: object, *, code: str) -> s
 
     Equality across receipts is necessary but not sufficient: a fully
     self-consistent older parser could otherwise mint a new automatic pointer.
-    The v9 parser is the only candidate normalizer whose rendered 13/15/12
-    field contract has been accepted for this narrow synthetic scope.  Its
-    separately reviewed behavior supersedes v8, so a coherent v8 chain
-    remains ineligible.
+    The v11 parser is the only candidate normalizer whose supervised native
+    template 13/15/12 field contract has been accepted for this narrow
+    synthetic scope.  It supersedes v10, so a coherent v10 chain remains
+    ineligible.
     """
 
     revision = _identifier(value, code=code)
     if revision != _SOURCE_ATTESTED_CANDIDATE_PARSER_REVISION:
         raise DocumentPreviewRuntimeError(code)
     return revision
+
+
+def _is_canonical_supervised_source_attested_packet(
+    *, dataset_id: str, dataset_revision: str, packet_receipt_sha256: str
+) -> bool:
+    """Identify the one production r1 packet without widening test fixtures.
+
+    Hermetic tests use injected fixture receipts and do not reach the
+    production replay boundary.  The actual source-attested loader later
+    independently pins this exact corpus and packets.  This narrow predicate
+    therefore keeps those fixtures useful while requiring the supervised
+    profile everywhere a real r1 receipt can be selected or activated.
+    """
+
+    return (
+        dataset_id == _SOURCE_ATTESTED_SUPERVISED_DATASET_ID
+        and dataset_revision == _SOURCE_ATTESTED_SUPERVISED_DATASET_REVISION
+        and packet_receipt_sha256
+        in {
+            _SOURCE_ATTESTED_SUPERVISED_DEVELOPMENT_PACKET_SHA256,
+            _SOURCE_ATTESTED_SUPERVISED_SEALED_PACKET_SHA256,
+        }
+    )
+
+
+def _require_canonical_supervised_source_attested_profile(
+    *,
+    dataset_id: str,
+    dataset_revision: str,
+    packet_receipt_sha256: str,
+    engine_kind: ApprovedPdfEngineKind,
+    extractor_revision: str,
+    code: str,
+) -> None:
+    """Reject a coherent but non-supervised r1 automatic-chain member."""
+
+    if not _is_canonical_supervised_source_attested_packet(
+        dataset_id=dataset_id,
+        dataset_revision=dataset_revision,
+        packet_receipt_sha256=packet_receipt_sha256,
+    ):
+        return
+    if (
+        engine_kind != "pdf_text_layer"
+        or extractor_revision != _PDF_TEXT_LAYER_SUPERVISED_TEMPLATE_EXTRACTOR_REVISION
+    ):
+        raise DocumentPreviewRuntimeError(code)
 
 
 def _parse_source_attested_metrics(
@@ -1475,7 +1774,7 @@ def parse_source_attested_synthetic_sealed_evaluation_result(
         value["schema_version"] != "1.0"
         or value["evaluation_basis"] != "source_attested_synthetic"
         or value["packet_kind"] != "sealed"
-        or value["evaluation_scope"] != "synthetic_content_stream_compatibility"
+        or value["evaluation_scope"] != "synthetic_r1_supervised_native_template_compatibility"
         or value["layout_truth_kind"] != "pdf_content_stream_layout_v1"
         or value["passed"] is not True
     ):
@@ -1499,12 +1798,26 @@ def parse_source_attested_synthetic_sealed_evaluation_result(
         or table_cell_f1 < _TABLE_CELL_F1_MIN
     ):
         raise DocumentPreviewRuntimeError("document_preview_source_attested_evaluation_gate_failed")
+    dataset_id = _identifier(value["dataset_id"], code=code)
+    dataset_revision = _identifier(value["dataset_revision"], code=code)
+    packet_receipt_sha256 = _sha256(value["packet_receipt_sha256"], code=code)
+    engine_kind = _engine_kind(value["engine_kind"], code=code)
+    extractor_revision = _identifier(value["extractor_revision"], code=code)
+    _require_canonical_supervised_source_attested_profile(
+        dataset_id=dataset_id,
+        dataset_revision=dataset_revision,
+        packet_receipt_sha256=packet_receipt_sha256,
+        engine_kind=engine_kind,
+        extractor_revision=extractor_revision,
+        code=code,
+    )
     return SourceAttestedSyntheticSealedEvaluationResultV1(
-        dataset_id=_identifier(value["dataset_id"], code=code),
-        dataset_revision=_identifier(value["dataset_revision"], code=code),
-        packet_receipt_sha256=_sha256(value["packet_receipt_sha256"], code=code),
+        dataset_id=dataset_id,
+        dataset_revision=dataset_revision,
+        packet_receipt_sha256=packet_receipt_sha256,
         evaluation_scope=cast(
-            Literal["synthetic_content_stream_compatibility"], value["evaluation_scope"]
+            Literal["synthetic_r1_supervised_native_template_compatibility"],
+            value["evaluation_scope"],
         ),
         layout_truth_kind=cast(Literal["pdf_content_stream_layout_v1"], value["layout_truth_kind"]),
         layout_truth_receipt_sha256=_sha256(value["layout_truth_receipt_sha256"], code=code),
@@ -1522,8 +1835,8 @@ def parse_source_attested_synthetic_sealed_evaluation_result(
         candidate_execution_receipt_sha256=_sha256(
             value["candidate_execution_receipt_sha256"], code=code
         ),
-        engine_kind=_engine_kind(value["engine_kind"], code=code),
-        extractor_revision=_identifier(value["extractor_revision"], code=code),
+        engine_kind=engine_kind,
+        extractor_revision=extractor_revision,
         configuration_sha256=_sha256(value["configuration_sha256"], code=code),
         model_inventory_sha256=_sha256(value["model_inventory_sha256"], code=code),
         evaluation_result_sha256=embedded_sha,
@@ -1586,7 +1899,7 @@ def parse_source_attested_synthetic_development_evaluation_result(
         value["schema_version"] != "1.0"
         or value["evaluation_basis"] != "source_attested_synthetic"
         or value["packet_kind"] != "development"
-        or value["evaluation_scope"] != "synthetic_content_stream_compatibility"
+        or value["evaluation_scope"] != "synthetic_r1_supervised_native_template_compatibility"
         or value["layout_truth_kind"] != "pdf_content_stream_layout_v1"
         or value["development_selection_receipt_sha256"] is not None
         or value["sealed_run_receipt_sha256"] is not None
@@ -1766,7 +2079,7 @@ def _parse_source_attested_layout_truth_receipt(
         value["schema_version"] != "1.0"
         or value["artifact_kind"] != "source_attested_synthetic_pdf_layout_truth"
         or value["provenance_kind"] != "source_attested_synthetic"
-        or value["evaluation_scope"] != "synthetic_content_stream_compatibility"
+        or value["evaluation_scope"] != "synthetic_r1_supervised_native_template_compatibility"
         or value["layout_truth_kind"] != "pdf_content_stream_layout_v1"
         or value["packet_kind"] != "stratified-v2"
         or not isinstance(value["packet_split"], str)
@@ -1882,7 +2195,7 @@ def _parse_source_attested_development_selection_receipt(
         value["schema_version"] != "1.0"
         or value["artifact_kind"] != "source_attested_synthetic_pdf_development_selection"
         or value["evaluation_basis"] != "source_attested_synthetic"
-        or value["evaluation_scope"] != "synthetic_content_stream_compatibility"
+        or value["evaluation_scope"] != "synthetic_r1_supervised_native_template_compatibility"
         or value["layout_truth_kind"] != "pdf_content_stream_layout_v1"
         or not isinstance(value["candidate_results"], list)
     ):
@@ -1896,6 +2209,8 @@ def _parse_source_attested_development_selection_receipt(
     # The development packet and its distinct layout receipt are loaded and
     # cross-checked by the caller.  Validate their lexical form here so a
     # selection cannot carry an arbitrary non-receipt value until then.
+    dataset_id = _identifier(value["dataset_id"], code=code)
+    dataset_revision = _identifier(value["dataset_revision"], code=code)
     development_packet_receipt_sha256 = _sha256(
         value["development_packet_receipt_sha256"], code=code
     )
@@ -1906,19 +2221,37 @@ def _parse_source_attested_development_selection_receipt(
     candidate_parser_revision = _source_attested_candidate_parser_revision(
         value["candidate_parser_revision"], code=code
     )
-    if (
-        len(candidates) != len(_ENGINE_KINDS)
-        or {item.engine_kind for item in candidates} != _ENGINE_KINDS
-        or {item.candidate_parser_revision for item in candidates} != {candidate_parser_revision}
-    ):
+    selected_engine_kind = _engine_kind(value["selected_engine_kind"], code=code)
+    selected_extractor_revision = _identifier(value["selected_extractor_revision"], code=code)
+    is_canonical_supervised = _is_canonical_supervised_source_attested_packet(
+        dataset_id=dataset_id,
+        dataset_revision=dataset_revision,
+        packet_receipt_sha256=development_packet_receipt_sha256,
+    )
+    if is_canonical_supervised:
+        candidates_are_valid = (
+            len(candidates) == 1
+            and candidates[0].engine_kind == "pdf_text_layer"
+            and candidates[0].extractor_revision
+            == _PDF_TEXT_LAYER_SUPERVISED_TEMPLATE_EXTRACTOR_REVISION
+            and {item.candidate_parser_revision for item in candidates}
+            == {candidate_parser_revision}
+        )
+    else:
+        candidates_are_valid = (
+            len(candidates) == len(_ENGINE_KINDS)
+            and {item.engine_kind for item in candidates} == _ENGINE_KINDS
+            and {item.candidate_parser_revision for item in candidates}
+            == {candidate_parser_revision}
+        )
+    if not candidates_are_valid:
         raise DocumentPreviewRuntimeError(code)
     selected_matches = [
         candidate
         for candidate in candidates
         if (
-            candidate.engine_kind == _engine_kind(value["selected_engine_kind"], code=code)
-            and candidate.extractor_revision
-            == _identifier(value["selected_extractor_revision"], code=code)
+            candidate.engine_kind == selected_engine_kind
+            and candidate.extractor_revision == selected_extractor_revision
             and candidate.configuration_sha256
             == _sha256(value["selected_configuration_sha256"], code=code)
             and candidate.model_inventory_sha256
@@ -1931,9 +2264,17 @@ def _parse_source_attested_development_selection_receipt(
     if len(selected_matches) != 1 or not selected_matches[0].passed:
         raise DocumentPreviewRuntimeError(code)
     selected = selected_matches[0]
+    _require_canonical_supervised_source_attested_profile(
+        dataset_id=dataset_id,
+        dataset_revision=dataset_revision,
+        packet_receipt_sha256=development_packet_receipt_sha256,
+        engine_kind=selected.engine_kind,
+        extractor_revision=selected.extractor_revision,
+        code=code,
+    )
     return SourceAttestedDevelopmentSelectionReceiptV1(
-        dataset_id=_identifier(value["dataset_id"], code=code),
-        dataset_revision=_identifier(value["dataset_revision"], code=code),
+        dataset_id=dataset_id,
+        dataset_revision=dataset_revision,
         development_packet_receipt_sha256=development_packet_receipt_sha256,
         layout_truth_receipt_sha256=layout_truth_receipt_sha256,
         layout_truth_parser_spec_sha256=_sha256(
@@ -1983,7 +2324,7 @@ def _parse_source_attested_sealed_run_receipt(
         value["schema_version"] != "1.0"
         or value["artifact_kind"] != "source_attested_synthetic_pdf_sealed_run"
         or value["evaluation_basis"] != "source_attested_synthetic"
-        or value["evaluation_scope"] != "synthetic_content_stream_compatibility"
+        or value["evaluation_scope"] != "synthetic_r1_supervised_native_template_compatibility"
         or value["layout_truth_kind"] != "pdf_content_stream_layout_v1"
     ):
         raise DocumentPreviewRuntimeError(code)
@@ -1993,10 +2334,23 @@ def _parse_source_attested_sealed_run_receipt(
         expected_digest=receipt_sha256,
         code=code,
     )
+    dataset_id = _identifier(value["dataset_id"], code=code)
+    dataset_revision = _identifier(value["dataset_revision"], code=code)
+    sealed_packet_receipt_sha256 = _sha256(value["sealed_packet_receipt_sha256"], code=code)
+    engine_kind = _engine_kind(value["selected_engine_kind"], code=code)
+    extractor_revision = _identifier(value["selected_extractor_revision"], code=code)
+    _require_canonical_supervised_source_attested_profile(
+        dataset_id=dataset_id,
+        dataset_revision=dataset_revision,
+        packet_receipt_sha256=sealed_packet_receipt_sha256,
+        engine_kind=engine_kind,
+        extractor_revision=extractor_revision,
+        code=code,
+    )
     return SourceAttestedSealedRunReceiptV1(
-        dataset_id=_identifier(value["dataset_id"], code=code),
-        dataset_revision=_identifier(value["dataset_revision"], code=code),
-        sealed_packet_receipt_sha256=_sha256(value["sealed_packet_receipt_sha256"], code=code),
+        dataset_id=dataset_id,
+        dataset_revision=dataset_revision,
+        sealed_packet_receipt_sha256=sealed_packet_receipt_sha256,
         layout_truth_receipt_sha256=_sha256(value["layout_truth_receipt_sha256"], code=code),
         layout_truth_parser_spec_sha256=_sha256(
             value["layout_truth_parser_spec_sha256"], code=code
@@ -2004,8 +2358,8 @@ def _parse_source_attested_sealed_run_receipt(
         development_selection_receipt_sha256=_sha256(
             value["development_selection_receipt_sha256"], code=code
         ),
-        engine_kind=_engine_kind(value["selected_engine_kind"], code=code),
-        extractor_revision=_identifier(value["selected_extractor_revision"], code=code),
+        engine_kind=engine_kind,
+        extractor_revision=extractor_revision,
         configuration_sha256=_sha256(value["selected_configuration_sha256"], code=code),
         model_inventory_sha256=_sha256(value["selected_model_inventory_sha256"], code=code),
         selected_development_evaluation_result_sha256=_sha256(
@@ -2353,26 +2707,47 @@ def _recompute_source_attested_development_selection(
     results: tuple[SourceAttestedSyntheticDevelopmentEvaluationResultV1, ...],
     selection: SourceAttestedDevelopmentSelectionReceiptV1,
 ) -> SourceAttestedSyntheticDevelopmentEvaluationResultV1:
-    """Apply the fixed metric ordering from verified raw development results."""
+    """Replay a verified source-attested development selection.
+
+    The historic hermetic fixtures retain their three-engine metric ordering.
+    The only production r1/v11 scope is instead a fixed, hash-bound
+    supervised-template profile: it validates one candidate and never
+    silently switches to a different engine because of a metric ranking.
+    """
 
     code = "document_preview_source_attested_development_selection_mismatch"
-    if (
-        len(results) != len(_ENGINE_KINDS)
-        or {result.engine_kind for result in results} != _ENGINE_KINDS
+    if _is_canonical_supervised_source_attested_packet(
+        dataset_id=selection.dataset_id,
+        dataset_revision=selection.dataset_revision,
+        packet_receipt_sha256=selection.development_packet_receipt_sha256,
     ):
-        raise DocumentPreviewRuntimeError(code)
-    passing = [result for result in results if result.passed]
-    if not passing:
-        raise DocumentPreviewRuntimeError(code)
-    expected = sorted(
-        passing,
-        key=lambda result: (
-            -result.field_exact_match,
-            result.ocr_cer,
-            -result.table_cell_f1,
-            result.engine_kind,
-        ),
-    )[0]
+        if (
+            len(results) != 1
+            or not results[0].passed
+            or results[0].engine_kind != "pdf_text_layer"
+            or results[0].extractor_revision
+            != _PDF_TEXT_LAYER_SUPERVISED_TEMPLATE_EXTRACTOR_REVISION
+        ):
+            raise DocumentPreviewRuntimeError(code)
+        expected = results[0]
+    else:
+        if (
+            len(results) != len(_ENGINE_KINDS)
+            or {result.engine_kind for result in results} != _ENGINE_KINDS
+        ):
+            raise DocumentPreviewRuntimeError(code)
+        passing = [result for result in results if result.passed]
+        if not passing:
+            raise DocumentPreviewRuntimeError(code)
+        expected = sorted(
+            passing,
+            key=lambda result: (
+                -result.field_exact_match,
+                result.ocr_cer,
+                -result.table_cell_f1,
+                result.engine_kind,
+            ),
+        )[0]
     if (
         selection.selected.engine_kind != expected.engine_kind
         or selection.selected.extractor_revision != expected.extractor_revision
@@ -2583,7 +2958,7 @@ def _verify_source_attested_synthetic_replay(
         len(development_evaluation_raws)
         == len(development_candidate_raws)
         == len(development_execution_raws)
-        == len(_ENGINE_KINDS)
+        and 1 <= len(development_evaluation_raws) <= len(_ENGINE_KINDS)
     ):
         raise DocumentPreviewRuntimeError(code)
     try:
@@ -2614,6 +2989,8 @@ def _verify_source_attested_synthetic_replay(
         development_selection = SourceAttestedSyntheticDevelopmentSelectionV1.model_validate_json(
             development_selection_raw
         )
+        if len(development_evaluation_raws) != len(development_selection.candidate_results):
+            raise DocumentPreviewRuntimeError(code)
         sealed_run = SourceAttestedSyntheticSealedRunV1.model_validate_json(sealed_run_raw)
         development_results = tuple(
             SourceAttestedSyntheticOcrEvaluationResultV1.model_validate_json(raw)
@@ -3082,12 +3459,104 @@ _PADDLE_EXECUTION_PACKAGES = frozenset(
 )
 _PADDLE_CV2_PROVIDER = "opencv-contrib-python"
 
+# PaddleOCR 3.2 runs the configured OCR path through
+# ``paddlex[ocr-core]``.  This is deliberately not a softened version of the
+# legacy 2.9 closure: the two lines install the same ``paddleocr``
+# distribution name with incompatible APIs and cannot be mixed in one
+# profile.
+#
+# The map is the complete, normalized, *activated* requirement closure of
+# PaddleOCR 3.2.0, PaddleX 3.2.0 with ``ocr-core``, PaddlePaddle 3.1.1, and
+# the adapter's PDFium rasterizer in the designated ASCII-only CPython 3.11 /
+# Windows AMD64 environment.  It was derived from installed distribution
+# metadata with current platform markers applied.  Unselected PaddleX extras
+# and unrelated service/test packages are intentionally absent; accepting
+# either would make this narrow profile depend on host installation choices.
+#
+# Pin every member, rather than only the three top-level packages.  A library
+# such as ``huggingface-hub`` or ``pydantic-core`` can affect construction,
+# parsing, or model resolution before inference, so recording just the nine
+# directly imported modules would leave a mutable execution path outside the
+# inventory hash.
+_PADDLEOCR3_PINNED_PACKAGE_VERSIONS: Mapping[str, str] = {
+    "aistudio-sdk": "0.3.9",
+    "annotated-types": "0.8.0",
+    "anyio": "4.14.2",
+    "bce-python-sdk": "0.9.76",
+    "certifi": "2026.7.22",
+    "chardet": "7.6.0",
+    "charset-normalizer": "3.5.1",
+    "click": "8.4.2",
+    "colorama": "0.4.6",
+    "colorlog": "6.12.0",
+    "crc32c": "2.8",
+    "filelock": "3.32.3",
+    "fsspec": "2026.7.0",
+    "future": "1.0.0",
+    "h11": "0.16.0",
+    "hf-xet": "1.6.0",
+    "httpcore": "1.0.9",
+    "httpx": "0.28.1",
+    "huggingface-hub": "1.27.0",
+    "idna": "3.18",
+    "imagesize": "2.0.0",
+    "modelscope": "1.39.1",
+    "modelscope-hub": "0.2.0",
+    "networkx": "3.6.1",
+    "numpy": "2.4.6",
+    "opencv-contrib-python": "4.10.0.84",
+    "opt-einsum": "3.3.0",
+    "packaging": "26.3",
+    "paddleocr": "3.2.0",
+    "paddlepaddle": "3.1.1",
+    "paddlex": "3.2.0",
+    "pandas": "3.0.5",
+    "pillow": "12.3.0",
+    "prettytable": "3.18.0",
+    "protobuf": "7.35.1",
+    "psutil": "7.2.2",
+    "py-cpuinfo": "9.0.0",
+    "pyclipper": "1.4.0",
+    "pycryptodome": "3.23.0",
+    "pydantic": "2.13.4",
+    "pydantic-core": "2.46.4",
+    "pypdfium2": "4.30.0",
+    "python-dateutil": "2.9.0.post0",
+    "pyyaml": "6.0.2",
+    "requests": "2.34.2",
+    "ruamel-yaml": "0.19.1",
+    "setuptools": "84.0.0",
+    "shapely": "2.1.2",
+    "six": "1.17.0",
+    "tqdm": "4.70.0",
+    "typing-extensions": "4.16.0",
+    "typing-inspection": "0.4.4",
+    "tzdata": "2026.3",
+    "ujson": "5.13.0",
+    "urllib3": "2.7.0",
+    "wcwidth": "0.8.2",
+}
+_PADDLEOCR3_EXECUTION_PACKAGES: Final[frozenset[str]] = frozenset(
+    _PADDLEOCR3_PINNED_PACKAGE_VERSIONS
+)
 
-def _required_packages(kind: ApprovedPdfEngineKind) -> frozenset[str]:
+
+def _required_packages(
+    kind: ApprovedPdfEngineKind,
+    runtime_api: PaddleOcrRuntimeApi | None = None,
+) -> frozenset[str]:
     if kind == "pdf_text_layer":
+        if runtime_api is not None:
+            raise DocumentPreviewRuntimeError("document_preview_inventory_packages_invalid")
         return frozenset({"pypdf"})
     if kind == "paddleocr":
-        return _PADDLE_EXECUTION_PACKAGES
+        if runtime_api in {None, _PADDLEOCR2_RUNTIME_API}:
+            return _PADDLE_EXECUTION_PACKAGES
+        if runtime_api == _PADDLEOCR3_RUNTIME_API:
+            return _PADDLEOCR3_EXECUTION_PACKAGES
+        raise DocumentPreviewRuntimeError("document_preview_inventory_packages_invalid")
+    if runtime_api is not None:
+        raise DocumentPreviewRuntimeError("document_preview_inventory_packages_invalid")
     return _DOCLING_EXECUTION_PACKAGES
 
 
@@ -3230,8 +3699,14 @@ def verify_inventory_packages(
     package_version_reader: Callable[[str], str] = importlib.metadata.version,
 ) -> None:
     packages = {_normalized_distribution_name(item.name): item for item in inventory.packages}
-    if not _required_packages(inventory.engine_kind).issubset(packages):
+    if not _required_packages(inventory.engine_kind, inventory.runtime_api).issubset(packages):
         raise DocumentPreviewRuntimeError("document_preview_inventory_packages_invalid")
+    if inventory.runtime_api == _PADDLEOCR3_RUNTIME_API:
+        if set(packages) != _PADDLEOCR3_EXECUTION_PACKAGES:
+            raise DocumentPreviewRuntimeError("document_preview_inventory_packages_invalid")
+        for name, expected_version in _PADDLEOCR3_PINNED_PACKAGE_VERSIONS.items():
+            if packages[name].version != expected_version:
+                raise DocumentPreviewRuntimeError("document_preview_inventory_packages_invalid")
     for item in inventory.packages:
         try:
             installed = package_version_reader(item.name)
@@ -3274,6 +3749,118 @@ def _configuration_directories_exist(
             raise DocumentPreviewRuntimeError("document_preview_configuration_invalid")
         directories.append((relative, path))
     return tuple(directories)
+
+
+def _configuration_inventory_profile_matches(
+    configuration: RuntimeConfigurationV1, inventory: ModelInventoryV1
+) -> bool:
+    """Require both the engine and its non-interchangeable API family."""
+
+    return (
+        configuration.engine_kind == inventory.engine_kind
+        and configuration.runtime_api == inventory.runtime_api
+    )
+
+
+def _verify_supervised_template_inventory_binding(
+    configuration: RuntimeConfigurationV1,
+    inventory: ModelInventoryV1,
+) -> None:
+    """Bind the local supervised model to its exact runtime configuration.
+
+    The trained selector is not an externally licensed download, so it must
+    never be represented by a made-up HTTPS source or a copied model-license
+    field.  Its inventory entry instead carries the immutable training receipt
+    digest.  Every other engine/profile remains external-artifact-only.
+    """
+
+    locally_trained = tuple(
+        item
+        for item in inventory.artifacts
+        if item.provenance_kind == "locally_trained_source_attested"
+    )
+    is_supervised_template = (
+        configuration.engine_kind == "pdf_text_layer"
+        and configuration.extractor_revision
+        == _PDF_TEXT_LAYER_SUPERVISED_TEMPLATE_EXTRACTOR_REVISION
+    )
+    if not is_supervised_template:
+        if locally_trained:
+            raise DocumentPreviewRuntimeError("document_preview_model_artifact_invalid")
+        return
+    options = configuration.options
+    model_directory = options.get("semantic_model_directory")
+    model_artifact = options.get("semantic_model_artifact")
+    training_receipt_sha256 = options.get("model_training_receipt_sha256")
+    if not all(
+        isinstance(value, str)
+        for value in (model_directory, model_artifact, training_receipt_sha256)
+    ):
+        raise DocumentPreviewRuntimeError("document_preview_model_artifact_invalid")
+    if len(inventory.artifacts) != 1 or len(locally_trained) != 1:
+        raise DocumentPreviewRuntimeError("document_preview_model_artifact_invalid")
+    artifact = locally_trained[0]
+    model_directory_text = cast(str, model_directory)
+    model_artifact_text = cast(str, model_artifact)
+    training_receipt_sha256_text = cast(str, training_receipt_sha256)
+    model_sha256 = Path(model_directory_text).name
+    if (
+        artifact.relative_path != model_artifact_text
+        or artifact.sha256 != model_sha256
+        or artifact.model_training_receipt_sha256 != training_receipt_sha256_text
+        or artifact.artifact_id != f"{SUPERVISED_TEMPLATE_MODEL_KIND}-{model_sha256}"
+        or artifact.license_id is not None
+        or artifact.source_uri is not None
+    ):
+        raise DocumentPreviewRuntimeError("document_preview_model_artifact_invalid")
+
+
+def _is_supervised_template_configuration(configuration: RuntimeConfigurationV1) -> bool:
+    return (
+        configuration.engine_kind == "pdf_text_layer"
+        and configuration.extractor_revision
+        == _PDF_TEXT_LAYER_SUPERVISED_TEMPLATE_EXTRACTOR_REVISION
+    )
+
+
+def _load_r1_supervised_template_provenance_binding(
+    *,
+    root: Path,
+    configuration: RuntimeConfigurationV1,
+    inventory: ModelInventoryV1,
+) -> "R1SupervisedTemplateProvenanceBinding | None":
+    """Load the model only after its inventory/configuration chain is exact."""
+
+    if not _is_supervised_template_configuration(configuration):
+        return None
+    _verify_supervised_template_inventory_binding(configuration, inventory)
+    model_artifact = configuration.options.get("semantic_model_artifact")
+    training_receipt_sha256 = configuration.options.get("model_training_receipt_sha256")
+    if not isinstance(model_artifact, str) or not isinstance(training_receipt_sha256, str):
+        raise DocumentPreviewRuntimeError("document_preview_supervised_template_provenance_invalid")
+    model_path = _artifact_path(root, model_artifact)
+    expected_model_sha256 = Path(model_artifact).stem
+    try:
+        # Delay the import to preserve the runtime/evaluation module boundary:
+        # the candidate runner imports this service module, while provenance is
+        # intentionally usable by both candidate and serving paths.
+        from customs_ai_agent.evaluation.supervised_template_provenance import (
+            SupervisedTemplateProvenanceError,
+            load_r1_supervised_template_provenance,
+        )
+
+        binding = load_r1_supervised_template_provenance(
+            document_preview_root=root,
+            model_artifact_path=model_path,
+            expected_model_training_receipt_sha256=training_receipt_sha256,
+            expected_model_artifact_sha256=expected_model_sha256,
+        )
+        binding.verified_model()
+    except (SupervisedTemplateProvenanceError, OSError, ValueError) as error:
+        raise DocumentPreviewRuntimeError(
+            "document_preview_supervised_template_provenance_invalid"
+        ) from error
+    return binding
 
 
 def _model_relative_path_key(relative_path: str) -> tuple[str, ...]:
@@ -3367,6 +3954,9 @@ def verify_configured_model_directory_artifacts(
     only later by the serving runtime.
     """
 
+    if not _configuration_inventory_profile_matches(configuration, inventory):
+        raise DocumentPreviewRuntimeError("document_preview_provisioning_kind_mismatch")
+    _verify_supervised_template_inventory_binding(configuration, inventory)
     directories = _configuration_directories_exist(root, configuration, inventory)
     fingerprints = _verify_inventory_artifacts(root, inventory)
     _verify_configured_model_directory_inventory(
@@ -3438,6 +4028,7 @@ class ApprovedPdfPreviewBinding:
     inventory: ModelInventoryV1
     evaluation: PdfPreviewEvaluationResultV1
     source_attested_receipt_binding: SourceAttestedSyntheticReceiptBindingV1 | None
+    supervised_template_provenance_binding: "R1SupervisedTemplateProvenanceBinding | None"
     artifact_fingerprints: tuple[_ArtifactFingerprint, ...]
 
     def verify_runtime_state(self) -> None:
@@ -3502,6 +4093,21 @@ class ApprovedPdfPreviewBinding:
         elif self.source_attested_receipt_binding is not None:
             raise DocumentPreviewRuntimeError(
                 "document_preview_source_attested_receipts_runtime_changed"
+            )
+        if _is_supervised_template_configuration(self.configuration):
+            if self.supervised_template_provenance_binding is None:
+                raise DocumentPreviewRuntimeError(
+                    "document_preview_supervised_template_runtime_changed"
+                )
+            try:
+                self.supervised_template_provenance_binding.verify_runtime_state()
+            except Exception as error:
+                raise DocumentPreviewRuntimeError(
+                    "document_preview_supervised_template_runtime_changed"
+                ) from error
+        elif self.supervised_template_provenance_binding is not None:
+            raise DocumentPreviewRuntimeError(
+                "document_preview_supervised_template_runtime_changed"
             )
         try:
             _verify_configured_model_directory_inventory(
@@ -3579,6 +4185,11 @@ def load_approved_pdf_preview_binding(
     )
     verify_inventory_packages(inventory, package_version_reader=package_version_reader)
     fingerprints = verify_configured_model_directory_artifacts(root, configuration, inventory)
+    supervised_template_provenance_binding = _load_r1_supervised_template_provenance_binding(
+        root=root,
+        configuration=configuration,
+        inventory=inventory,
+    )
     return ApprovedPdfPreviewBinding(
         root=root,
         approval_path=canonical_approval_path,
@@ -3591,6 +4202,7 @@ def load_approved_pdf_preview_binding(
         inventory=inventory,
         evaluation=evaluation,
         source_attested_receipt_binding=source_attested_receipt_binding,
+        supervised_template_provenance_binding=supervised_template_provenance_binding,
         artifact_fingerprints=fingerprints,
     )
 
@@ -4245,6 +4857,39 @@ class PdfTextLayerPreviewAdapter:
         pages = _extract_pdf_text_layer_visitor_pages(preview_input)
         return tuple(fragment for page in pages for fragment in page.fragments)
 
+    def extract_pdf_native_vector_grid(
+        self, preview_input: PreviewInputV1
+    ) -> "NativePdfVectorGridExtraction | None":
+        """Return direct candidate table evidence for the explicit v1 profile only.
+
+        This method is deliberately a separate seam from the visitor callback:
+        a vector-grid profile never falls back to visitor geometry, and an
+        older text-layer profile cannot accidentally acquire direct cells.
+        """
+
+        if self.extractor_revision != _PDF_TEXT_LAYER_NATIVE_VECTOR_GRID_EXTRACTOR_REVISION:
+            return None
+        if preview_input.metadata.media_type != "application/pdf":
+            return None
+        try:
+            from customs_ai_agent.evaluation.native_pdf_vector_grid import (
+                NativePdfVectorGridError,
+                extract_native_pdf_vector_grid,
+            )
+
+            with local_files_only():
+                return extract_native_pdf_vector_grid(preview_input=preview_input)
+        except NativePdfVectorGridError:
+            raise DocumentPreviewInputError(
+                "PDF native vector grid cannot be safely decoded"
+            ) from None
+        except Exception:
+            # Third-party parser exceptions can embed text-show operands.  Keep
+            # the same content-free runtime boundary used by the visitor path.
+            raise DocumentPreviewInputError(
+                "PDF native vector grid cannot be safely decoded"
+            ) from None
+
     def extract_pdf_text_layer(self, preview_input: PreviewInputV1) -> PreviewCandidateV1 | None:
         if self.extractor_revision not in _PDF_TEXT_LAYER_EXTRACTOR_REVISIONS:
             raise DocumentPreviewUnavailable("PDF text layer extractor revision is unavailable")
@@ -4252,6 +4897,37 @@ class PdfTextLayerPreviewAdapter:
             return None
         if self.extractor_revision == _PDF_TEXT_LAYER_LEGACY_EXTRACTOR_REVISION:
             return _extract_pdf_text_layer_legacy(preview_input)
+        if self.extractor_revision == _PDF_TEXT_LAYER_NATIVE_VECTOR_GRID_EXTRACTOR_REVISION:
+            extraction = self.extract_pdf_native_vector_grid(preview_input)
+            if extraction is None or not extraction.spans:
+                return None
+            spans_by_page: dict[int, list[DocumentSpanV1]] = {
+                page.page_number: [] for page in extraction.pages
+            }
+            for span in extraction.spans:
+                spans_by_page[span.page_number].append(
+                    DocumentSpanV1(
+                        span_id=f"page-{span.page_number}-span-{span.reading_order}",
+                        ordinal=span.reading_order,
+                        reading_order=span.reading_order,
+                        text=span.text,
+                    )
+                )
+            return PreviewCandidateV1(
+                status="preview_ready",
+                extractor_revision=self.extractor_revision,
+                pages=[
+                    DocumentPreviewPageV1(
+                        page_number=page.page_number,
+                        width=page.width,
+                        height=page.height,
+                        coordinate_unit="pdf_points",
+                        spans=spans_by_page[page.page_number],
+                    )
+                    for page in extraction.pages
+                ],
+                warnings=[DocumentExtractionWarningV1(code="text_layer_used")],
+            )
         visitor_pages = _extract_pdf_text_layer_visitor_pages(preview_input)
         if not any(page.fragments for page in visitor_pages):
             return None
@@ -4440,6 +5116,322 @@ class PaddleOcrPdfPreviewAdapter:
             raise
         except Exception as error:
             raise DocumentPreviewExecutionError("PaddleOCR execution failed") from error
+        if not pages:
+            raise DocumentPreviewInputError("PDF has no pages")
+        return PreviewCandidateV1(
+            status="preview_ready" if has_text else "needs_review",
+            extractor_revision=self.extractor_revision,
+            pages=pages,
+            warnings=[] if has_text else [DocumentExtractionWarningV1(code="ocr_text_not_found")],
+        )
+
+
+def _paddleocr3_sequence(value: object) -> list[object]:
+    """Convert an official P3 list/array without accepting arbitrary iterables."""
+
+    if isinstance(value, Sequence) and not isinstance(value, (str, bytes, bytearray)):
+        return list(value)
+    tolist = getattr(value, "tolist", None)
+    if not callable(tolist):
+        raise DocumentPreviewExecutionError("PaddleOCR 3 result is invalid")
+    try:
+        converted = tolist()
+    except Exception as error:
+        raise DocumentPreviewExecutionError("PaddleOCR 3 result is invalid") from error
+    if not isinstance(converted, Sequence) or isinstance(converted, (str, bytes, bytearray)):
+        raise DocumentPreviewExecutionError("PaddleOCR 3 result is invalid")
+    return list(converted)
+
+
+def _strict_paddleocr3_normalized_bbox(
+    polygon: object,
+    *,
+    width: int,
+    height: int,
+) -> BoundingBoxV1:
+    """Validate a P3 ``rec_polys`` polygon before normalizing its rectangle."""
+
+    if width < 1 or height < 1:
+        raise DocumentPreviewExecutionError("PaddleOCR 3 result is invalid")
+    points = _paddleocr3_sequence(polygon)
+    if not 4 <= len(points) <= 64:
+        raise DocumentPreviewExecutionError("PaddleOCR 3 result is invalid")
+    coordinates: list[tuple[float, float]] = []
+    for point in points:
+        pair = _paddleocr3_sequence(point)
+        if len(pair) != 2:
+            raise DocumentPreviewExecutionError("PaddleOCR 3 result is invalid")
+        x, y = pair
+        if (
+            isinstance(x, bool)
+            or isinstance(y, bool)
+            or not isinstance(x, (int, float))
+            or not isinstance(y, (int, float))
+            or not math.isfinite(float(x))
+            or not math.isfinite(float(y))
+        ):
+            raise DocumentPreviewExecutionError("PaddleOCR 3 result is invalid")
+        x_float, y_float = float(x), float(y)
+        if x_float < 0 or y_float < 0 or x_float > width or y_float > height:
+            raise DocumentPreviewExecutionError("PaddleOCR 3 result is invalid")
+        coordinates.append((x_float, y_float))
+    left = min(x for x, _ in coordinates) / width
+    top = min(y for _, y in coordinates) / height
+    right = max(x for x, _ in coordinates) / width
+    bottom = max(y for _, y in coordinates) / height
+    if not 0 <= left < right <= 1 or not 0 <= top < bottom <= 1:
+        raise DocumentPreviewExecutionError("PaddleOCR 3 result is invalid")
+    try:
+        return BoundingBoxV1.model_validate(
+            {"x": left, "y": top, "width": right - left, "height": bottom - top}
+        )
+    except ValidationError as error:
+        raise DocumentPreviewExecutionError("PaddleOCR 3 result is invalid") from error
+
+
+def _paddleocr3_page_spans(
+    prediction: object,
+    *,
+    page_number: int,
+    width: int,
+    height: int,
+) -> list[DocumentSpanV1]:
+    """Translate exactly one P3 ``predict`` result to safe public spans."""
+
+    if isinstance(prediction, Mapping) or isinstance(prediction, (str, bytes, bytearray)):
+        raise DocumentPreviewExecutionError("PaddleOCR 3 result is invalid")
+    try:
+        iterator = iter(prediction)  # type: ignore[call-overload]
+        result = next(iterator)
+    except (TypeError, StopIteration) as error:
+        raise DocumentPreviewExecutionError("PaddleOCR 3 result is invalid") from error
+    try:
+        next(iterator)
+    except StopIteration:
+        pass
+    else:
+        raise DocumentPreviewExecutionError("PaddleOCR 3 result is invalid")
+    if not isinstance(result, Mapping):
+        raise DocumentPreviewExecutionError("PaddleOCR 3 result is invalid")
+    texts = _paddleocr3_sequence(result.get("rec_texts"))
+    polygons = _paddleocr3_sequence(result.get("rec_polys"))
+    if len(texts) != len(polygons):
+        raise DocumentPreviewExecutionError("PaddleOCR 3 result is invalid")
+    spans: list[DocumentSpanV1] = []
+    for text_value, polygon in zip(texts, polygons, strict=True):
+        if not isinstance(text_value, str):
+            raise DocumentPreviewExecutionError("PaddleOCR 3 result is invalid")
+        bbox = _strict_paddleocr3_normalized_bbox(polygon, width=width, height=height)
+        text = text_value.strip()
+        if not text:
+            continue
+        spans.append(
+            DocumentSpanV1(
+                span_id=f"page-{page_number}-span-{len(spans) + 1}",
+                ordinal=len(spans) + 1,
+                reading_order=len(spans) + 1,
+                text=text[:8_000],
+                bbox=bbox,
+            )
+        )
+    return spans
+
+
+def _windows_short_path(path: Path) -> str:
+    """Return the Win32 8.3 spelling for an existing local path.
+
+    PaddlePaddle 3.1's native inference loader on Windows cannot open a
+    Unicode model-file path even though Python can.  Use Windows' own
+    pre-existing short alias rather than creating a junction, copying a model,
+    or accepting a lossy encoding.
+    """
+
+    try:
+        import ctypes
+
+        windll = getattr(ctypes, "windll", None)
+        kernel32 = None if windll is None else getattr(windll, "kernel32", None)
+        get_short_path_name = (
+            None if kernel32 is None else getattr(kernel32, "GetShortPathNameW", None)
+        )
+        if not callable(get_short_path_name):
+            raise OSError("GetShortPathNameW is unavailable")
+        required = get_short_path_name(str(path), None, 0)
+        if not isinstance(required, int) or required < 1:
+            raise OSError("GetShortPathNameW failed")
+        buffer = ctypes.create_unicode_buffer(required + 1)
+        written = get_short_path_name(str(path), buffer, len(buffer))
+        if not isinstance(written, int) or written < 1 or written >= len(buffer):
+            raise OSError("GetShortPathNameW failed")
+    except (AttributeError, OSError) as error:
+        raise DocumentPreviewUnavailable(
+            "document_preview_paddleocr3_native_runtime_unavailable"
+        ) from error
+    if not buffer.value or not buffer.value.isascii():
+        raise DocumentPreviewUnavailable("document_preview_paddleocr3_native_runtime_unavailable")
+    return buffer.value
+
+
+def _paddleocr3_native_model_directory(*, model_root: Path, relative_directory: str) -> str:
+    """Resolve a P3 model directory into a native-safe local path.
+
+    The configuration parser has already limited ``relative_directory`` to a
+    relative local path.  Resolve both levels again at the native boundary so
+    a missing directory or a link escaping the approved model root never
+    reaches PaddleX.  On Windows there is deliberately no Unicode-path
+    fallback: without an existing ASCII 8.3 alias, the profile is unavailable.
+    """
+
+    try:
+        resolved_root = model_root.resolve(strict=True)
+        resolved_directory = (resolved_root / relative_directory).resolve(strict=True)
+        resolved_directory.relative_to(resolved_root)
+    except (OSError, ValueError) as error:
+        raise DocumentPreviewUnavailable(
+            "document_preview_paddleocr3_native_runtime_unavailable"
+        ) from error
+    if sys.platform != "win32":
+        return str(resolved_directory)
+    return _windows_short_path(resolved_directory)
+
+
+@dataclass(slots=True)
+class PaddleOcr3PdfPreviewAdapter:
+    """Pinned offline PaddleOCR 3.2/PaddleX PDF adapter without P2 fallback."""
+
+    extractor_revision: str
+    model_root: Path
+    options: Mapping[str, object]
+    _engine: object | None = field(default=None, init=False, repr=False)
+    _lock: threading.Lock = field(default_factory=threading.Lock, init=False, repr=False)
+    _native_runtime_verified: bool = field(default=False, init=False, repr=False)
+    _native_runtime_lock: threading.Lock = field(
+        default_factory=threading.Lock, init=False, repr=False
+    )
+
+    def _paddle_engine(self) -> object:
+        with self._lock:
+            if self._engine is not None:
+                return self._engine
+            try:
+                kwargs: dict[str, object] = {
+                    "text_detection_model_name": self.options["text_detection_model_name"],
+                    "text_detection_model_dir": _paddleocr3_native_model_directory(
+                        model_root=self.model_root,
+                        relative_directory=cast(
+                            str, self.options["text_detection_model_directory"]
+                        ),
+                    ),
+                    "text_recognition_model_name": self.options["text_recognition_model_name"],
+                    "text_recognition_model_dir": _paddleocr3_native_model_directory(
+                        model_root=self.model_root,
+                        relative_directory=cast(
+                            str, self.options["text_recognition_model_directory"]
+                        ),
+                    ),
+                    "device": "cpu",
+                    "cpu_threads": 1,
+                    "enable_hpi": False,
+                    "enable_mkldnn": False,
+                    "use_tensorrt": False,
+                    "use_doc_orientation_classify": False,
+                    "use_doc_unwarping": False,
+                    "use_textline_orientation": False,
+                }
+                # Import and construction can both trigger PaddleX's model
+                # resolver.  The per-thread guard turns a missing local model
+                # into an unavailable result rather than an implicit download.
+                with local_files_only():
+                    from paddleocr import PaddleOCR  # type: ignore[import-not-found]
+
+                    self._engine = PaddleOCR(**kwargs)
+            except Exception as error:
+                raise DocumentPreviewUnavailable(
+                    "document_preview_paddleocr3_native_runtime_unavailable"
+                ) from error
+            return self._engine
+
+    @staticmethod
+    def _prediction_kwargs() -> dict[str, bool]:
+        return {
+            "use_doc_orientation_classify": False,
+            "use_doc_unwarping": False,
+            "use_textline_orientation": False,
+        }
+
+    def verify_native_runtime(self) -> None:
+        """Run P3 once on a blank ndarray before any source PDF is loaded."""
+
+        with self._native_runtime_lock:
+            if self._native_runtime_verified:
+                return
+            try:
+                import numpy as np  # type: ignore[import-not-found]
+
+                blank = np.zeros((64, 64, 3), dtype=np.uint8)
+                engine: Any = self._paddle_engine()
+                with local_files_only():
+                    prediction = engine.predict(blank, **self._prediction_kwargs())
+                _paddleocr3_page_spans(
+                    prediction,
+                    page_number=1,
+                    width=64,
+                    height=64,
+                )
+            except Exception as error:
+                raise DocumentPreviewUnavailable(
+                    "document_preview_paddleocr3_native_runtime_unavailable"
+                ) from error
+            self._native_runtime_verified = True
+
+    def extract_raster_or_image(self, preview_input: PreviewInputV1) -> PreviewCandidateV1:
+        if preview_input.metadata.media_type != "application/pdf":
+            raise DocumentPreviewUnavailable("PDF-only approval")
+        self.verify_native_runtime()
+        try:
+            import numpy as np  # type: ignore[import-not-found]
+            import pypdfium2 as pdfium  # type: ignore[import-not-found]
+        except ImportError as error:
+            raise DocumentPreviewUnavailable("PaddleOCR renderer is not provisioned") from error
+        engine: Any = self._paddle_engine()
+        try:
+            document = pdfium.PdfDocument(preview_input.content)
+            pages: list[DocumentPreviewPageV1] = []
+            has_text = False
+            for index in range(len(document)):
+                # The P3 profile parser pins raster_scale=3.  Do not fall
+                # back to pdfium's default scale because the extractor
+                # revision explicitly represents 216-dpi input.
+                rendered = document[index].render(scale=3).to_pil().convert("RGB")
+                width, height = rendered.size
+                if width < 1 or height < 1 or width * height > 40_000_000:
+                    raise DocumentPreviewInputError("PDF raster dimensions are invalid")
+                with local_files_only():
+                    prediction = engine.predict(np.asarray(rendered), **self._prediction_kwargs())
+                spans = _paddleocr3_page_spans(
+                    prediction,
+                    page_number=index + 1,
+                    width=width,
+                    height=height,
+                )
+                has_text = has_text or bool(spans)
+                pages.append(
+                    DocumentPreviewPageV1(
+                        page_number=index + 1,
+                        width=width,
+                        height=height,
+                        coordinate_unit="pixels",
+                        spans=spans,
+                    )
+                )
+        except DocumentPreviewInputError:
+            raise
+        except DocumentPreviewUnavailable:
+            raise
+        except DocumentPreviewExecutionError:
+            raise
+        except Exception as error:
+            raise DocumentPreviewExecutionError("PaddleOCR 3 execution failed") from error
         if not pages:
             raise DocumentPreviewInputError("PDF has no pages")
         return PreviewCandidateV1(
@@ -4644,6 +5636,29 @@ def preflight_provisioned_docling_native_runtime(
         ) from error
 
 
+def preflight_provisioned_paddleocr3_native_runtime(
+    *, document_preview_root: Path, configuration: RuntimeConfigurationV1
+) -> None:
+    """Verify an explicit PaddleOCR 3 profile without opening a source asset."""
+
+    if (
+        configuration.engine_kind != "paddleocr"
+        or configuration.runtime_api != _PADDLEOCR3_RUNTIME_API
+    ):
+        return
+    adapter = PaddleOcr3PdfPreviewAdapter(
+        extractor_revision=configuration.extractor_revision,
+        model_root=document_preview_root,
+        options=configuration.options,
+    )
+    try:
+        adapter.verify_native_runtime()
+    except DocumentPreviewUnavailable as error:
+        raise DocumentPreviewRuntimeError(
+            "document_preview_paddleocr3_native_runtime_unavailable"
+        ) from error
+
+
 @dataclass(slots=True)
 class ApprovedPdfOnlyPreviewEngine:
     """Block images and runtime drift before invoking the selected local profile."""
@@ -4685,13 +5700,34 @@ def build_default_pdf_preview_adapter(
         binding.approval, SourceAttestedSyntheticPdfPreviewActivationV1
     )
     if binding.approval.engine_kind == "pdf_text_layer":
+        if revision == _PDF_TEXT_LAYER_SUPERVISED_TEMPLATE_EXTRACTOR_REVISION:
+            if binding.supervised_template_provenance_binding is None:
+                raise DocumentPreviewRuntimeError(
+                    "document_preview_supervised_template_provenance_invalid"
+                )
+            return _SupervisedNativeTemplatePdfEngine(
+                extractor_revision=revision,
+                provenance_binding=binding.supervised_template_provenance_binding,
+            )
         return _PdfTextLayerEngine(PdfTextLayerPreviewAdapter(extractor_revision=revision))
     if binding.approval.engine_kind == "paddleocr":
-        paddle = PaddleOcrPdfPreviewAdapter(
-            extractor_revision=revision,
-            model_root=binding.root,
-            options=binding.configuration.options,
-        )
+        runtime_api = getattr(binding.configuration, "runtime_api", _PADDLEOCR2_RUNTIME_API)
+        if runtime_api == _PADDLEOCR2_RUNTIME_API:
+            paddle: PaddleOcrPdfPreviewAdapter | PaddleOcr3PdfPreviewAdapter = (
+                PaddleOcrPdfPreviewAdapter(
+                    extractor_revision=revision,
+                    model_root=binding.root,
+                    options=binding.configuration.options,
+                )
+            )
+        elif runtime_api == _PADDLEOCR3_RUNTIME_API:
+            paddle = PaddleOcr3PdfPreviewAdapter(
+                extractor_revision=revision,
+                model_root=binding.root,
+                options=binding.configuration.options,
+            )
+        else:
+            raise DocumentPreviewRuntimeError("document_preview_approval_binding_mismatch")
         if direct_source_attested_profile:
             return _DirectRasterOcrEngine(paddle)
         return LayeredLocalPreviewEngine(
@@ -4723,10 +5759,87 @@ class _PdfTextLayerEngine:
 
 
 @dataclass(frozen=True, slots=True)
+class _SupervisedNativeTemplatePdfEngine:
+    """Serve the exact learned r1 selector rather than a raw-vector fallback."""
+
+    extractor_revision: str
+    provenance_binding: "R1SupervisedTemplateProvenanceBinding"
+
+    def extract(self, preview_input: PreviewInputV1) -> PreviewCandidateV1:
+        try:
+            # Keep this import lazy: the semantic adapter imports the runtime
+            # network guard, while the service imports this class at startup.
+            from customs_ai_agent.evaluation.native_pdf_semantic_adapter import (
+                NativePdfSemanticAdapter,
+            )
+            from customs_ai_agent.evaluation.supervised_template_contract import (
+                R1_SUPERVISED_TEMPLATE_REQUIRED_FIELDS,
+            )
+
+            output = NativePdfSemanticAdapter(
+                model=self.provenance_binding.verified_model()
+            ).extract_pdf_bytes(preview_input.content)
+        except Exception as error:
+            raise DocumentPreviewUnavailable("supervised native template unavailable") from error
+        if output.document_type not in R1_SUPERVISED_TEMPLATE_REQUIRED_FIELDS:
+            raise DocumentPreviewUnavailable("supervised native template unavailable")
+        expected_field_names = {
+            field_name
+            for field_name, _normalizer in R1_SUPERVISED_TEMPLATE_REQUIRED_FIELDS[
+                cast(Literal["bill_of_lading", "invoice", "packing_list"], output.document_type)
+            ]
+        }
+        observed_field_names = [field.field_name for field in output.fields]
+        if (
+            len(observed_field_names) != len(expected_field_names)
+            or set(observed_field_names) != set(expected_field_names)
+            or len(observed_field_names) != len(set(observed_field_names))
+            or output.model_artifact_sha256
+            != self.provenance_binding.expected_model_artifact_sha256
+        ):
+            raise DocumentPreviewUnavailable("supervised native template unavailable")
+        spans_by_page: dict[int, list[DocumentSpanV1]] = {
+            page.page_number: [] for page in output.pages
+        }
+        for span in output.spans:
+            spans = spans_by_page.get(span.page_number)
+            if spans is None:
+                raise DocumentPreviewUnavailable("supervised native template unavailable")
+            ordinal = len(spans) + 1
+            spans.append(
+                DocumentSpanV1(
+                    span_id=f"page-{span.page_number}-span-{ordinal}",
+                    ordinal=ordinal,
+                    reading_order=ordinal,
+                    text=span.text,
+                    bbox=span.bbox,
+                )
+            )
+        pages = [
+            DocumentPreviewPageV1(
+                page_number=page.page_number,
+                width=page.width,
+                height=page.height,
+                coordinate_unit="pdf_points",
+                spans=spans_by_page[page.page_number],
+            )
+            for page in output.pages
+        ]
+        if not pages or not any(page.spans for page in pages):
+            raise DocumentPreviewUnavailable("supervised native template unavailable")
+        return PreviewCandidateV1(
+            status="preview_ready",
+            extractor_revision=self.extractor_revision,
+            pages=pages,
+            warnings=[DocumentExtractionWarningV1(code="supervised_native_template_used")],
+        )
+
+
+@dataclass(frozen=True, slots=True)
 class _DirectRasterOcrEngine:
     """Serve the exact direct PaddleOCR or Docling profile that was evaluated."""
 
-    adapter: PaddleOcrPdfPreviewAdapter | DoclingPdfPreviewAdapter
+    adapter: PaddleOcrPdfPreviewAdapter | PaddleOcr3PdfPreviewAdapter | DoclingPdfPreviewAdapter
 
     def extract(self, preview_input: PreviewInputV1) -> PreviewCandidateV1:
         return self.adapter.extract_raster_or_image(preview_input)
@@ -4914,10 +6027,15 @@ def write_runtime_sidecars(
     inventory_raw = _canonical_json_bytes(inventory_value, trailing_newline=True)
     configuration = parse_runtime_configuration(configuration_raw)
     inventory = parse_model_inventory(inventory_raw)
-    if configuration.engine_kind != inventory.engine_kind:
+    if not _configuration_inventory_profile_matches(configuration, inventory):
         raise DocumentPreviewRuntimeError("document_preview_provisioning_kind_mismatch")
     verify_inventory_packages(inventory, package_version_reader=package_version_reader)
     verify_configured_model_directory_artifacts(root, configuration, inventory)
+    _load_r1_supervised_template_provenance_binding(
+        root=root,
+        configuration=configuration,
+        inventory=inventory,
+    )
     configuration_sha256 = _sha256_bytes(configuration_raw)
     inventory_sha256 = _sha256_bytes(inventory_raw)
     _write_immutable_json(
@@ -5101,6 +6219,11 @@ def write_source_attested_synthetic_pdf_preview_pointer(
     inventory = parse_model_inventory(inventory_raw)
     verify_inventory_packages(inventory, package_version_reader=package_version_reader)
     verify_configured_model_directory_artifacts(root, configuration, inventory)
+    _load_r1_supervised_template_provenance_binding(
+        root=root,
+        configuration=configuration,
+        inventory=inventory,
+    )
     evaluation = parse_source_attested_synthetic_sealed_evaluation_result(evaluation_raw)
     if (
         configuration.engine_kind != evaluation.engine_kind
@@ -5149,7 +6272,7 @@ def write_source_attested_synthetic_pdf_preview_pointer(
             "dataset_revision": evaluation.dataset_revision,
             "packet_kind": "sealed",
             "packet_receipt_sha256": evaluation.packet_receipt_sha256,
-            "evaluation_scope": "synthetic_content_stream_compatibility",
+            "evaluation_scope": "synthetic_r1_supervised_native_template_compatibility",
             "layout_truth_kind": "pdf_content_stream_layout_v1",
             "layout_truth_receipt_sha256": evaluation.layout_truth_receipt_sha256,
             "layout_truth_parser_spec_sha256": evaluation.layout_truth_parser_spec_sha256,
@@ -5195,6 +6318,7 @@ __all__ = [
     "ModelArtifactV1",
     "ModelInventoryV1",
     "ModelPackageV1",
+    "PaddleOcr3PdfPreviewAdapter",
     "PaddleOcrPdfPreviewAdapter",
     "PdfPreviewActivationV1",
     "PdfPreviewApprovalV1",
@@ -5221,6 +6345,7 @@ __all__ = [
     "parse_source_attested_synthetic_pdf_preview_activation",
     "parse_source_attested_synthetic_sealed_evaluation_result",
     "preflight_provisioned_docling_native_runtime",
+    "preflight_provisioned_paddleocr3_native_runtime",
     "resolve_document_preview_engine",
     "resolve_approved_pdf_preview_engine",
     "validate_approval_pointer_path",

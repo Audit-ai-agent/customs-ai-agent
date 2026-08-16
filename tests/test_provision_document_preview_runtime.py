@@ -42,6 +42,30 @@ def _pdf_configuration() -> dict[str, object]:
     }
 
 
+def _paddleocr3_configuration() -> dict[str, object]:
+    return {
+        "schema_version": "1.0",
+        "engine_kind": "paddleocr",
+        "runtime_api": "paddleocr3-paddlex-3.2",
+        "extractor_revision": "paddleocr-3.2.0-ppocrv5-mobile-en-raster216-v1",
+        "options": {
+            "text_detection_model_name": "PP-OCRv5_mobile_det",
+            "text_detection_model_directory": "models/paddleocr3/det",
+            "text_recognition_model_name": "en_PP-OCRv5_mobile_rec",
+            "text_recognition_model_directory": "models/paddleocr3/rec",
+            "raster_scale": 3,
+            "device": "cpu",
+            "cpu_threads": 1,
+            "enable_hpi": False,
+            "enable_mkldnn": False,
+            "use_tensorrt": False,
+            "use_doc_orientation_classify": False,
+            "use_doc_unwarping": False,
+            "use_textline_orientation": False,
+        },
+    }
+
+
 def _inventory(kind: str) -> dict[str, object]:
     return {
         "schema_version": "1.0",
@@ -120,3 +144,37 @@ def test_non_docling_provision_skips_native_preflight(
         cache_directory=None,
         minimum_free_gib=12.0,
     )
+
+
+def test_paddleocr3_provision_runs_its_blank_native_preflight(
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    root = tmp_path / "_local" / "data" / "document-preview"
+    configuration_path = root / "staging" / "configuration.json"
+    inventory_path = root / "staging" / "inventory.json"
+    _write_json(configuration_path, _paddleocr3_configuration())
+    _write_json(inventory_path, _inventory("paddleocr"))
+    calls: list[str] = []
+
+    monkeypatch.setattr(provision_tool, "_check_free_space", lambda *_args: None)
+    monkeypatch.setattr(
+        provision_tool,
+        "write_runtime_sidecars",
+        lambda **_kwargs: ("a" * 64, "b" * 64),
+    )
+    monkeypatch.setattr(
+        provision_tool,
+        "preflight_provisioned_paddleocr3_native_runtime",
+        lambda *, document_preview_root, configuration: calls.append(
+            f"{document_preview_root.name}:{configuration.runtime_api}"
+        ),
+    )
+
+    assert provision_tool.provision_runtime(
+        document_preview_root=root,
+        configuration_path=configuration_path,
+        inventory_path=inventory_path,
+        cache_directory=None,
+        minimum_free_gib=12.0,
+    ) == ("a" * 64, "b" * 64)
+    assert calls == ["document-preview:paddleocr3-paddlex-3.2"]

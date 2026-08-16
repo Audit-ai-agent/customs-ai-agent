@@ -1,5 +1,9 @@
 # 합성 PDF source-attested 자동 활성화
 
+현재 r1 v11 감독형 profile의 문서 field, 학습·개발·봉인 평가 결과, 그리고 일반화
+한계는 [`R1_SUPERVISED_NATIVE_PDF_EVALUATION.md`](R1_SUPERVISED_NATIVE_PDF_EVALUATION.md)에
+별도로 설명한다. 이 문서는 activation artifact와 runtime fail-closed 경계에 집중한다.
+
 이 경로는 사람이 PDF를 다시 검수하지 않아도 되는 **합성 PDF 전용** 품질
 활성화 경로다. 기존 사람이 만든 합성 source truth와 final PDF의 authored
 content stream에서 만든 layout truth를 해시로 결속한다. 사람이 검수한 Gold
@@ -9,8 +13,9 @@ content stream에서 만든 layout truth를 해시로 결속한다. 사람이 �
 
 - `evaluation_basis`는 정확히 `source_attested_synthetic`이어야 한다.
 - `layout_truth_kind`는 정확히 `pdf_content_stream_layout_v1`이어야 한다.
-- `evaluation_scope`는 정확히 `synthetic_content_stream_compatibility`이다.
-- 따라서 native PDF text-layer 후보의 통과는 **PDF content-stream 호환성**
+- `evaluation_scope`는 정확히
+  `synthetic_r1_supervised_native_template_compatibility`이다.
+- 따라서 supervised native-template PDF 후보의 통과는 **고정 r1 템플릿 호환성**
   증거이며, 이미지 기반 광학 OCR 품질 증거가 아니다.
 - PDF, 선택한 synthetic dataset revision, sealed packet에만 적용된다. JPEG와
   PNG는 이 pointer가 있어도 계속 `unavailable`이다.
@@ -31,7 +36,7 @@ hash 자체가 같으면 오히려 잘못된 결속이다.
 한다.
 
 - `evaluation_basis: source_attested_synthetic`
-- `evaluation_scope: synthetic_content_stream_compatibility`
+- `evaluation_scope: synthetic_r1_supervised_native_template_compatibility`
 - `layout_truth_kind: pdf_content_stream_layout_v1`
 - `layout_truth_receipt_sha256`
 - `layout_truth_parser_spec_sha256`
@@ -54,9 +59,11 @@ provenance field, 다른 scope/kind는 이 경로에서 모두 거부된다. 반
 - `source-layout-truths/<development-layout-truth-sha>.json`: 개발 60개 전체의
   source PDF SHA와 6개 strata(각 10개)를 보존한다. 봉인 packet과 PDF SHA/asset ID가
   겹치면 거부한다.
-- `source-attested-development-selections/<selection-sha>.json`: 정확히
-  `pdf_text_layer`, `paddleocr`, `docling` 세 후보와 선택된 passing 후보의 engine,
-  revision, configuration, inventory, development result hash를 결속한다.
+- `source-attested-development-selections/<selection-sha>.json`: canonical r1 v11에서는
+  정확히 하나의 passing `pdf_text_layer` supervised profile의 engine, revision,
+  configuration, inventory, development result hash를 결속한다. 과거 또는 noncanonical
+  비교 경로에서의 `pdf_text_layer`·`paddleocr`·`docling` 세 후보 규칙은 이 r1 v11
+  선택 계약에 적용하지 않는다.
 - `source-attested-sealed-runs/<sealed-run-sha>.json`: 선택 결과, 봉인 layout,
   candidate bundle/parser 및 engine/configuration/inventory를 결속한다.
 - `candidate-run-reservations/sealed-<sealed-packet-sha>.json`: 봉인 후보 실행을
@@ -92,6 +99,33 @@ backend fallback을 허용하지 않는다. 이 후보는 inventory된 Docling l
 쓰는 로컬 구조·표 parser이며 EasyOCR downloader를 쓰지 않는다. StandardPdfPipeline의
 native GLM 경계 때문에 기존 ASCII-only `site-packages` preflight는 유지한다. 따라서 자동
 certificate에서 Docling을 일반 optical OCR로 표현하지 않는다.
+
+PaddleOCR 3 profile은 위 2.9 profile과 독립된
+`runtime_api: "paddleocr3-paddlex-3.2"`다. configuration은
+`paddleocr-3.2.0-ppocrv5-mobile-en-raster216-v1` revision, PP-OCRv5 mobile det/rec
+두 모델 directory, CPU 1 thread 및 `raster_scale: 3`만 허용한다. 이 revision은
+PDFium 3배 raster(216 dpi)와 PaddleOCR 3.2.0/PaddleX 3.2.0/PaddlePaddle 3.1.1 API
+family를 함께 뜻하므로 다른 revision이나 2.9 fallback으로 바꿀 수 없다.
+
+P3 inventory의 `packages`는 현재 ASCII-only CPython 3.11/Windows AMD64 environment에서
+installed metadata를 재귀적으로 해석한 **정확히 56개** activated dependency closure와
+각 고정 version으로 구성해야 한다. 시작점은 `paddleocr`(여기서
+`paddlex[ocr-core]`를 활성화), `paddlepaddle`, adapter의 `pypdfium2`이고, Windows와
+AMD64 marker도 적용한다. 활성화하지 않은 PaddleX extras와 서비스·테스트 패키지는
+포함하지 않는다. 누락, 추가 package, 또는 version drift는 모두 provisioning과 runtime
+binding에서 fail-closed 한다.
+
+```text
+aistudio-sdk, annotated-types, anyio, bce-python-sdk, certifi, chardet,
+charset-normalizer, click, colorama, colorlog, crc32c, filelock, fsspec,
+future, h11, hf-xet, httpcore, httpx, huggingface-hub, idna, imagesize,
+modelscope, modelscope-hub, networkx, numpy, opencv-contrib-python,
+opt-einsum, packaging, paddleocr, paddlepaddle, paddlex, pandas, pillow,
+prettytable, protobuf, psutil, py-cpuinfo, pyclipper, pycryptodome, pydantic,
+pydantic-core, pypdfium2, python-dateutil, pyyaml, requests, ruamel-yaml,
+setuptools, shapely, six, tqdm, typing-extensions, typing-inspection, tzdata,
+ujson, urllib3, wcwidth
+```
 
 ## 활성화
 

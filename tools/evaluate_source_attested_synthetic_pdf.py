@@ -1,9 +1,10 @@
 """Evaluate one local OCR candidate against source-attested synthetic PDF truth.
 
 This is intentionally separate from the reviewed-Gold evaluator.  Its fixed
-result scope is ``synthetic_content_stream_compatibility``: it compares exact
-local candidate output to the final born-digital synthetic PDF stream, and it
-does not assert independent optical-OCR or real-document quality.
+result scope is ``synthetic_r1_supervised_native_template_compatibility``: it
+compares the supervised native-template candidate with the exact final
+born-digital synthetic PDF, and it does not assert independent optical-OCR or
+real-document quality.
 """
 
 from __future__ import annotations

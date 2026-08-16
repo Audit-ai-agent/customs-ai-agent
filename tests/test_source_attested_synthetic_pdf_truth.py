@@ -35,6 +35,9 @@ from customs_ai_agent.evaluation.source_attested_synthetic_pdf_truth import (
     SourceAttestedSyntheticPdfTruthError,
     SOURCE_ATTESTED_CANDIDATE_PARSER_REVISION,
     SOURCE_ATTESTED_REQUIRED_FIELDS,
+    SOURCE_ATTESTED_SYNTHETIC_DATASET_ID,
+    SOURCE_ATTESTED_SYNTHETIC_DATASET_REVISION,
+    SOURCE_ATTESTED_SYNTHETIC_DEVELOPMENT_PACKET_RECEIPT_SHA256,
     build_source_attested_synthetic_candidate_execution,
     build_source_attested_synthetic_development_selection,
     build_source_attested_synthetic_sealed_run,
@@ -48,6 +51,7 @@ from customs_ai_agent.evaluation.source_attested_synthetic_pdf_truth import (
     read_canonical_source_attested_synthetic_packet,
     score_source_attested_synthetic_pdf_candidate_output,
     source_attested_evaluation_result_sha256,
+    source_layout_parser_spec_sha256,
     verify_source_attested_synthetic_pdf_evaluation_replay,
     write_source_attested_synthetic_candidate_bundle,
     write_source_attested_synthetic_candidate_execution,
@@ -57,6 +61,9 @@ from customs_ai_agent.evaluation.source_attested_synthetic_pdf_truth import (
     write_source_attested_synthetic_layout_truth,
     write_source_attested_synthetic_packet,
     write_source_attested_synthetic_sealed_run,
+)
+from customs_ai_agent.evaluation.supervised_template_contract import (
+    SUPERVISED_TEMPLATE_EXTRACTOR_REVISION,
 )
 from customs_ai_agent.evaluation.synthetic_pdf_candidate_runner import (
     SyntheticPdfCandidateRunnerError,
@@ -495,6 +502,56 @@ def _score(*, fixture: dict[str, object], split: str, truth, engine_kind: str):
     return candidate, result
 
 
+def _canonical_r1_development_result(
+    *,
+    engine_kind: str = "pdf_text_layer",
+    extractor_revision: str = SUPERVISED_TEMPLATE_EXTRACTOR_REVISION,
+    passed: bool = True,
+) -> SourceAttestedSyntheticOcrEvaluationResultV1:
+    """Build content-free canonical-identity evidence for selection tests."""
+
+    field_exact_match_count = 100 if passed else 98
+    payload: dict[str, object] = {
+        "schema_version": "1.0",
+        "evaluation_basis": "source_attested_synthetic",
+        "dataset_id": SOURCE_ATTESTED_SYNTHETIC_DATASET_ID,
+        "dataset_revision": SOURCE_ATTESTED_SYNTHETIC_DATASET_REVISION,
+        "packet_kind": "development",
+        "packet_receipt_sha256": SOURCE_ATTESTED_SYNTHETIC_DEVELOPMENT_PACKET_RECEIPT_SHA256,
+        "evaluation_scope": "synthetic_r1_supervised_native_template_compatibility",
+        "layout_truth_kind": "pdf_content_stream_layout_v1",
+        "layout_truth_receipt_sha256": _sha("canonical-r1-development-layout"),
+        "layout_truth_parser_spec_sha256": source_layout_parser_spec_sha256(),
+        "development_selection_receipt_sha256": None,
+        "sealed_run_receipt_sha256": None,
+        "engine_kind": engine_kind,
+        "extractor_revision": extractor_revision,
+        "configuration_sha256": _sha(f"canonical-r1-configuration:{engine_kind}"),
+        "model_inventory_sha256": _sha(f"canonical-r1-inventory:{engine_kind}"),
+        "candidate_parser_revision": SOURCE_ATTESTED_CANDIDATE_PARSER_REVISION,
+        "candidate_bundle_sha256": _sha(f"canonical-r1-candidate:{engine_kind}"),
+        "candidate_execution_receipt_sha256": _sha(f"canonical-r1-execution:{engine_kind}"),
+        "passed": passed,
+        "metrics": {
+            "field_exact_match": field_exact_match_count / 100,
+            "field_exact_match_count": field_exact_match_count,
+            "field_exact_match_total": 100,
+            "field_exact_match_denominators": [
+                {
+                    "document_type": "invoice",
+                    "document_count": 10,
+                    "fields_per_document": 10,
+                    "total_fields": 100,
+                }
+            ],
+            "ocr_cer": 0.0 if passed else 0.02,
+            "table_cell_f1": 1.0,
+        },
+    }
+    payload["evaluation_result_sha256"] = source_attested_evaluation_result_sha256(payload)
+    return SourceAttestedSyntheticOcrEvaluationResultV1.model_validate(payload)
+
+
 def test_compiler_uses_content_stream_not_manifest_and_writes_immutable_local_truth(
     tmp_path: Path,
 ) -> None:
@@ -596,11 +653,11 @@ def test_rendered_field_contract_exposes_bl13_invoice15_and_pl12() -> None:
         field_name for field_name, _normalizer in SOURCE_ATTESTED_REQUIRED_FIELDS["packing_list"]
     }
     assert SOURCE_ATTESTED_CANDIDATE_PARSER_REVISION == (
-        "synthetic-pdf-visible-layout-normalizer-v9"
+        "synthetic-pdf-supervised-template-normalizer-v11"
     )
 
 
-def test_source_truth_rejects_a_coherent_v8_candidate_parser_even_for_test_scope(
+def test_source_truth_rejects_a_coherent_v10_candidate_parser_even_for_test_scope(
     tmp_path: Path,
 ) -> None:
     """A coherent older parser cannot create new source-attested evidence."""
@@ -612,7 +669,7 @@ def test_source_truth_rejects_a_coherent_v8_candidate_parser_even_for_test_scope
         packet=packet,
         truth=truth,
         engine_kind="pdf_text_layer",
-        parser_revision="synthetic-pdf-visible-layout-normalizer-v8",
+        parser_revision="synthetic-pdf-visible-layout-normalizer-v10",
     )
     extractor_revision, configuration_sha256, model_inventory_sha256 = _profile("pdf_text_layer")
 
@@ -629,7 +686,7 @@ def test_source_truth_rejects_a_coherent_v8_candidate_parser_even_for_test_scope
             extractor_revision=extractor_revision,
             configuration_sha256=configuration_sha256,
             model_inventory_sha256=model_inventory_sha256,
-            parser_revision="synthetic-pdf-visible-layout-normalizer-v8",
+            parser_revision="synthetic-pdf-visible-layout-normalizer-v10",
             expected_dataset_scope=_test_scope(fixture),
             required_field_schema=_TEST_REQUIRED_FIELD_SCHEMA,
         )
@@ -880,14 +937,109 @@ def test_selection_requires_all_three_engine_results(tmp_path: Path) -> None:
         build_source_attested_synthetic_development_selection(results=two_results)
 
 
-def test_source_evaluator_refuses_coherent_v8_runner_parser_revision(
+def test_canonical_r1_selection_validates_one_fixed_profile_without_ranking() -> None:
+    """r1 accepts one attested profile; it never compares alternate engines."""
+
+    supervised = _canonical_r1_development_result()
+    selection = build_source_attested_synthetic_development_selection(results=[supervised])
+
+    assert len(selection.candidate_results) == 1
+    assert selection.selected_engine_kind == "pdf_text_layer"
+    assert selection.selected_extractor_revision == SUPERVISED_TEMPLATE_EXTRACTOR_REVISION
+    assert selection.selected_evaluation_result_sha256 == supervised.evaluation_result_sha256
+
+    # A second candidate is rejected before any metric order could rank it.
+    alternative = _canonical_r1_development_result(
+        engine_kind="docling", extractor_revision="docling-test-v1"
+    )
+    with pytest.raises(
+        SourceAttestedSyntheticPdfTruthError, match="supervised_development_profile_invalid"
+    ):
+        build_source_attested_synthetic_development_selection(results=[supervised, alternative])
+
+
+def test_canonical_r1_selection_requires_the_fixed_passing_supervised_profile() -> None:
+    with pytest.raises(
+        SourceAttestedSyntheticPdfTruthError, match="supervised_development_profile_invalid"
+    ):
+        build_source_attested_synthetic_development_selection(
+            results=[
+                _canonical_r1_development_result(
+                    extractor_revision="pypdf-5.3.1-unapproved-template-v1"
+                )
+            ]
+        )
+
+    with pytest.raises(
+        SourceAttestedSyntheticPdfTruthError, match="supervised_development_gate_failed"
+    ):
+        build_source_attested_synthetic_development_selection(
+            results=[_canonical_r1_development_result(passed=False)]
+        )
+
+
+def test_sealed_binding_revalidates_a_mutated_development_selection(tmp_path: Path) -> None:
+    """A mutable receipt object cannot bypass its validated selection contract."""
+
+    fixture = _fixture(tmp_path)
+    development_truth = _truth(fixture, "development")
+    selection = build_source_attested_synthetic_development_selection(
+        results=[
+            _score(
+                fixture=fixture,
+                split="development",
+                truth=development_truth,
+                engine_kind=engine_kind,
+            )[1]
+            for engine_kind in ("pdf_text_layer", "paddleocr", "docling")
+        ]
+    )
+    # BaseModel does not make nested lists immutable; sealing must revalidate
+    # the current receipt rather than trust its original construction.
+    selection.candidate_results.pop()
+
+    sealed_packet = fixture["sealed_packet"]
+    sealed_truth = _truth(fixture, "sealed")
+    candidate = _matching_candidate(
+        packet=sealed_packet,
+        truth=sealed_truth,
+        engine_kind=selection.selected_engine_kind,
+    )
+    extractor_revision, configuration_sha256, model_inventory_sha256 = _profile(
+        selection.selected_engine_kind
+    )
+    execution = _execution(
+        fixture=fixture,
+        packet=sealed_packet,
+        truth=sealed_truth,
+        candidate=candidate,
+        engine_kind=selection.selected_engine_kind,
+    )
+
+    with pytest.raises(SourceAttestedSyntheticPdfTruthError, match="selection_binding_mismatch"):
+        build_source_attested_synthetic_sealed_run(
+            packet=sealed_packet,
+            layout_truth=sealed_truth,
+            development_selection=selection,
+            candidate_output=candidate,
+            candidate_execution=execution,
+            document_preview_root=fixture["preview_root"],
+            engine_kind=selection.selected_engine_kind,
+            extractor_revision=extractor_revision,
+            configuration_sha256=configuration_sha256,
+            model_inventory_sha256=model_inventory_sha256,
+            parser_revision=_SOURCE_ATTESTED_TEST_PARSER_REVISION,
+        )
+
+
+def test_source_evaluator_refuses_coherent_v10_runner_parser_revision(
     tmp_path: Path, monkeypatch: pytest.MonkeyPatch
 ) -> None:
     """The CLI refuses before it can write local evidence with an unapproved parser."""
 
     monkeypatch.setattr(
         "tools.evaluate_source_attested_synthetic_pdf.SYNTHETIC_PDF_LABEL_NORMALIZER_REVISION",
-        "synthetic-pdf-visible-layout-normalizer-v8",
+        "synthetic-pdf-visible-layout-normalizer-v10",
     )
     with pytest.raises(
         SyntheticPdfCandidateRunnerError,
@@ -908,7 +1060,7 @@ def test_source_evaluator_refuses_coherent_v8_runner_parser_revision(
 def test_explicit_auto_activation_runs_only_after_a_passing_sealed_result(
     tmp_path: Path, monkeypatch: pytest.MonkeyPatch
 ) -> None:
-    # The candidate-runner revision is upgraded in the paired v9 change.
+    # The candidate-runner revision is upgraded in the paired v11 change.
     # Keep this source-attested chain test focused on the writer/runtime
     # boundary while asserting that exact paired revision.
     monkeypatch.setattr(
