@@ -4801,6 +4801,64 @@ def _paddleocr3_page_spans(
     return spans
 
 
+def _windows_short_path(path: Path) -> str:
+    """Return the Win32 8.3 spelling for an existing local path.
+
+    PaddlePaddle 3.1's native inference loader on Windows cannot open a
+    Unicode model-file path even though Python can.  Use Windows' own
+    pre-existing short alias rather than creating a junction, copying a model,
+    or accepting a lossy encoding.
+    """
+
+    try:
+        import ctypes
+
+        windll = getattr(ctypes, "windll", None)
+        kernel32 = None if windll is None else getattr(windll, "kernel32", None)
+        get_short_path_name = (
+            None if kernel32 is None else getattr(kernel32, "GetShortPathNameW", None)
+        )
+        if not callable(get_short_path_name):
+            raise OSError("GetShortPathNameW is unavailable")
+        required = get_short_path_name(str(path), None, 0)
+        if not isinstance(required, int) or required < 1:
+            raise OSError("GetShortPathNameW failed")
+        buffer = ctypes.create_unicode_buffer(required + 1)
+        written = get_short_path_name(str(path), buffer, len(buffer))
+        if not isinstance(written, int) or written < 1 or written >= len(buffer):
+            raise OSError("GetShortPathNameW failed")
+    except (AttributeError, OSError) as error:
+        raise DocumentPreviewUnavailable(
+            "document_preview_paddleocr3_native_runtime_unavailable"
+        ) from error
+    if not buffer.value or not buffer.value.isascii():
+        raise DocumentPreviewUnavailable("document_preview_paddleocr3_native_runtime_unavailable")
+    return buffer.value
+
+
+def _paddleocr3_native_model_directory(*, model_root: Path, relative_directory: str) -> str:
+    """Resolve a P3 model directory into a native-safe local path.
+
+    The configuration parser has already limited ``relative_directory`` to a
+    relative local path.  Resolve both levels again at the native boundary so
+    a missing directory or a link escaping the approved model root never
+    reaches PaddleX.  On Windows there is deliberately no Unicode-path
+    fallback: without an existing ASCII 8.3 alias, the profile is unavailable.
+    """
+
+    try:
+        resolved_root = model_root.resolve(strict=True)
+        resolved_directory = (resolved_root / relative_directory).resolve(strict=True)
+        resolved_directory.relative_to(resolved_root)
+    except (OSError, ValueError) as error:
+        raise DocumentPreviewUnavailable(
+            "document_preview_paddleocr3_native_runtime_unavailable"
+        ) from error
+    if sys.platform != "win32":
+        return str(resolved_directory)
+    return _windows_short_path(resolved_directory)
+
+
 @dataclass(slots=True)
 class PaddleOcr3PdfPreviewAdapter:
     """Pinned offline PaddleOCR 3.2/PaddleX PDF adapter without P2 fallback."""
@@ -4819,25 +4877,31 @@ class PaddleOcr3PdfPreviewAdapter:
         with self._lock:
             if self._engine is not None:
                 return self._engine
-            kwargs: dict[str, object] = {
-                "text_detection_model_name": self.options["text_detection_model_name"],
-                "text_detection_model_dir": str(
-                    self.model_root / str(self.options["text_detection_model_directory"])
-                ),
-                "text_recognition_model_name": self.options["text_recognition_model_name"],
-                "text_recognition_model_dir": str(
-                    self.model_root / str(self.options["text_recognition_model_directory"])
-                ),
-                "device": "cpu",
-                "cpu_threads": 1,
-                "enable_hpi": False,
-                "enable_mkldnn": False,
-                "use_tensorrt": False,
-                "use_doc_orientation_classify": False,
-                "use_doc_unwarping": False,
-                "use_textline_orientation": False,
-            }
             try:
+                kwargs: dict[str, object] = {
+                    "text_detection_model_name": self.options["text_detection_model_name"],
+                    "text_detection_model_dir": _paddleocr3_native_model_directory(
+                        model_root=self.model_root,
+                        relative_directory=cast(
+                            str, self.options["text_detection_model_directory"]
+                        ),
+                    ),
+                    "text_recognition_model_name": self.options["text_recognition_model_name"],
+                    "text_recognition_model_dir": _paddleocr3_native_model_directory(
+                        model_root=self.model_root,
+                        relative_directory=cast(
+                            str, self.options["text_recognition_model_directory"]
+                        ),
+                    ),
+                    "device": "cpu",
+                    "cpu_threads": 1,
+                    "enable_hpi": False,
+                    "enable_mkldnn": False,
+                    "use_tensorrt": False,
+                    "use_doc_orientation_classify": False,
+                    "use_doc_unwarping": False,
+                    "use_textline_orientation": False,
+                }
                 # Import and construction can both trigger PaddleX's model
                 # resolver.  The per-thread guard turns a missing local model
                 # into an unavailable result rather than an implicit download.

@@ -106,6 +106,11 @@ def _preview_input() -> PreviewInputV1:
 
 
 def _adapter(tmp_path: Path) -> runtime_module.PaddleOcr3PdfPreviewAdapter:
+    for relative_directory in (
+        "models/paddleocr3/det",
+        "models/paddleocr3/rec",
+    ):
+        (tmp_path / relative_directory).mkdir(parents=True, exist_ok=True)
     return runtime_module.PaddleOcr3PdfPreviewAdapter(
         extractor_revision="paddleocr-3.2.0-ppocrv5-mobile-en-raster216-v1",
         model_root=tmp_path,
@@ -309,6 +314,92 @@ def test_paddleocr3_inventory_builder_binds_the_paddlex_profile_locally(
     assert "paddlex" in packages
 
 
+def test_paddleocr3_windows_uses_only_ascii_short_model_paths(
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    captured: dict[str, object] = {}
+    short_path_inputs: list[Path] = []
+
+    class FakePaddleOcr:
+        def __init__(self, **kwargs: object) -> None:
+            captured.update(kwargs)
+
+    def _short_path(path: Path) -> str:
+        short_path_inputs.append(path)
+        return rf"C:\P3MODELS\{path.name}"
+
+    module = ModuleType("paddleocr")
+    module.PaddleOCR = FakePaddleOcr  # type: ignore[attr-defined]
+    monkeypatch.setitem(sys.modules, "paddleocr", module)
+    monkeypatch.setattr(runtime_module.sys, "platform", "win32")
+    monkeypatch.setattr(runtime_module, "_windows_short_path", _short_path)
+
+    _adapter(tmp_path)._paddle_engine()
+
+    assert short_path_inputs == [
+        (tmp_path / "models" / "paddleocr3" / "det").resolve(),
+        (tmp_path / "models" / "paddleocr3" / "rec").resolve(),
+    ]
+    assert captured["text_detection_model_dir"] == r"C:\P3MODELS\det"
+    assert captured["text_recognition_model_dir"] == r"C:\P3MODELS\rec"
+
+
+def test_paddleocr3_windows_rejects_a_missing_ascii_alias(
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    called = False
+
+    class FakePaddleOcr:
+        def __init__(self, **_kwargs: object) -> None:
+            nonlocal called
+            called = True
+
+    def _missing_short_path(_path: Path) -> str:
+        raise DocumentPreviewUnavailable("document_preview_paddleocr3_native_runtime_unavailable")
+
+    module = ModuleType("paddleocr")
+    module.PaddleOCR = FakePaddleOcr  # type: ignore[attr-defined]
+    monkeypatch.setitem(sys.modules, "paddleocr", module)
+    monkeypatch.setattr(runtime_module.sys, "platform", "win32")
+    monkeypatch.setattr(runtime_module, "_windows_short_path", _missing_short_path)
+
+    with pytest.raises(
+        DocumentPreviewUnavailable,
+        match="document_preview_paddleocr3_native_runtime_unavailable",
+    ):
+        _adapter(tmp_path)._paddle_engine()
+
+    assert not called
+
+
+def test_paddleocr3_non_windows_uses_resolved_local_model_paths(
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    captured: dict[str, object] = {}
+
+    class FakePaddleOcr:
+        def __init__(self, **kwargs: object) -> None:
+            captured.update(kwargs)
+
+    def _windows_only(_path: Path) -> str:
+        pytest.fail("non-Windows P3 profile must not request a short path")
+
+    module = ModuleType("paddleocr")
+    module.PaddleOCR = FakePaddleOcr  # type: ignore[attr-defined]
+    monkeypatch.setitem(sys.modules, "paddleocr", module)
+    monkeypatch.setattr(runtime_module.sys, "platform", "linux")
+    monkeypatch.setattr(runtime_module, "_windows_short_path", _windows_only)
+
+    _adapter(tmp_path)._paddle_engine()
+
+    assert captured["text_detection_model_dir"] == str(
+        (tmp_path / "models" / "paddleocr3" / "det").resolve()
+    )
+    assert captured["text_recognition_model_dir"] == str(
+        (tmp_path / "models" / "paddleocr3" / "rec").resolve()
+    )
+
+
 def test_paddleocr3_constructor_cannot_open_a_network_connection(
     tmp_path: Path, monkeypatch: pytest.MonkeyPatch
 ) -> None:
@@ -375,6 +466,7 @@ def test_paddleocr3_predict_uses_blank_native_preflight_and_normalizes_rec_polys
     module = ModuleType("paddleocr")
     module.PaddleOCR = FakePaddleOcr  # type: ignore[attr-defined]
     monkeypatch.setitem(sys.modules, "paddleocr", module)
+    monkeypatch.setattr(runtime_module.sys, "platform", "linux")
 
     _install_fake_numpy(monkeypatch)
     _install_one_page_pdfium(monkeypatch, captured)
@@ -384,9 +476,13 @@ def test_paddleocr3_predict_uses_blank_native_preflight_and_normalizes_rec_polys
     constructor = captured["constructor"]
     assert constructor == {
         "text_detection_model_name": "PP-OCRv5_mobile_det",
-        "text_detection_model_dir": str(tmp_path / "models" / "paddleocr3" / "det"),
+        "text_detection_model_dir": str(
+            (tmp_path / "models" / "paddleocr3" / "det").resolve()
+        ),
         "text_recognition_model_name": "en_PP-OCRv5_mobile_rec",
-        "text_recognition_model_dir": str(tmp_path / "models" / "paddleocr3" / "rec"),
+        "text_recognition_model_dir": str(
+            (tmp_path / "models" / "paddleocr3" / "rec").resolve()
+        ),
         "device": "cpu",
         "cpu_threads": 1,
         "enable_hpi": False,
