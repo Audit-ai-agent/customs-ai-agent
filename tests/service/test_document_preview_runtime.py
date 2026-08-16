@@ -47,6 +47,8 @@ from customs_ai_agent.service.settings import ServiceConfigurationError, Service
 
 
 _REPARSE_POINT_ATTRIBUTE = getattr(stat, "FILE_ATTRIBUTE_REPARSE_POINT", 0)
+_PDF_TEXT_LAYER_V1 = "pypdf-5.3.1-text-layer-v1"
+_PDF_TEXT_LAYER_V2 = "pypdf-5.3.1-text-layer-visitor-v2"
 
 
 @pytest.fixture(autouse=True)
@@ -197,7 +199,7 @@ def _configuration() -> dict[str, object]:
     return {
         "schema_version": "1.0",
         "engine_kind": "pdf_text_layer",
-        "extractor_revision": "pdf-text-test-v1",
+        "extractor_revision": _PDF_TEXT_LAYER_V1,
         "options": {},
     }
 
@@ -280,7 +282,7 @@ def _evaluation(
     inventory_sha256: str,
     *,
     engine_kind: str = "pdf_text_layer",
-    extractor_revision: str = "pdf-text-test-v1",
+    extractor_revision: str = _PDF_TEXT_LAYER_V1,
 ) -> bytes:
     unsigned: dict[str, object] = {
         "schema_version": "1.0",
@@ -321,7 +323,7 @@ def _source_attested_evaluation(
     candidate_bundle_sha256: str = "1" * 64,
     candidate_execution_receipt_sha256: str = "2" * 64,
     engine_kind: str = "pdf_text_layer",
-    extractor_revision: str = "pdf-text-test-v1",
+    extractor_revision: str = _PDF_TEXT_LAYER_V1,
 ) -> bytes:
     unsigned: dict[str, object] = {
         "schema_version": "1.0",
@@ -651,7 +653,7 @@ def _write_source_attested_receipt_chain(
     development_profiles = [
         (
             "pdf_text_layer",
-            "pdf-text-test-v1",
+            _PDF_TEXT_LAYER_V1,
             configuration_sha256,
             inventory_sha256,
             1.0,
@@ -779,7 +781,7 @@ def _write_source_attested_receipt_chain(
         packet=sealed_packet,
         records=sealed_records,
         engine_kind="pdf_text_layer",
-        extractor_revision="pdf-text-test-v1",
+        extractor_revision=_PDF_TEXT_LAYER_V1,
         candidate_configuration_sha256=configuration_sha256,
         candidate_inventory_sha256=inventory_sha256,
     )
@@ -788,7 +790,7 @@ def _write_source_attested_receipt_chain(
         packet_kind="sealed",
         layout_truth_sha256=layout_sha256,
         engine_kind="pdf_text_layer",
-        extractor_revision="pdf-text-test-v1",
+        extractor_revision=_PDF_TEXT_LAYER_V1,
         candidate_configuration_sha256=configuration_sha256,
         candidate_inventory_sha256=inventory_sha256,
         candidate_bundle_sha256=sealed_candidate_bundle_sha256,
@@ -803,7 +805,7 @@ def _write_source_attested_receipt_chain(
         "packet_kind": "sealed",
         "packet_receipt_sha256": sealed_packet_sha256,
         "engine_kind": "pdf_text_layer",
-        "extractor_revision": "pdf-text-test-v1",
+        "extractor_revision": _PDF_TEXT_LAYER_V1,
         "configuration_sha256": configuration_sha256,
         "model_inventory_sha256": inventory_sha256,
     }
@@ -1170,7 +1172,7 @@ def test_approved_binding_requires_exact_sidecars_and_pdf_only_runtime(tmp_path:
 
     candidate = engine.extract(_pdf_input())
 
-    assert candidate.extractor_revision == "pdf-text-test-v1"
+    assert candidate.extractor_revision == _PDF_TEXT_LAYER_V1
     assert fake.calls == 1
     with pytest.raises(DocumentPreviewUnavailable):
         engine.extract(_jpeg_input())
@@ -1673,6 +1675,44 @@ def test_paddle_missing_postprocess_package_rejects_provision_and_activation(
     assert not (root / "approvals" / "pdf-preview-active.json").exists()
 
 
+@pytest.mark.parametrize("revision", [_PDF_TEXT_LAYER_V1, _PDF_TEXT_LAYER_V2])
+def test_pdf_text_layer_runtime_configuration_binds_only_known_algorithms(
+    revision: str,
+) -> None:
+    configuration = runtime_module.parse_runtime_configuration(
+        _canonical(
+            {
+                "schema_version": "1.0",
+                "engine_kind": "pdf_text_layer",
+                "extractor_revision": revision,
+                "options": {},
+            },
+            newline=True,
+        )
+    )
+
+    assert configuration.extractor_revision == revision
+
+
+def test_pdf_text_layer_runtime_configuration_rejects_an_unbound_revision(
+    tmp_path: Path,
+) -> None:
+    root = _root(tmp_path)
+    unbound_configuration = _configuration() | {
+        "extractor_revision": "pypdf-5.3.1-text-layer-unreviewed-v3"
+    }
+
+    with pytest.raises(DocumentPreviewRuntimeError, match="document_preview_configuration_invalid"):
+        write_runtime_sidecars(
+            document_preview_root=root,
+            configuration_value=unbound_configuration,
+            inventory_value=_inventory(),
+            package_version_reader=_package_version,
+        )
+
+    assert not (root / "runtime-configurations").exists()
+
+
 def test_runtime_profiles_accept_only_the_explicit_offline_options() -> None:
     paddle = runtime_module.parse_runtime_configuration(
         _canonical(
@@ -1921,7 +1961,7 @@ def test_source_attested_auto_engine_activates_then_clears_cache_on_bad_pointer(
         model_inventory_sha256=inventory_sha256,
         package_version_reader=_package_version,
     )
-    assert engine.extract(_pdf_input()).extractor_revision == "pdf-text-test-v1"
+    assert engine.extract(_pdf_input()).extractor_revision == _PDF_TEXT_LAYER_V1
     assert len(delegates) == 1
     assert delegates[0].calls == 1
 
@@ -1940,7 +1980,7 @@ def test_source_attested_auto_engine_activates_then_clears_cache_on_bad_pointer(
         model_inventory_sha256=inventory_sha256,
         package_version_reader=_package_version,
     )
-    assert engine.extract(_pdf_input()).extractor_revision == "pdf-text-test-v1"
+    assert engine.extract(_pdf_input()).extractor_revision == _PDF_TEXT_LAYER_V1
     assert len(delegates) == 2
     assert delegates[1].calls == 1
 
@@ -2046,7 +2086,7 @@ def test_source_attested_synthetic_pointer_activates_pdf_only_without_human_gold
     )
 
     assert resolution.status == "approved"
-    assert resolution.engine.extract(_pdf_input()).extractor_revision == "pdf-text-test-v1"
+    assert resolution.engine.extract(_pdf_input()).extractor_revision == _PDF_TEXT_LAYER_V1
     with pytest.raises(DocumentPreviewUnavailable):
         resolution.engine.extract(_jpeg_input())
     assert fake.calls == 1

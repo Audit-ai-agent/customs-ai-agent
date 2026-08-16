@@ -84,6 +84,20 @@ _MAX_SOURCE_CANDIDATE_BUNDLE_BYTES = 32 * 1024 * 1024
 _FIELD_EXACT_MATCH_MIN = 0.99
 _OCR_CER_MAX = 0.01
 _TABLE_CELL_F1_MIN = 0.98
+# The text-layer adapter has two materially different extraction algorithms.
+# These names are part of the approved-engine evidence, not cosmetic labels:
+# a pointer approved against the historic aggregate ``extract_text`` result
+# must never silently begin serving visitor-callback fragments after a code
+# update.  Keep the legacy revision loadable for existing human approvals;
+# candidate-only visitor geometry is available only from the explicit v2.
+_PDF_TEXT_LAYER_LEGACY_EXTRACTOR_REVISION: Final = "pypdf-5.3.1-text-layer-v1"
+_PDF_TEXT_LAYER_VISITOR_EXTRACTOR_REVISION: Final = "pypdf-5.3.1-text-layer-visitor-v2"
+_PDF_TEXT_LAYER_EXTRACTOR_REVISIONS: Final[frozenset[str]] = frozenset(
+    {
+        _PDF_TEXT_LAYER_LEGACY_EXTRACTOR_REVISION,
+        _PDF_TEXT_LAYER_VISITOR_EXTRACTOR_REVISION,
+    }
+)
 _NETWORK_GUARD_LOCK = threading.Lock()
 _BYTECODE_GUARD_LOCK = threading.Lock()
 _NETWORK_GUARD_STATE = threading.local()
@@ -936,11 +950,14 @@ def parse_runtime_configuration(raw: bytes) -> RuntimeConfigurationV1:
     if value["schema_version"] != "1.0":
         raise DocumentPreviewRuntimeError("document_preview_configuration_invalid")
     kind = _engine_kind(value["engine_kind"], code="document_preview_configuration_invalid")
+    extractor_revision = _identifier(
+        value["extractor_revision"], code="document_preview_configuration_invalid"
+    )
+    if kind == "pdf_text_layer" and extractor_revision not in _PDF_TEXT_LAYER_EXTRACTOR_REVISIONS:
+        raise DocumentPreviewRuntimeError("document_preview_configuration_invalid")
     return RuntimeConfigurationV1(
         engine_kind=kind,
-        extractor_revision=_identifier(
-            value["extractor_revision"], code="document_preview_configuration_invalid"
-        ),
+        extractor_revision=extractor_revision,
         options=_parse_options(value["options"], kind=kind),
     )
 
@@ -3955,6 +3972,68 @@ def _pdf_page_dimensions(page: object) -> tuple[int, int]:
     return width, height
 
 
+def _extract_pdf_text_layer_legacy(preview_input: PreviewInputV1) -> PreviewCandidateV1 | None:
+    """Preserve the approved v1 aggregate ``pypdf`` extraction semantics.
+
+    This path intentionally keeps the original ``page.extract_text()`` call
+    and its whole-page ``_chunks`` projection.  It is separate from the v2
+    visitor path because the two algorithms can produce different text spans
+    for exactly the same PDF and must therefore never share an engine
+    revision.
+    """
+
+    try:
+        from pypdf import PdfReader  # type: ignore[import-not-found]
+    except ImportError as error:
+        raise DocumentPreviewUnavailable("pypdf is not provisioned") from error
+    try:
+        with local_files_only():
+            reader = PdfReader(io.BytesIO(preview_input.content), strict=True)
+            if reader.is_encrypted:
+                raise DocumentPreviewInputError("encrypted PDF preview is unavailable")
+            pages: list[DocumentPreviewPageV1] = []
+            has_text = False
+            for index, page in enumerate(reader.pages, start=1):
+                width, height = _pdf_page_dimensions(page)
+                extracted = page.extract_text() or ""
+                spans = [
+                    DocumentSpanV1(
+                        span_id=f"page-{index}-span-{ordinal}",
+                        ordinal=ordinal,
+                        reading_order=ordinal,
+                        text=text,
+                    )
+                    for ordinal, text in enumerate(_chunks(extracted), start=1)
+                ]
+                has_text = has_text or bool(spans)
+                pages.append(
+                    DocumentPreviewPageV1(
+                        page_number=index,
+                        width=width,
+                        height=height,
+                        coordinate_unit="pdf_points",
+                        spans=spans,
+                    )
+                )
+    except DocumentPreviewInputError:
+        raise
+    except Exception:
+        # A parser exception can include source text.  Preserve the legacy
+        # extraction output while keeping the existing content-free error
+        # boundary for logs and transcripts.
+        raise DocumentPreviewInputError("PDF text layer cannot be safely decoded") from None
+    if not pages:
+        raise DocumentPreviewInputError("PDF has no pages")
+    if not has_text:
+        return None
+    return PreviewCandidateV1(
+        status="preview_ready",
+        extractor_revision=_PDF_TEXT_LAYER_LEGACY_EXTRACTOR_REVISION,
+        pages=pages,
+        warnings=[DocumentExtractionWarningV1(code="text_layer_used")],
+    )
+
+
 def _pdf_text_visitor_fragment(value: object) -> str | None:
     """Keep a visitor fragment verbatim except for its terminal line break.
 
@@ -4140,7 +4219,7 @@ def _extract_pdf_text_layer_visitor_pages(
 
 @dataclass(slots=True)
 class PdfTextLayerPreviewAdapter:
-    """Pinned local ``pypdf`` visitor extraction with no raster/OCR fallback."""
+    """Pinned local ``pypdf`` extraction selected by approved revision only."""
 
     extractor_revision: str
 
@@ -4155,14 +4234,22 @@ class PdfTextLayerPreviewAdapter:
         candidate projection.
         """
 
+        if self.extractor_revision != _PDF_TEXT_LAYER_VISITOR_EXTRACTOR_REVISION:
+            raise DocumentPreviewUnavailable(
+                "PDF text visitor is unavailable for this extractor revision"
+            )
         if preview_input.metadata.media_type != "application/pdf":
             return ()
         pages = _extract_pdf_text_layer_visitor_pages(preview_input)
         return tuple(fragment for page in pages for fragment in page.fragments)
 
     def extract_pdf_text_layer(self, preview_input: PreviewInputV1) -> PreviewCandidateV1 | None:
+        if self.extractor_revision not in _PDF_TEXT_LAYER_EXTRACTOR_REVISIONS:
+            raise DocumentPreviewUnavailable("PDF text layer extractor revision is unavailable")
         if preview_input.metadata.media_type != "application/pdf":
             return None
+        if self.extractor_revision == _PDF_TEXT_LAYER_LEGACY_EXTRACTOR_REVISION:
+            return _extract_pdf_text_layer_legacy(preview_input)
         visitor_pages = _extract_pdf_text_layer_visitor_pages(preview_input)
         if not any(page.fragments for page in visitor_pages):
             return None

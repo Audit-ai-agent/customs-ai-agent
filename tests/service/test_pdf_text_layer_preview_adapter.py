@@ -13,11 +13,16 @@ from customs_ai_agent.schemas.document_extraction import (
     DocumentExtractionRequestMetadataV1,
     PreviewInputV1,
 )
-from customs_ai_agent.service.document_extraction import DocumentPreviewInputError
+from customs_ai_agent.service.document_extraction import (
+    DocumentPreviewInputError,
+    DocumentPreviewUnavailable,
+)
 from customs_ai_agent.service.document_preview_runtime import PdfTextLayerPreviewAdapter
 
 
 _IDENTITY = [1, 0, 0, 1, 0, 0]
+_LEGACY_REVISION = "pypdf-5.3.1-text-layer-v1"
+_VISITOR_REVISION = "pypdf-5.3.1-text-layer-visitor-v2"
 
 
 def _preview_input() -> PreviewInputV1:
@@ -35,15 +40,25 @@ def _preview_input() -> PreviewInputV1:
 
 
 class _FakeVisitorPage:
-    def __init__(self, callback_plan: Callable[[Callable[..., None]], None]) -> None:
+    def __init__(
+        self,
+        callback_plan: Callable[[Callable[..., None]], None],
+        *,
+        aggregate_text: str = "default-aggregation-must-not-be-used",
+    ) -> None:
         self.mediabox = SimpleNamespace(width=200, height=100)
         self._callback_plan = callback_plan
+        self._aggregate_text = aggregate_text
         self.visitor_calls = 0
+        self.aggregate_calls = 0
 
-    def extract_text(self, *, visitor_text: Callable[..., None]) -> str:
+    def extract_text(self, *, visitor_text: Callable[..., None] | None = None) -> str:
+        if visitor_text is None:
+            self.aggregate_calls += 1
+            return self._aggregate_text
         self.visitor_calls += 1
         self._callback_plan(visitor_text)
-        return "default-aggregation-must-not-be-used"
+        return self._aggregate_text
 
 
 def _install_fake_pypdf(
@@ -75,7 +90,7 @@ def test_pdf_text_visitor_trims_only_terminal_newlines_and_uses_no_aggregate_out
 
     pages = _install_fake_pypdf(monkeypatch, lambda: _FakeVisitorPage(callback_plan))
 
-    adapter = PdfTextLayerPreviewAdapter(extractor_revision="pdf-text-test-v1")
+    adapter = PdfTextLayerPreviewAdapter(extractor_revision=_VISITOR_REVISION)
     fragments = adapter.extract_pdf_text_layer_fragments(_preview_input())
     candidate = adapter.extract_pdf_text_layer(_preview_input())
 
@@ -90,6 +105,7 @@ def test_pdf_text_visitor_trims_only_terminal_newlines_and_uses_no_aggregate_out
         None,
     ]
     assert [page.visitor_calls for page in pages] == [1, 1]
+    assert [page.aggregate_calls for page in pages] == [0, 0]
 
 
 def test_pdf_text_visitor_positions_are_deterministic_without_bbox_estimation(
@@ -100,7 +116,7 @@ def test_pdf_text_visitor_positions_are_deterministic_without_bbox_estimation(
         visitor("B\n", [1, 0, 0, 1, 10, 0], [1, 0, 0, 1, 70, 20], {}, 10)
 
     _install_fake_pypdf(monkeypatch, lambda: _FakeVisitorPage(callback_plan))
-    adapter = PdfTextLayerPreviewAdapter(extractor_revision="pdf-text-test-v1")
+    adapter = PdfTextLayerPreviewAdapter(extractor_revision=_VISITOR_REVISION)
 
     first = adapter.extract_pdf_text_layer_fragments(_preview_input())
     second = adapter.extract_pdf_text_layer_fragments(_preview_input())
@@ -117,6 +133,43 @@ def test_pdf_text_visitor_positions_are_deterministic_without_bbox_estimation(
         (0.25, 0.8),
         None,
     ]
+
+
+def test_pdf_text_legacy_v1_preserves_the_aggregate_extract_text_path(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    def callback_plan(_visitor: Callable[..., None]) -> None:
+        raise AssertionError("legacy v1 must not invoke the visitor callback")
+
+    pages = _install_fake_pypdf(
+        monkeypatch,
+        lambda: _FakeVisitorPage(
+            callback_plan,
+            aggregate_text="  legacy first\nlegacy second  ",
+        ),
+    )
+    adapter = PdfTextLayerPreviewAdapter(extractor_revision=_LEGACY_REVISION)
+
+    candidate = adapter.extract_pdf_text_layer(_preview_input())
+
+    assert candidate is not None
+    assert candidate.extractor_revision == _LEGACY_REVISION
+    assert [span.text for span in candidate.pages[0].spans] == ["legacy first\nlegacy second"]
+    assert [page.aggregate_calls for page in pages] == [1]
+    assert [page.visitor_calls for page in pages] == [0]
+    with pytest.raises(DocumentPreviewUnavailable, match="visitor is unavailable"):
+        adapter.extract_pdf_text_layer_fragments(_preview_input())
+
+
+def test_pdf_text_rejects_an_unsupported_extractor_revision() -> None:
+    adapter = PdfTextLayerPreviewAdapter(
+        extractor_revision="pypdf-5.3.1-text-layer-unreviewed-v3"
+    )
+
+    with pytest.raises(DocumentPreviewUnavailable, match="extractor revision is unavailable"):
+        adapter.extract_pdf_text_layer(_preview_input())
+    with pytest.raises(DocumentPreviewUnavailable, match="visitor is unavailable"):
+        adapter.extract_pdf_text_layer_fragments(_preview_input())
 
 
 def test_pdf_text_candidate_adapter_reuses_the_internal_fragment_projection() -> None:
@@ -157,7 +210,7 @@ def test_pdf_text_visitor_failure_does_not_leak_fragment_content(
     with pytest.raises(
         DocumentPreviewInputError, match="PDF text layer cannot be safely decoded"
     ) as error:
-        PdfTextLayerPreviewAdapter(extractor_revision="pdf-text-test-v1").extract_pdf_text_layer(
+        PdfTextLayerPreviewAdapter(extractor_revision=_VISITOR_REVISION).extract_pdf_text_layer(
             _preview_input()
         )
 
@@ -186,7 +239,7 @@ def test_pdf_text_visitor_runs_under_the_local_network_guard(
     _install_fake_pypdf(monkeypatch, lambda: _FakeVisitorPage(callback_plan))
 
     with pytest.raises(DocumentPreviewInputError, match="PDF text layer cannot be safely decoded"):
-        PdfTextLayerPreviewAdapter(extractor_revision="pdf-text-test-v1").extract_pdf_text_layer(
+        PdfTextLayerPreviewAdapter(extractor_revision=_VISITOR_REVISION).extract_pdf_text_layer(
             _preview_input()
         )
 
