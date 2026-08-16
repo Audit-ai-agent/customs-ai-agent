@@ -13,6 +13,7 @@ from __future__ import annotations
 import hashlib
 import importlib.metadata
 import json
+import math
 import os
 import re
 import socket
@@ -49,6 +50,7 @@ from customs_ai_agent.evaluation.synthetic_pdf_visitor_table_projector import (
     project_synthetic_pdf_visitor_table_cells,
 )
 from customs_ai_agent.schemas.document_extraction import (
+    BoundingBoxV1,
     DocumentExtractionRequestMetadataV1,
     PreviewCandidateV1,
     PreviewInputV1,
@@ -115,6 +117,48 @@ class CandidateExtractionV1:
 
     spans: tuple[CandidateSpanV1, ...]
     table_cells: tuple[CandidateTableCellV1, ...] = ()
+
+
+def _has_complete_validated_bbox_geometry(spans: Sequence[CandidateSpanV1]) -> bool:
+    """Accept Paddle geometry only when every candidate span has one safe bbox.
+
+    PaddleOCR exposes public normalized rectangles rather than the text-layer
+    adapter's local matrix anchors.  The existing geometry projectors can use
+    those rectangles directly, but a partial or model-constructed malformed
+    set must not let one surviving span supply selective layout evidence.
+    This predicate reads only candidate spans and never repairs, clips, or
+    infers a rectangle.
+    """
+
+    if not spans:
+        return False
+    for span in spans:
+        bbox = span.bbox
+        if not isinstance(bbox, BoundingBoxV1):
+            return False
+        values = (bbox.x, bbox.y, bbox.width, bbox.height)
+        if any(
+            isinstance(value, bool)
+            or not isinstance(value, (int, float))
+            or not math.isfinite(float(value))
+            for value in values
+        ):
+            return False
+        x, y, width, height = (float(value) for value in values)
+        if (
+            x < 0
+            or y < 0
+            or width <= 0
+            or height <= 0
+            or x > 1
+            or y > 1
+            or width > 1
+            or height > 1
+            or x + width > 1
+            or y + height > 1
+        ):
+            return False
+    return True
 
 
 def select_synthetic_pdf_candidate_table_cells(
@@ -1508,12 +1552,17 @@ def run_synthetic_pdf_ocr_candidate(
         except Exception as error:
             raise SyntheticPdfCandidateRunnerError("candidate_engine_execution_failed") from error
         # Adapter-provided structured cells are the normal table evidence.
-        # Native pypdf visitor anchors can additionally form one strict local
-        # geometry projection; neither route reads Markdown, Gold, CSV, or a
-        # source content stream.  Both projections are fail-closed and then
-        # pass through the same text-free structural selector.
+        # Native pypdf visitor anchors, and Paddle's complete validated public
+        # rectangles, can additionally form one strict local geometry
+        # projection. Neither route reads Markdown, Gold, CSV, or a source
+        # content stream. Both projections are fail-closed and then pass
+        # through the same text-free structural selector.
+        uses_candidate_geometry = profile.engine_kind == "pdf_text_layer" or (
+            profile.engine_kind == "paddleocr"
+            and _has_complete_validated_bbox_geometry(extracted.spans)
+        )
         raw_table_cells = tuple(extracted.table_cells)
-        if profile.engine_kind == "pdf_text_layer":
+        if uses_candidate_geometry:
             try:
                 raw_table_cells = tuple(
                     project_synthetic_pdf_visitor_table_cells(spans=extracted.spans)
@@ -1522,7 +1571,7 @@ def run_synthetic_pdf_ocr_candidate(
                 raise SyntheticPdfCandidateRunnerError(
                     "candidate_table_projection_invalid"
                 ) from error
-        if profile.engine_kind in {"docling", "pdf_text_layer"}:
+        if profile.engine_kind == "docling" or uses_candidate_geometry:
             try:
                 table_cells = select_synthetic_pdf_candidate_table_cells(
                     table_cells=raw_table_cells
@@ -1538,7 +1587,7 @@ def run_synthetic_pdf_ocr_candidate(
             spans=extracted.spans,
             table_cells=table_cells,
         )
-        if profile.engine_kind == "pdf_text_layer":
+        if uses_candidate_geometry:
             try:
                 positioned_fields = project_native_pdf_text_layer_fields(
                     document_type=item.document_type,

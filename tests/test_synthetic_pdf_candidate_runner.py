@@ -48,6 +48,11 @@ from customs_ai_agent.service.document_preview_runtime import (
     DocumentPreviewRuntimeError,
     write_runtime_sidecars,
 )
+from customs_ai_agent.schemas.document_extraction import (
+    BoundingBoxV1,
+    DocumentPreviewPageV1,
+    DocumentSpanV1,
+)
 from tools.run_synthetic_pdf_ocr_candidate import _parser, main
 
 
@@ -360,6 +365,61 @@ class _FakeAdapter:
             ),
             table_cells=table_cells,
         )
+
+
+@dataclass
+class _StaticExtractionFakeAdapter:
+    """Return one synthetic adapter output without opening a real PDF."""
+
+    extraction: CandidateExtractionV1
+    calls: int = 0
+
+    def extract_pdf(self, _preview_input: object) -> CandidateExtractionV1:
+        self.calls += 1
+        return self.extraction
+
+
+def _bbox_span(
+    *,
+    text: str,
+    reading_order: int,
+    x: float,
+    y: float,
+    width: float = 0.10,
+    height: float = 0.02,
+) -> CandidateSpanV1:
+    return CandidateSpanV1(
+        page_number=1,
+        reading_order=reading_order,
+        text=text,
+        bbox=BoundingBoxV1(x=x, y=y, width=width, height=height),
+    )
+
+
+def _bbox_grid(
+    *,
+    prefix: str,
+    reading_order_start: int,
+    header_y: float,
+    body_y: float,
+    columns: int = 5,
+) -> list[CandidateSpanV1]:
+    """Build one opaque public-bbox grid with no schema/header data."""
+
+    spans: list[CandidateSpanV1] = []
+    reading_order = reading_order_start
+    for row_name, y in (("header", header_y), ("body", body_y)):
+        for column_index in range(columns):
+            spans.append(
+                _bbox_span(
+                    text=f"{prefix}-{row_name}-{column_index}",
+                    reading_order=reading_order,
+                    x=0.05 + (column_index * 0.18),
+                    y=y,
+                )
+            )
+            reading_order += 1
+    return spans
 
 
 def _table_cells(
@@ -1373,6 +1433,149 @@ def test_native_text_layer_runner_uses_positioned_field_projection(
     assert seen["document_type"] == "invoice"
     assert isinstance(seen["spans"], tuple)
     assert {field.field_name for field in bundle.documents[0].fields} >= {"inv_no"}
+
+
+def test_paddle_runner_routes_complete_public_bboxes_through_geometry_projectors(
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    """Paddle's public rectangles are evaluation-only geometry evidence."""
+
+    fixture = _fixture(tmp_path, engine_kind="paddleocr")
+    extraction = CandidateExtractionV1(
+        spans=(
+            _bbox_span(text="Invoice Number", reading_order=1, x=0.08, y=0.06, width=0.20),
+            _bbox_span(text="INV-001", reading_order=2, x=0.40, y=0.06),
+            *_bbox_grid(
+                prefix="opaque",
+                reading_order_start=3,
+                header_y=0.40,
+                body_y=0.46,
+            ),
+        )
+    )
+    adapter = _StaticExtractionFakeAdapter(extraction=extraction)
+    seen: dict[str, object] = {}
+    table_projector = candidate_runner_module.project_synthetic_pdf_visitor_table_cells
+    field_projector = candidate_runner_module.project_native_pdf_text_layer_fields
+
+    def project_table(*, spans: object) -> list[CandidateTableCellV1]:
+        seen["table_spans"] = spans
+        return table_projector(spans=spans)  # type: ignore[arg-type]
+
+    def project_fields(*, document_type: object, spans: object) -> list[CandidateFieldV1]:
+        seen["field_document_type"] = document_type
+        seen["field_spans"] = spans
+        return field_projector(  # type: ignore[arg-type]
+            document_type=document_type,
+            spans=spans,
+        )
+
+    monkeypatch.setattr(
+        candidate_runner_module, "project_synthetic_pdf_visitor_table_cells", project_table
+    )
+    monkeypatch.setattr(
+        candidate_runner_module, "project_native_pdf_text_layer_fields", project_fields
+    )
+
+    summary = _run(fixture, adapter)
+    output = fixture["output_directory"] / summary["candidate_file"]  # type: ignore[operator]
+    bundle = SyntheticPdfCandidateOutputBundleV1.model_validate_json(output.read_bytes())
+
+    assert isinstance(seen["table_spans"], tuple)
+    assert seen["field_document_type"] == "invoice"
+    assert isinstance(seen["field_spans"], tuple)
+    assert len(bundle.documents[0].table_cells) == 10
+    assert [(cell.row_index, cell.column_index) for cell in bundle.documents[0].table_cells] == [
+        (row_index, column_index) for row_index in (0, 1) for column_index in range(5)
+    ]
+    assert [(field.field_name, field.value) for field in bundle.documents[0].fields] == [
+        ("inv_no", "INV-001")
+    ]
+    assert adapter.calls == 1
+
+
+@pytest.mark.parametrize("geometry", ["missing_bbox", "ambiguous_grid"])
+def test_paddle_runner_fails_closed_for_incomplete_or_ambiguous_bbox_geometry(
+    tmp_path: Path, geometry: str
+) -> None:
+    fixture = _fixture(tmp_path, engine_kind="paddleocr")
+    spans = _bbox_grid(
+        prefix="opaque-first",
+        reading_order_start=1,
+        header_y=0.40,
+        body_y=0.46,
+    )
+    if geometry == "missing_bbox":
+        target = spans[-1]
+        spans[-1] = CandidateSpanV1(
+            page_number=target.page_number,
+            reading_order=target.reading_order,
+            text=target.text,
+            bbox=None,
+        )
+    else:
+        spans.extend(
+            _bbox_grid(
+                prefix="opaque-second",
+                reading_order_start=20,
+                header_y=0.66,
+                body_y=0.72,
+            )
+        )
+    adapter = _StaticExtractionFakeAdapter(extraction=CandidateExtractionV1(spans=tuple(spans)))
+
+    summary = _run(fixture, adapter)
+    output = fixture["output_directory"] / summary["candidate_file"]  # type: ignore[operator]
+    bundle = SyntheticPdfCandidateOutputBundleV1.model_validate_json(output.read_bytes())
+
+    assert bundle.documents[0].table_cells == []
+    assert bundle.documents[0].fields == []
+    assert adapter.calls == 1
+
+
+def test_paddle_bbox_geometry_uses_the_existing_conflict_omit_merge(
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    fixture = _fixture(tmp_path, engine_kind="paddleocr")
+    adapter = _StaticExtractionFakeAdapter(
+        extraction=CandidateExtractionV1(
+            spans=(
+                _bbox_span(
+                    text="Invoice No: VISIBLE-ONLY",
+                    reading_order=1,
+                    x=0.08,
+                    y=0.06,
+                    width=0.34,
+                ),
+            )
+        )
+    )
+    monkeypatch.setattr(
+        candidate_runner_module,
+        "project_synthetic_pdf_visitor_table_cells",
+        lambda *, spans: [],
+    )
+    monkeypatch.setattr(
+        candidate_runner_module,
+        "project_native_pdf_text_layer_fields",
+        lambda *, document_type, spans: [
+            CandidateFieldV1(field_name="inv_no", value="POSITIONED-ONLY")
+        ],
+    )
+
+    summary = _run(fixture, adapter)
+    output = fixture["output_directory"] / summary["candidate_file"]  # type: ignore[operator]
+    bundle = SyntheticPdfCandidateOutputBundleV1.model_validate_json(output.read_bytes())
+
+    assert bundle.documents[0].fields == []
+
+
+def test_paddle_bbox_geometry_does_not_extend_the_public_preview_contract() -> None:
+    """Geometry stays in local candidate evaluation; the HTTP wire shape is unchanged."""
+
+    assert "anchor_x" not in DocumentSpanV1.model_fields
+    assert "anchor_y" not in DocumentSpanV1.model_fields
+    assert "table_cells" not in DocumentPreviewPageV1.model_fields
 
 
 def test_merge_candidate_fields_keeps_only_equal_or_single_raw_values() -> None:
