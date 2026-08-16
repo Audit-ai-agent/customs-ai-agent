@@ -2966,7 +2966,7 @@ def _verify_source_attested_synthetic_replay(
         len(development_evaluation_raws)
         == len(development_candidate_raws)
         == len(development_execution_raws)
-        == len(_ENGINE_KINDS)
+        and 1 <= len(development_evaluation_raws) <= len(_ENGINE_KINDS)
     ):
         raise DocumentPreviewRuntimeError(code)
     try:
@@ -2997,6 +2997,8 @@ def _verify_source_attested_synthetic_replay(
         development_selection = SourceAttestedSyntheticDevelopmentSelectionV1.model_validate_json(
             development_selection_raw
         )
+        if len(development_evaluation_raws) != len(development_selection.candidate_results):
+            raise DocumentPreviewRuntimeError(code)
         sealed_run = SourceAttestedSyntheticSealedRunV1.model_validate_json(sealed_run_raw)
         development_results = tuple(
             SourceAttestedSyntheticOcrEvaluationResultV1.model_validate_json(raw)
