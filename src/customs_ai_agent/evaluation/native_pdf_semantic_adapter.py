@@ -35,8 +35,14 @@ from customs_ai_agent.evaluation.native_pdf_vector_grid import (
 from customs_ai_agent.service.document_preview_runtime import local_files_only
 
 
-_NUMERIC_TOKEN = re.compile(r"[+-]?(?:\d{1,3}(?:,\d{3})+|\d+)(?:\.\d+)?\Z")
-_ALPHA_TOKEN = re.compile(r"[A-Za-z]+\Z")
+# These bounded patterns intentionally mirror the immutable field-transform
+# contract used when source-PDF training labels are compiled.  They live here
+# (rather than importing the training/source parser) so byte-only runtime
+# inference remains independent from source truth and training-only code.
+_NUMERIC_TOKEN = re.compile(
+    r"(?<![A-Za-z0-9])(?:\d{1,3}(?:,\d{3})*|\d+)(?:\.\d+)?(?![A-Za-z0-9])"
+)
+_ALPHA_TOKEN = re.compile(r"[A-Za-z]+")
 
 
 class NativePdfSemanticAdapterError(ValueError):
@@ -66,6 +72,20 @@ class _SelectorMatch:
     source_kind: str
     source_index: int
     text: str
+
+
+def _single_token(*, text: str, pattern: re.Pattern[str]) -> str | None:
+    """Return exactly one bounded token, never a best-effort substring.
+
+    The semantic model's token transforms select one native text run and then
+    conservatively emit its sole numeric or alphabetic token.  A zero- or
+    multi-token run is ambiguous and therefore omitted.
+    """
+
+    tokens = pattern.findall(text)
+    if len(tokens) != 1 or not tokens[0].strip():
+        return None
+    return tokens[0].strip()
 
 
 def _resolve_selector(
@@ -171,15 +191,15 @@ def _transformed_field_value(
     if field.value_transform == "raw-v1":
         result = values[0]
     elif field.value_transform == "single-numeric-token-v1":
-        result = values[0].strip()
-        if _NUMERIC_TOKEN.fullmatch(result) is None:
+        result = _single_token(text=values[0], pattern=_NUMERIC_TOKEN)
+        if result is None:
             return None
     elif field.value_transform == "single-alpha-token-v1":
-        result = values[0].strip()
-        if _ALPHA_TOKEN.fullmatch(result) is None:
+        result = _single_token(text=values[0], pattern=_ALPHA_TOKEN)
+        if result is None:
             return None
     else:
-        result = "/".join(value.strip() for value in values)
+        result = " / ".join(value.strip() for value in values)
         if not result or any(not value.strip() for value in values):
             return None
     if not normalize_field_value(result, field.normalizer):

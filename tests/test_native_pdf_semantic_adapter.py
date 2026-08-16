@@ -200,7 +200,7 @@ def test_adapter_preserves_native_evidence_and_applies_learned_selectors(
         ("alpha_code", "ABC"),
         ("quantity", "15"),
         ("reference", "REF-001"),
-        ("reference_quantity", "REF-001/15"),
+        ("reference_quantity", "REF-001 / 15"),
     ]
     assert output.spans == extraction.spans
     assert output.table_cells == extraction.table_cells
@@ -269,6 +269,139 @@ def test_same_native_source_cannot_satisfy_two_join_selectors(
         "quantity",
         "reference",
     }
+
+
+def test_token_transforms_extract_one_bounded_token_from_one_native_run(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    extraction = _native_extraction()
+    binding = _model_binding()
+    artifact_payload = binding.artifact.model_dump(mode="json", exclude_none=True)
+    documents = artifact_payload["documents"]
+    assert isinstance(documents, list)
+    document = documents[0]
+    assert isinstance(document, dict)
+    fields = document["fields"]
+    assert isinstance(fields, list)
+    fields[:] = [
+        {
+            "field_name": "quantity_from_composite_run",
+            "normalizer": "numeric-v1",
+            "selectors": [_span_selector(reading_order=2)],
+            "value_transform": "single-numeric-token-v1",
+        },
+        {
+            "field_name": "unit_from_composite_run",
+            "normalizer": "text-v1",
+            "selectors": [_span_selector(reading_order=2)],
+            "value_transform": "single-alpha-token-v1",
+        },
+    ]
+    artifact = NativePdfSemanticModelArtifactV1.model_validate(artifact_payload)
+    artifact_bytes = canonical_json_file_bytes(artifact.model_dump(mode="json", exclude_none=True))
+    composite_binding = bind_native_pdf_semantic_model_artifact(
+        artifact_bytes=artifact_bytes,
+        expected_sha256=hashlib.sha256(artifact_bytes).hexdigest(),
+    )
+    composite_spans = list(extraction.spans)
+    composite_spans[1] = CandidateSpanV1(
+        page_number=1,
+        reading_order=2,
+        text="15 PCS",
+        anchor_x=0.20,
+        anchor_y=0.20,
+    )
+    composite = NativePdfVectorGridExtraction(
+        pages=extraction.pages,
+        spans=tuple(composite_spans),
+        table_cells=extraction.table_cells,
+        form_regions=extraction.form_regions,
+    )
+    monkeypatch.setattr(
+        semantic_adapter,
+        "extract_native_pdf_vector_grid_from_pdf_bytes",
+        lambda *, pdf_bytes: composite,
+    )
+
+    output = semantic_adapter.NativePdfSemanticAdapter(model=composite_binding).extract_pdf_bytes(
+        b"%PDF-selected-only"
+    )
+
+    assert [(field.field_name, field.value) for field in output.fields] == [
+        ("quantity_from_composite_run", "15"),
+        ("unit_from_composite_run", "PCS"),
+    ]
+
+
+def test_token_transform_rejects_multiple_tokens_in_one_native_run(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    extraction = _native_extraction()
+    binding = _model_binding()
+    artifact_payload = binding.artifact.model_dump(mode="json", exclude_none=True)
+    documents = artifact_payload["documents"]
+    assert isinstance(documents, list)
+    document = documents[0]
+    assert isinstance(document, dict)
+    fields = document["fields"]
+    assert isinstance(fields, list)
+    fields[:] = [
+        {
+            "field_name": "ambiguous_quantity",
+            "normalizer": "numeric-v1",
+            "selectors": [_span_selector(reading_order=2)],
+            "value_transform": "single-numeric-token-v1",
+        }
+    ]
+    artifact = NativePdfSemanticModelArtifactV1.model_validate(artifact_payload)
+    artifact_bytes = canonical_json_file_bytes(artifact.model_dump(mode="json", exclude_none=True))
+    ambiguous_binding = bind_native_pdf_semantic_model_artifact(
+        artifact_bytes=artifact_bytes,
+        expected_sha256=hashlib.sha256(artifact_bytes).hexdigest(),
+    )
+    ambiguous_spans = list(extraction.spans)
+    ambiguous_spans[1] = CandidateSpanV1(
+        page_number=1,
+        reading_order=2,
+        text="15 OR 16",
+        anchor_x=0.20,
+        anchor_y=0.20,
+    )
+    ambiguous = NativePdfVectorGridExtraction(
+        pages=extraction.pages,
+        spans=tuple(ambiguous_spans),
+        table_cells=extraction.table_cells,
+        form_regions=extraction.form_regions,
+    )
+    monkeypatch.setattr(
+        semantic_adapter,
+        "extract_native_pdf_vector_grid_from_pdf_bytes",
+        lambda *, pdf_bytes: ambiguous,
+    )
+
+    output = semantic_adapter.NativePdfSemanticAdapter(model=ambiguous_binding).extract_pdf_bytes(
+        b"%PDF-selected-only"
+    )
+
+    assert output.document_type == "demo_document"
+    assert output.fields == ()
+
+
+def test_semantic_runtime_does_not_import_source_truth_or_training_only_modules() -> None:
+    tree = ast.parse(Path(semantic_adapter.__file__).read_text(encoding="utf-8"))
+    imports = [
+        alias.name
+        for node in ast.walk(tree)
+        if isinstance(node, ast.Import)
+        for alias in node.names
+    ] + [
+        node.module or ""
+        for node in ast.walk(tree)
+        if isinstance(node, ast.ImportFrom)
+    ]
+
+    assert all("source_attested_synthetic_pdf_truth" not in name for name in imports)
+    assert all("supervised_template_training" not in name for name in imports)
 
 
 def test_ambiguous_structural_profile_fails_closed_without_fields(
