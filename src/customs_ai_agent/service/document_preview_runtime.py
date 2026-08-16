@@ -70,6 +70,9 @@ from customs_ai_agent.service.document_extraction import (
 
 if TYPE_CHECKING:
     from customs_ai_agent.evaluation.native_pdf_vector_grid import NativePdfVectorGridExtraction
+    from customs_ai_agent.evaluation.supervised_template_provenance import (
+        R1SupervisedTemplateProvenanceBinding,
+    )
 
 
 _IDENTIFIER = re.compile(r"^[A-Za-z0-9][A-Za-z0-9._:-]{0,127}$")
@@ -92,6 +95,18 @@ _SOURCE_SEALED_RUN_DIRECTORY = "source-attested-sealed-runs"
 _SOURCE_ATTESTED_CANDIDATE_PARSER_REVISION: Final = (
     "synthetic-pdf-supervised-template-normalizer-v11"
 )
+# The source-attested automatic pointer has exactly one production corpus and
+# two canonical packet receipts.  Keep the profile pin local to this
+# import-cycle-sensitive module: the evaluation package imports this runtime
+# through the candidate runner, so a top-level contract import would cycle.
+_SOURCE_ATTESTED_SUPERVISED_DATASET_ID: Final = "synthetic-customs-pdf-2000"
+_SOURCE_ATTESTED_SUPERVISED_DATASET_REVISION: Final = "20260811-r1"
+_SOURCE_ATTESTED_SUPERVISED_DEVELOPMENT_PACKET_SHA256: Final = (
+    "5b8a804b022e97df0e58a60c4fadfc9d3637c900f368273b8c1b6ff347c3f7e2"
+)
+_SOURCE_ATTESTED_SUPERVISED_SEALED_PACKET_SHA256: Final = (
+    "174d7fad0040e89ee93d367f31694183049ea649a28515cde7a59458261aa271"
+)
 _SEALED_RESERVATION_DIRECTORY = "candidate-run-reservations"
 _SOURCE_LAYOUT_RECORD_COUNTS: Mapping[str, int] = {"development": 60, "sealed": 20}
 _MAX_SOURCE_DATASET_RECEIPT_BYTES = 8 * 1024 * 1024
@@ -109,11 +124,22 @@ _TABLE_CELL_F1_MIN = 0.98
 _PDF_TEXT_LAYER_LEGACY_EXTRACTOR_REVISION: Final = "pypdf-5.3.1-text-layer-v1"
 _PDF_TEXT_LAYER_VISITOR_EXTRACTOR_REVISION: Final = "pypdf-5.3.1-text-layer-visitor-v2"
 _PDF_TEXT_LAYER_NATIVE_VECTOR_GRID_EXTRACTOR_REVISION: Final = "pypdf-5.3.1-native-vector-grid-v1"
+_PDF_TEXT_LAYER_SUPERVISED_TEMPLATE_EXTRACTOR_REVISION: Final = (
+    "pypdf-5.3.1-supervised-template-r1-v1"
+)
+# These literals are repeated at this import-cycle-sensitive service boundary.
+# The provenance loader below imports the public evaluation contract lazily and
+# verifies the model's exact identity before any PDF bytes are supplied.
+SUPERVISED_TEMPLATE_EXTRACTOR_REVISION: Final = (
+    _PDF_TEXT_LAYER_SUPERVISED_TEMPLATE_EXTRACTOR_REVISION
+)
+SUPERVISED_TEMPLATE_MODEL_KIND: Final = "native_pdf_semantic_model"
 _PDF_TEXT_LAYER_EXTRACTOR_REVISIONS: Final[frozenset[str]] = frozenset(
     {
         _PDF_TEXT_LAYER_LEGACY_EXTRACTOR_REVISION,
         _PDF_TEXT_LAYER_VISITOR_EXTRACTOR_REVISION,
         _PDF_TEXT_LAYER_NATIVE_VECTOR_GRID_EXTRACTOR_REVISION,
+        _PDF_TEXT_LAYER_SUPERVISED_TEMPLATE_EXTRACTOR_REVISION,
     }
 )
 _NETWORK_GUARD_LOCK = threading.Lock()
@@ -565,8 +591,10 @@ class ModelArtifactV1:
     relative_path: str
     sha256: str
     byte_size: int
-    license_id: str
-    source_uri: str
+    provenance_kind: Literal["external", "locally_trained_source_attested"]
+    license_id: str | None
+    source_uri: str | None
+    model_training_receipt_sha256: str | None
 
 
 @dataclass(frozen=True, slots=True)
@@ -883,11 +911,45 @@ def _parse_options(
     *,
     kind: ApprovedPdfEngineKind,
     runtime_api: PaddleOcrRuntimeApi | None,
+    extractor_revision: str,
 ) -> Mapping[str, object]:
     if not isinstance(value, dict):
         raise DocumentPreviewRuntimeError("document_preview_configuration_invalid")
     options = cast(dict[str, object], value)
     if kind == "pdf_text_layer":
+        if extractor_revision == _PDF_TEXT_LAYER_SUPERVISED_TEMPLATE_EXTRACTOR_REVISION:
+            required = {
+                "semantic_model_directory",
+                "semantic_model_artifact",
+                "model_training_receipt_sha256",
+            }
+            if set(options) != required:
+                raise DocumentPreviewRuntimeError("document_preview_configuration_invalid")
+            model_directory = _relative_model_path(
+                options["semantic_model_directory"],
+                code="document_preview_configuration_invalid",
+            )
+            model_artifact = _relative_model_path(
+                options["semantic_model_artifact"],
+                code="document_preview_configuration_invalid",
+            )
+            directory_parts = Path(model_directory).parts
+            if (
+                len(directory_parts) != 3
+                or directory_parts[:2] != ("models", "native-pdf-semantic")
+                or _SHA256.fullmatch(directory_parts[2]) is None
+                or model_artifact
+                != f"{model_directory}/{directory_parts[2]}.json"
+            ):
+                raise DocumentPreviewRuntimeError("document_preview_configuration_invalid")
+            return {
+                "semantic_model_directory": model_directory,
+                "semantic_model_artifact": model_artifact,
+                "model_training_receipt_sha256": _sha256(
+                    options["model_training_receipt_sha256"],
+                    code="document_preview_configuration_invalid",
+                ),
+            }
         if options:
             raise DocumentPreviewRuntimeError("document_preview_configuration_invalid")
         return {}
@@ -1090,7 +1152,12 @@ def parse_runtime_configuration(raw: bytes) -> RuntimeConfigurationV1:
         engine_kind=kind,
         extractor_revision=extractor_revision,
         runtime_api=runtime_api,
-        options=_parse_options(value["options"], kind=kind, runtime_api=runtime_api),
+        options=_parse_options(
+            value["options"],
+            kind=kind,
+            runtime_api=runtime_api,
+            extractor_revision=extractor_revision,
+        ),
     )
 
 
@@ -1126,11 +1193,25 @@ def _parse_artifact(value: object) -> ModelArtifactV1:
     if not isinstance(value, dict):
         raise DocumentPreviewRuntimeError("document_preview_inventory_invalid")
     item = cast(dict[str, object], value)
-    _require_exact_keys(
-        item,
-        {"artifact_id", "relative_path", "sha256", "byte_size", "license_id", "source_uri"},
-        code="document_preview_inventory_invalid",
-    )
+    external_keys = {
+        "artifact_id",
+        "relative_path",
+        "sha256",
+        "byte_size",
+        "license_id",
+        "source_uri",
+    }
+    locally_trained_keys = {
+        "artifact_id",
+        "relative_path",
+        "sha256",
+        "byte_size",
+        "provenance_kind",
+        "model_training_receipt_sha256",
+    }
+    keys = frozenset(item)
+    if keys not in {frozenset(external_keys), frozenset(locally_trained_keys)}:
+        raise DocumentPreviewRuntimeError("document_preview_inventory_invalid")
     byte_size = item["byte_size"]
     if (
         isinstance(byte_size, bool)
@@ -1138,16 +1219,37 @@ def _parse_artifact(value: object) -> ModelArtifactV1:
         or not 1 <= byte_size <= 8 * 1024**3
     ):
         raise DocumentPreviewRuntimeError("document_preview_inventory_invalid")
+    artifact_id = _identifier(item["artifact_id"], code="document_preview_inventory_invalid")
+    relative_path = _relative_model_path(
+        item["relative_path"], code="document_preview_inventory_invalid"
+    )
+    sha256 = _sha256(item["sha256"], code="document_preview_inventory_invalid")
+    if keys == external_keys:
+        return ModelArtifactV1(
+            artifact_id=artifact_id,
+            relative_path=relative_path,
+            sha256=sha256,
+            byte_size=byte_size,
+            provenance_kind="external",
+            license_id=_identifier(item["license_id"], code="document_preview_inventory_invalid"),
+            source_uri=_validate_https_source(
+                item["source_uri"], code="document_preview_inventory_invalid"
+            ),
+            model_training_receipt_sha256=None,
+        )
+    if item["provenance_kind"] != "locally_trained_source_attested":
+        raise DocumentPreviewRuntimeError("document_preview_inventory_invalid")
     return ModelArtifactV1(
-        artifact_id=_identifier(item["artifact_id"], code="document_preview_inventory_invalid"),
-        relative_path=_relative_model_path(
-            item["relative_path"], code="document_preview_inventory_invalid"
-        ),
-        sha256=_sha256(item["sha256"], code="document_preview_inventory_invalid"),
+        artifact_id=artifact_id,
+        relative_path=relative_path,
+        sha256=sha256,
         byte_size=byte_size,
-        license_id=_identifier(item["license_id"], code="document_preview_inventory_invalid"),
-        source_uri=_validate_https_source(
-            item["source_uri"], code="document_preview_inventory_invalid"
+        provenance_kind="locally_trained_source_attested",
+        license_id=None,
+        source_uri=None,
+        model_training_receipt_sha256=_sha256(
+            item["model_training_receipt_sha256"],
+            code="document_preview_inventory_invalid",
         ),
     )
 
@@ -1309,14 +1411,27 @@ def parse_source_attested_synthetic_pdf_preview_activation(
         or evaluation["layout_truth_kind"] != "pdf_content_stream_layout_v1"
     ):
         raise DocumentPreviewRuntimeError(code)
+    engine_kind = _engine_kind(engine["kind"], code=code)
+    extractor_revision = _identifier(engine["extractor_revision"], code=code)
+    dataset_id = _identifier(evaluation["dataset_id"], code=code)
+    dataset_revision = _identifier(evaluation["dataset_revision"], code=code)
+    packet_receipt_sha256 = _sha256(evaluation["packet_receipt_sha256"], code=code)
+    _require_canonical_supervised_source_attested_profile(
+        dataset_id=dataset_id,
+        dataset_revision=dataset_revision,
+        packet_receipt_sha256=packet_receipt_sha256,
+        engine_kind=engine_kind,
+        extractor_revision=extractor_revision,
+        code=code,
+    )
     return SourceAttestedSyntheticPdfPreviewActivationV1(
-        engine_kind=_engine_kind(engine["kind"], code=code),
-        extractor_revision=_identifier(engine["extractor_revision"], code=code),
+        engine_kind=engine_kind,
+        extractor_revision=extractor_revision,
         configuration_sha256=_sha256(engine["configuration_sha256"], code=code),
         model_inventory_sha256=_sha256(engine["model_inventory_sha256"], code=code),
-        dataset_id=_identifier(evaluation["dataset_id"], code=code),
-        dataset_revision=_identifier(evaluation["dataset_revision"], code=code),
-        packet_receipt_sha256=_sha256(evaluation["packet_receipt_sha256"], code=code),
+        dataset_id=dataset_id,
+        dataset_revision=dataset_revision,
+        packet_receipt_sha256=packet_receipt_sha256,
         evaluation_scope=cast(
             Literal["synthetic_r1_supervised_native_template_compatibility"],
             evaluation["evaluation_scope"],
@@ -1454,6 +1569,53 @@ def _source_attested_candidate_parser_revision(value: object, *, code: str) -> s
     if revision != _SOURCE_ATTESTED_CANDIDATE_PARSER_REVISION:
         raise DocumentPreviewRuntimeError(code)
     return revision
+
+
+def _is_canonical_supervised_source_attested_packet(
+    *, dataset_id: str, dataset_revision: str, packet_receipt_sha256: str
+) -> bool:
+    """Identify the one production r1 packet without widening test fixtures.
+
+    Hermetic tests use injected fixture receipts and do not reach the
+    production replay boundary.  The actual source-attested loader later
+    independently pins this exact corpus and packets.  This narrow predicate
+    therefore keeps those fixtures useful while requiring the supervised
+    profile everywhere a real r1 receipt can be selected or activated.
+    """
+
+    return (
+        dataset_id == _SOURCE_ATTESTED_SUPERVISED_DATASET_ID
+        and dataset_revision == _SOURCE_ATTESTED_SUPERVISED_DATASET_REVISION
+        and packet_receipt_sha256
+        in {
+            _SOURCE_ATTESTED_SUPERVISED_DEVELOPMENT_PACKET_SHA256,
+            _SOURCE_ATTESTED_SUPERVISED_SEALED_PACKET_SHA256,
+        }
+    )
+
+
+def _require_canonical_supervised_source_attested_profile(
+    *,
+    dataset_id: str,
+    dataset_revision: str,
+    packet_receipt_sha256: str,
+    engine_kind: ApprovedPdfEngineKind,
+    extractor_revision: str,
+    code: str,
+) -> None:
+    """Reject a coherent but non-supervised r1 automatic-chain member."""
+
+    if not _is_canonical_supervised_source_attested_packet(
+        dataset_id=dataset_id,
+        dataset_revision=dataset_revision,
+        packet_receipt_sha256=packet_receipt_sha256,
+    ):
+        return
+    if (
+        engine_kind != "pdf_text_layer"
+        or extractor_revision != _PDF_TEXT_LAYER_SUPERVISED_TEMPLATE_EXTRACTOR_REVISION
+    ):
+        raise DocumentPreviewRuntimeError(code)
 
 
 def _parse_source_attested_metrics(
@@ -1639,10 +1801,23 @@ def parse_source_attested_synthetic_sealed_evaluation_result(
         or table_cell_f1 < _TABLE_CELL_F1_MIN
     ):
         raise DocumentPreviewRuntimeError("document_preview_source_attested_evaluation_gate_failed")
+    dataset_id = _identifier(value["dataset_id"], code=code)
+    dataset_revision = _identifier(value["dataset_revision"], code=code)
+    packet_receipt_sha256 = _sha256(value["packet_receipt_sha256"], code=code)
+    engine_kind = _engine_kind(value["engine_kind"], code=code)
+    extractor_revision = _identifier(value["extractor_revision"], code=code)
+    _require_canonical_supervised_source_attested_profile(
+        dataset_id=dataset_id,
+        dataset_revision=dataset_revision,
+        packet_receipt_sha256=packet_receipt_sha256,
+        engine_kind=engine_kind,
+        extractor_revision=extractor_revision,
+        code=code,
+    )
     return SourceAttestedSyntheticSealedEvaluationResultV1(
-        dataset_id=_identifier(value["dataset_id"], code=code),
-        dataset_revision=_identifier(value["dataset_revision"], code=code),
-        packet_receipt_sha256=_sha256(value["packet_receipt_sha256"], code=code),
+        dataset_id=dataset_id,
+        dataset_revision=dataset_revision,
+        packet_receipt_sha256=packet_receipt_sha256,
         evaluation_scope=cast(
             Literal["synthetic_r1_supervised_native_template_compatibility"],
             value["evaluation_scope"],
@@ -1663,8 +1838,8 @@ def parse_source_attested_synthetic_sealed_evaluation_result(
         candidate_execution_receipt_sha256=_sha256(
             value["candidate_execution_receipt_sha256"], code=code
         ),
-        engine_kind=_engine_kind(value["engine_kind"], code=code),
-        extractor_revision=_identifier(value["extractor_revision"], code=code),
+        engine_kind=engine_kind,
+        extractor_revision=extractor_revision,
         configuration_sha256=_sha256(value["configuration_sha256"], code=code),
         model_inventory_sha256=_sha256(value["model_inventory_sha256"], code=code),
         evaluation_result_sha256=embedded_sha,
@@ -2040,6 +2215,8 @@ def _parse_source_attested_development_selection_receipt(
     # The development packet and its distinct layout receipt are loaded and
     # cross-checked by the caller.  Validate their lexical form here so a
     # selection cannot carry an arbitrary non-receipt value until then.
+    dataset_id = _identifier(value["dataset_id"], code=code)
+    dataset_revision = _identifier(value["dataset_revision"], code=code)
     development_packet_receipt_sha256 = _sha256(
         value["development_packet_receipt_sha256"], code=code
     )
@@ -2050,19 +2227,38 @@ def _parse_source_attested_development_selection_receipt(
     candidate_parser_revision = _source_attested_candidate_parser_revision(
         value["candidate_parser_revision"], code=code
     )
-    if (
-        len(candidates) != len(_ENGINE_KINDS)
-        or {item.engine_kind for item in candidates} != _ENGINE_KINDS
-        or {item.candidate_parser_revision for item in candidates} != {candidate_parser_revision}
-    ):
+    selected_engine_kind = _engine_kind(value["selected_engine_kind"], code=code)
+    selected_extractor_revision = _identifier(value["selected_extractor_revision"], code=code)
+    is_canonical_supervised = _is_canonical_supervised_source_attested_packet(
+        dataset_id=dataset_id,
+        dataset_revision=dataset_revision,
+        packet_receipt_sha256=development_packet_receipt_sha256,
+    )
+    if is_canonical_supervised:
+        candidates_are_valid = (
+            len(candidates) == 1
+            and candidates[0].engine_kind == "pdf_text_layer"
+            and candidates[0].extractor_revision
+            == _PDF_TEXT_LAYER_SUPERVISED_TEMPLATE_EXTRACTOR_REVISION
+            and {item.candidate_parser_revision for item in candidates}
+            == {candidate_parser_revision}
+        )
+    else:
+        candidates_are_valid = (
+            len(candidates) == len(_ENGINE_KINDS)
+            and {item.engine_kind for item in candidates} == _ENGINE_KINDS
+            and {item.candidate_parser_revision for item in candidates}
+            == {candidate_parser_revision}
+        )
+    if not candidates_are_valid:
         raise DocumentPreviewRuntimeError(code)
     selected_matches = [
         candidate
         for candidate in candidates
         if (
-            candidate.engine_kind == _engine_kind(value["selected_engine_kind"], code=code)
+            candidate.engine_kind == selected_engine_kind
             and candidate.extractor_revision
-            == _identifier(value["selected_extractor_revision"], code=code)
+            == selected_extractor_revision
             and candidate.configuration_sha256
             == _sha256(value["selected_configuration_sha256"], code=code)
             and candidate.model_inventory_sha256
@@ -2075,9 +2271,17 @@ def _parse_source_attested_development_selection_receipt(
     if len(selected_matches) != 1 or not selected_matches[0].passed:
         raise DocumentPreviewRuntimeError(code)
     selected = selected_matches[0]
+    _require_canonical_supervised_source_attested_profile(
+        dataset_id=dataset_id,
+        dataset_revision=dataset_revision,
+        packet_receipt_sha256=development_packet_receipt_sha256,
+        engine_kind=selected.engine_kind,
+        extractor_revision=selected.extractor_revision,
+        code=code,
+    )
     return SourceAttestedDevelopmentSelectionReceiptV1(
-        dataset_id=_identifier(value["dataset_id"], code=code),
-        dataset_revision=_identifier(value["dataset_revision"], code=code),
+        dataset_id=dataset_id,
+        dataset_revision=dataset_revision,
         development_packet_receipt_sha256=development_packet_receipt_sha256,
         layout_truth_receipt_sha256=layout_truth_receipt_sha256,
         layout_truth_parser_spec_sha256=_sha256(
@@ -2138,10 +2342,23 @@ def _parse_source_attested_sealed_run_receipt(
         expected_digest=receipt_sha256,
         code=code,
     )
+    dataset_id = _identifier(value["dataset_id"], code=code)
+    dataset_revision = _identifier(value["dataset_revision"], code=code)
+    sealed_packet_receipt_sha256 = _sha256(value["sealed_packet_receipt_sha256"], code=code)
+    engine_kind = _engine_kind(value["selected_engine_kind"], code=code)
+    extractor_revision = _identifier(value["selected_extractor_revision"], code=code)
+    _require_canonical_supervised_source_attested_profile(
+        dataset_id=dataset_id,
+        dataset_revision=dataset_revision,
+        packet_receipt_sha256=sealed_packet_receipt_sha256,
+        engine_kind=engine_kind,
+        extractor_revision=extractor_revision,
+        code=code,
+    )
     return SourceAttestedSealedRunReceiptV1(
-        dataset_id=_identifier(value["dataset_id"], code=code),
-        dataset_revision=_identifier(value["dataset_revision"], code=code),
-        sealed_packet_receipt_sha256=_sha256(value["sealed_packet_receipt_sha256"], code=code),
+        dataset_id=dataset_id,
+        dataset_revision=dataset_revision,
+        sealed_packet_receipt_sha256=sealed_packet_receipt_sha256,
         layout_truth_receipt_sha256=_sha256(value["layout_truth_receipt_sha256"], code=code),
         layout_truth_parser_spec_sha256=_sha256(
             value["layout_truth_parser_spec_sha256"], code=code
@@ -2149,8 +2366,8 @@ def _parse_source_attested_sealed_run_receipt(
         development_selection_receipt_sha256=_sha256(
             value["development_selection_receipt_sha256"], code=code
         ),
-        engine_kind=_engine_kind(value["selected_engine_kind"], code=code),
-        extractor_revision=_identifier(value["selected_extractor_revision"], code=code),
+        engine_kind=engine_kind,
+        extractor_revision=extractor_revision,
         configuration_sha256=_sha256(value["selected_configuration_sha256"], code=code),
         model_inventory_sha256=_sha256(value["selected_model_inventory_sha256"], code=code),
         selected_development_evaluation_result_sha256=_sha256(
@@ -2498,26 +2715,47 @@ def _recompute_source_attested_development_selection(
     results: tuple[SourceAttestedSyntheticDevelopmentEvaluationResultV1, ...],
     selection: SourceAttestedDevelopmentSelectionReceiptV1,
 ) -> SourceAttestedSyntheticDevelopmentEvaluationResultV1:
-    """Apply the fixed metric ordering from verified raw development results."""
+    """Replay a verified source-attested development selection.
+
+    The historic hermetic fixtures retain their three-engine metric ordering.
+    The only production r1/v11 scope is instead a fixed, hash-bound
+    supervised-template profile: it validates one candidate and never
+    silently switches to a different engine because of a metric ranking.
+    """
 
     code = "document_preview_source_attested_development_selection_mismatch"
-    if (
-        len(results) != len(_ENGINE_KINDS)
-        or {result.engine_kind for result in results} != _ENGINE_KINDS
+    if _is_canonical_supervised_source_attested_packet(
+        dataset_id=selection.dataset_id,
+        dataset_revision=selection.dataset_revision,
+        packet_receipt_sha256=selection.development_packet_receipt_sha256,
     ):
-        raise DocumentPreviewRuntimeError(code)
-    passing = [result for result in results if result.passed]
-    if not passing:
-        raise DocumentPreviewRuntimeError(code)
-    expected = sorted(
-        passing,
-        key=lambda result: (
-            -result.field_exact_match,
-            result.ocr_cer,
-            -result.table_cell_f1,
-            result.engine_kind,
-        ),
-    )[0]
+        if (
+            len(results) != 1
+            or not results[0].passed
+            or results[0].engine_kind != "pdf_text_layer"
+            or results[0].extractor_revision
+            != _PDF_TEXT_LAYER_SUPERVISED_TEMPLATE_EXTRACTOR_REVISION
+        ):
+            raise DocumentPreviewRuntimeError(code)
+        expected = results[0]
+    else:
+        if (
+            len(results) != len(_ENGINE_KINDS)
+            or {result.engine_kind for result in results} != _ENGINE_KINDS
+        ):
+            raise DocumentPreviewRuntimeError(code)
+        passing = [result for result in results if result.passed]
+        if not passing:
+            raise DocumentPreviewRuntimeError(code)
+        expected = sorted(
+            passing,
+            key=lambda result: (
+                -result.field_exact_match,
+                result.ocr_cer,
+                -result.table_cell_f1,
+                result.engine_kind,
+            ),
+        )[0]
     if (
         selection.selected.engine_kind != expected.engine_kind
         or selection.selected.extractor_revision != expected.extractor_revision
@@ -3530,6 +3768,107 @@ def _configuration_inventory_profile_matches(
     )
 
 
+def _verify_supervised_template_inventory_binding(
+    configuration: RuntimeConfigurationV1,
+    inventory: ModelInventoryV1,
+) -> None:
+    """Bind the local supervised model to its exact runtime configuration.
+
+    The trained selector is not an externally licensed download, so it must
+    never be represented by a made-up HTTPS source or a copied model-license
+    field.  Its inventory entry instead carries the immutable training receipt
+    digest.  Every other engine/profile remains external-artifact-only.
+    """
+
+    locally_trained = tuple(
+        item
+        for item in inventory.artifacts
+        if item.provenance_kind == "locally_trained_source_attested"
+    )
+    is_supervised_template = (
+        configuration.engine_kind == "pdf_text_layer"
+        and configuration.extractor_revision
+        == _PDF_TEXT_LAYER_SUPERVISED_TEMPLATE_EXTRACTOR_REVISION
+    )
+    if not is_supervised_template:
+        if locally_trained:
+            raise DocumentPreviewRuntimeError("document_preview_model_artifact_invalid")
+        return
+    options = configuration.options
+    model_directory = options.get("semantic_model_directory")
+    model_artifact = options.get("semantic_model_artifact")
+    training_receipt_sha256 = options.get("model_training_receipt_sha256")
+    if not all(
+        isinstance(value, str)
+        for value in (model_directory, model_artifact, training_receipt_sha256)
+    ):
+        raise DocumentPreviewRuntimeError("document_preview_model_artifact_invalid")
+    if len(inventory.artifacts) != 1 or len(locally_trained) != 1:
+        raise DocumentPreviewRuntimeError("document_preview_model_artifact_invalid")
+    artifact = locally_trained[0]
+    model_directory_text = cast(str, model_directory)
+    model_artifact_text = cast(str, model_artifact)
+    training_receipt_sha256_text = cast(str, training_receipt_sha256)
+    model_sha256 = Path(model_directory_text).name
+    if (
+        artifact.relative_path != model_artifact_text
+        or artifact.sha256 != model_sha256
+        or artifact.model_training_receipt_sha256 != training_receipt_sha256_text
+        or artifact.artifact_id != f"{SUPERVISED_TEMPLATE_MODEL_KIND}-{model_sha256}"
+        or artifact.license_id is not None
+        or artifact.source_uri is not None
+    ):
+        raise DocumentPreviewRuntimeError("document_preview_model_artifact_invalid")
+
+
+def _is_supervised_template_configuration(configuration: RuntimeConfigurationV1) -> bool:
+    return (
+        configuration.engine_kind == "pdf_text_layer"
+        and configuration.extractor_revision
+        == _PDF_TEXT_LAYER_SUPERVISED_TEMPLATE_EXTRACTOR_REVISION
+    )
+
+
+def _load_r1_supervised_template_provenance_binding(
+    *,
+    root: Path,
+    configuration: RuntimeConfigurationV1,
+    inventory: ModelInventoryV1,
+) -> "R1SupervisedTemplateProvenanceBinding | None":
+    """Load the model only after its inventory/configuration chain is exact."""
+
+    if not _is_supervised_template_configuration(configuration):
+        return None
+    _verify_supervised_template_inventory_binding(configuration, inventory)
+    model_artifact = configuration.options.get("semantic_model_artifact")
+    training_receipt_sha256 = configuration.options.get("model_training_receipt_sha256")
+    if not isinstance(model_artifact, str) or not isinstance(training_receipt_sha256, str):
+        raise DocumentPreviewRuntimeError("document_preview_supervised_template_provenance_invalid")
+    model_path = _artifact_path(root, model_artifact)
+    expected_model_sha256 = Path(model_artifact).stem
+    try:
+        # Delay the import to preserve the runtime/evaluation module boundary:
+        # the candidate runner imports this service module, while provenance is
+        # intentionally usable by both candidate and serving paths.
+        from customs_ai_agent.evaluation.supervised_template_provenance import (
+            SupervisedTemplateProvenanceError,
+            load_r1_supervised_template_provenance,
+        )
+
+        binding = load_r1_supervised_template_provenance(
+            document_preview_root=root,
+            model_artifact_path=model_path,
+            expected_model_training_receipt_sha256=training_receipt_sha256,
+            expected_model_artifact_sha256=expected_model_sha256,
+        )
+        binding.verified_model()
+    except (SupervisedTemplateProvenanceError, OSError, ValueError) as error:
+        raise DocumentPreviewRuntimeError(
+            "document_preview_supervised_template_provenance_invalid"
+        ) from error
+    return binding
+
+
 def _model_relative_path_key(relative_path: str) -> tuple[str, ...]:
     """Normalize a declared local relative path for the host filesystem."""
 
@@ -3623,6 +3962,7 @@ def verify_configured_model_directory_artifacts(
 
     if not _configuration_inventory_profile_matches(configuration, inventory):
         raise DocumentPreviewRuntimeError("document_preview_provisioning_kind_mismatch")
+    _verify_supervised_template_inventory_binding(configuration, inventory)
     directories = _configuration_directories_exist(root, configuration, inventory)
     fingerprints = _verify_inventory_artifacts(root, inventory)
     _verify_configured_model_directory_inventory(
@@ -3694,6 +4034,7 @@ class ApprovedPdfPreviewBinding:
     inventory: ModelInventoryV1
     evaluation: PdfPreviewEvaluationResultV1
     source_attested_receipt_binding: SourceAttestedSyntheticReceiptBindingV1 | None
+    supervised_template_provenance_binding: "R1SupervisedTemplateProvenanceBinding | None"
     artifact_fingerprints: tuple[_ArtifactFingerprint, ...]
 
     def verify_runtime_state(self) -> None:
@@ -3759,6 +4100,19 @@ class ApprovedPdfPreviewBinding:
             raise DocumentPreviewRuntimeError(
                 "document_preview_source_attested_receipts_runtime_changed"
             )
+        if _is_supervised_template_configuration(self.configuration):
+            if self.supervised_template_provenance_binding is None:
+                raise DocumentPreviewRuntimeError(
+                    "document_preview_supervised_template_runtime_changed"
+                )
+            try:
+                self.supervised_template_provenance_binding.verify_runtime_state()
+            except Exception as error:
+                raise DocumentPreviewRuntimeError(
+                    "document_preview_supervised_template_runtime_changed"
+                ) from error
+        elif self.supervised_template_provenance_binding is not None:
+            raise DocumentPreviewRuntimeError("document_preview_supervised_template_runtime_changed")
         try:
             _verify_configured_model_directory_inventory(
                 self.root, self.configuration, self.inventory
@@ -3835,6 +4189,11 @@ def load_approved_pdf_preview_binding(
     )
     verify_inventory_packages(inventory, package_version_reader=package_version_reader)
     fingerprints = verify_configured_model_directory_artifacts(root, configuration, inventory)
+    supervised_template_provenance_binding = _load_r1_supervised_template_provenance_binding(
+        root=root,
+        configuration=configuration,
+        inventory=inventory,
+    )
     return ApprovedPdfPreviewBinding(
         root=root,
         approval_path=canonical_approval_path,
@@ -3847,6 +4206,7 @@ def load_approved_pdf_preview_binding(
         inventory=inventory,
         evaluation=evaluation,
         source_attested_receipt_binding=source_attested_receipt_binding,
+        supervised_template_provenance_binding=supervised_template_provenance_binding,
         artifact_fingerprints=fingerprints,
     )
 
@@ -5346,6 +5706,15 @@ def build_default_pdf_preview_adapter(
         binding.approval, SourceAttestedSyntheticPdfPreviewActivationV1
     )
     if binding.approval.engine_kind == "pdf_text_layer":
+        if revision == _PDF_TEXT_LAYER_SUPERVISED_TEMPLATE_EXTRACTOR_REVISION:
+            if binding.supervised_template_provenance_binding is None:
+                raise DocumentPreviewRuntimeError(
+                    "document_preview_supervised_template_provenance_invalid"
+                )
+            return _SupervisedNativeTemplatePdfEngine(
+                extractor_revision=revision,
+                provenance_binding=binding.supervised_template_provenance_binding,
+            )
         return _PdfTextLayerEngine(PdfTextLayerPreviewAdapter(extractor_revision=revision))
     if binding.approval.engine_kind == "paddleocr":
         runtime_api = getattr(binding.configuration, "runtime_api", _PADDLEOCR2_RUNTIME_API)
@@ -5393,6 +5762,83 @@ class _PdfTextLayerEngine:
         if candidate is None:
             raise DocumentPreviewUnavailable("PDF text layer is unavailable")
         return candidate
+
+
+@dataclass(frozen=True, slots=True)
+class _SupervisedNativeTemplatePdfEngine:
+    """Serve the exact learned r1 selector rather than a raw-vector fallback."""
+
+    extractor_revision: str
+    provenance_binding: "R1SupervisedTemplateProvenanceBinding"
+
+    def extract(self, preview_input: PreviewInputV1) -> PreviewCandidateV1:
+        try:
+            # Keep this import lazy: the semantic adapter imports the runtime
+            # network guard, while the service imports this class at startup.
+            from customs_ai_agent.evaluation.native_pdf_semantic_adapter import (
+                NativePdfSemanticAdapter,
+            )
+            from customs_ai_agent.evaluation.supervised_template_contract import (
+                R1_SUPERVISED_TEMPLATE_REQUIRED_FIELDS,
+            )
+
+            output = NativePdfSemanticAdapter(
+                model=self.provenance_binding.verified_model()
+            ).extract_pdf_bytes(preview_input.content)
+        except Exception as error:
+            raise DocumentPreviewUnavailable("supervised native template unavailable") from error
+        if output.document_type not in R1_SUPERVISED_TEMPLATE_REQUIRED_FIELDS:
+            raise DocumentPreviewUnavailable("supervised native template unavailable")
+        expected_field_names = {
+            field_name
+            for field_name, _normalizer in R1_SUPERVISED_TEMPLATE_REQUIRED_FIELDS[
+                cast(Literal["bill_of_lading", "invoice", "packing_list"], output.document_type)
+            ]
+        }
+        observed_field_names = [field.field_name for field in output.fields]
+        if (
+            len(observed_field_names) != len(expected_field_names)
+            or set(observed_field_names) != set(expected_field_names)
+            or len(observed_field_names) != len(set(observed_field_names))
+            or output.model_artifact_sha256
+            != self.provenance_binding.expected_model_artifact_sha256
+        ):
+            raise DocumentPreviewUnavailable("supervised native template unavailable")
+        spans_by_page: dict[int, list[DocumentSpanV1]] = {
+            page.page_number: [] for page in output.pages
+        }
+        for span in output.spans:
+            spans = spans_by_page.get(span.page_number)
+            if spans is None:
+                raise DocumentPreviewUnavailable("supervised native template unavailable")
+            ordinal = len(spans) + 1
+            spans.append(
+                DocumentSpanV1(
+                    span_id=f"page-{span.page_number}-span-{ordinal}",
+                    ordinal=ordinal,
+                    reading_order=ordinal,
+                    text=span.text,
+                    bbox=span.bbox,
+                )
+            )
+        pages = [
+            DocumentPreviewPageV1(
+                page_number=page.page_number,
+                width=page.width,
+                height=page.height,
+                coordinate_unit="pdf_points",
+                spans=spans_by_page[page.page_number],
+            )
+            for page in output.pages
+        ]
+        if not pages or not any(page.spans for page in pages):
+            raise DocumentPreviewUnavailable("supervised native template unavailable")
+        return PreviewCandidateV1(
+            status="preview_ready",
+            extractor_revision=self.extractor_revision,
+            pages=pages,
+            warnings=[DocumentExtractionWarningV1(code="supervised_native_template_used")],
+        )
 
 
 @dataclass(frozen=True, slots=True)
@@ -5591,6 +6037,11 @@ def write_runtime_sidecars(
         raise DocumentPreviewRuntimeError("document_preview_provisioning_kind_mismatch")
     verify_inventory_packages(inventory, package_version_reader=package_version_reader)
     verify_configured_model_directory_artifacts(root, configuration, inventory)
+    _load_r1_supervised_template_provenance_binding(
+        root=root,
+        configuration=configuration,
+        inventory=inventory,
+    )
     configuration_sha256 = _sha256_bytes(configuration_raw)
     inventory_sha256 = _sha256_bytes(inventory_raw)
     _write_immutable_json(
@@ -5774,6 +6225,11 @@ def write_source_attested_synthetic_pdf_preview_pointer(
     inventory = parse_model_inventory(inventory_raw)
     verify_inventory_packages(inventory, package_version_reader=package_version_reader)
     verify_configured_model_directory_artifacts(root, configuration, inventory)
+    _load_r1_supervised_template_provenance_binding(
+        root=root,
+        configuration=configuration,
+        inventory=inventory,
+    )
     evaluation = parse_source_attested_synthetic_sealed_evaluation_result(evaluation_raw)
     if (
         configuration.engine_kind != evaluation.engine_kind

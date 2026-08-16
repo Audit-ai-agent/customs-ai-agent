@@ -30,6 +30,7 @@ from customs_ai_agent.evaluation.native_pdf_semantic_model import (
 from customs_ai_agent.evaluation.native_pdf_vector_grid import (
     NativePdfVectorFormRegion,
     NativePdfVectorGridError,
+    NativePdfVectorGridPage,
     extract_native_pdf_vector_grid_from_pdf_bytes,
 )
 from customs_ai_agent.service.document_preview_runtime import local_files_only
@@ -65,6 +66,10 @@ class NativePdfSemanticAdapterOutputV1:
     spans: tuple[CandidateSpanV1, ...]
     table_cells: tuple[CandidateTableCellV1, ...]
     form_regions: tuple[NativePdfVectorFormRegion, ...]
+    # Page geometry is internal preview support only.  Keep a default so the
+    # byte-only candidate adapter's existing output construction contract
+    # remains source-compatible for injected test adapters.
+    pages: tuple[NativePdfVectorGridPage, ...] = ()
 
 
 @dataclass(frozen=True, slots=True)
@@ -271,6 +276,7 @@ class NativePdfSemanticAdapter:
             spans=extraction.spans,
             table_cells=extraction.table_cells,
             form_regions=extraction.form_regions,
+            pages=extraction.pages,
         )
 
 

@@ -49,6 +49,7 @@ from customs_ai_agent.service.settings import ServiceConfigurationError, Service
 _REPARSE_POINT_ATTRIBUTE = getattr(stat, "FILE_ATTRIBUTE_REPARSE_POINT", 0)
 _PDF_TEXT_LAYER_V1 = "pypdf-5.3.1-text-layer-v1"
 _PDF_TEXT_LAYER_V2 = "pypdf-5.3.1-text-layer-visitor-v2"
+_PDF_TEXT_LAYER_SUPERVISED = "pypdf-5.3.1-supervised-template-r1-v1"
 
 
 @pytest.fixture(autouse=True)
@@ -2254,6 +2255,68 @@ def test_source_attested_parser_rejects_missing_scope_and_mixed_human_provenance
         DocumentPreviewRuntimeError, match="document_preview_source_attested_evaluation_invalid"
     ):
         parse_source_attested_synthetic_sealed_evaluation_result(_canonical(mixed, newline=True))
+
+
+@pytest.mark.parametrize(
+    ("engine_kind", "extractor_revision"),
+    [
+        ("pdf_text_layer", _PDF_TEXT_LAYER_V1),
+        ("paddleocr", "paddle-test-v1"),
+        ("docling", "docling-test-v1"),
+    ],
+)
+def test_canonical_r1_source_attested_results_pin_the_supervised_profile(
+    engine_kind: str, extractor_revision: str
+) -> None:
+    """A coherent legacy/raster r1 chain cannot regain v11 eligibility."""
+
+    value = json.loads(_source_attested_evaluation("c" * 64, "d" * 64))
+    value["dataset_id"] = "synthetic-customs-pdf-2000"
+    value["dataset_revision"] = "20260811-r1"
+    value["packet_receipt_sha256"] = (
+        "174d7fad0040e89ee93d367f31694183049ea649a28515cde7a59458261aa271"
+    )
+    value["engine_kind"] = engine_kind
+    value["extractor_revision"] = extractor_revision
+    unsigned = dict(value)
+    unsigned.pop("evaluation_result_sha256")
+    value["evaluation_result_sha256"] = hashlib.sha256(_canonical(unsigned)).hexdigest()
+
+    with pytest.raises(
+        DocumentPreviewRuntimeError, match="document_preview_source_attested_evaluation_invalid"
+    ):
+        parse_source_attested_synthetic_sealed_evaluation_result(_canonical(value, newline=True))
+
+    value["engine_kind"] = "pdf_text_layer"
+    value["extractor_revision"] = _PDF_TEXT_LAYER_SUPERVISED
+    unsigned = dict(value)
+    unsigned.pop("evaluation_result_sha256")
+    value["evaluation_result_sha256"] = hashlib.sha256(_canonical(unsigned)).hexdigest()
+    parsed = parse_source_attested_synthetic_sealed_evaluation_result(
+        _canonical(value, newline=True)
+    )
+    assert parsed.extractor_revision == _PDF_TEXT_LAYER_SUPERVISED
+
+
+def test_canonical_r1_source_attested_pointer_pins_the_supervised_profile() -> None:
+    pointer = json.loads(
+        _source_attested_activation_pointer(extractor_revision=_PDF_TEXT_LAYER_V1)
+    )
+    evaluation = cast(dict[str, object], pointer["evaluation"])
+    evaluation["dataset_id"] = "synthetic-customs-pdf-2000"
+    evaluation["dataset_revision"] = "20260811-r1"
+    evaluation["packet_receipt_sha256"] = (
+        "174d7fad0040e89ee93d367f31694183049ea649a28515cde7a59458261aa271"
+    )
+    with pytest.raises(
+        DocumentPreviewRuntimeError, match="document_preview_source_attested_activation_invalid"
+    ):
+        parse_source_attested_synthetic_pdf_preview_activation(_canonical(pointer, newline=True))
+
+    engine = cast(dict[str, object], pointer["engine"])
+    engine["extractor_revision"] = _PDF_TEXT_LAYER_SUPERVISED
+    parsed = parse_source_attested_synthetic_pdf_preview_activation(_canonical(pointer, newline=True))
+    assert parsed.extractor_revision == _PDF_TEXT_LAYER_SUPERVISED
 
 
 def test_source_attested_pointer_parser_rejects_human_approval_fields(tmp_path: Path) -> None:

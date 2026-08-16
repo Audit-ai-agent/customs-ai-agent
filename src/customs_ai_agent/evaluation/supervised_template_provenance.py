@@ -24,7 +24,7 @@ import re
 import stat
 from dataclasses import dataclass
 from pathlib import Path
-from typing import Final, Literal, Mapping, Sequence
+from typing import Final, Literal, Mapping, Sequence, cast
 
 from pydantic import BaseModel, ConfigDict, Field, ValidationError, model_validator
 
@@ -615,7 +615,7 @@ def _metadata_for_asset(asset: DatasetAssetReceiptV1) -> _ReceiptAssetMetadata:
     return _ReceiptAssetMetadata(
         asset=asset,
         fixture_kind=fixture_kind,
-        document_type=document_type,
+        document_type=cast(SyntheticDocumentType, document_type),
         family_set_number=set_number,
     )
 

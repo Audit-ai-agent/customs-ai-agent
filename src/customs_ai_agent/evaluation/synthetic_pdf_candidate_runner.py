@@ -420,17 +420,33 @@ class _DoclingCandidateAdapter:
 def _load_supervised_template_model(
     profile: EvaluationRuntimeProfileV1,
 ) -> HashBoundNativePdfSemanticModelV1:
-    """Lazy provenance seam for the default supervised candidate factory.
+    """Load the exact r1 model only after runtime profile checks have passed."""
 
-    The dedicated provenance module is intentionally integrated by the
-    runtime/configuration change, not by this candidate-only module.  Until
-    that boundary supplies a verified binding, the default factory refuses to
-    open a selected PDF.  Callers that already hold a verified binding can
-    inject it through ``supervised_template_model_loader`` below.
-    """
+    model_artifact = profile.configuration.options.get("semantic_model_artifact")
+    training_receipt_sha256 = profile.configuration.options.get(
+        "model_training_receipt_sha256"
+    )
+    if not isinstance(model_artifact, str) or not isinstance(training_receipt_sha256, str):
+        raise SyntheticPdfCandidateRunnerError("candidate_supervised_model_binding_unavailable")
+    try:
+        from customs_ai_agent.evaluation.supervised_template_provenance import (
+            SupervisedTemplateProvenanceError,
+            load_r1_supervised_template_provenance,
+        )
 
-    del profile
-    raise SyntheticPdfCandidateRunnerError("candidate_supervised_model_binding_unavailable")
+        binding = load_r1_supervised_template_provenance(
+            document_preview_root=profile.document_preview_root,
+            model_artifact_path=profile.document_preview_root.joinpath(
+                *Path(model_artifact).parts
+            ),
+            expected_model_training_receipt_sha256=training_receipt_sha256,
+            expected_model_artifact_sha256=Path(model_artifact).stem,
+        )
+        return binding.verified_model()
+    except (SupervisedTemplateProvenanceError, OSError, ValueError) as error:
+        raise SyntheticPdfCandidateRunnerError(
+            "candidate_supervised_model_binding_unavailable"
+        ) from error
 
 
 def build_default_synthetic_pdf_candidate_adapter(
