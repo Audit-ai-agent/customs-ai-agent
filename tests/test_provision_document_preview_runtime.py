@@ -53,6 +53,7 @@ def _paddleocr3_configuration() -> dict[str, object]:
             "text_detection_model_directory": "models/paddleocr3/det",
             "text_recognition_model_name": "en_PP-OCRv5_mobile_rec",
             "text_recognition_model_directory": "models/paddleocr3/rec",
+            "raster_scale": 3,
             "device": "cpu",
             "cpu_threads": 1,
             "enable_hpi": False,

@@ -43,6 +43,7 @@ def _p3_options() -> dict[str, object]:
         "text_detection_model_directory": "models/paddleocr3/det",
         "text_recognition_model_name": "en_PP-OCRv5_mobile_rec",
         "text_recognition_model_directory": "models/paddleocr3/rec",
+        "raster_scale": 3,
         "device": "cpu",
         "cpu_threads": 1,
         "enable_hpi": False,
@@ -112,7 +113,10 @@ def _adapter(tmp_path: Path) -> runtime_module.PaddleOcr3PdfPreviewAdapter:
     )
 
 
-def _install_one_page_pdfium(monkeypatch: pytest.MonkeyPatch) -> None:
+def _install_one_page_pdfium(
+    monkeypatch: pytest.MonkeyPatch,
+    captured: dict[str, object] | None = None,
+) -> None:
     class FakeRenderedImage:
         size = (100, 100)
 
@@ -128,9 +132,12 @@ def _install_one_page_pdfium(monkeypatch: pytest.MonkeyPatch) -> None:
             return 1
 
         def __getitem__(self, _index: int) -> SimpleNamespace:
-            return SimpleNamespace(
-                render=lambda *, scale: SimpleNamespace(to_pil=FakeRenderedImage)
-            )
+            def render(*, scale: float) -> SimpleNamespace:
+                if captured is not None:
+                    captured["render_scale"] = scale
+                return SimpleNamespace(to_pil=FakeRenderedImage)
+
+            return SimpleNamespace(render=render)
 
     pdfium = ModuleType("pypdfium2")
     pdfium.PdfDocument = FakePdfDocument  # type: ignore[attr-defined]
@@ -159,6 +166,8 @@ def test_paddleocr3_configuration_requires_its_explicit_api_and_offline_profile(
     missing_api.pop("runtime_api")
     wrong_preprocessing = _p3_options()
     wrong_preprocessing["use_doc_unwarping"] = True
+    wrong_raster_scale = _p3_options()
+    wrong_raster_scale["raster_scale"] = 1
     non_paddle_api = {
         "schema_version": "1.0",
         "engine_kind": "docling",
@@ -169,6 +178,7 @@ def test_paddleocr3_configuration_requires_its_explicit_api_and_offline_profile(
     for value in (
         missing_api,
         _p3_configuration(options=wrong_preprocessing),
+        _p3_configuration(options=wrong_raster_scale),
         non_paddle_api,
     ):
         with pytest.raises(
@@ -367,7 +377,7 @@ def test_paddleocr3_predict_uses_blank_native_preflight_and_normalizes_rec_polys
     monkeypatch.setitem(sys.modules, "paddleocr", module)
 
     _install_fake_numpy(monkeypatch)
-    _install_one_page_pdfium(monkeypatch)
+    _install_one_page_pdfium(monkeypatch, captured)
 
     candidate = _adapter(tmp_path).extract_raster_or_image(_preview_input())
 
@@ -389,6 +399,7 @@ def test_paddleocr3_predict_uses_blank_native_preflight_and_normalizes_rec_polys
     predictions = captured["predictions"]
     assert isinstance(predictions, list)
     assert len(predictions) == 2
+    assert captured["render_scale"] == 3
     assert getattr(predictions[0][0], "shape") == (64, 64, 3)
     assert predictions[0][1] == {
         "use_doc_orientation_classify": False,

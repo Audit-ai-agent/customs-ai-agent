@@ -952,6 +952,7 @@ def _parse_options(
             "text_detection_model_directory",
             "text_recognition_model_name",
             "text_recognition_model_directory",
+            "raster_scale",
             "device",
             "cpu_threads",
             "enable_hpi",
@@ -966,6 +967,10 @@ def _parse_options(
         if (
             options["text_detection_model_name"] != "PP-OCRv5_mobile_det"
             or options["text_recognition_model_name"] != "en_PP-OCRv5_mobile_rec"
+            # The extractor revision names its input resolution.  Keep the
+            # raster scale in the configuration hash rather than relying on
+            # pdfium's default (72 dpi).
+            or options["raster_scale"] != 3
             or options["device"] != "cpu"
             or options["cpu_threads"] != 1
             or options["enable_hpi"] is not False
@@ -987,6 +992,7 @@ def _parse_options(
                 options["text_recognition_model_directory"],
                 code="document_preview_configuration_invalid",
             ),
+            "raster_scale": 3,
             "device": "cpu",
             "cpu_threads": 1,
             "enable_hpi": False,
@@ -4893,7 +4899,10 @@ class PaddleOcr3PdfPreviewAdapter:
             pages: list[DocumentPreviewPageV1] = []
             has_text = False
             for index in range(len(document)):
-                rendered = document[index].render(scale=1).to_pil().convert("RGB")
+                # The P3 profile parser pins raster_scale=3.  Do not fall
+                # back to pdfium's default scale because the extractor
+                # revision explicitly represents 216-dpi input.
+                rendered = document[index].render(scale=3).to_pil().convert("RGB")
                 width, height = rendered.size
                 if width < 1 or height < 1 or width * height > 40_000_000:
                     raise DocumentPreviewInputError("PDF raster dimensions are invalid")
