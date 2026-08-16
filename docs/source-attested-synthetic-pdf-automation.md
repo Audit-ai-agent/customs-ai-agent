@@ -45,12 +45,16 @@ content stream을 독립적인 pinned parser와 template profile로 읽어 만�
 - `clean_manifest.csv`와 `error_labels.csv`는 dataset 결속, strata와 compact
   mismatch receipt용이다. PDF에 실제로 그려진 값을 조용히 고치거나 OCR 후보
   출력으로 정답을 만들지 않는다.
-- PaddleOCR 후보는 `PP-OCRv4`, CPU 1 thread와 detection/recognition/classifier
-  세 local directory를 모두 configuration·inventory에 고정한다. Docling 후보는
-  CPU 1 thread의 local layout/table parser로만 동작하며 EasyOCR downloader를 피하기 위해
-  `ocr_enabled: false`, `table_structure_mode: "fast" | "accurate"`, `pdf_backend: "pypdfium2"`를
-  고정한다. 두 table mode는 서로 다른 configuration·inventory·extractor revision의 별도
-  profile이며 mode 자동 대체는 없다.
+- 기존 PaddleOCR 2.9 후보는 `PP-OCRv4`, CPU 1 thread와
+  detection/recognition/classifier 세 local directory를 모두 configuration·inventory에
+  고정한다. PaddleOCR 3 후보는 `runtime_api: "paddleocr3-paddlex-3.2"`와 CPU 1 thread,
+  `models/paddleocr3/det`·`models/paddleocr3/rec`, `raster_scale: 3`만을 별도
+  configuration·inventory에 고정한다. 두 Paddle profile은 같은 `paddleocr` distribution의 호환되지 않는 API를 쓰므로
+  environment와 fallback을 공유하지 않는다. Docling 후보는 CPU 1 thread의 local
+  layout/table parser로만 동작하며 EasyOCR downloader를 피하기 위해 `ocr_enabled: false`,
+  `table_structure_mode: "fast" | "accurate"`, `pdf_backend: "pypdfium2"`를 고정한다.
+  두 table mode는 서로 다른 configuration·inventory·extractor revision의 별도 profile이며
+  mode 자동 대체는 없다.
   adapter는 `PyPdfiumDocumentBackend`를 직접 선택하므로 기본 `DoclingParseV2`와 다른
   backend는 fallback 후보가 아니다. StandardPdfPipeline native GLM의 Windows 경계는
   별도로 남으므로 ASCII-only environment preflight도 계속 필요하다. 이 둘의 실제 실행

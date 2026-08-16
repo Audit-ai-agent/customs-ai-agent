@@ -368,7 +368,32 @@ uv run --locked --no-sync --group dev customs-ai-agent-dev-serve
 동일 local write 권한을 가진 악성 프로세스까지 구별하는 외부 signer도 아니다. 상세
 제약과 증거 chain은 [`docs/LOCAL_SOURCE_ATTESTED_SYNTHETIC_PDF_ACTIVATION.md`](docs/LOCAL_SOURCE_ATTESTED_SYNTHETIC_PDF_ACTIVATION.md)에 있다.
 
-`configuration`은 `schema_version`, `engine_kind`, `extractor_revision`, `options`만 허용합니다. `pdf_text_layer`의 `options`는 빈 객체이다. PaddleOCR은 `PP-OCRv4`, CPU 1 thread, detection/recognition/classifier의 세 local model directory를 모두 고정해야 하며, classifier를 쓰지 않아도 생략할 수 없다. Docling은 `pdf_backend: "pypdfium2"`, CPU 1 thread·`table_structure_mode: "fast" | "accurate"`의 local layout/table parser만 허용하고 `ocr_enabled: false`를 강제해 EasyOCR downloader와 기본 `DoclingParseV2` PDF backend 선택을 차단한다. 두 mode는 configuration hash·extractor revision·model inventory가 서로 다른 별도 profile이며, `accurate`가 `fast`로 자동 대체되거나 반대로 바뀌지 않는다. 다른 mode·backend·누락 backend는 구성 단계에서 거부한다. Windows의 non-ASCII `site-packages` 경로에서는 pinned Docling native component가 resource를 찾지 못할 수 있으므로, provisioning과 source PDF 이전 runtime은 memory-only blank PDF self-test로 `unavailable` fail-closed 한다. `pypdfium2`를 명시해도 StandardPdfPipeline의 native GLM 실행 경계는 남으므로 이 조건은 완화하지 않는다. 이때는 자동 junction/drive mapping 대신 ASCII-only virtual environment에서 명시적으로 provisioning해야 한다. `inventory`는 pinned package version과 각 model artifact의 relative path·byte size·SHA-256·license ID·공식 HTTPS source URI를 모두 요구하며, Docling은 output에 관여하는 고정 실행 closure 전체도 빠짐없이 적어야 한다. OCR engine의 설정 directory 아래 regular file은 inventory에 모두 한 번씩 선언되어야 하며, extra file·누락 file·link/junction은 허용하지 않는다. 경로 이탈·symlink·누락 artifact·버전 불일치·sealed 평가 Gate 실패·pointer 변조는 모두 preview 비활성으로 끝난다.
+`configuration`은 `schema_version`, `engine_kind`, `extractor_revision`, `options`와
+PaddleOCR profile의 명시적 `runtime_api`만 허용합니다. `pdf_text_layer`의 `options`는 빈
+객체이다. 기존 PaddleOCR 2.9 profile은 `PP-OCRv4`, CPU 1 thread,
+detection/recognition/classifier의 세 local model directory를 모두 고정해야 하며,
+classifier를 쓰지 않아도 생략할 수 없다. 새 PaddleOCR 3 profile은 반드시
+`runtime_api: "paddleocr3-paddlex-3.2"`를 쓰고, 216 dpi에 해당하는
+`raster_scale: 3`, CPU 1 thread의
+`PP-OCRv5_mobile_det`·`en_PP-OCRv5_mobile_rec` 두 directory와 모든 전처리 비활성
+option을 고정한다. 두 Paddle profile은 같은 `paddleocr` distribution의 호환되지 않는
+API를 쓰므로 한 environment를 공유하거나 서로 fallback할 수 없다. Docling은
+`pdf_backend: "pypdfium2"`, CPU 1 thread·`table_structure_mode: "fast" | "accurate"`의
+local layout/table parser만 허용하고 `ocr_enabled: false`를 강제해 EasyOCR downloader와
+기본 `DoclingParseV2` PDF backend 선택을 차단한다. 두 mode는 configuration hash,
+extractor revision, model inventory가 서로 다른 별도 profile이며, `accurate`가 `fast`로
+자동 대체되거나 반대로 바뀌지 않는다. 다른 mode·backend·누락 backend는 구성 단계에서
+거부한다. Windows의 non-ASCII `site-packages` 경로에서는 pinned Docling native component가
+resource를 찾지 못할 수 있으므로, provisioning과 source PDF 이전 runtime은 memory-only
+blank PDF self-test로 `unavailable` fail-closed 한다. `pypdfium2`를 명시해도
+StandardPdfPipeline의 native GLM 실행 경계는 남으므로 이 조건은 완화하지 않는다. 이때는
+자동 junction/drive mapping 대신 ASCII-only virtual environment에서 명시적으로
+provisioning해야 한다. `inventory`는 pinned package version과 각 model artifact의 relative
+path·byte size·SHA-256·license ID·공식 HTTPS source URI를 모두 요구하며, Docling은 output에
+관여하는 고정 실행 closure 전체도 빠짐없이 적어야 한다. OCR engine의 설정 directory 아래
+regular file은 inventory에 모두 한 번씩 선언되어야 하며, extra file·누락 file·link/junction은
+허용하지 않는다. 경로 이탈·symlink·누락 artifact·버전 불일치·sealed 평가 Gate 실패·pointer
+변조는 모두 preview 비활성으로 끝난다.
 
 PaddleOCR/Docling은 대용량 wheel·모델·cache가 필요할 수 있습니다. provisioning 도구의 기본 free-space 기준은 12 GiB이며 `--minimum-free-gib`로 더 높은 운영 기준을 지정할 수 있습니다. 여유 공간이 부족하면 다운로드나 부분 설치 전에 중단해야 하며, 일반 Agent runtime은 언제나 no-download 상태를 유지합니다.
 
@@ -392,6 +417,32 @@ uv run --locked --no-sync --group dev python tools/stage_docling_accurate_tablef
 result, approval pointer를 쓰지 않는다. 성공 후에도 accurate 전용 configuration과
 provenance를 staging하고 기존 inventory builder·local-only provisioner·개발 평가를
 각각 별도로 통과해야 한다. 따라서 이 다운로드만으로 preview가 활성화되지 않는다.
+
+PaddleOCR 3 mobile profile도 별도의 모델 쌍과 별도의 runtime environment가 필요하다.
+아래 도구는 운영자가 `--confirm-download`를 명시했을 때에만
+`PaddlePaddle/PP-OCRv5_mobile_det`의 정확한
+`0d63e78e2b680928f6b1747d76a08db6e645efb7` commit과
+`PaddlePaddle/en_PP-OCRv5_mobile_rec`의 정확한
+`267c36e24c331595590fe7bd72bde2436fd286f2` commit에서 각각
+`config.json`, `inference.json`, `inference.pdiparams`, `inference.yml`만 가져온다.
+각 snapshot의 byte size와 Git blob SHA-1 또는 Xet parameter SHA-256, HTTPS redirect,
+link/junction 부재를 검증하고 12 GiB 여유 공간을 확인한 뒤에만
+`_local/data/document-preview/models/paddleocr3/{det,rec}`를 한 번에 원자적으로
+게시한다. 이미 `models/paddleocr3`가 있으면 정상 파일·drift 모두 덮어쓰지 않고 중단한다.
+
+```powershell
+uv run --locked --no-sync --group dev python tools/stage_paddleocr3_mobile_models.py `
+  --document-preview-root <workspace>/_local/data/document-preview `
+  --confirm-download
+```
+
+이 명령은 PaddleOCR/PaddleX를 설치하지 않으며, sidecar·candidate·evaluation·sealed
+result·approval pointer도 쓰지 않는다. 다음 단계는 **별도 ASCII-only environment**에
+`paddleocr==3.2.0`, `paddlex==3.2.0`, `paddlepaddle==3.1.1`과 P3 execution closure
+(`numpy`, `opencv-contrib-python`, `pillow`, `pypdfium2`, `pyyaml`,
+`typing-extensions`)를 명시적으로 provision한 뒤, P3 전용 configuration/provenance, local inventory builder,
+local-only provisioner, 개발 평가를 순서대로 통과시키는 것이다. 기존 PaddleOCR 2.9
+environment를 재사용하거나 이 다운로드만으로 preview를 활성화하면 안 된다.
 
 ## 확인
 
