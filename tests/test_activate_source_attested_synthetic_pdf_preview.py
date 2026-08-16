@@ -80,7 +80,7 @@ def _result(configuration_sha256: str, inventory_sha256: str) -> bytes:
         "extractor_revision": "pdf-text-test-v1",
         "configuration_sha256": configuration_sha256,
         "model_inventory_sha256": inventory_sha256,
-        "candidate_parser_revision": "synthetic-pdf-visible-layout-normalizer-v7",
+        "candidate_parser_revision": "synthetic-pdf-visible-layout-normalizer-v8",
         "candidate_execution_receipt_sha256": "1" * 64,
         "passed": True,
         "metrics": {

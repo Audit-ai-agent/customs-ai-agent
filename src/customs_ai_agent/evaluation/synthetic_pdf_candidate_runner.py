@@ -80,11 +80,12 @@ _MAX_DATASET_RECEIPT_BYTES = 8 * 1024 * 1024
 _MAX_JSON_BYTES = 1 * 1024 * 1024
 _MAX_SOURCE_BYTES = 32 * 1024 * 1024
 _PROFILE_MODE: Literal["offline_synthetic_pdf_evaluation"] = "offline_synthetic_pdf_evaluation"
-# v7 binds the visible label/value transform, direct structured-table selection,
-# native-PDF visitor anchor projection, and the stricter positioned field
-# projector.  It is deliberately a candidate-only revision: historical bundles
-# cannot be relabelled as outputs from the stricter layout parser.
-SYNTHETIC_PDF_LABEL_NORMALIZER_REVISION = "synthetic-pdf-visible-layout-normalizer-v7"
+# v8 binds the visible label/value transform, direct structured-table selection,
+# native-PDF visitor anchor projection, stricter positioned field projector,
+# and coalesced native visitor table geometry.  It is deliberately a
+# candidate-only revision: historical bundles cannot be relabelled as outputs
+# from the stricter layout parser.
+SYNTHETIC_PDF_LABEL_NORMALIZER_REVISION = "synthetic-pdf-visible-layout-normalizer-v8"
 
 
 class SyntheticPdfCandidateRunnerError(ValueError):
