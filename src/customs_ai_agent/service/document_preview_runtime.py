@@ -107,6 +107,7 @@ _ORIGINAL_SOCKET_CONNECT_EX = socket.socket.connect_ex
 
 _DOCLING_NATIVE_PACKAGE_NAMES: Final = ("docling_parse", "deepsearch_glm")
 _DOCLING_PDF_BACKEND: Final = "pypdfium2"
+_DOCLING_TABLE_STRUCTURE_MODES: Final[frozenset[str]] = frozenset({"fast", "accurate"})
 
 ApprovedPdfEngineKind = Literal["pdf_text_layer", "paddleocr", "docling"]
 
@@ -923,7 +924,8 @@ def _parse_options(value: object, *, kind: ApprovedPdfEngineKind) -> Mapping[str
             or options["device"] != "cpu"
             or options["num_threads"] != 1
             or options["do_table_structure"] is not True
-            or options["table_structure_mode"] != "fast"
+            or not isinstance(options["table_structure_mode"], str)
+            or options["table_structure_mode"] not in _DOCLING_TABLE_STRUCTURE_MODES
         ):
             raise DocumentPreviewRuntimeError("document_preview_configuration_invalid")
         return {
@@ -935,7 +937,7 @@ def _parse_options(value: object, *, kind: ApprovedPdfEngineKind) -> Mapping[str
             "device": "cpu",
             "num_threads": 1,
             "do_table_structure": True,
-            "table_structure_mode": "fast",
+            "table_structure_mode": options["table_structure_mode"],
         }
     raise DocumentPreviewRuntimeError("document_preview_configuration_invalid")
 
@@ -4466,6 +4468,12 @@ class DoclingPdfPreviewAdapter:
         with self._lock:
             if self.options.get("pdf_backend") != _DOCLING_PDF_BACKEND:
                 raise DocumentPreviewUnavailable("Docling PDF backend configuration is invalid")
+            table_structure_mode = self.options.get("table_structure_mode")
+            if (
+                not isinstance(table_structure_mode, str)
+                or table_structure_mode not in _DOCLING_TABLE_STRUCTURE_MODES
+            ):
+                raise DocumentPreviewUnavailable("Docling table structure configuration is invalid")
             if self._converter is not None:
                 return self._converter
             _require_docling_native_ascii_package_paths()
@@ -4495,7 +4503,11 @@ class DoclingPdfPreviewAdapter:
                 # EasyOCR cache or downloader escape the local inventory.
                 pipeline.do_ocr = False
                 pipeline.do_table_structure = True
-                pipeline.table_structure_options.mode = TableFormerMode.FAST
+                pipeline.table_structure_options.mode = (
+                    TableFormerMode.FAST
+                    if table_structure_mode == "fast"
+                    else TableFormerMode.ACCURATE
+                )
                 pipeline.table_structure_options.do_cell_matching = True
                 pipeline.accelerator_options = AcceleratorOptions(
                     device=AcceleratorDevice.CPU, num_threads=1

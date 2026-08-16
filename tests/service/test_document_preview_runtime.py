@@ -1302,7 +1302,11 @@ def test_docling_native_runtime_probe_is_cached_and_discards_its_result(
     adapter = runtime_module.DoclingPdfPreviewAdapter(
         extractor_revision="docling-test-v1",
         model_root=_root(tmp_path),
-        options={"artifacts_directory": "models/docling", "pdf_backend": "pypdfium2"},
+        options={
+            "artifacts_directory": "models/docling",
+            "pdf_backend": "pypdfium2",
+            "table_structure_mode": "fast",
+        },
     )
     adapter._converter = (FakeConverter(), FakeDocumentStream)
     monkeypatch.setattr(runtime_module, "_require_docling_native_ascii_package_paths", lambda: None)
@@ -1332,7 +1336,11 @@ def test_docling_native_runtime_probe_fails_closed(
     adapter = runtime_module.DoclingPdfPreviewAdapter(
         extractor_revision="docling-test-v1",
         model_root=_root(tmp_path),
-        options={"artifacts_directory": "models/docling", "pdf_backend": "pypdfium2"},
+        options={
+            "artifacts_directory": "models/docling",
+            "pdf_backend": "pypdfium2",
+            "table_structure_mode": "fast",
+        },
     )
     adapter._converter = (FailingConverter(), FakeDocumentStream)
     monkeypatch.setattr(runtime_module, "_require_docling_native_ascii_package_paths", lambda: None)
@@ -1415,6 +1423,32 @@ def test_docling_profile_rejects_easyocr_download_mode() -> None:
                 "num_threads": 1,
                 "do_table_structure": True,
                 "table_structure_mode": "fast",
+            },
+        },
+        newline=True,
+    )
+
+    with pytest.raises(DocumentPreviewRuntimeError, match="document_preview_configuration_invalid"):
+        runtime_module.parse_runtime_configuration(raw)
+
+
+@pytest.mark.parametrize("table_structure_mode", ["unsupported", "FAST", "accurate-v2", 1])
+def test_docling_profile_rejects_unpinned_table_structure_mode(
+    table_structure_mode: object,
+) -> None:
+    raw = _canonical(
+        {
+            "schema_version": "1.0",
+            "engine_kind": "docling",
+            "extractor_revision": "docling-test-v1",
+            "options": {
+                "artifacts_directory": "models/docling",
+                "pdf_backend": "pypdfium2",
+                "ocr_enabled": False,
+                "device": "cpu",
+                "num_threads": 1,
+                "do_table_structure": True,
+                "table_structure_mode": table_structure_mode,
             },
         },
         newline=True,
@@ -1713,7 +1747,10 @@ def test_pdf_text_layer_runtime_configuration_rejects_an_unbound_revision(
     assert not (root / "runtime-configurations").exists()
 
 
-def test_runtime_profiles_accept_only_the_explicit_offline_options() -> None:
+@pytest.mark.parametrize("docling_table_structure_mode", ["fast", "accurate"])
+def test_runtime_profiles_accept_only_the_explicit_offline_options(
+    docling_table_structure_mode: str,
+) -> None:
     paddle = runtime_module.parse_runtime_configuration(
         _canonical(
             {
@@ -1745,7 +1782,7 @@ def test_runtime_profiles_accept_only_the_explicit_offline_options() -> None:
                     "device": "cpu",
                     "num_threads": 1,
                     "do_table_structure": True,
-                    "table_structure_mode": "fast",
+                    "table_structure_mode": docling_table_structure_mode,
                 },
             },
             newline=True,
@@ -1769,7 +1806,7 @@ def test_runtime_profiles_accept_only_the_explicit_offline_options() -> None:
         "device": "cpu",
         "num_threads": 1,
         "do_table_structure": True,
-        "table_structure_mode": "fast",
+        "table_structure_mode": docling_table_structure_mode,
     }
 
 
@@ -1788,8 +1825,63 @@ def test_docling_adapter_rejects_an_unpinned_pdf_backend_before_loading_packages
         adapter._docling_converter()
 
 
+@pytest.mark.parametrize("table_structure_mode", [None, "unreviewed"])
+def test_docling_adapter_rejects_an_unpinned_table_mode_before_loading_packages(
+    tmp_path: Path,
+    monkeypatch: pytest.MonkeyPatch,
+    table_structure_mode: object,
+) -> None:
+    adapter = runtime_module.DoclingPdfPreviewAdapter(
+        extractor_revision="docling-test-v1",
+        model_root=_root(tmp_path),
+        options={
+            "artifacts_directory": "models/docling",
+            "pdf_backend": "pypdfium2",
+            "table_structure_mode": table_structure_mode,
+        },
+    )
+    monkeypatch.setattr(
+        runtime_module,
+        "_require_docling_native_ascii_package_paths",
+        lambda: pytest.fail("invalid table mode must not load Docling packages"),
+    )
+
+    with pytest.raises(
+        DocumentPreviewUnavailable, match="Docling table structure configuration is invalid"
+    ):
+        adapter._docling_converter()
+
+
+def test_docling_adapter_requires_an_explicit_table_mode_before_loading_packages(
+    tmp_path: Path,
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    adapter = runtime_module.DoclingPdfPreviewAdapter(
+        extractor_revision="docling-test-v1",
+        model_root=_root(tmp_path),
+        options={"artifacts_directory": "models/docling", "pdf_backend": "pypdfium2"},
+    )
+    monkeypatch.setattr(
+        runtime_module,
+        "_require_docling_native_ascii_package_paths",
+        lambda: pytest.fail("missing table mode must not load Docling packages"),
+    )
+
+    with pytest.raises(
+        DocumentPreviewUnavailable, match="Docling table structure configuration is invalid"
+    ):
+        adapter._docling_converter()
+
+
+@pytest.mark.parametrize(
+    ("table_structure_mode", "expected_table_former_mode"),
+    [("fast", "fast"), ("accurate", "accurate")],
+)
 def test_docling_adapter_builds_the_explicit_pypdfium_converter(
-    monkeypatch: pytest.MonkeyPatch, tmp_path: Path
+    monkeypatch: pytest.MonkeyPatch,
+    tmp_path: Path,
+    table_structure_mode: str,
+    expected_table_former_mode: str,
 ) -> None:
     captured: dict[str, object] = {}
 
@@ -1813,6 +1905,7 @@ def test_docling_adapter_builds_the_explicit_pypdfium_converter(
 
     class FakeTableFormerMode:
         FAST = "fast"
+        ACCURATE = "accurate"
 
     class FakePyPdfiumDocumentBackend:
         pass
@@ -1859,7 +1952,11 @@ def test_docling_adapter_builds_the_explicit_pypdfium_converter(
     adapter = runtime_module.DoclingPdfPreviewAdapter(
         extractor_revision="docling-test-v1",
         model_root=_root(tmp_path),
-        options={"artifacts_directory": "models/docling", "pdf_backend": "pypdfium2"},
+        options={
+            "artifacts_directory": "models/docling",
+            "pdf_backend": "pypdfium2",
+            "table_structure_mode": table_structure_mode,
+        },
     )
 
     adapter._docling_converter()
@@ -1869,7 +1966,7 @@ def test_docling_adapter_builds_the_explicit_pypdfium_converter(
     assert isinstance(pipeline, FakePdfPipelineOptions)
     assert pipeline.do_ocr is False
     assert pipeline.do_table_structure is True
-    assert pipeline.table_structure_options.mode == "fast"
+    assert pipeline.table_structure_options.mode == expected_table_former_mode
     assert pipeline.table_structure_options.do_cell_matching is True
     assert pipeline.artifacts_path == str(_root(tmp_path) / "models" / "docling")
 
@@ -3200,7 +3297,11 @@ def test_docling_runtime_does_not_call_markdown_export(
     adapter = runtime_module.DoclingPdfPreviewAdapter(
         extractor_revision="docling-test-v1",
         model_root=_root(tmp_path),
-        options={"artifacts_directory": "models/docling", "pdf_backend": "pypdfium2"},
+        options={
+            "artifacts_directory": "models/docling",
+            "pdf_backend": "pypdfium2",
+            "table_structure_mode": "fast",
+        },
     )
     monkeypatch.setattr(
         runtime_module.DoclingPdfPreviewAdapter,
@@ -3225,7 +3326,11 @@ def test_docling_preview_and_candidate_consume_the_same_structured_extractor(
     adapter = runtime_module.DoclingPdfPreviewAdapter(
         extractor_revision="docling-test-v1",
         model_root=_root(tmp_path),
-        options={"artifacts_directory": "models/docling", "pdf_backend": "pypdfium2"},
+        options={
+            "artifacts_directory": "models/docling",
+            "pdf_backend": "pypdfium2",
+            "table_structure_mode": "fast",
+        },
     )
     calls = 0
 
