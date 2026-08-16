@@ -40,7 +40,7 @@ def _configuration() -> dict[str, object]:
     return {
         "schema_version": "1.0",
         "engine_kind": "pdf_text_layer",
-        "extractor_revision": "pdf-text-test-v1",
+        "extractor_revision": "pypdf-5.3.1-text-layer-v1",
         "options": {},
     }
 
@@ -77,7 +77,7 @@ def _result(configuration_sha256: str, inventory_sha256: str) -> bytes:
         "sealed_run_receipt_sha256": "e" * 64,
         "candidate_bundle_sha256": "f" * 64,
         "engine_kind": "pdf_text_layer",
-        "extractor_revision": "pdf-text-test-v1",
+        "extractor_revision": "pypdf-5.3.1-text-layer-v1",
         "configuration_sha256": configuration_sha256,
         "model_inventory_sha256": inventory_sha256,
         "candidate_parser_revision": "synthetic-pdf-visible-layout-normalizer-v8",

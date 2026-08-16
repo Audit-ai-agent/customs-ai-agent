@@ -161,10 +161,31 @@ def test_pdf_text_legacy_v1_preserves_the_aggregate_extract_text_path(
         adapter.extract_pdf_text_layer_fragments(_preview_input())
 
 
-def test_pdf_text_rejects_an_unsupported_extractor_revision() -> None:
-    adapter = PdfTextLayerPreviewAdapter(
-        extractor_revision="pypdf-5.3.1-text-layer-unreviewed-v3"
+def test_human_raster_fallback_uses_legacy_parser_and_preserves_profile_revision(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    def callback_plan(_visitor: Callable[..., None]) -> None:
+        raise AssertionError("human raster fallback must not invoke the visitor callback")
+
+    pages = _install_fake_pypdf(
+        monkeypatch,
+        lambda: _FakeVisitorPage(callback_plan, aggregate_text="legacy fallback text"),
     )
+    adapter = runtime_module._LegacyPdfTextLayerFallbackAdapter(
+        extractor_revision="paddleocr-profile-v1"
+    )
+
+    candidate = adapter.extract_pdf_text_layer(_preview_input())
+
+    assert candidate is not None
+    assert candidate.extractor_revision == "paddleocr-profile-v1"
+    assert [span.text for span in candidate.pages[0].spans] == ["legacy fallback text"]
+    assert [page.aggregate_calls for page in pages] == [1]
+    assert [page.visitor_calls for page in pages] == [0]
+
+
+def test_pdf_text_rejects_an_unsupported_extractor_revision() -> None:
+    adapter = PdfTextLayerPreviewAdapter(extractor_revision="pypdf-5.3.1-text-layer-unreviewed-v3")
 
     with pytest.raises(DocumentPreviewUnavailable, match="extractor revision is unavailable"):
         adapter.extract_pdf_text_layer(_preview_input())

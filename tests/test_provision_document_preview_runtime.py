@@ -37,7 +37,7 @@ def _pdf_configuration() -> dict[str, object]:
     return {
         "schema_version": "1.0",
         "engine_kind": "pdf_text_layer",
-        "extractor_revision": "pdf-text-test-v1",
+        "extractor_revision": "pypdf-5.3.1-text-layer-v1",
         "options": {},
     }
 

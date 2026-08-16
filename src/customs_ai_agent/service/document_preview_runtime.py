@@ -33,7 +33,7 @@ import stat
 import sys
 import threading
 from contextlib import contextmanager
-from dataclasses import dataclass, field
+from dataclasses import dataclass, field, replace
 from pathlib import Path, PurePosixPath
 from typing import Any, Callable, Final, Iterator, Literal, Mapping, Protocol, Sequence, cast
 from urllib.parse import urlparse
@@ -4278,6 +4278,26 @@ class PdfTextLayerPreviewAdapter:
         )
 
 
+@dataclass(frozen=True, slots=True)
+class _LegacyPdfTextLayerFallbackAdapter:
+    """Keep human-approved raster profiles on their historic native-text path.
+
+    A human approval for PaddleOCR or Docling historically reported its
+    selected profile revision even when a native PDF text layer satisfied the
+    request before raster OCR.  The parser is nevertheless explicitly fixed
+    to text-layer v1 here; a raster profile revision must never select the
+    visitor parser by accident.
+    """
+
+    extractor_revision: str
+
+    def extract_pdf_text_layer(self, preview_input: PreviewInputV1) -> PreviewCandidateV1 | None:
+        candidate = _extract_pdf_text_layer_legacy(preview_input)
+        if candidate is None:
+            return None
+        return replace(candidate, extractor_revision=self.extractor_revision)
+
+
 def _normalized_bbox(points: object, *, width: int, height: int) -> dict[str, float] | None:
     if not isinstance(points, Sequence) or isinstance(points, (str, bytes)):
         return None
@@ -4649,12 +4669,11 @@ def build_default_pdf_preview_adapter(
     """
 
     revision = binding.approval.extractor_revision
-    text_layer = PdfTextLayerPreviewAdapter(extractor_revision=revision)
     direct_source_attested_profile = isinstance(
         binding.approval, SourceAttestedSyntheticPdfPreviewActivationV1
     )
     if binding.approval.engine_kind == "pdf_text_layer":
-        return _PdfTextLayerEngine(text_layer)
+        return _PdfTextLayerEngine(PdfTextLayerPreviewAdapter(extractor_revision=revision))
     if binding.approval.engine_kind == "paddleocr":
         paddle = PaddleOcrPdfPreviewAdapter(
             extractor_revision=revision,
@@ -4663,7 +4682,9 @@ def build_default_pdf_preview_adapter(
         )
         if direct_source_attested_profile:
             return _DirectRasterOcrEngine(paddle)
-        return LayeredLocalPreviewEngine(text_layer, paddle)
+        return LayeredLocalPreviewEngine(
+            _LegacyPdfTextLayerFallbackAdapter(extractor_revision=revision), paddle
+        )
     if binding.approval.engine_kind == "docling":
         docling = DoclingPdfPreviewAdapter(
             extractor_revision=revision,
@@ -4672,7 +4693,9 @@ def build_default_pdf_preview_adapter(
         )
         if direct_source_attested_profile:
             return _DirectRasterOcrEngine(docling)
-        return LayeredLocalPreviewEngine(text_layer, docling)
+        return LayeredLocalPreviewEngine(
+            _LegacyPdfTextLayerFallbackAdapter(extractor_revision=revision), docling
+        )
     raise DocumentPreviewRuntimeError("document_preview_approval_binding_mismatch")
 
 

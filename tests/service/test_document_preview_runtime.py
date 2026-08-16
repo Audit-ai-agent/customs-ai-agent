@@ -1096,7 +1096,7 @@ def test_source_attested_runtime_uses_the_direct_evaluated_profile(
             calls["raster"] += 1
             return _preview_candidate(revision=self.extractor_revision, text=engine_kind)
 
-    monkeypatch.setattr(runtime_module, "PdfTextLayerPreviewAdapter", FakeTextLayer)
+    monkeypatch.setattr(runtime_module, "_LegacyPdfTextLayerFallbackAdapter", FakeTextLayer)
     monkeypatch.setattr(runtime_module, adapter_name, FakeRaster)
 
     source_approval = parse_source_attested_synthetic_pdf_preview_activation(

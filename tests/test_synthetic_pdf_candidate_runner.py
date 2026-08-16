@@ -149,7 +149,7 @@ def _profile_sidecars(root: Path, engine_kind: str) -> tuple[Path, Path]:
         configuration = {
             "schema_version": "1.0",
             "engine_kind": engine_kind,
-            "extractor_revision": "native-test-v1",
+            "extractor_revision": "pypdf-5.3.1-text-layer-visitor-v2",
             "options": {},
         }
         inventory = {
