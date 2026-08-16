@@ -39,7 +39,13 @@
    OpenCV 배포본이 공존할 수 있으므로 `opencv-contrib-python`·`opencv-python`·
    `opencv-python-headless`를 빠짐없이 선언하고, 실제 `cv2` 파일이 designated
    contrib wheel `RECORD`의 regular file 집합·hash·size와 일치하지 않으면 후보 실행을 거부한다. active pointer는
-   필요하지 않습니다. 평가는 승인보다 먼저 수행되기 때문입니다.
+   필요하지 않습니다. 평가는 승인보다 먼저 수행되기 때문입니다. 반면 PaddleOCR 3은
+   `paddleocr3-paddlex-3.2` 전용 ASCII-only environment를 쓰며, 고정
+   `paddleocr-3.2.0-ppocrv5-mobile-en-raster216-v1` revision의 56개 activated
+   metadata dependency closure를 version까지 정확히 inventory해야 합니다.
+   `paddlex[ocr-core]`의 전이 dependency가 빠지거나, closure 밖 package가 더 들어가도
+   이 P3 profile은 후보 실행 전에 fail-closed 합니다. P2와 P3은 같은 environment나
+   fallback을 공유하지 않습니다.
 
 ### Windows Docling native path 조건
 

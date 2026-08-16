@@ -49,8 +49,12 @@ content stream을 독립적인 pinned parser와 template profile로 읽어 만�
   detection/recognition/classifier 세 local directory를 모두 configuration·inventory에
   고정한다. PaddleOCR 3 후보는 `runtime_api: "paddleocr3-paddlex-3.2"`와 CPU 1 thread,
   `models/paddleocr3/det`·`models/paddleocr3/rec`, `raster_scale: 3`만을 별도
-  configuration·inventory에 고정한다. 두 Paddle profile은 같은 `paddleocr` distribution의 호환되지 않는 API를 쓰므로
-  environment와 fallback을 공유하지 않는다. Docling 후보는 CPU 1 thread의 local
+  configuration·inventory에 고정한다. P3 configuration은
+  `paddleocr-3.2.0-ppocrv5-mobile-en-raster216-v1` revision만 허용하며, inventory는
+  해당 ASCII-only CPython 3.11/Windows AMD64 profile의 56개 metadata dependency
+  closure와 고정 version을 정확히 모두 가져야 한다. 두 Paddle profile은 같은
+  `paddleocr` distribution의 호환되지 않는 API를 쓰므로 environment와 fallback을
+  공유하지 않는다. Docling 후보는 CPU 1 thread의 local
   layout/table parser로만 동작하며 EasyOCR downloader를 피하기 위해 `ocr_enabled: false`,
   `table_structure_mode: "fast" | "accurate"`, `pdf_backend: "pypdfium2"`를 고정한다.
   두 table mode는 서로 다른 configuration·inventory·extractor revision의 별도 profile이며

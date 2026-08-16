@@ -22,6 +22,7 @@ from tools.build_document_preview_runtime_inventory import build_runtime_invento
 
 
 _P3_RUNTIME_API = "paddleocr3-paddlex-3.2"
+_P3_EXTRACTOR_REVISION = "paddleocr-3.2.0-ppocrv5-mobile-en-raster216-v1"
 
 
 def _canonical(value: object) -> bytes:
@@ -60,17 +61,12 @@ def _p3_configuration(*, options: dict[str, object] | None = None) -> dict[str, 
         "schema_version": "1.0",
         "engine_kind": "paddleocr",
         "runtime_api": _P3_RUNTIME_API,
-        "extractor_revision": "paddleocr-3.2.0-ppocrv5-mobile-en-raster216-v1",
+        "extractor_revision": _P3_EXTRACTOR_REVISION,
         "options": _p3_options() if options is None else options,
     }
 
 
 def _p3_inventory(*, omitted: str | None = None) -> dict[str, object]:
-    pinned = {
-        "paddleocr": "3.2.0",
-        "paddlex": "3.2.0",
-        "paddlepaddle": "3.1.1",
-    }
     packages = []
     for name in sorted(runtime_module._required_packages("paddleocr", _P3_RUNTIME_API)):
         if name == omitted:
@@ -78,7 +74,7 @@ def _p3_inventory(*, omitted: str | None = None) -> dict[str, object]:
         packages.append(
             {
                 "name": name,
-                "version": pinned.get(name, "test-v1"),
+                "version": runtime_module._PADDLEOCR3_PINNED_PACKAGE_VERSIONS[name],
                 "license_id": "test-license",
                 "source_uri": "https://example.test/paddleocr3/",
             }
@@ -112,7 +108,7 @@ def _adapter(tmp_path: Path) -> runtime_module.PaddleOcr3PdfPreviewAdapter:
     ):
         (tmp_path / relative_directory).mkdir(parents=True, exist_ok=True)
     return runtime_module.PaddleOcr3PdfPreviewAdapter(
-        extractor_revision="paddleocr-3.2.0-ppocrv5-mobile-en-raster216-v1",
+        extractor_revision=_P3_EXTRACTOR_REVISION,
         model_root=tmp_path,
         options=_p3_options(),
     )
@@ -161,6 +157,7 @@ def test_paddleocr3_configuration_requires_its_explicit_api_and_offline_profile(
     parsed = runtime_module.parse_runtime_configuration(_canonical(_p3_configuration()))
 
     assert parsed.runtime_api == _P3_RUNTIME_API
+    assert parsed.extractor_revision == _P3_EXTRACTOR_REVISION
     assert parsed.options["device"] == "cpu"
     assert parsed.options["cpu_threads"] == 1
     assert parsed.options["use_doc_orientation_classify"] is False
@@ -173,6 +170,8 @@ def test_paddleocr3_configuration_requires_its_explicit_api_and_offline_profile(
     wrong_preprocessing["use_doc_unwarping"] = True
     wrong_raster_scale = _p3_options()
     wrong_raster_scale["raster_scale"] = 1
+    wrong_revision = _p3_configuration()
+    wrong_revision["extractor_revision"] = "paddleocr-3.2.0-unreviewed-raster216-v1"
     non_paddle_api = {
         "schema_version": "1.0",
         "engine_kind": "docling",
@@ -184,6 +183,7 @@ def test_paddleocr3_configuration_requires_its_explicit_api_and_offline_profile(
         missing_api,
         _p3_configuration(options=wrong_preprocessing),
         _p3_configuration(options=wrong_raster_scale),
+        wrong_revision,
         non_paddle_api,
     ):
         with pytest.raises(
@@ -193,10 +193,35 @@ def test_paddleocr3_configuration_requires_its_explicit_api_and_offline_profile(
             runtime_module.parse_runtime_configuration(_canonical(value))
 
 
+def test_paddleocr3_revision_whitelist_does_not_rewrite_legacy_paddleocr2() -> None:
+    legacy = runtime_module.parse_runtime_configuration(
+        _canonical(
+            {
+                "schema_version": "1.0",
+                "engine_kind": "paddleocr",
+                "extractor_revision": "paddleocr2-existing-profile-v1",
+                "options": {
+                    "det_model_directory": "models/paddle/det",
+                    "rec_model_directory": "models/paddle/rec",
+                    "cls_model_directory": "models/paddle/cls",
+                    "ocr_version": "PP-OCRv4",
+                    "use_gpu": False,
+                    "cpu_threads": 1,
+                },
+            }
+        )
+    )
+
+    assert legacy.runtime_api == "paddleocr2-2.9"
+    assert legacy.extractor_revision == "paddleocr2-existing-profile-v1"
+
+
 def test_paddleocr3_inventory_requires_its_own_paddlex_profile(
     monkeypatch: pytest.MonkeyPatch,
 ) -> None:
-    monkeypatch.setattr(runtime_module, "_recorded_cv2_tree_matches_designated_provider", lambda: None)
+    monkeypatch.setattr(
+        runtime_module, "_recorded_cv2_tree_matches_designated_provider", lambda: None
+    )
     inventory = runtime_module.parse_model_inventory(_canonical(_p3_inventory()))
     versions = {item.name: item.version for item in inventory.packages}
 
@@ -204,19 +229,70 @@ def test_paddleocr3_inventory_requires_its_own_paddlex_profile(
         inventory,
         package_version_reader=lambda name: versions[name],
     )
+    assert set(versions) == set(runtime_module._PADDLEOCR3_PINNED_PACKAGE_VERSIONS)
+    assert len(versions) == 56
+    assert {
+        "aistudio-sdk",
+        "bce-python-sdk",
+        "httpcore",
+        "modelscope-hub",
+        "pydantic-core",
+        "pypdfium2",
+    }.issubset(versions)
     assert runtime_module._required_packages("paddleocr", _P3_RUNTIME_API) != (
         runtime_module._required_packages("paddleocr")
     )
 
-    missing_paddlex = runtime_module.parse_model_inventory(
-        _canonical(_p3_inventory(omitted="paddlex"))
+    missing_transitive = runtime_module.parse_model_inventory(
+        _canonical(_p3_inventory(omitted="modelscope-hub"))
     )
     with pytest.raises(
         runtime_module.DocumentPreviewRuntimeError,
         match="document_preview_inventory_packages_invalid",
     ):
         runtime_module.verify_inventory_packages(
-            missing_paddlex,
+            missing_transitive,
+            package_version_reader=lambda _name: "test-v1",
+        )
+
+    version_drift = _p3_inventory()
+    drift_packages = version_drift["packages"]
+    assert isinstance(drift_packages, list)
+    for item in drift_packages:
+        assert isinstance(item, dict)
+        if item["name"] == "httpx":
+            item["version"] = "0.0.0"
+            break
+    else:
+        pytest.fail("P3 closure must retain the httpx transitive dependency")
+    with pytest.raises(
+        runtime_module.DocumentPreviewRuntimeError,
+        match="document_preview_inventory_packages_invalid",
+    ):
+        runtime_module.verify_inventory_packages(
+            runtime_module.parse_model_inventory(_canonical(version_drift)),
+            package_version_reader=lambda name: runtime_module._PADDLEOCR3_PINNED_PACKAGE_VERSIONS[
+                name
+            ],
+        )
+
+    extra_package = _p3_inventory()
+    packages = extra_package["packages"]
+    assert isinstance(packages, list)
+    packages.append(
+        {
+            "name": "unreviewed-p3-package",
+            "version": "1.0.0",
+            "license_id": "test-license",
+            "source_uri": "https://example.test/paddleocr3/",
+        }
+    )
+    with pytest.raises(
+        runtime_module.DocumentPreviewRuntimeError,
+        match="document_preview_inventory_packages_invalid",
+    ):
+        runtime_module.verify_inventory_packages(
+            runtime_module.parse_model_inventory(_canonical(extra_package)),
             package_version_reader=lambda _name: "test-v1",
         )
 
@@ -295,23 +371,22 @@ def test_paddleocr3_inventory_builder_binds_the_paddlex_profile_locally(
             }
         )
     )
-    pinned = {
-        "paddleocr": "3.2.0",
-        "paddlex": "3.2.0",
-        "paddlepaddle": "3.1.1",
-    }
-    monkeypatch.setattr(runtime_module, "_recorded_cv2_tree_matches_designated_provider", lambda: None)
+    monkeypatch.setattr(
+        runtime_module, "_recorded_cv2_tree_matches_designated_provider", lambda: None
+    )
 
     inventory, _configuration_sha256 = build_runtime_inventory(
         document_preview_root=root,
         configuration_path=configuration_path,
         provenance_path=provenance_path,
-        package_version_reader=lambda name: pinned.get(name, "test-v1"),
+        package_version_reader=lambda name: runtime_module._PADDLEOCR3_PINNED_PACKAGE_VERSIONS[
+            name
+        ],
     )
 
     assert inventory["runtime_api"] == _P3_RUNTIME_API
     packages = {item["name"] for item in inventory["packages"]}
-    assert "paddlex" in packages
+    assert packages == set(runtime_module._PADDLEOCR3_PINNED_PACKAGE_VERSIONS)
 
 
 def test_paddleocr3_windows_uses_only_ascii_short_model_paths(

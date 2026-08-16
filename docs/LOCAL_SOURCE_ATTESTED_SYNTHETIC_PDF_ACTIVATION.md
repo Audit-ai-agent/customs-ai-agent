@@ -93,6 +93,33 @@ backend fallback을 허용하지 않는다. 이 후보는 inventory된 Docling l
 native GLM 경계 때문에 기존 ASCII-only `site-packages` preflight는 유지한다. 따라서 자동
 certificate에서 Docling을 일반 optical OCR로 표현하지 않는다.
 
+PaddleOCR 3 profile은 위 2.9 profile과 독립된
+`runtime_api: "paddleocr3-paddlex-3.2"`다. configuration은
+`paddleocr-3.2.0-ppocrv5-mobile-en-raster216-v1` revision, PP-OCRv5 mobile det/rec
+두 모델 directory, CPU 1 thread 및 `raster_scale: 3`만 허용한다. 이 revision은
+PDFium 3배 raster(216 dpi)와 PaddleOCR 3.2.0/PaddleX 3.2.0/PaddlePaddle 3.1.1 API
+family를 함께 뜻하므로 다른 revision이나 2.9 fallback으로 바꿀 수 없다.
+
+P3 inventory의 `packages`는 현재 ASCII-only CPython 3.11/Windows AMD64 environment에서
+installed metadata를 재귀적으로 해석한 **정확히 56개** activated dependency closure와
+각 고정 version으로 구성해야 한다. 시작점은 `paddleocr`(여기서
+`paddlex[ocr-core]`를 활성화), `paddlepaddle`, adapter의 `pypdfium2`이고, Windows와
+AMD64 marker도 적용한다. 활성화하지 않은 PaddleX extras와 서비스·테스트 패키지는
+포함하지 않는다. 누락, 추가 package, 또는 version drift는 모두 provisioning과 runtime
+binding에서 fail-closed 한다.
+
+```text
+aistudio-sdk, annotated-types, anyio, bce-python-sdk, certifi, chardet,
+charset-normalizer, click, colorama, colorlog, crc32c, filelock, fsspec,
+future, h11, hf-xet, httpcore, httpx, huggingface-hub, idna, imagesize,
+modelscope, modelscope-hub, networkx, numpy, opencv-contrib-python,
+opt-einsum, packaging, paddleocr, paddlepaddle, paddlex, pandas, pillow,
+prettytable, protobuf, psutil, py-cpuinfo, pyclipper, pycryptodome, pydantic,
+pydantic-core, pypdfium2, python-dateutil, pyyaml, requests, ruamel-yaml,
+setuptools, shapely, six, tqdm, typing-extensions, typing-inspection, tzdata,
+ujson, urllib3, wcwidth
+```
+
 ## 활성화
 
 source-attested evaluator가 `source-attested-evaluation-results/` 아래에 passing sealed result를

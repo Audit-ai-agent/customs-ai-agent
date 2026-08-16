@@ -126,6 +126,11 @@ _DOCLING_PDF_BACKEND: Final = "pypdfium2"
 _DOCLING_TABLE_STRUCTURE_MODES: Final[frozenset[str]] = frozenset({"fast", "accurate"})
 _PADDLEOCR2_RUNTIME_API: Final = "paddleocr2-2.9"
 _PADDLEOCR3_RUNTIME_API: Final = "paddleocr3-paddlex-3.2"
+# This revision names the complete, fixed P3 extraction contract: the
+# PaddleOCR/PaddleX API family, the two PP-OCRv5 mobile models, and PDFium's
+# 3x (216 dpi) raster input.  It is intentionally not interchangeable with
+# the legacy PaddleOCR 2 sidecars, which retain their existing revisions.
+_PADDLEOCR3_EXTRACTOR_REVISION: Final = "paddleocr-3.2.0-ppocrv5-mobile-en-raster216-v1"
 
 ApprovedPdfEngineKind = Literal["pdf_text_layer", "paddleocr", "docling"]
 PaddleOcrRuntimeApi = Literal["paddleocr2-2.9", "paddleocr3-paddlex-3.2"]
@@ -1072,6 +1077,12 @@ def parse_runtime_configuration(raw: bytes) -> RuntimeConfigurationV1:
         value["extractor_revision"], code="document_preview_configuration_invalid"
     )
     if kind == "pdf_text_layer" and extractor_revision not in _PDF_TEXT_LAYER_EXTRACTOR_REVISIONS:
+        raise DocumentPreviewRuntimeError("document_preview_configuration_invalid")
+    if (
+        kind == "paddleocr"
+        and runtime_api == _PADDLEOCR3_RUNTIME_API
+        and extractor_revision != _PADDLEOCR3_EXTRACTOR_REVISION
+    ):
         raise DocumentPreviewRuntimeError("document_preview_configuration_invalid")
     return RuntimeConfigurationV1(
         engine_kind=kind,
@@ -3206,29 +3217,86 @@ _PADDLE_EXECUTION_PACKAGES = frozenset(
 )
 _PADDLE_CV2_PROVIDER = "opencv-contrib-python"
 
-# PaddleOCR 3.2 runs its OCR pipeline through PaddleX.  This is deliberately
-# not a softened version of the legacy 2.9 closure: the two lines install the
-# same ``paddleocr`` distribution name with incompatible APIs and cannot be
-# mixed in one profile.  Keep the execution inventory small but complete for
-# the modules constructed directly by this adapter and its P3 pipeline.
-_PADDLEOCR3_EXECUTION_PACKAGES = frozenset(
-    {
-        "numpy",
-        "opencv-contrib-python",
-        "paddleocr",
-        "paddlepaddle",
-        "paddlex",
-        "pillow",
-        "pypdfium2",
-        "pyyaml",
-        "typing-extensions",
-    }
-)
+# PaddleOCR 3.2 runs the configured OCR path through
+# ``paddlex[ocr-core]``.  This is deliberately not a softened version of the
+# legacy 2.9 closure: the two lines install the same ``paddleocr``
+# distribution name with incompatible APIs and cannot be mixed in one
+# profile.
+#
+# The map is the complete, normalized, *activated* requirement closure of
+# PaddleOCR 3.2.0, PaddleX 3.2.0 with ``ocr-core``, PaddlePaddle 3.1.1, and
+# the adapter's PDFium rasterizer in the designated ASCII-only CPython 3.11 /
+# Windows AMD64 environment.  It was derived from installed distribution
+# metadata with current platform markers applied.  Unselected PaddleX extras
+# and unrelated service/test packages are intentionally absent; accepting
+# either would make this narrow profile depend on host installation choices.
+#
+# Pin every member, rather than only the three top-level packages.  A library
+# such as ``huggingface-hub`` or ``pydantic-core`` can affect construction,
+# parsing, or model resolution before inference, so recording just the nine
+# directly imported modules would leave a mutable execution path outside the
+# inventory hash.
 _PADDLEOCR3_PINNED_PACKAGE_VERSIONS: Mapping[str, str] = {
+    "aistudio-sdk": "0.3.9",
+    "annotated-types": "0.8.0",
+    "anyio": "4.14.2",
+    "bce-python-sdk": "0.9.76",
+    "certifi": "2026.7.22",
+    "chardet": "7.6.0",
+    "charset-normalizer": "3.5.1",
+    "click": "8.4.2",
+    "colorama": "0.4.6",
+    "colorlog": "6.12.0",
+    "crc32c": "2.8",
+    "filelock": "3.32.3",
+    "fsspec": "2026.7.0",
+    "future": "1.0.0",
+    "h11": "0.16.0",
+    "hf-xet": "1.6.0",
+    "httpcore": "1.0.9",
+    "httpx": "0.28.1",
+    "huggingface-hub": "1.27.0",
+    "idna": "3.18",
+    "imagesize": "2.0.0",
+    "modelscope": "1.39.1",
+    "modelscope-hub": "0.2.0",
+    "networkx": "3.6.1",
+    "numpy": "2.4.6",
+    "opencv-contrib-python": "4.10.0.84",
+    "opt-einsum": "3.3.0",
+    "packaging": "26.3",
     "paddleocr": "3.2.0",
     "paddlepaddle": "3.1.1",
     "paddlex": "3.2.0",
+    "pandas": "3.0.5",
+    "pillow": "12.3.0",
+    "prettytable": "3.18.0",
+    "protobuf": "7.35.1",
+    "psutil": "7.2.2",
+    "py-cpuinfo": "9.0.0",
+    "pyclipper": "1.4.0",
+    "pycryptodome": "3.23.0",
+    "pydantic": "2.13.4",
+    "pydantic-core": "2.46.4",
+    "pypdfium2": "4.30.0",
+    "python-dateutil": "2.9.0.post0",
+    "pyyaml": "6.0.2",
+    "requests": "2.34.2",
+    "ruamel-yaml": "0.19.1",
+    "setuptools": "84.0.0",
+    "shapely": "2.1.2",
+    "six": "1.17.0",
+    "tqdm": "4.70.0",
+    "typing-extensions": "4.16.0",
+    "typing-inspection": "0.4.4",
+    "tzdata": "2026.3",
+    "ujson": "5.13.0",
+    "urllib3": "2.7.0",
+    "wcwidth": "0.8.2",
 }
+_PADDLEOCR3_EXECUTION_PACKAGES: Final[frozenset[str]] = frozenset(
+    _PADDLEOCR3_PINNED_PACKAGE_VERSIONS
+)
 
 
 def _required_packages(
@@ -3392,6 +3460,8 @@ def verify_inventory_packages(
     if not _required_packages(inventory.engine_kind, inventory.runtime_api).issubset(packages):
         raise DocumentPreviewRuntimeError("document_preview_inventory_packages_invalid")
     if inventory.runtime_api == _PADDLEOCR3_RUNTIME_API:
+        if set(packages) != _PADDLEOCR3_EXECUTION_PACKAGES:
+            raise DocumentPreviewRuntimeError("document_preview_inventory_packages_invalid")
         for name, expected_version in _PADDLEOCR3_PINNED_PACKAGE_VERSIONS.items():
             if packages[name].version != expected_version:
                 raise DocumentPreviewRuntimeError("document_preview_inventory_packages_invalid")
