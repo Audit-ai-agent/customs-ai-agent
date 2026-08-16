@@ -2,3 +2,11 @@ title = "customs-ai-agent secret scanning"
 
 [extend]
 useDefault = true
+
+[[allowlists]]
+description = "공개 PaddleOCR 런타임 식별자에 대한 generic-api-key 오탐만 제외한다"
+regexTarget = "match"
+regexes = [
+  '''(?i)\bpaddleocr2-2\.9\b''',
+  '''(?i)\bpaddleocr3-paddlex-3\.2\b''',
+]
