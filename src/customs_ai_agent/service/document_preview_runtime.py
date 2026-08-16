@@ -124,8 +124,11 @@ _ORIGINAL_SOCKET_CONNECT_EX = socket.socket.connect_ex
 _DOCLING_NATIVE_PACKAGE_NAMES: Final = ("docling_parse", "deepsearch_glm")
 _DOCLING_PDF_BACKEND: Final = "pypdfium2"
 _DOCLING_TABLE_STRUCTURE_MODES: Final[frozenset[str]] = frozenset({"fast", "accurate"})
+_PADDLEOCR2_RUNTIME_API: Final = "paddleocr2-2.9"
+_PADDLEOCR3_RUNTIME_API: Final = "paddleocr3-paddlex-3.2"
 
 ApprovedPdfEngineKind = Literal["pdf_text_layer", "paddleocr", "docling"]
+PaddleOcrRuntimeApi = Literal["paddleocr2-2.9", "paddleocr3-paddlex-3.2"]
 
 
 class DocumentPreviewRuntimeError(RuntimeError):
@@ -537,6 +540,7 @@ def _write_exact_immutable_bytes(path: Path, payload: bytes, *, limit: int, code
 class RuntimeConfigurationV1:
     engine_kind: ApprovedPdfEngineKind
     extractor_revision: str
+    runtime_api: PaddleOcrRuntimeApi | None
     options: Mapping[str, object]
 
 
@@ -561,6 +565,7 @@ class ModelArtifactV1:
 @dataclass(frozen=True, slots=True)
 class ModelInventoryV1:
     engine_kind: ApprovedPdfEngineKind
+    runtime_api: PaddleOcrRuntimeApi | None
     packages: tuple[ModelPackageV1, ...]
     artifacts: tuple[ModelArtifactV1, ...]
 
@@ -841,7 +846,37 @@ PdfPreviewEvaluationResultV1 = (
 )
 
 
-def _parse_options(value: object, *, kind: ApprovedPdfEngineKind) -> Mapping[str, object]:
+def _parse_paddleocr_runtime_api(
+    value: object,
+    *,
+    kind: ApprovedPdfEngineKind,
+    present: bool,
+    code: str,
+) -> PaddleOcrRuntimeApi | None:
+    """Return one explicit Paddle family without rewriting legacy sidecars.
+
+    Existing PaddleOCR 2.9 sidecars predate ``runtime_api`` and remain valid
+    as the legacy family.  The newer PaddleOCR 3/PaddleX profile must name
+    itself explicitly, so a P3 option set can never select the 2.9 adapter.
+    """
+
+    if kind != "paddleocr":
+        if present:
+            raise DocumentPreviewRuntimeError(code)
+        return None
+    if not present:
+        return _PADDLEOCR2_RUNTIME_API
+    if value != _PADDLEOCR3_RUNTIME_API:
+        raise DocumentPreviewRuntimeError(code)
+    return _PADDLEOCR3_RUNTIME_API
+
+
+def _parse_options(
+    value: object,
+    *,
+    kind: ApprovedPdfEngineKind,
+    runtime_api: PaddleOcrRuntimeApi | None,
+) -> Mapping[str, object]:
     if not isinstance(value, dict):
         raise DocumentPreviewRuntimeError("document_preview_configuration_invalid")
     options = cast(dict[str, object], value)
@@ -849,7 +884,7 @@ def _parse_options(value: object, *, kind: ApprovedPdfEngineKind) -> Mapping[str
         if options:
             raise DocumentPreviewRuntimeError("document_preview_configuration_invalid")
         return {}
-    if kind == "paddleocr":
+    if kind == "paddleocr" and runtime_api == _PADDLEOCR2_RUNTIME_API:
         allowed = {
             "det_model_directory",
             "rec_model_directory",
@@ -907,6 +942,60 @@ def _parse_options(value: object, *, kind: ApprovedPdfEngineKind) -> Mapping[str
                 raise DocumentPreviewRuntimeError("document_preview_configuration_invalid")
             normalized["use_angle_cls"] = options["use_angle_cls"]
         return normalized
+    if kind == "paddleocr" and runtime_api == _PADDLEOCR3_RUNTIME_API:
+        # PaddleOCR 3 delegates this pipeline to PaddleX.  Keep every model
+        # directory and every optional preprocessor explicit: leaving one at
+        # its upstream default can select a non-inventoried model and download
+        # it during constructor or first inference.
+        required = {
+            "text_detection_model_name",
+            "text_detection_model_directory",
+            "text_recognition_model_name",
+            "text_recognition_model_directory",
+            "device",
+            "cpu_threads",
+            "enable_hpi",
+            "enable_mkldnn",
+            "use_tensorrt",
+            "use_doc_orientation_classify",
+            "use_doc_unwarping",
+            "use_textline_orientation",
+        }
+        if set(options) != required:
+            raise DocumentPreviewRuntimeError("document_preview_configuration_invalid")
+        if (
+            options["text_detection_model_name"] != "PP-OCRv5_mobile_det"
+            or options["text_recognition_model_name"] != "en_PP-OCRv5_mobile_rec"
+            or options["device"] != "cpu"
+            or options["cpu_threads"] != 1
+            or options["enable_hpi"] is not False
+            or options["enable_mkldnn"] is not False
+            or options["use_tensorrt"] is not False
+            or options["use_doc_orientation_classify"] is not False
+            or options["use_doc_unwarping"] is not False
+            or options["use_textline_orientation"] is not False
+        ):
+            raise DocumentPreviewRuntimeError("document_preview_configuration_invalid")
+        return {
+            "text_detection_model_name": "PP-OCRv5_mobile_det",
+            "text_detection_model_directory": _relative_model_path(
+                options["text_detection_model_directory"],
+                code="document_preview_configuration_invalid",
+            ),
+            "text_recognition_model_name": "en_PP-OCRv5_mobile_rec",
+            "text_recognition_model_directory": _relative_model_path(
+                options["text_recognition_model_directory"],
+                code="document_preview_configuration_invalid",
+            ),
+            "device": "cpu",
+            "cpu_threads": 1,
+            "enable_hpi": False,
+            "enable_mkldnn": False,
+            "use_tensorrt": False,
+            "use_doc_orientation_classify": False,
+            "use_doc_unwarping": False,
+            "use_textline_orientation": False,
+        }
     if kind == "docling":
         allowed = {
             "artifacts_directory",
@@ -960,14 +1049,19 @@ def _parse_options(value: object, *, kind: ApprovedPdfEngineKind) -> Mapping[str
 
 def parse_runtime_configuration(raw: bytes) -> RuntimeConfigurationV1:
     value = _strict_json_object(raw, code="document_preview_configuration_invalid")
-    _require_exact_keys(
-        value,
-        {"schema_version", "engine_kind", "extractor_revision", "options"},
-        code="document_preview_configuration_invalid",
-    )
+    base_keys = {"schema_version", "engine_kind", "extractor_revision", "options"}
+    runtime_api_present = "runtime_api" in value
+    if set(value) != base_keys | ({"runtime_api"} if runtime_api_present else set()):
+        raise DocumentPreviewRuntimeError("document_preview_configuration_invalid")
     if value["schema_version"] != "1.0":
         raise DocumentPreviewRuntimeError("document_preview_configuration_invalid")
     kind = _engine_kind(value["engine_kind"], code="document_preview_configuration_invalid")
+    runtime_api = _parse_paddleocr_runtime_api(
+        value.get("runtime_api"),
+        kind=kind,
+        present=runtime_api_present,
+        code="document_preview_configuration_invalid",
+    )
     extractor_revision = _identifier(
         value["extractor_revision"], code="document_preview_configuration_invalid"
     )
@@ -976,7 +1070,8 @@ def parse_runtime_configuration(raw: bytes) -> RuntimeConfigurationV1:
     return RuntimeConfigurationV1(
         engine_kind=kind,
         extractor_revision=extractor_revision,
-        options=_parse_options(value["options"], kind=kind),
+        runtime_api=runtime_api,
+        options=_parse_options(value["options"], kind=kind, runtime_api=runtime_api),
     )
 
 
@@ -1040,17 +1135,23 @@ def _parse_artifact(value: object) -> ModelArtifactV1:
 
 def parse_model_inventory(raw: bytes) -> ModelInventoryV1:
     value = _strict_json_object(raw, code="document_preview_inventory_invalid")
-    _require_exact_keys(
-        value,
-        {"schema_version", "engine_kind", "packages", "artifacts"},
-        code="document_preview_inventory_invalid",
-    )
+    base_keys = {"schema_version", "engine_kind", "packages", "artifacts"}
+    runtime_api_present = "runtime_api" in value
+    if set(value) != base_keys | ({"runtime_api"} if runtime_api_present else set()):
+        raise DocumentPreviewRuntimeError("document_preview_inventory_invalid")
     if (
         value["schema_version"] != "1.0"
         or not isinstance(value["packages"], list)
         or not isinstance(value["artifacts"], list)
     ):
         raise DocumentPreviewRuntimeError("document_preview_inventory_invalid")
+    kind = _engine_kind(value["engine_kind"], code="document_preview_inventory_invalid")
+    runtime_api = _parse_paddleocr_runtime_api(
+        value.get("runtime_api"),
+        kind=kind,
+        present=runtime_api_present,
+        code="document_preview_inventory_invalid",
+    )
     packages = tuple(_parse_package(item) for item in value["packages"])
     artifacts = tuple(_parse_artifact(item) for item in value["artifacts"])
     if not packages:
@@ -1065,7 +1166,8 @@ def parse_model_inventory(raw: bytes) -> ModelInventoryV1:
     ):
         raise DocumentPreviewRuntimeError("document_preview_inventory_invalid")
     return ModelInventoryV1(
-        engine_kind=_engine_kind(value["engine_kind"], code="document_preview_inventory_invalid"),
+        engine_kind=kind,
+        runtime_api=runtime_api,
         packages=packages,
         artifacts=artifacts,
     )
@@ -3098,12 +3200,47 @@ _PADDLE_EXECUTION_PACKAGES = frozenset(
 )
 _PADDLE_CV2_PROVIDER = "opencv-contrib-python"
 
+# PaddleOCR 3.2 runs its OCR pipeline through PaddleX.  This is deliberately
+# not a softened version of the legacy 2.9 closure: the two lines install the
+# same ``paddleocr`` distribution name with incompatible APIs and cannot be
+# mixed in one profile.  Keep the execution inventory small but complete for
+# the modules constructed directly by this adapter and its P3 pipeline.
+_PADDLEOCR3_EXECUTION_PACKAGES = frozenset(
+    {
+        "numpy",
+        "opencv-contrib-python",
+        "paddleocr",
+        "paddlepaddle",
+        "paddlex",
+        "pillow",
+        "pypdfium2",
+        "pyyaml",
+        "typing-extensions",
+    }
+)
+_PADDLEOCR3_PINNED_PACKAGE_VERSIONS: Mapping[str, str] = {
+    "paddleocr": "3.2.0",
+    "paddlepaddle": "3.1.1",
+    "paddlex": "3.2.0",
+}
 
-def _required_packages(kind: ApprovedPdfEngineKind) -> frozenset[str]:
+
+def _required_packages(
+    kind: ApprovedPdfEngineKind,
+    runtime_api: PaddleOcrRuntimeApi | None = None,
+) -> frozenset[str]:
     if kind == "pdf_text_layer":
+        if runtime_api is not None:
+            raise DocumentPreviewRuntimeError("document_preview_inventory_packages_invalid")
         return frozenset({"pypdf"})
     if kind == "paddleocr":
-        return _PADDLE_EXECUTION_PACKAGES
+        if runtime_api in {None, _PADDLEOCR2_RUNTIME_API}:
+            return _PADDLE_EXECUTION_PACKAGES
+        if runtime_api == _PADDLEOCR3_RUNTIME_API:
+            return _PADDLEOCR3_EXECUTION_PACKAGES
+        raise DocumentPreviewRuntimeError("document_preview_inventory_packages_invalid")
+    if runtime_api is not None:
+        raise DocumentPreviewRuntimeError("document_preview_inventory_packages_invalid")
     return _DOCLING_EXECUTION_PACKAGES
 
 
@@ -3246,8 +3383,12 @@ def verify_inventory_packages(
     package_version_reader: Callable[[str], str] = importlib.metadata.version,
 ) -> None:
     packages = {_normalized_distribution_name(item.name): item for item in inventory.packages}
-    if not _required_packages(inventory.engine_kind).issubset(packages):
+    if not _required_packages(inventory.engine_kind, inventory.runtime_api).issubset(packages):
         raise DocumentPreviewRuntimeError("document_preview_inventory_packages_invalid")
+    if inventory.runtime_api == _PADDLEOCR3_RUNTIME_API:
+        for name, expected_version in _PADDLEOCR3_PINNED_PACKAGE_VERSIONS.items():
+            if packages[name].version != expected_version:
+                raise DocumentPreviewRuntimeError("document_preview_inventory_packages_invalid")
     for item in inventory.packages:
         try:
             installed = package_version_reader(item.name)
@@ -3290,6 +3431,17 @@ def _configuration_directories_exist(
             raise DocumentPreviewRuntimeError("document_preview_configuration_invalid")
         directories.append((relative, path))
     return tuple(directories)
+
+
+def _configuration_inventory_profile_matches(
+    configuration: RuntimeConfigurationV1, inventory: ModelInventoryV1
+) -> bool:
+    """Require both the engine and its non-interchangeable API family."""
+
+    return (
+        configuration.engine_kind == inventory.engine_kind
+        and configuration.runtime_api == inventory.runtime_api
+    )
 
 
 def _model_relative_path_key(relative_path: str) -> tuple[str, ...]:
@@ -3383,6 +3535,8 @@ def verify_configured_model_directory_artifacts(
     only later by the serving runtime.
     """
 
+    if not _configuration_inventory_profile_matches(configuration, inventory):
+        raise DocumentPreviewRuntimeError("document_preview_provisioning_kind_mismatch")
     directories = _configuration_directories_exist(root, configuration, inventory)
     fingerprints = _verify_inventory_artifacts(root, inventory)
     _verify_configured_model_directory_inventory(
@@ -4530,6 +4684,257 @@ class PaddleOcrPdfPreviewAdapter:
         )
 
 
+def _paddleocr3_sequence(value: object) -> list[object]:
+    """Convert an official P3 list/array without accepting arbitrary iterables."""
+
+    if isinstance(value, Sequence) and not isinstance(value, (str, bytes, bytearray)):
+        return list(value)
+    tolist = getattr(value, "tolist", None)
+    if not callable(tolist):
+        raise DocumentPreviewExecutionError("PaddleOCR 3 result is invalid")
+    try:
+        converted = tolist()
+    except Exception as error:
+        raise DocumentPreviewExecutionError("PaddleOCR 3 result is invalid") from error
+    if not isinstance(converted, Sequence) or isinstance(converted, (str, bytes, bytearray)):
+        raise DocumentPreviewExecutionError("PaddleOCR 3 result is invalid")
+    return list(converted)
+
+
+def _strict_paddleocr3_normalized_bbox(
+    polygon: object,
+    *,
+    width: int,
+    height: int,
+) -> BoundingBoxV1:
+    """Validate a P3 ``rec_polys`` polygon before normalizing its rectangle."""
+
+    if width < 1 or height < 1:
+        raise DocumentPreviewExecutionError("PaddleOCR 3 result is invalid")
+    points = _paddleocr3_sequence(polygon)
+    if not 4 <= len(points) <= 64:
+        raise DocumentPreviewExecutionError("PaddleOCR 3 result is invalid")
+    coordinates: list[tuple[float, float]] = []
+    for point in points:
+        pair = _paddleocr3_sequence(point)
+        if len(pair) != 2:
+            raise DocumentPreviewExecutionError("PaddleOCR 3 result is invalid")
+        x, y = pair
+        if (
+            isinstance(x, bool)
+            or isinstance(y, bool)
+            or not isinstance(x, (int, float))
+            or not isinstance(y, (int, float))
+            or not math.isfinite(float(x))
+            or not math.isfinite(float(y))
+        ):
+            raise DocumentPreviewExecutionError("PaddleOCR 3 result is invalid")
+        x_float, y_float = float(x), float(y)
+        if x_float < 0 or y_float < 0 or x_float > width or y_float > height:
+            raise DocumentPreviewExecutionError("PaddleOCR 3 result is invalid")
+        coordinates.append((x_float, y_float))
+    left = min(x for x, _ in coordinates) / width
+    top = min(y for _, y in coordinates) / height
+    right = max(x for x, _ in coordinates) / width
+    bottom = max(y for _, y in coordinates) / height
+    if not 0 <= left < right <= 1 or not 0 <= top < bottom <= 1:
+        raise DocumentPreviewExecutionError("PaddleOCR 3 result is invalid")
+    try:
+        return BoundingBoxV1.model_validate(
+            {"x": left, "y": top, "width": right - left, "height": bottom - top}
+        )
+    except ValidationError as error:
+        raise DocumentPreviewExecutionError("PaddleOCR 3 result is invalid") from error
+
+
+def _paddleocr3_page_spans(
+    prediction: object,
+    *,
+    page_number: int,
+    width: int,
+    height: int,
+) -> list[DocumentSpanV1]:
+    """Translate exactly one P3 ``predict`` result to safe public spans."""
+
+    if isinstance(prediction, Mapping) or isinstance(prediction, (str, bytes, bytearray)):
+        raise DocumentPreviewExecutionError("PaddleOCR 3 result is invalid")
+    try:
+        iterator = iter(prediction)  # type: ignore[call-overload]
+        result = next(iterator)
+    except (TypeError, StopIteration) as error:
+        raise DocumentPreviewExecutionError("PaddleOCR 3 result is invalid") from error
+    try:
+        next(iterator)
+    except StopIteration:
+        pass
+    else:
+        raise DocumentPreviewExecutionError("PaddleOCR 3 result is invalid")
+    if not isinstance(result, Mapping):
+        raise DocumentPreviewExecutionError("PaddleOCR 3 result is invalid")
+    texts = _paddleocr3_sequence(result.get("rec_texts"))
+    polygons = _paddleocr3_sequence(result.get("rec_polys"))
+    if len(texts) != len(polygons):
+        raise DocumentPreviewExecutionError("PaddleOCR 3 result is invalid")
+    spans: list[DocumentSpanV1] = []
+    for text_value, polygon in zip(texts, polygons, strict=True):
+        if not isinstance(text_value, str):
+            raise DocumentPreviewExecutionError("PaddleOCR 3 result is invalid")
+        bbox = _strict_paddleocr3_normalized_bbox(polygon, width=width, height=height)
+        text = text_value.strip()
+        if not text:
+            continue
+        spans.append(
+            DocumentSpanV1(
+                span_id=f"page-{page_number}-span-{len(spans) + 1}",
+                ordinal=len(spans) + 1,
+                reading_order=len(spans) + 1,
+                text=text[:8_000],
+                bbox=bbox,
+            )
+        )
+    return spans
+
+
+@dataclass(slots=True)
+class PaddleOcr3PdfPreviewAdapter:
+    """Pinned offline PaddleOCR 3.2/PaddleX PDF adapter without P2 fallback."""
+
+    extractor_revision: str
+    model_root: Path
+    options: Mapping[str, object]
+    _engine: object | None = field(default=None, init=False, repr=False)
+    _lock: threading.Lock = field(default_factory=threading.Lock, init=False, repr=False)
+    _native_runtime_verified: bool = field(default=False, init=False, repr=False)
+    _native_runtime_lock: threading.Lock = field(
+        default_factory=threading.Lock, init=False, repr=False
+    )
+
+    def _paddle_engine(self) -> object:
+        with self._lock:
+            if self._engine is not None:
+                return self._engine
+            kwargs: dict[str, object] = {
+                "text_detection_model_name": self.options["text_detection_model_name"],
+                "text_detection_model_dir": str(
+                    self.model_root / str(self.options["text_detection_model_directory"])
+                ),
+                "text_recognition_model_name": self.options["text_recognition_model_name"],
+                "text_recognition_model_dir": str(
+                    self.model_root / str(self.options["text_recognition_model_directory"])
+                ),
+                "device": "cpu",
+                "cpu_threads": 1,
+                "enable_hpi": False,
+                "enable_mkldnn": False,
+                "use_tensorrt": False,
+                "use_doc_orientation_classify": False,
+                "use_doc_unwarping": False,
+                "use_textline_orientation": False,
+            }
+            try:
+                # Import and construction can both trigger PaddleX's model
+                # resolver.  The per-thread guard turns a missing local model
+                # into an unavailable result rather than an implicit download.
+                with local_files_only():
+                    from paddleocr import PaddleOCR  # type: ignore[import-not-found]
+
+                    self._engine = PaddleOCR(**kwargs)
+            except Exception as error:
+                raise DocumentPreviewUnavailable(
+                    "document_preview_paddleocr3_native_runtime_unavailable"
+                ) from error
+            return self._engine
+
+    @staticmethod
+    def _prediction_kwargs() -> dict[str, bool]:
+        return {
+            "use_doc_orientation_classify": False,
+            "use_doc_unwarping": False,
+            "use_textline_orientation": False,
+        }
+
+    def verify_native_runtime(self) -> None:
+        """Run P3 once on a blank ndarray before any source PDF is loaded."""
+
+        with self._native_runtime_lock:
+            if self._native_runtime_verified:
+                return
+            try:
+                import numpy as np  # type: ignore[import-not-found]
+
+                blank = np.zeros((64, 64, 3), dtype=np.uint8)
+                engine: Any = self._paddle_engine()
+                with local_files_only():
+                    prediction = engine.predict(blank, **self._prediction_kwargs())
+                _paddleocr3_page_spans(
+                    prediction,
+                    page_number=1,
+                    width=64,
+                    height=64,
+                )
+            except Exception as error:
+                raise DocumentPreviewUnavailable(
+                    "document_preview_paddleocr3_native_runtime_unavailable"
+                ) from error
+            self._native_runtime_verified = True
+
+    def extract_raster_or_image(self, preview_input: PreviewInputV1) -> PreviewCandidateV1:
+        if preview_input.metadata.media_type != "application/pdf":
+            raise DocumentPreviewUnavailable("PDF-only approval")
+        self.verify_native_runtime()
+        try:
+            import numpy as np  # type: ignore[import-not-found]
+            import pypdfium2 as pdfium  # type: ignore[import-not-found]
+        except ImportError as error:
+            raise DocumentPreviewUnavailable("PaddleOCR renderer is not provisioned") from error
+        engine: Any = self._paddle_engine()
+        try:
+            document = pdfium.PdfDocument(preview_input.content)
+            pages: list[DocumentPreviewPageV1] = []
+            has_text = False
+            for index in range(len(document)):
+                rendered = document[index].render(scale=1).to_pil().convert("RGB")
+                width, height = rendered.size
+                if width < 1 or height < 1 or width * height > 40_000_000:
+                    raise DocumentPreviewInputError("PDF raster dimensions are invalid")
+                with local_files_only():
+                    prediction = engine.predict(
+                        np.asarray(rendered), **self._prediction_kwargs()
+                    )
+                spans = _paddleocr3_page_spans(
+                    prediction,
+                    page_number=index + 1,
+                    width=width,
+                    height=height,
+                )
+                has_text = has_text or bool(spans)
+                pages.append(
+                    DocumentPreviewPageV1(
+                        page_number=index + 1,
+                        width=width,
+                        height=height,
+                        coordinate_unit="pixels",
+                        spans=spans,
+                    )
+                )
+        except DocumentPreviewInputError:
+            raise
+        except DocumentPreviewUnavailable:
+            raise
+        except DocumentPreviewExecutionError:
+            raise
+        except Exception as error:
+            raise DocumentPreviewExecutionError("PaddleOCR 3 execution failed") from error
+        if not pages:
+            raise DocumentPreviewInputError("PDF has no pages")
+        return PreviewCandidateV1(
+            status="preview_ready" if has_text else "needs_review",
+            extractor_revision=self.extractor_revision,
+            pages=pages,
+            warnings=[] if has_text else [DocumentExtractionWarningV1(code="ocr_text_not_found")],
+        )
+
+
 @dataclass(slots=True)
 class DoclingPdfPreviewAdapter:
     """Pinned local Docling adapter using an in-memory PDF stream only."""
@@ -4724,6 +5129,29 @@ def preflight_provisioned_docling_native_runtime(
         ) from error
 
 
+def preflight_provisioned_paddleocr3_native_runtime(
+    *, document_preview_root: Path, configuration: RuntimeConfigurationV1
+) -> None:
+    """Verify an explicit PaddleOCR 3 profile without opening a source asset."""
+
+    if (
+        configuration.engine_kind != "paddleocr"
+        or configuration.runtime_api != _PADDLEOCR3_RUNTIME_API
+    ):
+        return
+    adapter = PaddleOcr3PdfPreviewAdapter(
+        extractor_revision=configuration.extractor_revision,
+        model_root=document_preview_root,
+        options=configuration.options,
+    )
+    try:
+        adapter.verify_native_runtime()
+    except DocumentPreviewUnavailable as error:
+        raise DocumentPreviewRuntimeError(
+            "document_preview_paddleocr3_native_runtime_unavailable"
+        ) from error
+
+
 @dataclass(slots=True)
 class ApprovedPdfOnlyPreviewEngine:
     """Block images and runtime drift before invoking the selected local profile."""
@@ -4767,11 +5195,23 @@ def build_default_pdf_preview_adapter(
     if binding.approval.engine_kind == "pdf_text_layer":
         return _PdfTextLayerEngine(PdfTextLayerPreviewAdapter(extractor_revision=revision))
     if binding.approval.engine_kind == "paddleocr":
-        paddle = PaddleOcrPdfPreviewAdapter(
-            extractor_revision=revision,
-            model_root=binding.root,
-            options=binding.configuration.options,
-        )
+        runtime_api = getattr(binding.configuration, "runtime_api", _PADDLEOCR2_RUNTIME_API)
+        if runtime_api == _PADDLEOCR2_RUNTIME_API:
+            paddle: PaddleOcrPdfPreviewAdapter | PaddleOcr3PdfPreviewAdapter = (
+                PaddleOcrPdfPreviewAdapter(
+                    extractor_revision=revision,
+                    model_root=binding.root,
+                    options=binding.configuration.options,
+                )
+            )
+        elif runtime_api == _PADDLEOCR3_RUNTIME_API:
+            paddle = PaddleOcr3PdfPreviewAdapter(
+                extractor_revision=revision,
+                model_root=binding.root,
+                options=binding.configuration.options,
+            )
+        else:
+            raise DocumentPreviewRuntimeError("document_preview_approval_binding_mismatch")
         if direct_source_attested_profile:
             return _DirectRasterOcrEngine(paddle)
         return LayeredLocalPreviewEngine(
@@ -4806,7 +5246,7 @@ class _PdfTextLayerEngine:
 class _DirectRasterOcrEngine:
     """Serve the exact direct PaddleOCR or Docling profile that was evaluated."""
 
-    adapter: PaddleOcrPdfPreviewAdapter | DoclingPdfPreviewAdapter
+    adapter: PaddleOcrPdfPreviewAdapter | PaddleOcr3PdfPreviewAdapter | DoclingPdfPreviewAdapter
 
     def extract(self, preview_input: PreviewInputV1) -> PreviewCandidateV1:
         return self.adapter.extract_raster_or_image(preview_input)
@@ -4994,7 +5434,7 @@ def write_runtime_sidecars(
     inventory_raw = _canonical_json_bytes(inventory_value, trailing_newline=True)
     configuration = parse_runtime_configuration(configuration_raw)
     inventory = parse_model_inventory(inventory_raw)
-    if configuration.engine_kind != inventory.engine_kind:
+    if not _configuration_inventory_profile_matches(configuration, inventory):
         raise DocumentPreviewRuntimeError("document_preview_provisioning_kind_mismatch")
     verify_inventory_packages(inventory, package_version_reader=package_version_reader)
     verify_configured_model_directory_artifacts(root, configuration, inventory)
@@ -5275,6 +5715,7 @@ __all__ = [
     "ModelArtifactV1",
     "ModelInventoryV1",
     "ModelPackageV1",
+    "PaddleOcr3PdfPreviewAdapter",
     "PaddleOcrPdfPreviewAdapter",
     "PdfPreviewActivationV1",
     "PdfPreviewApprovalV1",
@@ -5301,6 +5742,7 @@ __all__ = [
     "parse_source_attested_synthetic_pdf_preview_activation",
     "parse_source_attested_synthetic_sealed_evaluation_result",
     "preflight_provisioned_docling_native_runtime",
+    "preflight_provisioned_paddleocr3_native_runtime",
     "resolve_document_preview_engine",
     "resolve_approved_pdf_preview_engine",
     "validate_approval_pointer_path",

@@ -65,6 +65,7 @@ from customs_ai_agent.service.document_preview_runtime import (
     DoclingPdfPreviewAdapter,
     DocumentPreviewRuntimeError,
     ModelInventoryV1,
+    PaddleOcr3PdfPreviewAdapter,
     PaddleOcrPdfPreviewAdapter,
     PdfTextLayerPreviewAdapter,
     RuntimeConfigurationV1,
@@ -269,6 +270,19 @@ class _PaddleOcrCandidateAdapter:
 
 
 @dataclass(slots=True)
+class _PaddleOcr3CandidateAdapter:
+    """Direct P3 adapter with a source-PDF-free native preflight."""
+
+    adapter: PaddleOcr3PdfPreviewAdapter
+
+    def preflight_native_runtime(self) -> None:
+        self.adapter.verify_native_runtime()
+
+    def extract_pdf(self, preview_input: PreviewInputV1) -> CandidateExtractionV1:
+        return _candidate_from_preview(self.adapter.extract_raster_or_image(preview_input))
+
+
+@dataclass(slots=True)
 class _DoclingCandidateAdapter:
     adapter: DoclingPdfPreviewAdapter
 
@@ -319,13 +333,23 @@ def build_default_synthetic_pdf_candidate_adapter(
             PdfTextLayerPreviewAdapter(extractor_revision=profile.extractor_revision)
         )
     if profile.engine_kind == "paddleocr":
-        return _PaddleOcrCandidateAdapter(
-            PaddleOcrPdfPreviewAdapter(
-                extractor_revision=profile.extractor_revision,
-                model_root=profile.document_preview_root,
-                options=profile.configuration.options,
+        if profile.configuration.runtime_api == "paddleocr2-2.9":
+            return _PaddleOcrCandidateAdapter(
+                PaddleOcrPdfPreviewAdapter(
+                    extractor_revision=profile.extractor_revision,
+                    model_root=profile.document_preview_root,
+                    options=profile.configuration.options,
+                )
             )
-        )
+        if profile.configuration.runtime_api == "paddleocr3-paddlex-3.2":
+            return _PaddleOcr3CandidateAdapter(
+                PaddleOcr3PdfPreviewAdapter(
+                    extractor_revision=profile.extractor_revision,
+                    model_root=profile.document_preview_root,
+                    options=profile.configuration.options,
+                )
+            )
+        raise SyntheticPdfCandidateRunnerError("candidate_engine_profile_mismatch")
     if profile.engine_kind == "docling":
         return _DoclingCandidateAdapter(
             DoclingPdfPreviewAdapter(
@@ -465,6 +489,7 @@ def load_unapproved_local_candidate_profile(
         configuration.engine_kind != engine_kind
         or inventory.engine_kind != engine_kind
         or configuration.engine_kind != inventory.engine_kind
+        or configuration.runtime_api != inventory.runtime_api
     ):
         raise SyntheticPdfCandidateRunnerError("candidate_engine_profile_mismatch")
     try:
@@ -1556,15 +1581,18 @@ def run_synthetic_pdf_ocr_candidate(
         adapter = adapter_factory(profile)
     except Exception as error:
         raise SyntheticPdfCandidateRunnerError("candidate_adapter_unavailable") from error
-    if profile.engine_kind == "docling":
-        native_preflight = getattr(adapter, "preflight_native_runtime", None)
-        if callable(native_preflight):
-            try:
-                native_preflight()
-            except (DocumentPreviewError, OSError, socket.error) as error:
-                raise SyntheticPdfCandidateRunnerError("candidate_adapter_unavailable") from error
-            except Exception as error:
-                raise SyntheticPdfCandidateRunnerError("candidate_adapter_unavailable") from error
+    # A native P3/PaddleX or Docling profile must prove its local model stack
+    # on an in-memory probe before the first selected source PDF is opened.
+    # Legacy P2 adapters deliberately have no probe method, preserving their
+    # historic behavior without treating their constructor as P3-compatible.
+    native_preflight = getattr(adapter, "preflight_native_runtime", None)
+    if callable(native_preflight):
+        try:
+            native_preflight()
+        except (DocumentPreviewError, OSError, socket.error) as error:
+            raise SyntheticPdfCandidateRunnerError("candidate_adapter_unavailable") from error
+        except Exception as error:
+            raise SyntheticPdfCandidateRunnerError("candidate_adapter_unavailable") from error
 
     documents: list[CandidateDocumentOutputV1] = []
     for item in packet.items:

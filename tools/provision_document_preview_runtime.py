@@ -18,6 +18,7 @@ from customs_ai_agent.service.document_preview_runtime import (
     DocumentPreviewRuntimeError,
     parse_runtime_configuration,
     preflight_provisioned_docling_native_runtime,
+    preflight_provisioned_paddleocr3_native_runtime,
     validate_document_preview_root,
     write_runtime_sidecars,
 )
@@ -92,6 +93,10 @@ def provision_runtime(
             document_preview_root=root,
             configuration=parsed_configuration,
         )
+    preflight_provisioned_paddleocr3_native_runtime(
+        document_preview_root=root,
+        configuration=parsed_configuration,
+    )
     return configuration_sha256, model_inventory_sha256
 
 

@@ -164,9 +164,12 @@ def _parse_provenance(
     configuration: RuntimeConfigurationV1,
 ) -> tuple[dict[str, dict[str, str]], dict[str, dict[str, str]]]:
     code = "document_preview_inventory_provenance_invalid"
+    expected_keys = {"schema_version", "engine_kind", "packages", "artifact_directories"}
+    if configuration.runtime_api == "paddleocr3-paddlex-3.2":
+        expected_keys.add("runtime_api")
     provenance = _strict_mapping(
         value,
-        expected={"schema_version", "engine_kind", "packages", "artifact_directories"},
+        expected=expected_keys,
         code=code,
     )
     if (
@@ -174,12 +177,18 @@ def _parse_provenance(
         or provenance["engine_kind"] != configuration.engine_kind
         or not isinstance(provenance["packages"], list)
         or not isinstance(provenance["artifact_directories"], list)
+        or (
+            configuration.runtime_api == "paddleocr3-paddlex-3.2"
+            and provenance.get("runtime_api") != configuration.runtime_api
+        )
     ):
         raise DocumentPreviewRuntimeError(code)
 
     required = {
         _normalized_distribution_name(name): name
-        for name in runtime_module._required_packages(configuration.engine_kind)
+        for name in runtime_module._required_packages(
+            configuration.engine_kind, configuration.runtime_api
+        )
     }
     packages: dict[str, dict[str, str]] = {}
     for raw_item in provenance["packages"]:
@@ -387,7 +396,9 @@ def build_runtime_inventory(
             value=provenance_value,
             configuration=configuration,
         )
-        required = runtime_module._required_packages(configuration.engine_kind)
+        required = runtime_module._required_packages(
+            configuration.engine_kind, configuration.runtime_api
+        )
         packages = [
             {
                 "name": name,
@@ -409,10 +420,15 @@ def build_runtime_inventory(
                 artifact_directory_provenance=artifact_directory_provenance,
             ),
         }
+        if configuration.runtime_api == "paddleocr3-paddlex-3.2":
+            inventory_value["runtime_api"] = configuration.runtime_api
         inventory_raw = _canonical_json_bytes(inventory_value)
         try:
             inventory = parse_model_inventory(inventory_raw)
-            if inventory.engine_kind != configuration.engine_kind:
+            if (
+                inventory.engine_kind != configuration.engine_kind
+                or inventory.runtime_api != configuration.runtime_api
+            ):
                 raise DocumentPreviewRuntimeError("document_preview_provisioning_kind_mismatch")
             verify_inventory_packages(inventory, package_version_reader=package_version_reader)
             verify_configured_model_directory_artifacts(root, configuration, inventory)
