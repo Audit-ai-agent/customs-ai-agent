@@ -92,7 +92,7 @@ _PROFILE_MODE: Literal["offline_synthetic_pdf_evaluation"] = "offline_synthetic_
 # coalesced native visitor table geometry, and the bbox-complete PaddleOCR
 # geometry path. It is deliberately a candidate-only revision: historical
 # bundles cannot be relabelled as outputs from the stricter layout parser.
-SYNTHETIC_PDF_LABEL_NORMALIZER_REVISION = "synthetic-pdf-visible-layout-normalizer-v9"
+SYNTHETIC_PDF_LABEL_NORMALIZER_REVISION = "synthetic-pdf-visible-layout-normalizer-v10"
 
 
 class SyntheticPdfCandidateRunnerError(ValueError):

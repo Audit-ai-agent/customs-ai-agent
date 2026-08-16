@@ -32,9 +32,9 @@ content stream을 독립적인 pinned parser와 template profile로 읽어 만�
   run 수·좌표·table geometry·token 개수가 달라져 모호해지면 PDF preview는
   `unavailable`로 남는다.
 - candidate parser revision은 정확히
-  `synthetic-pdf-visible-layout-normalizer-v9`만 허용한다. 따라서 v8 또는 그 이전의
+  `synthetic-pdf-visible-layout-normalizer-v10`만 허용한다. 따라서 v9 또는 그 이전의
   candidate/execution/result/selection/sealed-run이 모든 SHA와 서로 일치해도
-  새 자동 pointer를 만들 수 없다. v9가 아닌 revision은 source-truth writer와
+  새 자동 pointer를 만들 수 없다. v10가 아닌 revision은 source-truth writer와
   runtime loader 양쪽에서 fail-closed 한다.
 - `error` stratum은 error label만으로 인정하지 않는다. 같은 set/document의
   clean sibling과 decoded content stream이 실제로 달라야 하며, label의

@@ -596,11 +596,11 @@ def test_rendered_field_contract_exposes_bl13_invoice15_and_pl12() -> None:
         field_name for field_name, _normalizer in SOURCE_ATTESTED_REQUIRED_FIELDS["packing_list"]
     }
     assert SOURCE_ATTESTED_CANDIDATE_PARSER_REVISION == (
-        "synthetic-pdf-visible-layout-normalizer-v9"
+        "synthetic-pdf-visible-layout-normalizer-v10"
     )
 
 
-def test_source_truth_rejects_a_coherent_v8_candidate_parser_even_for_test_scope(
+def test_source_truth_rejects_a_coherent_v9_candidate_parser_even_for_test_scope(
     tmp_path: Path,
 ) -> None:
     """A coherent older parser cannot create new source-attested evidence."""
@@ -612,7 +612,7 @@ def test_source_truth_rejects_a_coherent_v8_candidate_parser_even_for_test_scope
         packet=packet,
         truth=truth,
         engine_kind="pdf_text_layer",
-        parser_revision="synthetic-pdf-visible-layout-normalizer-v8",
+        parser_revision="synthetic-pdf-visible-layout-normalizer-v9",
     )
     extractor_revision, configuration_sha256, model_inventory_sha256 = _profile("pdf_text_layer")
 
@@ -629,7 +629,7 @@ def test_source_truth_rejects_a_coherent_v8_candidate_parser_even_for_test_scope
             extractor_revision=extractor_revision,
             configuration_sha256=configuration_sha256,
             model_inventory_sha256=model_inventory_sha256,
-            parser_revision="synthetic-pdf-visible-layout-normalizer-v8",
+            parser_revision="synthetic-pdf-visible-layout-normalizer-v9",
             expected_dataset_scope=_test_scope(fixture),
             required_field_schema=_TEST_REQUIRED_FIELD_SCHEMA,
         )
@@ -880,14 +880,14 @@ def test_selection_requires_all_three_engine_results(tmp_path: Path) -> None:
         build_source_attested_synthetic_development_selection(results=two_results)
 
 
-def test_source_evaluator_refuses_coherent_v8_runner_parser_revision(
+def test_source_evaluator_refuses_coherent_v9_runner_parser_revision(
     tmp_path: Path, monkeypatch: pytest.MonkeyPatch
 ) -> None:
     """The CLI refuses before it can write local evidence with an unapproved parser."""
 
     monkeypatch.setattr(
         "tools.evaluate_source_attested_synthetic_pdf.SYNTHETIC_PDF_LABEL_NORMALIZER_REVISION",
-        "synthetic-pdf-visible-layout-normalizer-v8",
+        "synthetic-pdf-visible-layout-normalizer-v9",
     )
     with pytest.raises(
         SyntheticPdfCandidateRunnerError,

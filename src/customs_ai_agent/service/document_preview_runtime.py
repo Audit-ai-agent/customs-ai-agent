@@ -89,7 +89,7 @@ _SOURCE_CANDIDATE_EXECUTION_DIRECTORY = "source-attested-candidate-executions"
 _SOURCE_EVALUATION_RESULT_DIRECTORY = "source-attested-evaluation-results"
 _SOURCE_DEVELOPMENT_SELECTION_DIRECTORY = "source-attested-development-selections"
 _SOURCE_SEALED_RUN_DIRECTORY = "source-attested-sealed-runs"
-_SOURCE_ATTESTED_CANDIDATE_PARSER_REVISION: Final = "synthetic-pdf-visible-layout-normalizer-v9"
+_SOURCE_ATTESTED_CANDIDATE_PARSER_REVISION: Final = "synthetic-pdf-visible-layout-normalizer-v10"
 _SEALED_RESERVATION_DIRECTORY = "candidate-run-reservations"
 _SOURCE_LAYOUT_RECORD_COUNTS: Mapping[str, int] = {"development": 60, "sealed": 20}
 _MAX_SOURCE_DATASET_RECEIPT_BYTES = 8 * 1024 * 1024
@@ -1321,7 +1321,7 @@ def _source_attested_candidate_parser_revision(value: object, *, code: str) -> s
 
     Equality across receipts is necessary but not sufficient: a fully
     self-consistent older parser could otherwise mint a new automatic pointer.
-    The v9 parser is the only candidate normalizer whose rendered 13/15/12
+    The v10 parser is the only candidate normalizer whose rendered 13/15/12
     field contract has been accepted for this narrow synthetic scope.  Its
     separately reviewed behavior supersedes v8, so a coherent v8 chain
     remains ineligible.

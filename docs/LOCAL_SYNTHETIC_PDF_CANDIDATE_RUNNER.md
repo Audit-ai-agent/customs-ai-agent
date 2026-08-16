@@ -124,7 +124,7 @@ uv run python tools/run_synthetic_pdf_ocr_candidate.py `
 
 - engine kind와 extractor revision
 - configuration SHA-256와 model inventory SHA-256
-- `synthetic-pdf-visible-layout-normalizer-v9` parser revision
+- `synthetic-pdf-visible-layout-normalizer-v10` parser revision
 - `offline_synthetic_pdf_evaluation` profile mode
 - 모든 위 값과 candidate document를 묶은 `candidate_bundle_sha256`
 
@@ -171,7 +171,7 @@ uv run python tools/evaluate_synthetic_pdf_ocr.py `
   광학 OCR이라고 부르지 않으며, 합성 PDF의 content-stream compatibility 범위를
   넘는 품질 근거가 아니다.
 
-`synthetic-pdf-visible-layout-normalizer-v9`은 후보 엔진이 낸 span과
+`synthetic-pdf-visible-layout-normalizer-v10`은 후보 엔진이 낸 span과
 table cell만 읽습니다. B/L 13개, Invoice 15개, Packing List 12개라는
 **렌더링된 field 계약**을 대상으로 다음 두 가지 visible 의미만 사용합니다.
 

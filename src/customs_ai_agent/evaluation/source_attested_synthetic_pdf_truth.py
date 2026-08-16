@@ -102,8 +102,8 @@ SOURCE_LAYOUT_PARSER_SPEC_REVISION: Final[
 # and Packing-list-12 field surface.  Version 8 or older must not regain
 # eligibility merely by producing a self-consistent chain of newer receipts.
 SOURCE_ATTESTED_CANDIDATE_PARSER_REVISION: Final[
-    Literal["synthetic-pdf-visible-layout-normalizer-v9"]
-] = "synthetic-pdf-visible-layout-normalizer-v9"
+    Literal["synthetic-pdf-visible-layout-normalizer-v10"]
+] = "synthetic-pdf-visible-layout-normalizer-v10"
 
 # This automatic path has one deliberately narrow approval target.  These
 # values are a compact identity for the existing human-checked, 2,000-set PDF
