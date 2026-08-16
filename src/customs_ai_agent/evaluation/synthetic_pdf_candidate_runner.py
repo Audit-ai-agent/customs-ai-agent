@@ -167,7 +167,21 @@ class _PdfTextLayerCandidateAdapter:
     adapter: PdfTextLayerPreviewAdapter
 
     def extract_pdf(self, preview_input: PreviewInputV1) -> CandidateExtractionV1:
-        return _candidate_from_preview(self.adapter.extract_pdf_text_layer(preview_input))
+        # Reuse the native adapter's one visitor conversion rather than
+        # deriving candidate spans from the public preview wire projection.
+        # Internal anchors deliberately stay out of CandidateSpanV1 until a
+        # local-only geometry schema can represent points without inventing a
+        # rectangle.
+        return CandidateExtractionV1(
+            spans=tuple(
+                CandidateSpanV1(
+                    page_number=fragment.page_number,
+                    text=fragment.text,
+                    reading_order=fragment.ordinal,
+                )
+                for fragment in self.adapter.extract_pdf_text_layer_fragments(preview_input)
+            )
+        )
 
 
 @dataclass(slots=True)

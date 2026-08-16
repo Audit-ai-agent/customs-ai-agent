@@ -3954,59 +3954,238 @@ def _pdf_page_dimensions(page: object) -> tuple[int, int]:
     return width, height
 
 
+def _pdf_text_visitor_fragment(value: object) -> str | None:
+    """Keep a visitor fragment verbatim except for its terminal line break.
+
+    ``pypdf`` uses a trailing LF (and sometimes CRLF) to delimit text-showing
+    operations.  It is an extraction artifact rather than content that belongs
+    in the individual callback fragment.  Leading whitespace and all other
+    characters remain untouched so this path cannot silently rewrite a native
+    text layer.
+    """
+
+    if not isinstance(value, str):
+        raise DocumentPreviewInputError("PDF text visitor output is invalid")
+    trimmed = value.rstrip("\r\n")
+    return trimmed or None
+
+
+_PDF_TEXT_VISITOR_IDENTITY_MATRIX: Final[tuple[float, float, float, float, float, float]] = (
+    1.0,
+    0.0,
+    0.0,
+    1.0,
+    0.0,
+    0.0,
+)
+
+
+@dataclass(frozen=True, slots=True)
+class _PdfTextLayerVisitorAnchor:
+    """One internal-only normalized text start point, with top-origin ``y``."""
+
+    x: float
+    y: float
+
+
+@dataclass(frozen=True, slots=True)
+class _PdfTextLayerVisitorFragment:
+    """One local visitor fragment before it is projected to public preview spans."""
+
+    page_number: int
+    ordinal: int
+    text: str
+    anchor: _PdfTextLayerVisitorAnchor | None
+
+
+@dataclass(frozen=True, slots=True)
+class _PdfTextLayerVisitorPage:
+    """One internal-only page result shared by preview and candidate paths."""
+
+    page_number: int
+    width: int
+    height: int
+    fragments: tuple[_PdfTextLayerVisitorFragment, ...]
+
+
+def _pdf_text_visitor_matrix(
+    value: object,
+) -> tuple[float, float, float, float, float, float] | None:
+    """Accept one finite six-value PDF matrix without coercing arbitrary values."""
+
+    if not isinstance(value, Sequence) or isinstance(value, (str, bytes)) or len(value) != 6:
+        return None
+    coordinates: list[float] = []
+    for coordinate in value:
+        if isinstance(coordinate, bool) or not isinstance(coordinate, (int, float)):
+            return None
+        numeric = float(coordinate)
+        if not math.isfinite(numeric):
+            return None
+        coordinates.append(numeric)
+    return cast(tuple[float, float, float, float, float, float], tuple(coordinates))
+
+
+def _pdf_text_visitor_anchor(
+    *, current_matrix: object, text_matrix: object, width: int, height: int
+) -> _PdfTextLayerVisitorAnchor | None:
+    """Return a strict local anchor without inventing a public text rectangle.
+
+    ``pypdf`` gives the text matrix's start point, but only an identity CTM
+    keeps that point directly aligned to the unrotated page coordinates used
+    here.  Any other transformation, malformed matrix, or out-of-page point
+    is deliberately omitted.  The internal anchor is never placed on the
+    public ``DocumentSpanV1`` wire model.
+    """
+
+    current = _pdf_text_visitor_matrix(current_matrix)
+    text = _pdf_text_visitor_matrix(text_matrix)
+    if current != _PDF_TEXT_VISITOR_IDENTITY_MATRIX or text is None:
+        return None
+    x, y = text[4], text[5]
+    if not 0 <= x <= width or not 0 <= y <= height:
+        return None
+    return _PdfTextLayerVisitorAnchor(x=x / width, y=(height - y) / height)
+
+
+def _pdf_text_visitor_fragments(
+    *, page: object, page_number: int, width: int, height: int
+) -> tuple[_PdfTextLayerVisitorFragment, ...]:
+    """Extract local callback fragments and only their proven start anchors.
+
+    A start anchor belongs only to the first emitted chunk of one callback;
+    later chunks have no proven advance and therefore receive ``None``.
+    """
+
+    fragments: list[_PdfTextLayerVisitorFragment] = []
+
+    def visitor(
+        text: object,
+        current_matrix: object,
+        text_matrix: object,
+        _font_dictionary: object,
+        _font_size: object,
+    ) -> None:
+        fragment = _pdf_text_visitor_fragment(text)
+        if fragment is None:
+            return
+        anchor = _pdf_text_visitor_anchor(
+            current_matrix=current_matrix,
+            text_matrix=text_matrix,
+            width=width,
+            height=height,
+        )
+        for offset in range(0, len(fragment), 8_000):
+            if len(fragments) >= 10_000:
+                raise DocumentPreviewInputError("PDF text layer has too many fragments")
+            ordinal = len(fragments) + 1
+            fragments.append(
+                _PdfTextLayerVisitorFragment(
+                    page_number=page_number,
+                    ordinal=ordinal,
+                    text=fragment[offset : offset + 8_000],
+                    anchor=anchor if offset == 0 else None,
+                )
+            )
+
+    extract_text = getattr(page, "extract_text", None)
+    if not callable(extract_text):
+        raise DocumentPreviewInputError("PDF text layer cannot be safely decoded")
+    extract_text(visitor_text=visitor)
+    return tuple(fragments)
+
+
+def _extract_pdf_text_layer_visitor_pages(
+    preview_input: PreviewInputV1,
+) -> tuple[_PdfTextLayerVisitorPage, ...]:
+    """Run the one local pypdf visitor conversion shared by both consumers."""
+
+    try:
+        from pypdf import PdfReader  # type: ignore[import-not-found]
+    except ImportError as error:
+        raise DocumentPreviewUnavailable("pypdf is not provisioned") from error
+    try:
+        with local_files_only():
+            reader = PdfReader(io.BytesIO(preview_input.content), strict=True)
+            if reader.is_encrypted:
+                raise DocumentPreviewInputError("encrypted PDF preview is unavailable")
+            pages: list[_PdfTextLayerVisitorPage] = []
+            for index, page in enumerate(reader.pages, start=1):
+                width, height = _pdf_page_dimensions(page)
+                pages.append(
+                    _PdfTextLayerVisitorPage(
+                        page_number=index,
+                        width=width,
+                        height=height,
+                        fragments=_pdf_text_visitor_fragments(
+                            page=page,
+                            page_number=index,
+                            width=width,
+                            height=height,
+                        ),
+                    )
+                )
+    except DocumentPreviewInputError:
+        raise
+    except Exception:
+        # A parser exception may include a raw text fragment.  Do not retain it
+        # in the normal preview error chain where a transcript or general log
+        # could expose document content.
+        raise DocumentPreviewInputError("PDF text layer cannot be safely decoded") from None
+    if not pages:
+        raise DocumentPreviewInputError("PDF has no pages")
+    return tuple(pages)
+
+
 @dataclass(slots=True)
 class PdfTextLayerPreviewAdapter:
-    """Pinned local ``pypdf`` extraction with no raster/OCR fallback."""
+    """Pinned local ``pypdf`` visitor extraction with no raster/OCR fallback."""
 
     extractor_revision: str
+
+    def extract_pdf_text_layer_fragments(
+        self, preview_input: PreviewInputV1
+    ) -> tuple[_PdfTextLayerVisitorFragment, ...]:
+        """Return local-only visitor output for candidate evaluation reuse.
+
+        This deliberately does not change the public preview wire contract.
+        It shares the exact pypdf conversion path with ``extract_pdf_text_layer``
+        but retains a fail-closed, internal start anchor for a later local
+        candidate projection.
+        """
+
+        if preview_input.metadata.media_type != "application/pdf":
+            return ()
+        pages = _extract_pdf_text_layer_visitor_pages(preview_input)
+        return tuple(fragment for page in pages for fragment in page.fragments)
 
     def extract_pdf_text_layer(self, preview_input: PreviewInputV1) -> PreviewCandidateV1 | None:
         if preview_input.metadata.media_type != "application/pdf":
             return None
-        try:
-            from pypdf import PdfReader  # type: ignore[import-not-found]
-        except ImportError as error:
-            raise DocumentPreviewUnavailable("pypdf is not provisioned") from error
-        try:
-            reader = PdfReader(io.BytesIO(preview_input.content), strict=True)
-            if reader.is_encrypted:
-                raise DocumentPreviewInputError("encrypted PDF preview is unavailable")
-            pages: list[DocumentPreviewPageV1] = []
-            has_text = False
-            for index, page in enumerate(reader.pages, start=1):
-                width, height = _pdf_page_dimensions(page)
-                extracted = page.extract_text() or ""
-                spans = [
-                    DocumentSpanV1(
-                        span_id=f"page-{index}-span-{ordinal}",
-                        ordinal=ordinal,
-                        reading_order=ordinal,
-                        text=text,
-                    )
-                    for ordinal, text in enumerate(_chunks(extracted), start=1)
-                ]
-                has_text = has_text or bool(spans)
-                pages.append(
-                    DocumentPreviewPageV1(
-                        page_number=index,
-                        width=width,
-                        height=height,
-                        coordinate_unit="pdf_points",
-                        spans=spans,
-                    )
-                )
-        except DocumentPreviewInputError:
-            raise
-        except Exception as error:
-            raise DocumentPreviewInputError("PDF text layer cannot be safely decoded") from error
-        if not pages:
-            raise DocumentPreviewInputError("PDF has no pages")
-        if not has_text:
+        visitor_pages = _extract_pdf_text_layer_visitor_pages(preview_input)
+        if not any(page.fragments for page in visitor_pages):
             return None
         return PreviewCandidateV1(
             status="preview_ready",
             extractor_revision=self.extractor_revision,
-            pages=pages,
+            pages=[
+                DocumentPreviewPageV1(
+                    page_number=page.page_number,
+                    width=page.width,
+                    height=page.height,
+                    coordinate_unit="pdf_points",
+                    spans=[
+                        DocumentSpanV1(
+                            span_id=f"page-{fragment.page_number}-span-{fragment.ordinal}",
+                            ordinal=fragment.ordinal,
+                            reading_order=fragment.ordinal,
+                            text=fragment.text,
+                        )
+                        for fragment in page.fragments
+                    ],
+                )
+                for page in visitor_pages
+            ],
             warnings=[DocumentExtractionWarningV1(code="text_layer_used")],
         )
 
