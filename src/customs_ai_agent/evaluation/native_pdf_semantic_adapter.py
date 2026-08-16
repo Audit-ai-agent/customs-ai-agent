@@ -192,13 +192,15 @@ def _transformed_field_value(
     if field.value_transform == "raw-v1":
         result = values[0]
     elif field.value_transform == "single-numeric-token-v1":
-        result = _single_token(text=values[0], pattern=_NUMERIC_TOKEN)
-        if result is None:
+        token = _single_token(text=values[0], pattern=_NUMERIC_TOKEN)
+        if token is None:
             return None
+        result = token
     elif field.value_transform == "single-alpha-token-v1":
-        result = _single_token(text=values[0], pattern=_ALPHA_TOKEN)
-        if result is None:
+        token = _single_token(text=values[0], pattern=_ALPHA_TOKEN)
+        if token is None:
             return None
+        result = token
     else:
         result = " / ".join(value.strip() for value in values)
         if not result or any(not value.strip() for value in values):

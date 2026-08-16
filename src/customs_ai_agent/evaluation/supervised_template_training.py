@@ -263,6 +263,7 @@ class SourceAttestedSupervisedTemplateModelTrainingReceiptV1(_WireModel):
     training_split_receipt_sha256: str = Field(pattern=_SHA256)
     training_labels_receipt_sha256: str = Field(pattern=_SHA256)
     model_kind: str = Field(min_length=1, max_length=128, pattern=_IDENTIFIER)
+    model_id: str = Field(min_length=1, max_length=128, pattern=_IDENTIFIER)
     model_revision: str = Field(min_length=1, max_length=128, pattern=_IDENTIFIER)
     model_artifact_sha256: str = Field(pattern=_SHA256)
     training_recipe_sha256: str = Field(pattern=_SHA256)
@@ -660,6 +661,7 @@ def build_source_attested_supervised_template_model_training_receipt(
     training_split: SourceAttestedSupervisedTemplateTrainingSplitV1,
     training_labels: SourceAttestedSupervisedTemplateTrainingLabelsV1,
     model_kind: str,
+    model_id: str,
     model_revision: str,
     model_artifact_sha256: str,
     training_recipe_sha256: str,
@@ -690,6 +692,7 @@ def build_source_attested_supervised_template_model_training_receipt(
         "training_split_receipt_sha256": training_split.training_split_receipt_sha256,
         "training_labels_receipt_sha256": training_labels.training_labels_receipt_sha256,
         "model_kind": model_kind,
+        "model_id": model_id,
         "model_revision": model_revision,
         "model_artifact_sha256": model_artifact_sha256,
         "training_recipe_sha256": training_recipe_sha256,

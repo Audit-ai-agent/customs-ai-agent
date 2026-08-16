@@ -311,6 +311,7 @@ def test_labels_are_pdf_derived_compact_and_immutable(tmp_path: Path) -> None:
         training_split=split,
         training_labels=labels,
         model_kind="semantic-template-model",
+        model_id="semantic-template-model-r1",
         model_revision="v1",
         model_artifact_sha256=_sha("model"),
         training_recipe_sha256=_sha("recipe"),
