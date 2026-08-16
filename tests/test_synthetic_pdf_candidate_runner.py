@@ -29,6 +29,7 @@ from customs_ai_agent.evaluation.document_ocr_quality import (
     packet_receipt_sha256,
     validate_synthetic_candidate_output_provenance,
 )
+from customs_ai_agent.evaluation.native_pdf_vector_grid import NativePdfVectorFormRegion
 from customs_ai_agent.evaluation.synthetic_pdf_candidate_runner import (
     CandidateExtractionV1,
     EvaluationRuntimeProfileV1,
@@ -1433,6 +1434,59 @@ def test_native_text_layer_runner_uses_positioned_field_projection(
     assert seen["document_type"] == "invoice"
     assert isinstance(seen["spans"], tuple)
     assert {field.field_name for field in bundle.documents[0].fields} >= {"inv_no"}
+
+
+def test_native_vector_direct_cells_bypass_visitor_projection_and_add_form_evidence(
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    fixture = _fixture(tmp_path, engine_kind="pdf_text_layer")
+    direct_cells = _table_cells(
+        headers=("opaque-0", "opaque-1", "opaque-2", "opaque-3", "opaque-4"),
+        values=("opaque-5", "opaque-6", "opaque-7", "opaque-8", "opaque-9"),
+    )
+    extraction = CandidateExtractionV1(
+        spans=(
+            CandidateSpanV1(
+                page_number=1,
+                reading_order=1,
+                text="Invoice Number",
+                anchor_x=0.10,
+                anchor_y=0.10,
+            ),
+            CandidateSpanV1(
+                page_number=1,
+                reading_order=2,
+                text="INV-001",
+                anchor_x=0.50,
+                anchor_y=0.10,
+            ),
+        ),
+        table_cells=direct_cells,
+        table_cells_are_direct=True,
+        form_regions=(
+            NativePdfVectorFormRegion(
+                page_number=1,
+                x=0.05,
+                y=0.05,
+                width=0.80,
+                height=0.20,
+            ),
+        ),
+    )
+    monkeypatch.setattr(
+        candidate_runner_module,
+        "project_synthetic_pdf_visitor_table_cells",
+        lambda **_kwargs: (_ for _ in ()).throw(AssertionError("visitor must not run")),
+    )
+
+    summary = _run(fixture, _StaticExtractionFakeAdapter(extraction=extraction))
+    output = fixture["output_directory"] / summary["candidate_file"]  # type: ignore[operator]
+    bundle = SyntheticPdfCandidateOutputBundleV1.model_validate_json(output.read_bytes())
+
+    assert len(bundle.documents[0].table_cells) == 10
+    assert [(field.field_name, field.value) for field in bundle.documents[0].fields] == [
+        ("inv_no", "INV-001")
+    ]
 
 
 def test_paddle_runner_routes_complete_public_bboxes_through_geometry_projectors(

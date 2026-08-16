@@ -35,7 +35,18 @@ import threading
 from contextlib import contextmanager
 from dataclasses import dataclass, field, replace
 from pathlib import Path, PurePosixPath
-from typing import Any, Callable, Final, Iterator, Literal, Mapping, Protocol, Sequence, cast
+from typing import (
+    TYPE_CHECKING,
+    Any,
+    Callable,
+    Final,
+    Iterator,
+    Literal,
+    Mapping,
+    Protocol,
+    Sequence,
+    cast,
+)
 from urllib.parse import urlparse
 
 from pydantic import ValidationError
@@ -56,6 +67,9 @@ from customs_ai_agent.service.document_extraction import (
     LayeredLocalPreviewEngine,
     LocalDocumentPreviewEngine,
 )
+
+if TYPE_CHECKING:
+    from customs_ai_agent.evaluation.native_pdf_vector_grid import NativePdfVectorGridExtraction
 
 
 _IDENTIFIER = re.compile(r"^[A-Za-z0-9][A-Za-z0-9._:-]{0,127}$")
@@ -92,10 +106,12 @@ _TABLE_CELL_F1_MIN = 0.98
 # candidate-only visitor geometry is available only from the explicit v2.
 _PDF_TEXT_LAYER_LEGACY_EXTRACTOR_REVISION: Final = "pypdf-5.3.1-text-layer-v1"
 _PDF_TEXT_LAYER_VISITOR_EXTRACTOR_REVISION: Final = "pypdf-5.3.1-text-layer-visitor-v2"
+_PDF_TEXT_LAYER_NATIVE_VECTOR_GRID_EXTRACTOR_REVISION: Final = "pypdf-5.3.1-native-vector-grid-v1"
 _PDF_TEXT_LAYER_EXTRACTOR_REVISIONS: Final[frozenset[str]] = frozenset(
     {
         _PDF_TEXT_LAYER_LEGACY_EXTRACTOR_REVISION,
         _PDF_TEXT_LAYER_VISITOR_EXTRACTOR_REVISION,
+        _PDF_TEXT_LAYER_NATIVE_VECTOR_GRID_EXTRACTOR_REVISION,
     }
 )
 _NETWORK_GUARD_LOCK = threading.Lock()
@@ -4245,6 +4261,39 @@ class PdfTextLayerPreviewAdapter:
         pages = _extract_pdf_text_layer_visitor_pages(preview_input)
         return tuple(fragment for page in pages for fragment in page.fragments)
 
+    def extract_pdf_native_vector_grid(
+        self, preview_input: PreviewInputV1
+    ) -> "NativePdfVectorGridExtraction | None":
+        """Return direct candidate table evidence for the explicit v1 profile only.
+
+        This method is deliberately a separate seam from the visitor callback:
+        a vector-grid profile never falls back to visitor geometry, and an
+        older text-layer profile cannot accidentally acquire direct cells.
+        """
+
+        if self.extractor_revision != _PDF_TEXT_LAYER_NATIVE_VECTOR_GRID_EXTRACTOR_REVISION:
+            return None
+        if preview_input.metadata.media_type != "application/pdf":
+            return None
+        try:
+            from customs_ai_agent.evaluation.native_pdf_vector_grid import (
+                NativePdfVectorGridError,
+                extract_native_pdf_vector_grid,
+            )
+
+            with local_files_only():
+                return extract_native_pdf_vector_grid(preview_input=preview_input)
+        except NativePdfVectorGridError:
+            raise DocumentPreviewInputError(
+                "PDF native vector grid cannot be safely decoded"
+            ) from None
+        except Exception:
+            # Third-party parser exceptions can embed text-show operands.  Keep
+            # the same content-free runtime boundary used by the visitor path.
+            raise DocumentPreviewInputError(
+                "PDF native vector grid cannot be safely decoded"
+            ) from None
+
     def extract_pdf_text_layer(self, preview_input: PreviewInputV1) -> PreviewCandidateV1 | None:
         if self.extractor_revision not in _PDF_TEXT_LAYER_EXTRACTOR_REVISIONS:
             raise DocumentPreviewUnavailable("PDF text layer extractor revision is unavailable")
@@ -4252,6 +4301,37 @@ class PdfTextLayerPreviewAdapter:
             return None
         if self.extractor_revision == _PDF_TEXT_LAYER_LEGACY_EXTRACTOR_REVISION:
             return _extract_pdf_text_layer_legacy(preview_input)
+        if self.extractor_revision == _PDF_TEXT_LAYER_NATIVE_VECTOR_GRID_EXTRACTOR_REVISION:
+            extraction = self.extract_pdf_native_vector_grid(preview_input)
+            if extraction is None or not extraction.spans:
+                return None
+            spans_by_page: dict[int, list[DocumentSpanV1]] = {
+                page.page_number: [] for page in extraction.pages
+            }
+            for span in extraction.spans:
+                spans_by_page[span.page_number].append(
+                    DocumentSpanV1(
+                        span_id=f"page-{span.page_number}-span-{span.reading_order}",
+                        ordinal=span.reading_order,
+                        reading_order=span.reading_order,
+                        text=span.text,
+                    )
+                )
+            return PreviewCandidateV1(
+                status="preview_ready",
+                extractor_revision=self.extractor_revision,
+                pages=[
+                    DocumentPreviewPageV1(
+                        page_number=page.page_number,
+                        width=page.width,
+                        height=page.height,
+                        coordinate_unit="pdf_points",
+                        spans=spans_by_page[page.page_number],
+                    )
+                    for page in extraction.pages
+                ],
+                warnings=[DocumentExtractionWarningV1(code="text_layer_used")],
+            )
         visitor_pages = _extract_pdf_text_layer_visitor_pages(preview_input)
         if not any(page.fragments for page in visitor_pages):
             return None

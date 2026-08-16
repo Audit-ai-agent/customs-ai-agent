@@ -150,6 +150,27 @@ uv run python tools/evaluate_synthetic_pdf_ocr.py `
 
 ## field와 table의 제한
 
+### native vector/grid text-layer v1
+
+`pypdf-5.3.1-native-vector-grid-v1`은 기존 visitor v2와 다른 명시적
+`pdf_text_layer` revision이다. 기존 승인이나 visitor 결과를 자동으로 바꾸지
+않으며, 이 revision은 별도의 candidate 실행과 같은 Gate 평가를 거쳐야 한다.
+
+- extractor는 **선택된 후보 PDF 자신의** ContentStream에서 text-show anchor와
+  stroked rectangle만 읽는다. Gold, CSV, source truth, manifest, source-layout
+  profile, template coordinate, 고정 text-run index, 다른 문서는 입력이나 import가
+  아니다.
+- table은 5 또는 6개의 같은 열을 가진 상단/header와 하단/body rectangle band가
+  정확히 하나일 때만 만든다. 모든 cell에 anchor text가 하나 이상 있어야 하며,
+  두 grid, 겹치는 anchor, 빈 cell, 지원하지 않는 transform은 추측 없이 table
+  evidence를 비운다.
+- form field는 table 밖 rectangle 안의 visible label과 같은 줄 오른쪽 또는 바로
+  아래의 value block만 사용한다. label 중복, rectangle 겹침, 방향 충돌, 남는
+  text가 있으면 해당 field를 생략한다.
+- 이것은 born-digital PDF의 native text/vector extraction이다. 스캔·이미지의
+  광학 OCR이라고 부르지 않으며, 합성 PDF의 content-stream compatibility 범위를
+  넘는 품질 근거가 아니다.
+
 `synthetic-pdf-visible-layout-normalizer-v9`은 후보 엔진이 낸 span과
 table cell만 읽습니다. B/L 13개, Invoice 15개, Packing List 12개라는
 **렌더링된 field 계약**을 대상으로 다음 두 가지 visible 의미만 사용합니다.
@@ -198,8 +219,11 @@ Gold·CSV·source truth·PDF content stream을 보고 셀을 만드는 경로는
 
 page provenance가 하나가 아니거나, page/bbox가 유효 범위를 벗어나거나, grid와
 cell offset이 불완전하면 Docling 후보는 fail-closed 합니다. 빈 cell은 채우지 않으며,
-Gold·CSV·PDF content stream도 읽지 않습니다. Pdf text layer와 PaddleOCR가 자체적으로
-검증된 structured cell을 내지 않으면 여전히 빈 목록이고 F1 Gate를 통과하지 못합니다.
+Gold·CSV·PDF content stream도 읽지 않습니다. visitor text-layer revision과
+PaddleOCR가 자체적으로 검증된 structured cell을 내지 않으면 여전히 빈 목록이고 F1
+Gate를 통과하지 못합니다. 반면 native vector/grid v1은 위의 독립적인
+candidate-PDF rectangle/text-anchor 증거만 사용하며, 같은 selector를 거친 뒤에만
+table cell을 냅니다.
 이는 합성 PDF의 고정된 Docling structure/table output만 측정하는 범위이며 일반 문서
 table 품질을 보장한다는 뜻은 아닙니다.
 

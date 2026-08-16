@@ -9,6 +9,11 @@ import pytest
 
 import customs_ai_agent.service.document_preview_runtime as runtime_module
 from customs_ai_agent.evaluation.synthetic_pdf_candidate_runner import _PdfTextLayerCandidateAdapter
+from customs_ai_agent.evaluation.document_ocr_quality import CandidateSpanV1
+from customs_ai_agent.evaluation.native_pdf_vector_grid import (
+    NativePdfVectorGridExtraction,
+    NativePdfVectorGridPage,
+)
 from customs_ai_agent.schemas.document_extraction import (
     DocumentExtractionRequestMetadataV1,
     PreviewInputV1,
@@ -23,6 +28,7 @@ from customs_ai_agent.service.document_preview_runtime import PdfTextLayerPrevie
 _IDENTITY = [1, 0, 0, 1, 0, 0]
 _LEGACY_REVISION = "pypdf-5.3.1-text-layer-v1"
 _VISITOR_REVISION = "pypdf-5.3.1-text-layer-visitor-v2"
+_NATIVE_VECTOR_GRID_REVISION = "pypdf-5.3.1-native-vector-grid-v1"
 
 
 def _preview_input() -> PreviewInputV1:
@@ -159,6 +165,47 @@ def test_pdf_text_legacy_v1_preserves_the_aggregate_extract_text_path(
     assert [page.visitor_calls for page in pages] == [0]
     with pytest.raises(DocumentPreviewUnavailable, match="visitor is unavailable"):
         adapter.extract_pdf_text_layer_fragments(_preview_input())
+
+
+def test_pdf_text_native_vector_grid_revision_uses_the_direct_candidate_seam(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    import customs_ai_agent.evaluation.native_pdf_vector_grid as vector_grid
+
+    expected = NativePdfVectorGridExtraction(
+        pages=(NativePdfVectorGridPage(page_number=1, width=200, height=100),),
+        spans=(
+            CandidateSpanV1(
+                page_number=1,
+                reading_order=1,
+                text="generic-native-fragment",
+                anchor_x=0.25,
+                anchor_y=0.80,
+            ),
+        ),
+        table_cells=(),
+        form_regions=(),
+    )
+    monkeypatch.setattr(
+        vector_grid,
+        "extract_native_pdf_vector_grid",
+        lambda *, preview_input: expected,
+    )
+    monkeypatch.setattr(
+        runtime_module,
+        "_extract_pdf_text_layer_visitor_pages",
+        lambda _preview_input: (_ for _ in ()).throw(AssertionError("visitor must not run")),
+    )
+
+    candidate = PdfTextLayerPreviewAdapter(
+        extractor_revision=_NATIVE_VECTOR_GRID_REVISION
+    ).extract_pdf_text_layer(_preview_input())
+
+    assert candidate is not None
+    assert candidate.extractor_revision == _NATIVE_VECTOR_GRID_REVISION
+    assert [(span.ordinal, span.reading_order, span.text) for span in candidate.pages[0].spans] == [
+        (1, 1, "generic-native-fragment")
+    ]
 
 
 def test_human_raster_fallback_uses_legacy_parser_and_preserves_profile_revision(

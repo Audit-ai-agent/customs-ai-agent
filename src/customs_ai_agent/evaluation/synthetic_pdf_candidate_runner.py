@@ -46,6 +46,11 @@ from customs_ai_agent.evaluation.document_ocr_quality import (
 from customs_ai_agent.evaluation.native_pdf_text_layer_fields import (
     project_native_pdf_text_layer_fields,
 )
+from customs_ai_agent.evaluation.native_pdf_vector_form_fields import (
+    NativePdfVectorVisibleFieldSpec,
+    project_native_pdf_vector_form_fields,
+)
+from customs_ai_agent.evaluation.native_pdf_vector_grid import NativePdfVectorFormRegion
 from customs_ai_agent.evaluation.synthetic_pdf_visitor_table_projector import (
     project_synthetic_pdf_visitor_table_cells,
 )
@@ -117,6 +122,14 @@ class CandidateExtractionV1:
 
     spans: tuple[CandidateSpanV1, ...]
     table_cells: tuple[CandidateTableCellV1, ...] = ()
+    # A native vector/grid adapter can establish table coordinates from
+    # stroked PDF rectangles directly.  Such cells must not be overwritten by
+    # the weaker visitor-anchor projector below.  This remains local candidate
+    # evidence; it has no access to source truth or an approval pointer.
+    table_cells_are_direct: bool = False
+    # Normalized non-table rectangles are local geometry evidence for the
+    # vector form projector.  They contain no semantic field mapping.
+    form_regions: tuple[NativePdfVectorFormRegion, ...] = ()
 
 
 def _has_complete_validated_bbox_geometry(spans: Sequence[CandidateSpanV1]) -> bool:
@@ -218,6 +231,16 @@ class _PdfTextLayerCandidateAdapter:
     adapter: PdfTextLayerPreviewAdapter
 
     def extract_pdf(self, preview_input: PreviewInputV1) -> CandidateExtractionV1:
+        native_vector_grid = getattr(self.adapter, "extract_pdf_native_vector_grid", None)
+        if callable(native_vector_grid):
+            native_extraction = native_vector_grid(preview_input)
+            if native_extraction is not None:
+                return CandidateExtractionV1(
+                    spans=native_extraction.spans,
+                    table_cells=native_extraction.table_cells,
+                    table_cells_are_direct=True,
+                    form_regions=native_extraction.form_regions,
+                )
         # Reuse the native adapter's one visitor conversion rather than
         # deriving candidate spans from the public preview wire projection.
         # Internal anchors deliberately stay out of CandidateSpanV1 until a
@@ -756,6 +779,21 @@ def _field_specification(document_type: SyntheticDocumentType) -> tuple[_Visible
     if specification is None:
         raise SyntheticPdfCandidateRunnerError("candidate_document_type_invalid")
     return specification
+
+
+def _native_vector_form_field_specifications(
+    document_type: SyntheticDocumentType,
+) -> tuple[NativePdfVectorVisibleFieldSpec, ...]:
+    """Adapt the existing candidate-visible vocabulary without source mappings."""
+
+    return tuple(
+        NativePdfVectorVisibleFieldSpec(
+            field_name=specification.field_name,
+            normalizer=specification.normalizer,
+            labels=specification.labels,
+        )
+        for specification in _field_specification(document_type)
+    )
 
 
 def _matching_visible_field_names(
@@ -1552,12 +1590,24 @@ def run_synthetic_pdf_ocr_candidate(
         except Exception as error:
             raise SyntheticPdfCandidateRunnerError("candidate_engine_execution_failed") from error
         # Adapter-provided structured cells are the normal table evidence.
-        # Native pypdf visitor anchors, and Paddle's complete validated public
-        # rectangles, can additionally form one strict local geometry
-        # projection. Neither route reads Markdown, Gold, CSV, or a source
-        # content stream. Both projections are fail-closed and then pass
-        # through the same text-free structural selector.
-        uses_candidate_geometry = profile.engine_kind == "pdf_text_layer" or (
+        # A native vector/grid text-layer profile reads only this selected
+        # candidate PDF's own content stream and has already proven its cells
+        # from stroked rectangles, so visitor anchors must not overwrite that
+        # stronger evidence.  Historic text-layer candidates and Paddle's
+        # complete validated public rectangles still use the existing local
+        # geometry projection.  Neither route reads Markdown, Gold, CSV,
+        # source truth, a source-layout profile, or another document; every
+        # result passes through the same text-free structural selector.
+        uses_direct_table_cells = extracted.table_cells_are_direct
+        if uses_direct_table_cells and profile.engine_kind != "pdf_text_layer":
+            raise SyntheticPdfCandidateRunnerError("candidate_table_evidence_invalid")
+        uses_candidate_geometry = (
+            profile.engine_kind == "pdf_text_layer" and not uses_direct_table_cells
+        ) or (
+            profile.engine_kind == "paddleocr"
+            and _has_complete_validated_bbox_geometry(extracted.spans)
+        )
+        uses_positioned_fields = profile.engine_kind == "pdf_text_layer" or (
             profile.engine_kind == "paddleocr"
             and _has_complete_validated_bbox_geometry(extracted.spans)
         )
@@ -1571,7 +1621,7 @@ def run_synthetic_pdf_ocr_candidate(
                 raise SyntheticPdfCandidateRunnerError(
                     "candidate_table_projection_invalid"
                 ) from error
-        if profile.engine_kind == "docling" or uses_candidate_geometry:
+        if profile.engine_kind == "docling" or uses_direct_table_cells or uses_candidate_geometry:
             try:
                 table_cells = select_synthetic_pdf_candidate_table_cells(
                     table_cells=raw_table_cells
@@ -1587,7 +1637,19 @@ def run_synthetic_pdf_ocr_candidate(
             spans=extracted.spans,
             table_cells=table_cells,
         )
-        if uses_candidate_geometry:
+        vector_form_fields: list[CandidateFieldV1] = []
+        if extracted.form_regions:
+            try:
+                vector_form_fields = project_native_pdf_vector_form_fields(
+                    spans=extracted.spans,
+                    regions=extracted.form_regions,
+                    specifications=_native_vector_form_field_specifications(item.document_type),
+                )
+            except Exception as error:
+                raise SyntheticPdfCandidateRunnerError(
+                    "candidate_vector_form_projection_invalid"
+                ) from error
+        if uses_positioned_fields:
             try:
                 positioned_fields = project_native_pdf_text_layer_fields(
                     document_type=item.document_type,
@@ -1597,9 +1659,13 @@ def run_synthetic_pdf_ocr_candidate(
                 raise SyntheticPdfCandidateRunnerError(
                     "candidate_field_projection_invalid"
                 ) from error
-            fields = merge_synthetic_pdf_candidate_fields(positioned_fields, visible_fields)
+            fields = merge_synthetic_pdf_candidate_fields(
+                vector_form_fields,
+                positioned_fields,
+                visible_fields,
+            )
         else:
-            fields = visible_fields
+            fields = merge_synthetic_pdf_candidate_fields(vector_form_fields, visible_fields)
         documents.append(
             CandidateDocumentOutputV1(
                 asset_id=item.asset_id,
