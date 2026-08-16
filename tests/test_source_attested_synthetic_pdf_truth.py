@@ -387,7 +387,13 @@ def _profile(engine_kind: str) -> tuple[str, str, str]:
     )
 
 
-def _matching_candidate(*, packet: EvaluationPacketV2, truth, engine_kind: str):
+def _matching_candidate(
+    *,
+    packet: EvaluationPacketV2,
+    truth,
+    engine_kind: str,
+    parser_revision: str = _SOURCE_ATTESTED_TEST_PARSER_REVISION,
+):
     extractor_revision, configuration_sha256, model_inventory_sha256 = _profile(engine_kind)
     documents: list[CandidateDocumentOutputV1] = []
     for record in truth.records:
@@ -423,7 +429,7 @@ def _matching_candidate(*, packet: EvaluationPacketV2, truth, engine_kind: str):
         "schema_version": "1.0",
         "artifact_kind": "synthetic_pdf_candidate_output",
         "profile_mode": "offline_synthetic_pdf_evaluation",
-        "parser_revision": _SOURCE_ATTESTED_TEST_PARSER_REVISION,
+        "parser_revision": parser_revision,
         "dataset_id": packet.dataset_id,
         "dataset_revision": packet.dataset_revision,
         "packet_receipt_sha256": packet.packet_receipt_sha256,
@@ -590,17 +596,24 @@ def test_rendered_field_contract_exposes_bl13_invoice15_and_pl12() -> None:
         field_name for field_name, _normalizer in SOURCE_ATTESTED_REQUIRED_FIELDS["packing_list"]
     }
     assert SOURCE_ATTESTED_CANDIDATE_PARSER_REVISION == (
-        "synthetic-pdf-visible-layout-normalizer-v8"
+        "synthetic-pdf-visible-layout-normalizer-v9"
     )
 
 
-def test_source_truth_rejects_v4_candidate_parser_even_for_test_scope(tmp_path: Path) -> None:
+def test_source_truth_rejects_a_coherent_v8_candidate_parser_even_for_test_scope(
+    tmp_path: Path,
+) -> None:
     """A coherent older parser cannot create new source-attested evidence."""
 
     fixture = _fixture(tmp_path)
     truth = _truth(fixture, "development")
     packet = fixture["development_packet"]
-    candidate = _matching_candidate(packet=packet, truth=truth, engine_kind="pdf_text_layer")
+    candidate = _matching_candidate(
+        packet=packet,
+        truth=truth,
+        engine_kind="pdf_text_layer",
+        parser_revision="synthetic-pdf-visible-layout-normalizer-v8",
+    )
     extractor_revision, configuration_sha256, model_inventory_sha256 = _profile("pdf_text_layer")
 
     with pytest.raises(
@@ -616,7 +629,7 @@ def test_source_truth_rejects_v4_candidate_parser_even_for_test_scope(tmp_path: 
             extractor_revision=extractor_revision,
             configuration_sha256=configuration_sha256,
             model_inventory_sha256=model_inventory_sha256,
-            parser_revision="synthetic-pdf-visible-layout-normalizer-v4",
+            parser_revision="synthetic-pdf-visible-layout-normalizer-v8",
             expected_dataset_scope=_test_scope(fixture),
             required_field_schema=_TEST_REQUIRED_FIELD_SCHEMA,
         )
@@ -867,14 +880,14 @@ def test_selection_requires_all_three_engine_results(tmp_path: Path) -> None:
         build_source_attested_synthetic_development_selection(results=two_results)
 
 
-def test_source_evaluator_refuses_runner_parser_revision_drift(
+def test_source_evaluator_refuses_coherent_v8_runner_parser_revision(
     tmp_path: Path, monkeypatch: pytest.MonkeyPatch
 ) -> None:
     """The CLI refuses before it can write local evidence with an unapproved parser."""
 
     monkeypatch.setattr(
         "tools.evaluate_source_attested_synthetic_pdf.SYNTHETIC_PDF_LABEL_NORMALIZER_REVISION",
-        "synthetic-pdf-visible-layout-normalizer-v4",
+        "synthetic-pdf-visible-layout-normalizer-v8",
     )
     with pytest.raises(
         SyntheticPdfCandidateRunnerError,
@@ -895,7 +908,7 @@ def test_source_evaluator_refuses_runner_parser_revision_drift(
 def test_explicit_auto_activation_runs_only_after_a_passing_sealed_result(
     tmp_path: Path, monkeypatch: pytest.MonkeyPatch
 ) -> None:
-    # The candidate-runner revision is upgraded in the paired v8 change.
+    # The candidate-runner revision is upgraded in the paired v9 change.
     # Keep this source-attested chain test focused on the writer/runtime
     # boundary while asserting that exact paired revision.
     monkeypatch.setattr(
