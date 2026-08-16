@@ -317,7 +317,7 @@ def _source_attested_evaluation(
     layout_truth_parser_spec_sha256: str = "d" * 64,
     development_selection_receipt_sha256: str = "e" * 64,
     sealed_run_receipt_sha256: str = "f" * 64,
-    candidate_parser_revision: str = "synthetic-pdf-visible-layout-normalizer-v5",
+    candidate_parser_revision: str = "synthetic-pdf-visible-layout-normalizer-v7",
     candidate_bundle_sha256: str = "1" * 64,
     candidate_execution_receipt_sha256: str = "2" * 64,
     engine_kind: str = "pdf_text_layer",
@@ -410,7 +410,7 @@ def _write_source_attested_receipt_chain(
     root: Path,
     configuration_sha256: str,
     inventory_sha256: str,
-    candidate_parser_revision: str = "synthetic-pdf-visible-layout-normalizer-v5",
+    candidate_parser_revision: str = "synthetic-pdf-visible-layout-normalizer-v7",
 ) -> dict[str, str | bytes]:
     """Build a complete local source-attested chain, not hash-shaped placeholders."""
 
@@ -2804,10 +2804,10 @@ def test_source_attested_loader_rejects_execution_receipt_mismatch(tmp_path: Pat
         )
 
 
-def test_source_attested_loader_accepts_one_consistent_visible_layout_v5_chain(
+def test_source_attested_loader_accepts_one_consistent_visible_layout_v7_chain(
     tmp_path: Path,
 ) -> None:
-    """The v5 parser is accepted only when every immutable binding agrees."""
+    """The v7 parser is accepted only when every immutable binding agrees."""
 
     root = _root(tmp_path)
     root.mkdir(parents=True)
@@ -2821,7 +2821,7 @@ def test_source_attested_loader_accepts_one_consistent_visible_layout_v5_chain(
         root=root,
         configuration_sha256=configuration_sha256,
         inventory_sha256=inventory_sha256,
-        candidate_parser_revision="synthetic-pdf-visible-layout-normalizer-v5",
+        candidate_parser_revision="synthetic-pdf-visible-layout-normalizer-v7",
     )
     evaluation = chain["evaluation"]
     assert isinstance(evaluation, bytes)
@@ -2832,16 +2832,16 @@ def test_source_attested_loader_accepts_one_consistent_visible_layout_v5_chain(
     )
 
     assert binding.development_selection.candidate_parser_revision == (
-        "synthetic-pdf-visible-layout-normalizer-v5"
+        "synthetic-pdf-visible-layout-normalizer-v7"
     )
     assert binding.sealed_run.candidate_parser_revision == (
-        "synthetic-pdf-visible-layout-normalizer-v5"
+        "synthetic-pdf-visible-layout-normalizer-v7"
     )
     assert binding.sealed_run_state_path.name.startswith("sealed-run-state-")
     assert binding.sealed_evaluation_state_path.name.startswith("sealed-evaluation-state-")
 
 
-def test_source_attested_loader_rejects_a_coherent_v4_candidate_parser_chain(
+def test_source_attested_loader_rejects_a_coherent_v6_candidate_parser_chain(
     tmp_path: Path,
 ) -> None:
     """Equality alone cannot authorize a fully self-consistent old parser."""
@@ -2858,7 +2858,7 @@ def test_source_attested_loader_rejects_a_coherent_v4_candidate_parser_chain(
         root=root,
         configuration_sha256=configuration_sha256,
         inventory_sha256=inventory_sha256,
-        candidate_parser_revision="synthetic-pdf-visible-layout-normalizer-v4",
+        candidate_parser_revision="synthetic-pdf-visible-layout-normalizer-v6",
     )
     evaluation = chain["evaluation"]
     assert isinstance(evaluation, bytes)

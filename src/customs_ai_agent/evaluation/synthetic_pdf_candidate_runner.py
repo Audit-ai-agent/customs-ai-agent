@@ -42,6 +42,12 @@ from customs_ai_agent.evaluation.document_ocr_quality import (
     normalize_field_value,
     verify_receipt_source_assets,
 )
+from customs_ai_agent.evaluation.native_pdf_text_layer_fields import (
+    project_native_pdf_text_layer_fields,
+)
+from customs_ai_agent.evaluation.synthetic_pdf_visitor_table_projector import (
+    project_synthetic_pdf_visitor_table_cells,
+)
 from customs_ai_agent.schemas.document_extraction import (
     DocumentExtractionRequestMetadataV1,
     PreviewCandidateV1,
@@ -74,10 +80,11 @@ _MAX_DATASET_RECEIPT_BYTES = 8 * 1024 * 1024
 _MAX_JSON_BYTES = 1 * 1024 * 1024
 _MAX_SOURCE_BYTES = 32 * 1024 * 1024
 _PROFILE_MODE: Literal["offline_synthetic_pdf_evaluation"] = "offline_synthetic_pdf_evaluation"
-# v5 binds the visible label/value transform and the direct-Docling five-column
-# table projection.  It is deliberately a candidate-only revision: historical
-# bundles cannot be relabelled as outputs from the stricter layout parser.
-SYNTHETIC_PDF_LABEL_NORMALIZER_REVISION = "synthetic-pdf-visible-layout-normalizer-v5"
+# v7 binds the visible label/value transform, direct structured-table selection,
+# native-PDF visitor anchor projection, and the stricter positioned field
+# projector.  It is deliberately a candidate-only revision: historical bundles
+# cannot be relabelled as outputs from the stricter layout parser.
+SYNTHETIC_PDF_LABEL_NORMALIZER_REVISION = "synthetic-pdf-visible-layout-normalizer-v7"
 
 
 class SyntheticPdfCandidateRunnerError(ValueError):
@@ -113,15 +120,14 @@ def select_synthetic_pdf_candidate_table_cells(
     *,
     table_cells: Sequence[CandidateTableCellV1],
 ) -> list[CandidateTableCellV1]:
-    """Select one direct Docling table by coordinates, never by its text.
+    """Select one structured candidate table by coordinates, never by its text.
 
     This is intentionally a candidate-only structural projection.  A target
-    has exactly five observed cells in each of row 0 and row 1, at columns
-    0--4.  Later rows may exist only as partial footer rows: each is a
-    non-empty strict subset of those same five columns.  A second complete
-    five-column row, a row/column gap, a sixth column, or duplicate cell
-    coordinate rejects that table.  Zero or multiple structural targets are
-    omitted rather than guessed.
+    has exactly five or six observed cells in each of row 0 and row 1.  Later
+    rows may exist only as partial footer rows: each is a non-empty strict
+    subset of those same columns.  A second complete row, a row/column gap,
+    a seventh column, or duplicate cell coordinate rejects that table.  Zero
+    or multiple structural targets are omitted rather than guessed.
 
     The selected header/body pair is reindexed to the stable page-one/table-one
     slot.  The predicate reads neither document type nor cell text, so it
@@ -131,7 +137,7 @@ def select_synthetic_pdf_candidate_table_cells(
 
     targets: list[tuple[CandidateTableCellV1, ...]] = []
     for _table_key, table in sorted(_direct_docling_table_cells_by_coordinate(table_cells).items()):
-        target = _direct_docling_five_column_target_pair(table)
+        target = _direct_candidate_table_target_pair(table)
         if target is not None:
             targets.append(target)
     if len(targets) != 1:
@@ -178,6 +184,8 @@ class _PdfTextLayerCandidateAdapter:
                     page_number=fragment.page_number,
                     text=fragment.text,
                     reading_order=fragment.ordinal,
+                    anchor_x=(fragment.anchor.x if fragment.anchor is not None else None),
+                    anchor_y=(fragment.anchor.y if fragment.anchor is not None else None),
                 )
                 for fragment in self.adapter.extract_pdf_text_layer_fragments(preview_input)
             )
@@ -809,15 +817,15 @@ def _direct_docling_table_cells_by_coordinate(
     return tables
 
 
-def _direct_docling_five_column_target_pair(
+def _direct_candidate_table_target_pair(
     table: dict[tuple[int, int], CandidateTableCellV1],
 ) -> tuple[CandidateTableCellV1, ...] | None:
-    """Return one exact five-column header/body pair, if the grid is safe.
+    """Return one exact five- or six-column header/body pair, if the grid is safe.
 
-    Direct Docling grids can retain footer fragments after the actual one-line
-    item.  The first two rows must still be a complete 5x2 rectangle.  A
-    footer is allowed only after that pair and only when it is structurally
-    partial; the function intentionally does not inspect its values.
+    Candidate grids can retain footer fragments after the actual one-line item.
+    The first two rows must still be a complete 5x2 or 6x2 rectangle.  A footer
+    is allowed only after that pair and only when it is structurally partial;
+    the function intentionally does not inspect its values.
     """
 
     if not table:
@@ -825,7 +833,12 @@ def _direct_docling_five_column_target_pair(
     row_indexes = {row_index for row_index, _column_index in table}
     if row_indexes != set(range(max(row_indexes) + 1)) or not {0, 1}.issubset(row_indexes):
         return None
-    expected_columns = set(range(5))
+    first_columns = {
+        column_index for candidate_row_index, column_index in table if candidate_row_index == 0
+    }
+    if len(first_columns) not in {5, 6} or first_columns != set(range(len(first_columns))):
+        return None
+    expected_columns = first_columns
     for row_index in (0, 1):
         columns = {
             column_index
@@ -843,7 +856,9 @@ def _direct_docling_five_column_target_pair(
         if not columns or not columns < expected_columns:
             return None
     return tuple(
-        table[(row_index, column_index)] for row_index in (0, 1) for column_index in range(5)
+        table[(row_index, column_index)]
+        for row_index in (0, 1)
+        for column_index in range(len(expected_columns))
     )
 
 
@@ -1062,6 +1077,33 @@ def normalize_synthetic_pdf_fields(
         # substitutes a value from another artifact.
         fields.append(CandidateFieldV1(field_name=field.field_name, value=values[0]))
     return fields
+
+
+def merge_synthetic_pdf_candidate_fields(
+    *field_groups: Sequence[CandidateFieldV1],
+) -> list[CandidateFieldV1]:
+    """Keep only one raw value per field across independent candidate views.
+
+    The native positioned form projector and the existing visible-label/table
+    normalizer are independent candidate-only observations.  A field survives
+    only when exactly one raw value occurs across all views, or every view
+    produced precisely the same value.  Differing spellings are deliberately
+    omitted rather than normalized into a seemingly compatible value.
+    """
+
+    order: list[str] = []
+    values_by_field: dict[str, set[str]] = {}
+    for fields in field_groups:
+        for field in fields:
+            if field.field_name not in values_by_field:
+                order.append(field.field_name)
+                values_by_field[field.field_name] = set()
+            values_by_field[field.field_name].add(field.value)
+    return [
+        CandidateFieldV1(field_name=field_name, value=next(iter(values)))
+        for field_name in order
+        if len(values := values_by_field[field_name]) == 1
+    ]
 
 
 @dataclass(frozen=True, slots=True)
@@ -1464,13 +1506,22 @@ def run_synthetic_pdf_ocr_candidate(
             raise SyntheticPdfCandidateRunnerError("candidate_engine_execution_failed") from error
         except Exception as error:
             raise SyntheticPdfCandidateRunnerError("candidate_engine_execution_failed") from error
-        # Adapter-provided structured cells are the only table evidence.  The
-        # runner never derives grid coordinates from Markdown, Gold, CSV, or
-        # a PDF content stream.  Docling can emit several form tables, so only
-        # its fixed synthetic target table is selected and reindexed.  Other
-        # adapters preserve any future verified structured cells unchanged.
+        # Adapter-provided structured cells are the normal table evidence.
+        # Native pypdf visitor anchors can additionally form one strict local
+        # geometry projection; neither route reads Markdown, Gold, CSV, or a
+        # source content stream.  Both projections are fail-closed and then
+        # pass through the same text-free structural selector.
         raw_table_cells = tuple(extracted.table_cells)
-        if profile.engine_kind == "docling":
+        if profile.engine_kind == "pdf_text_layer":
+            try:
+                raw_table_cells = tuple(
+                    project_synthetic_pdf_visitor_table_cells(spans=extracted.spans)
+                )
+            except Exception as error:
+                raise SyntheticPdfCandidateRunnerError(
+                    "candidate_table_projection_invalid"
+                ) from error
+        if profile.engine_kind in {"docling", "pdf_text_layer"}:
             try:
                 table_cells = select_synthetic_pdf_candidate_table_cells(
                     table_cells=raw_table_cells
@@ -1481,11 +1532,24 @@ def run_synthetic_pdf_ocr_candidate(
                 ) from error
         else:
             table_cells = list(raw_table_cells)
-        fields = normalize_synthetic_pdf_fields(
+        visible_fields = normalize_synthetic_pdf_fields(
             document_type=item.document_type,
             spans=extracted.spans,
             table_cells=table_cells,
         )
+        if profile.engine_kind == "pdf_text_layer":
+            try:
+                positioned_fields = project_native_pdf_text_layer_fields(
+                    document_type=item.document_type,
+                    spans=extracted.spans,
+                )
+            except Exception as error:
+                raise SyntheticPdfCandidateRunnerError(
+                    "candidate_field_projection_invalid"
+                ) from error
+            fields = merge_synthetic_pdf_candidate_fields(positioned_fields, visible_fields)
+        else:
+            fields = visible_fields
         documents.append(
             CandidateDocumentOutputV1(
                 asset_id=item.asset_id,
@@ -1525,6 +1589,7 @@ __all__ = [
     "build_default_synthetic_pdf_candidate_adapter",
     "load_local_synthetic_pdf_evaluation_inputs",
     "load_unapproved_local_candidate_profile",
+    "merge_synthetic_pdf_candidate_fields",
     "normalize_synthetic_pdf_docling_table_cells",
     "normalize_synthetic_pdf_fields",
     "reserve_sealed_candidate_run",

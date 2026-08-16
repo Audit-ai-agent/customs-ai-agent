@@ -166,11 +166,7 @@ def _validated_page_one_spans(
     seen_reading_orders: set[int] = set()
     for span in spans:
         page_number = getattr(span, "page_number", None)
-        if (
-            isinstance(page_number, bool)
-            or not isinstance(page_number, int)
-            or page_number < 1
-        ):
+        if isinstance(page_number, bool) or not isinstance(page_number, int) or page_number < 1:
             return None
         if page_number != 1:
             continue
@@ -268,7 +264,9 @@ def _bbox_rows(spans: Sequence[_GeometrySpan]) -> list[_GeometryRow]:
     current: list[_GeometrySpan] = []
     common_top = 0.0
     common_bottom = 0.0
-    for span in sorted(spans, key=lambda item: (item.top, item.bottom, item.left, item.reading_order)):
+    for span in sorted(
+        spans, key=lambda item: (item.top, item.bottom, item.left, item.reading_order)
+    ):
         if not current:
             current = [span]
             common_top = span.top
@@ -408,9 +406,7 @@ def _header_body_rows(
     return None
 
 
-def _matching_column_pitch(
-    header: Sequence[_CellRun], body: Sequence[_CellRun]
-) -> float | None:
+def _matching_column_pitch(header: Sequence[_CellRun], body: Sequence[_CellRun]) -> float | None:
     """Verify a stable one-to-one horizontal slot for every visible column."""
 
     if len(header) != len(body) or len(header) not in _COMPLETE_COLUMN_COUNTS:
@@ -451,9 +447,7 @@ def _visible_grids(
     run_candidates = (
         _bbox_row_run_candidates if geometry_kind == "bbox" else _anchor_row_run_candidates
     )
-    rows_are_nearby = (
-        _bbox_rows_are_nearby if geometry_kind == "bbox" else _anchor_rows_are_nearby
-    )
+    rows_are_nearby = _bbox_rows_are_nearby if geometry_kind == "bbox" else _anchor_rows_are_nearby
     grids: list[_VisibleGrid] = []
     for index, (first, second) in enumerate(zip(rows, rows[1:])):
         header_row, body_row = _header_body_rows(first, second) or (None, None)
@@ -494,7 +488,9 @@ def _row_conflicts_with_grid(
         nearby = vertical_gap <= height * _MAX_BBOX_ROW_GAP_HEIGHT_MULTIPLIER
     else:
         nearby = vertical_gap <= grid.column_pitch * _MAX_ANCHOR_ROW_GAP_TO_COLUMN_PITCH_RATIO
-    return nearby and any(span.left <= table_right and table_left <= span.right for span in row.spans)
+    return nearby and any(
+        span.left <= table_right and table_left <= span.right for span in row.spans
+    )
 
 
 def _has_unassigned_nearby_row(rows: Sequence[_GeometryRow], grid: _VisibleGrid) -> bool:

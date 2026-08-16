@@ -590,7 +590,7 @@ def test_rendered_field_contract_exposes_bl13_invoice15_and_pl12() -> None:
         field_name for field_name, _normalizer in SOURCE_ATTESTED_REQUIRED_FIELDS["packing_list"]
     }
     assert SOURCE_ATTESTED_CANDIDATE_PARSER_REVISION == (
-        "synthetic-pdf-visible-layout-normalizer-v5"
+        "synthetic-pdf-visible-layout-normalizer-v7"
     )
 
 
@@ -895,7 +895,7 @@ def test_source_evaluator_refuses_runner_parser_revision_drift(
 def test_explicit_auto_activation_runs_only_after_a_passing_sealed_result(
     tmp_path: Path, monkeypatch: pytest.MonkeyPatch
 ) -> None:
-    # The candidate-runner revision is upgraded in the paired v5 change.
+    # The candidate-runner revision is upgraded in the paired v7 change.
     # Keep this source-attested chain test focused on the writer/runtime
     # boundary while asserting that exact paired revision.
     monkeypatch.setattr(

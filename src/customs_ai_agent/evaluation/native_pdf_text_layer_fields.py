@@ -116,7 +116,7 @@ _UNIT_ONLY = re.compile(r"^\s*(?P<unit>[A-Za-z]+)\s*$")
 
 # All positions are normalized to one page.  These are broad enough for a
 # label/value pair rendered in the same form cell, but intentionally much
-# narrower than a page quadrant.  The visitor's direct successor is also
+# narrower than a page quadrant.  A unique geometrically bounded candidate is
 # required, rather than a nearest-neighbour search over the page.
 _SAME_ROW_Y_DELTA = 0.020
 _MAX_RIGHT_GAP = 0.550
@@ -278,27 +278,20 @@ def _single_geometric_value(
     ]
     if not successors:
         return None
-    direct_successor = successors[0]
-    # A visible known label cannot double as the next label's value.  We do
-    # not skip over it, because doing so would become a sequential-text
-    # fallback rather than a proven local label/value relation.
-    if _matching_specs(document_type=document_type, label=direct_successor.text):
-        return None
-    if not _is_geometrically_adjacent_label_value(label=label, value=direct_successor):
-        return None
-    # Duplicate visitor callbacks at the same exact anchor cannot be safely
-    # ordered as one visual value.  Reject them rather than concatenating or
-    # choosing one.  Other page fragments do not matter once the direct
-    # successor has established the bounded label/value relation.
-    duplicate_successors = [
+    candidates = [
         candidate
-        for candidate in successors[1:]
-        if abs(candidate.anchor.x - direct_successor.anchor.x) <= _POSITION_EPSILON
-        and abs(candidate.anchor.y - direct_successor.anchor.y) <= _POSITION_EPSILON
+        for candidate in successors
+        if not _matching_specs(document_type=document_type, label=candidate.text)
+        and _is_geometrically_adjacent_label_value(label=label, value=candidate)
     ]
-    if duplicate_successors:
+    # Visitor callback order can contain an unrelated fragment between a
+    # visible label and its nearby value.  Geometry may safely skip that
+    # distant fragment only when it leaves exactly one local non-label
+    # candidate.  Two candidates, including a duplicate callback at the same
+    # anchor, are ambiguous and deliberately omitted.
+    if len(candidates) != 1:
         return None
-    return direct_successor.text
+    return candidates[0].text
 
 
 def _append_value_for_field(
@@ -330,8 +323,8 @@ def project_native_pdf_text_layer_fields(
     """Project unambiguous native-PDF label/value pairs into candidate fields.
 
     Only positioned candidate spans are consulted.  Each field requires one
-    and only one exact visible label and one direct, nearby non-label visitor
-    successor.  Consequently this function returns an empty or partial list
+    and only one exact visible label and one uniquely bounded, nearby non-label
+    candidate.  Consequently this function returns an empty or partial list
     when the adapter does not provide reliable geometry; that is deliberate
     fail-closed behaviour, not a fallback to a nearest page-text search.
     """

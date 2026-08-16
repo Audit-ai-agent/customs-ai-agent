@@ -175,13 +175,41 @@ def test_projects_a_single_below_label_value_pair() -> None:
     assert [(field.field_name, field.value) for field in fields] == [("inv_no", "INV-001")]
 
 
-def test_rejects_a_field_when_the_direct_successor_anchor_is_duplicated() -> None:
+def test_rejects_a_field_when_the_unique_nearby_value_anchor_is_duplicated() -> None:
     fields = project_native_pdf_text_layer_fields(
         document_type="invoice",
         spans=[
             _span(reading_order=1, text="Invoice Number", x=0.10, y=0.20),
             _span(reading_order=2, text="INV-ONE", x=0.40, y=0.20),
             _span(reading_order=3, text="INV-TWO", x=0.40, y=0.20),
+        ],
+    )
+
+    assert fields == []
+
+
+def test_uses_only_one_geometrically_nearby_value_when_callback_order_has_an_unrelated_fragment() -> (
+    None
+):
+    fields = project_native_pdf_text_layer_fields(
+        document_type="invoice",
+        spans=[
+            _span(reading_order=1, text="Invoice Number", x=0.10, y=0.20),
+            _span(reading_order=2, text="Unrelated page fragment", x=0.80, y=0.80),
+            _span(reading_order=3, text="INV-ONE", x=0.40, y=0.20),
+        ],
+    )
+
+    assert [(field.field_name, field.value) for field in fields] == [("inv_no", "INV-ONE")]
+
+
+def test_rejects_a_field_when_two_different_values_are_geometrically_nearby() -> None:
+    fields = project_native_pdf_text_layer_fields(
+        document_type="invoice",
+        spans=[
+            _span(reading_order=1, text="Invoice Number", x=0.10, y=0.20),
+            _span(reading_order=2, text="INV-ONE", x=0.40, y=0.20),
+            _span(reading_order=3, text="INV-TWO", x=0.42, y=0.20),
         ],
     )
 

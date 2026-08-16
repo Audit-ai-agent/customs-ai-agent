@@ -90,9 +90,7 @@ def test_projects_one_fragmented_structural_grid_without_document_type_or_text_p
 
     assert [(cell.page_number, cell.table_index) for cell in cells] == [(1, 1)] * (columns * 2)
     assert [(cell.row_index, cell.column_index) for cell in cells] == [
-        (row_index, column_index)
-        for row_index in (0, 1)
-        for column_index in range(columns)
+        (row_index, column_index) for row_index in (0, 1) for column_index in range(columns)
     ]
     assert [cell.text for cell in cells] == [
         f"opaque-{row_name}-{column_index}-aopaque-{row_name}-{column_index}-b"
@@ -135,6 +133,32 @@ def test_bbox_path_has_priority_when_anchors_do_not_form_a_grid() -> None:
     assert len(project_synthetic_pdf_visitor_table_cells(spans=spans)) == 10
 
 
+def test_uses_complete_anchor_grid_when_partial_bbox_grid_fails_closed() -> None:
+    anchored = _fragmented_grid(columns=5, prefix="opaque", geometry="anchor")
+    spans = [
+        CandidateSpanV1(
+            page_number=span.page_number,
+            reading_order=span.reading_order,
+            text=span.text,
+            bbox=(
+                None
+                if index == len(anchored) - 1
+                else BoundingBoxV1(
+                    x=span.anchor_x or 0.0,
+                    y=span.anchor_y or 0.0,
+                    width=0.035,
+                    height=0.02,
+                )
+            ),
+            anchor_x=span.anchor_x,
+            anchor_y=span.anchor_y,
+        )
+        for index, span in enumerate(anchored)
+    ]
+
+    assert len(project_synthetic_pdf_visitor_table_cells(spans=spans)) == 10
+
+
 @pytest.mark.parametrize("malformation", ["missing", "unlocated", "misaligned", "interleaved"])
 def test_bbox_path_fails_closed_for_missing_or_ambiguous_grid(malformation: str) -> None:
     spans = _fragmented_grid(columns=5, prefix="opaque")
@@ -162,7 +186,11 @@ def test_bbox_path_fails_closed_for_missing_or_ambiguous_grid(malformation: str)
         spans = [
             CandidateSpanV1(
                 page_number=span.page_number,
-                reading_order=(span.reading_order * 2 if span.reading_order <= 10 else span.reading_order * 2 - 19),
+                reading_order=(
+                    span.reading_order * 2
+                    if span.reading_order <= 10
+                    else span.reading_order * 2 - 19
+                ),
                 text=span.text,
                 bbox=span.bbox,
             )
@@ -246,9 +274,7 @@ def test_fails_closed_when_two_complete_structural_targets_exist() -> None:
 
 def test_ignores_unlocated_callback_outside_grid_order_and_rejects_page_two_only_grid() -> None:
     positioned = _fragmented_grid(columns=5, prefix="opaque")
-    positioned.append(
-        CandidateSpanV1(page_number=1, reading_order=99, text="outside", bbox=None)
-    )
+    positioned.append(CandidateSpanV1(page_number=1, reading_order=99, text="outside", bbox=None))
     assert len(project_synthetic_pdf_visitor_table_cells(spans=positioned)) == 10
 
     page_two = _fragmented_grid(columns=5, prefix="opaque", page_number=2)
