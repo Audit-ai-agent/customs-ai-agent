@@ -938,8 +938,7 @@ def _parse_options(
                 len(directory_parts) != 3
                 or directory_parts[:2] != ("models", "native-pdf-semantic")
                 or _SHA256.fullmatch(directory_parts[2]) is None
-                or model_artifact
-                != f"{model_directory}/{directory_parts[2]}.json"
+                or model_artifact != f"{model_directory}/{directory_parts[2]}.json"
             ):
                 raise DocumentPreviewRuntimeError("document_preview_configuration_invalid")
             return {
@@ -1406,8 +1405,7 @@ def parse_source_attested_synthetic_pdf_preview_activation(
     if (
         evaluation["packet_kind"] != "sealed"
         or evaluation["evaluation_basis"] != "source_attested_synthetic"
-        or evaluation["evaluation_scope"]
-        != "synthetic_r1_supervised_native_template_compatibility"
+        or evaluation["evaluation_scope"] != "synthetic_r1_supervised_native_template_compatibility"
         or evaluation["layout_truth_kind"] != "pdf_content_stream_layout_v1"
     ):
         raise DocumentPreviewRuntimeError(code)
@@ -1776,8 +1774,7 @@ def parse_source_attested_synthetic_sealed_evaluation_result(
         value["schema_version"] != "1.0"
         or value["evaluation_basis"] != "source_attested_synthetic"
         or value["packet_kind"] != "sealed"
-        or value["evaluation_scope"]
-        != "synthetic_r1_supervised_native_template_compatibility"
+        or value["evaluation_scope"] != "synthetic_r1_supervised_native_template_compatibility"
         or value["layout_truth_kind"] != "pdf_content_stream_layout_v1"
         or value["passed"] is not True
     ):
@@ -1902,8 +1899,7 @@ def parse_source_attested_synthetic_development_evaluation_result(
         value["schema_version"] != "1.0"
         or value["evaluation_basis"] != "source_attested_synthetic"
         or value["packet_kind"] != "development"
-        or value["evaluation_scope"]
-        != "synthetic_r1_supervised_native_template_compatibility"
+        or value["evaluation_scope"] != "synthetic_r1_supervised_native_template_compatibility"
         or value["layout_truth_kind"] != "pdf_content_stream_layout_v1"
         or value["development_selection_receipt_sha256"] is not None
         or value["sealed_run_receipt_sha256"] is not None
@@ -2083,8 +2079,7 @@ def _parse_source_attested_layout_truth_receipt(
         value["schema_version"] != "1.0"
         or value["artifact_kind"] != "source_attested_synthetic_pdf_layout_truth"
         or value["provenance_kind"] != "source_attested_synthetic"
-        or value["evaluation_scope"]
-        != "synthetic_r1_supervised_native_template_compatibility"
+        or value["evaluation_scope"] != "synthetic_r1_supervised_native_template_compatibility"
         or value["layout_truth_kind"] != "pdf_content_stream_layout_v1"
         or value["packet_kind"] != "stratified-v2"
         or not isinstance(value["packet_split"], str)
@@ -2200,8 +2195,7 @@ def _parse_source_attested_development_selection_receipt(
         value["schema_version"] != "1.0"
         or value["artifact_kind"] != "source_attested_synthetic_pdf_development_selection"
         or value["evaluation_basis"] != "source_attested_synthetic"
-        or value["evaluation_scope"]
-        != "synthetic_r1_supervised_native_template_compatibility"
+        or value["evaluation_scope"] != "synthetic_r1_supervised_native_template_compatibility"
         or value["layout_truth_kind"] != "pdf_content_stream_layout_v1"
         or not isinstance(value["candidate_results"], list)
     ):
@@ -2257,8 +2251,7 @@ def _parse_source_attested_development_selection_receipt(
         for candidate in candidates
         if (
             candidate.engine_kind == selected_engine_kind
-            and candidate.extractor_revision
-            == selected_extractor_revision
+            and candidate.extractor_revision == selected_extractor_revision
             and candidate.configuration_sha256
             == _sha256(value["selected_configuration_sha256"], code=code)
             and candidate.model_inventory_sha256
@@ -2331,8 +2324,7 @@ def _parse_source_attested_sealed_run_receipt(
         value["schema_version"] != "1.0"
         or value["artifact_kind"] != "source_attested_synthetic_pdf_sealed_run"
         or value["evaluation_basis"] != "source_attested_synthetic"
-        or value["evaluation_scope"]
-        != "synthetic_r1_supervised_native_template_compatibility"
+        or value["evaluation_scope"] != "synthetic_r1_supervised_native_template_compatibility"
         or value["layout_truth_kind"] != "pdf_content_stream_layout_v1"
     ):
         raise DocumentPreviewRuntimeError(code)
@@ -4114,7 +4106,9 @@ class ApprovedPdfPreviewBinding:
                     "document_preview_supervised_template_runtime_changed"
                 ) from error
         elif self.supervised_template_provenance_binding is not None:
-            raise DocumentPreviewRuntimeError("document_preview_supervised_template_runtime_changed")
+            raise DocumentPreviewRuntimeError(
+                "document_preview_supervised_template_runtime_changed"
+            )
         try:
             _verify_configured_model_directory_inventory(
                 self.root, self.configuration, self.inventory
@@ -5413,9 +5407,7 @@ class PaddleOcr3PdfPreviewAdapter:
                 if width < 1 or height < 1 or width * height > 40_000_000:
                     raise DocumentPreviewInputError("PDF raster dimensions are invalid")
                 with local_files_only():
-                    prediction = engine.predict(
-                        np.asarray(rendered), **self._prediction_kwargs()
-                    )
+                    prediction = engine.predict(np.asarray(rendered), **self._prediction_kwargs())
                 spans = _paddleocr3_page_spans(
                     prediction,
                     page_number=index + 1,

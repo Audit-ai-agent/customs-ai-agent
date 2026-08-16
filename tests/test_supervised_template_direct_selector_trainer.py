@@ -52,12 +52,15 @@ def _field_value(*, document_type: str, field_name: str, normalizer: str, ordina
     return f"TEXT{ordinal:04d}"
 
 
-def _candidate_extraction(document_type: str) -> tuple[NativePdfVectorGridExtraction, dict[str, str]]:
+def _candidate_extraction(
+    document_type: str,
+) -> tuple[NativePdfVectorGridExtraction, dict[str, str]]:
     base_x = {"bill_of_lading": 0.10, "invoice": 0.30, "packing_list": 0.50}[document_type]
     values: dict[str, str] = {}
     spans: list[CandidateSpanV1] = []
     for ordinal, (field_name, normalizer) in enumerate(
-        trainer._REQUIRED_FIELDS[document_type], start=1  # type: ignore[index]
+        trainer._REQUIRED_FIELDS[document_type],
+        start=1,  # type: ignore[index]
     ):
         if field_name == "net_gross_weight":
             continue
@@ -198,7 +201,9 @@ def _training_fixture(tmp_path: Path):  # type: ignore[no-untyped-def]
         "field_label_count": sum(len(record.field_labels) for record in records),
         "records": [record.model_dump(mode="json") for record in records],
     }
-    labels_payload["training_labels_receipt_sha256"] = training_labels_receipt_sha256(labels_payload)
+    labels_payload["training_labels_receipt_sha256"] = training_labels_receipt_sha256(
+        labels_payload
+    )
     labels = SourceAttestedSupervisedTemplateTrainingLabelsV1.model_validate(labels_payload)
     return source_directory, split, labels, evidence_by_bytes, values
 
@@ -238,7 +243,9 @@ def test_candidate_native_trainer_discovers_join_and_writes_isolated_model(
         return evidence_by_bytes[pdf_bytes]
 
     monkeypatch.setattr(trainer, "extract_native_pdf_vector_grid_from_pdf_bytes", fake_extract)
-    monkeypatch.setattr(semantic_adapter, "extract_native_pdf_vector_grid_from_pdf_bytes", fake_extract)
+    monkeypatch.setattr(
+        semantic_adapter, "extract_native_pdf_vector_grid_from_pdf_bytes", fake_extract
+    )
     result = trainer.train_source_attested_supervised_template_direct_selector_model(
         receipt=object(),  # type: ignore[arg-type]
         development_packet=object(),  # type: ignore[arg-type]
@@ -251,14 +258,26 @@ def test_candidate_native_trainer_discovers_join_and_writes_isolated_model(
         training_environment_inventory_sha256=_sha("environment"),
     )
 
-    packing_list = next(document for document in result.model.documents if document.document_type == "packing_list")
-    net_gross = next(field for field in packing_list.fields if field.field_name == "net_gross_weight")
+    packing_list = next(
+        document for document in result.model.documents if document.document_type == "packing_list"
+    )
+    net_gross = next(
+        field for field in packing_list.fields if field.field_name == "net_gross_weight"
+    )
     assert net_gross.value_transform == "join-slash-v1"
     assert len(net_gross.selectors) == 2
-    assert result.model_training_receipt.model_id == trainer.SUPERVISED_TEMPLATE_DIRECT_SELECTOR_MODEL_ID
+    assert (
+        result.model_training_receipt.model_id
+        == trainer.SUPERVISED_TEMPLATE_DIRECT_SELECTOR_MODEL_ID
+    )
     assert result.model_training_receipt.model_artifact_sha256 == result.model_artifact_sha256
-    assert all(asset.asset_id.encode("utf-8") not in result.model_artifact_bytes for asset in split.training_assets)
-    assert all(value.encode("utf-8") not in result.model_artifact_bytes for value in last_values.values())
+    assert all(
+        asset.asset_id.encode("utf-8") not in result.model_artifact_bytes
+        for asset in split.training_assets
+    )
+    assert all(
+        value.encode("utf-8") not in result.model_artifact_bytes for value in last_values.values()
+    )
 
     root = tmp_path / "workspace" / "_local" / "data" / "document-preview"
     root.mkdir()
@@ -394,13 +413,11 @@ def test_trainer_uses_hash_only_labels_and_no_source_profile_import() -> None:
         for node in ast.walk(tree)
         if isinstance(node, ast.Import)
         for alias in node.names
-    ] + [
-        node.module or ""
-        for node in ast.walk(tree)
-        if isinstance(node, ast.ImportFrom)
-    ]
+    ] + [node.module or "" for node in ast.walk(tree) if isinstance(node, ast.ImportFrom)]
     attributes = {
-        node.attr for node in ast.walk(tree) if isinstance(node, ast.Attribute) and isinstance(node.attr, str)
+        node.attr
+        for node in ast.walk(tree)
+        if isinstance(node, ast.Attribute) and isinstance(node.attr, str)
     }
 
     assert all("source_attested_synthetic_pdf_truth" not in name for name in imported_modules)
@@ -408,9 +425,13 @@ def test_trainer_uses_hash_only_labels_and_no_source_profile_import() -> None:
     assert "value_transform" not in {
         node.attr
         for node in ast.walk(tree)
-        if isinstance(node, ast.Attribute) and isinstance(node.value, ast.Name) and node.value.id == "label"
+        if isinstance(node, ast.Attribute)
+        and isinstance(node.value, ast.Name)
+        and node.value.id == "label"
     }
-    signature = inspect.signature(trainer.train_source_attested_supervised_template_direct_selector_model)
+    signature = inspect.signature(
+        trainer.train_source_attested_supervised_template_direct_selector_model
+    )
     assert "clean_manifest_path" not in signature.parameters
     assert "error_labels_path" not in signature.parameters
     assert "development_pdf_path" not in signature.parameters

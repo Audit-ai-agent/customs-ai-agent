@@ -551,13 +551,9 @@ def test_paddleocr3_predict_uses_blank_native_preflight_and_normalizes_rec_polys
     constructor = captured["constructor"]
     assert constructor == {
         "text_detection_model_name": "PP-OCRv5_mobile_det",
-        "text_detection_model_dir": str(
-            (tmp_path / "models" / "paddleocr3" / "det").resolve()
-        ),
+        "text_detection_model_dir": str((tmp_path / "models" / "paddleocr3" / "det").resolve()),
         "text_recognition_model_name": "en_PP-OCRv5_mobile_rec",
-        "text_recognition_model_dir": str(
-            (tmp_path / "models" / "paddleocr3" / "rec").resolve()
-        ),
+        "text_recognition_model_dir": str((tmp_path / "models" / "paddleocr3" / "rec").resolve()),
         "device": "cpu",
         "cpu_threads": 1,
         "enable_hpi": False,

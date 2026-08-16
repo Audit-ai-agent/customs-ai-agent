@@ -35,6 +35,7 @@ from customs_ai_agent.evaluation.document_ocr_quality import (
     receipt_sha256,
     sha256_bytes,
 )
+
 # The private source-truth helpers below are intentionally confined to this
 # training-only module.  They must not be imported by a runtime adapter or a
 # candidate runner: this module reads only family-safe training PDFs and emits
@@ -66,9 +67,9 @@ SUPERVISED_TEMPLATE_TRAINING_SPLIT_REVISION: Literal[
 SUPERVISED_TEMPLATE_TRAINING_LABEL_COMPILER_REVISION: Literal[
     "source-attested-family-safe-training-label-compiler-v1"
 ] = "source-attested-family-safe-training-label-compiler-v1"
-SUPERVISED_TEMPLATE_TRAINING_LABEL_KIND: Literal[
+SUPERVISED_TEMPLATE_TRAINING_LABEL_KIND: Literal["pdf-content-stream-semantic-slot-label-v1"] = (
     "pdf-content-stream-semantic-slot-label-v1"
-] = "pdf-content-stream-semantic-slot-label-v1"
+)
 
 
 class SupervisedTemplateTrainingError(ValueError):
@@ -122,9 +123,7 @@ class SourceAttestedSupervisedTemplateTrainingSplitV1(_WireModel):
     )
     training_asset_count: int = Field(ge=1, le=100_000)
     training_asset_list_sha256: str = Field(pattern=_SHA256)
-    training_strata: list[SupervisedTemplateTrainingStratumV1] = Field(
-        min_length=1, max_length=16
-    )
+    training_strata: list[SupervisedTemplateTrainingStratumV1] = Field(min_length=1, max_length=16)
     training_split_receipt_sha256: str = Field(pattern=_SHA256)
 
     @model_validator(mode="after")
@@ -144,9 +143,7 @@ class SourceAttestedSupervisedTemplateTrainingSplitV1(_WireModel):
         if self.training_asset_list_sha256 != training_asset_list_sha256(assets):
             raise ValueError("training split asset list SHA-256 mismatch")
         strata = self.training_strata
-        ordered_strata = sorted(
-            strata, key=lambda item: (item.fixture_kind, item.document_type)
-        )
+        ordered_strata = sorted(strata, key=lambda item: (item.fixture_kind, item.document_type))
         if strata != ordered_strata or len(
             {(item.fixture_kind, item.document_type) for item in strata}
         ) != len(strata):
@@ -214,18 +211,16 @@ class SourceAttestedSupervisedTemplateTrainingLabelsV1(_WireModel):
     label_kind: Literal["pdf-content-stream-semantic-slot-label-v1"] = (
         SUPERVISED_TEMPLATE_TRAINING_LABEL_KIND
     )
-    label_compiler_revision: Literal[
-        "source-attested-family-safe-training-label-compiler-v1"
-    ] = SUPERVISED_TEMPLATE_TRAINING_LABEL_COMPILER_REVISION
+    label_compiler_revision: Literal["source-attested-family-safe-training-label-compiler-v1"] = (
+        SUPERVISED_TEMPLATE_TRAINING_LABEL_COMPILER_REVISION
+    )
     dataset_id: str = Field(min_length=1, max_length=128, pattern=_IDENTIFIER)
     dataset_revision: str = Field(min_length=1, max_length=128, pattern=_IDENTIFIER)
     dataset_receipt_sha256: str = Field(pattern=_SHA256)
     training_split_receipt_sha256: str = Field(pattern=_SHA256)
     record_count: int = Field(ge=1, le=100_000)
     field_label_count: int = Field(ge=1, le=1_000_000)
-    records: list[SupervisedTemplateTrainingLabelRecordV1] = Field(
-        min_length=1, max_length=100_000
-    )
+    records: list[SupervisedTemplateTrainingLabelRecordV1] = Field(min_length=1, max_length=100_000)
     training_labels_receipt_sha256: str = Field(pattern=_SHA256)
 
     @model_validator(mode="after")
@@ -302,10 +297,7 @@ def training_asset_list_sha256(
 
     return sha256_bytes(
         canonical_json_bytes(
-            [
-                {"asset_id": asset.asset_id, "source_sha256": asset.source_sha256}
-                for asset in assets
-            ]
+            [{"asset_id": asset.asset_id, "source_sha256": asset.source_sha256} for asset in assets]
         )
     )
 
@@ -364,9 +356,9 @@ def model_training_receipt_sha256(
     return sha256_bytes(canonical_json_bytes(_model_training_receipt_payload(receipt)))
 
 
-def _asset_family(asset: DatasetAssetReceiptV1) -> tuple[
-    Literal["clean", "error"], SyntheticDocumentType, str
-]:
+def _asset_family(
+    asset: DatasetAssetReceiptV1,
+) -> tuple[Literal["clean", "error"], SyntheticDocumentType, str]:
     """Derive the family from the receipt path, never from packet labels."""
 
     relative = asset.relative_path.replace("\\", "/")
@@ -374,7 +366,9 @@ def _asset_family(asset: DatasetAssetReceiptV1) -> tuple[
     if len(parts) != 3:
         raise SupervisedTemplateTrainingError("supervised_training_receipt_path_invalid")
     fixture_directory, set_directory, filename = parts
-    if fixture_directory not in {"clean_sets", "error_sets"} or not set_directory.startswith("set_"):
+    if fixture_directory not in {"clean_sets", "error_sets"} or not set_directory.startswith(
+        "set_"
+    ):
         raise SupervisedTemplateTrainingError("supervised_training_receipt_path_invalid")
     set_number = set_directory.removeprefix("set_")
     if len(set_number) != 4 or not set_number.isdigit():
@@ -599,13 +593,17 @@ def build_source_attested_supervised_template_training_labels(
         try:
             pdf_bytes = _read_verified_source_pdf(source_directory=source_directory, asset=asset)
         except SourceAttestedSyntheticPdfTruthError as error:
-            raise SupervisedTemplateTrainingError("supervised_training_source_asset_invalid") from error
+            raise SupervisedTemplateTrainingError(
+                "supervised_training_source_asset_invalid"
+            ) from error
         try:
             parsed = _parse_pdf_content_stream_v1(pdf_bytes)
             profile = _require_profile(document_type=document_type, parsed=parsed)
             fields = _fields_from_profile(parsed=parsed, profile=profile)
         except SourceAttestedSyntheticPdfTruthError as error:
-            raise SupervisedTemplateTrainingError("supervised_training_source_label_invalid") from error
+            raise SupervisedTemplateTrainingError(
+                "supervised_training_source_label_invalid"
+            ) from error
         fields_by_name = {field.field_name: field for field in fields}
         if len(fields_by_name) != len(fields):
             raise SupervisedTemplateTrainingError("supervised_training_source_label_invalid")
@@ -702,7 +700,9 @@ def build_source_attested_supervised_template_model_training_receipt(
     try:
         return SourceAttestedSupervisedTemplateModelTrainingReceiptV1.model_validate(payload)
     except ValidationError as error:
-        raise SupervisedTemplateTrainingError("supervised_training_model_receipt_invalid") from error
+        raise SupervisedTemplateTrainingError(
+            "supervised_training_model_receipt_invalid"
+        ) from error
 
 
 def _read_canonical_split(path: Path) -> SourceAttestedSupervisedTemplateTrainingSplitV1:

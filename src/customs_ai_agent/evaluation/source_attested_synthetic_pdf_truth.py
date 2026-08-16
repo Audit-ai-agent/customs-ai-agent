@@ -88,9 +88,7 @@ SOURCE_ATTESTED_EVALUATION_BASIS: Final[Literal["source_attested_synthetic"]] = 
 )
 SOURCE_ATTESTED_EVALUATION_SCOPE: Final[
     Literal["synthetic_r1_supervised_native_template_compatibility"]
-] = (
-    "synthetic_r1_supervised_native_template_compatibility"
-)
+] = "synthetic_r1_supervised_native_template_compatibility"
 SOURCE_LAYOUT_TRUTH_KIND: Final[Literal["pdf_content_stream_layout_v1"]] = (
     "pdf_content_stream_layout_v1"
 )
@@ -116,9 +114,7 @@ SOURCE_ATTESTED_CANDIDATE_PARSER_REVISION: Final[
 # beside the source-truth scope makes an older text-layer extractor or an
 # unrelated OCR engine ineligible even if it can mint a self-consistent result
 # chain.
-SOURCE_ATTESTED_SUPERVISED_TEMPLATE_ENGINE_KIND: Final[Literal["pdf_text_layer"]] = (
-    "pdf_text_layer"
-)
+SOURCE_ATTESTED_SUPERVISED_TEMPLATE_ENGINE_KIND: Final[Literal["pdf_text_layer"]] = "pdf_text_layer"
 SOURCE_ATTESTED_SUPERVISED_TEMPLATE_EXTRACTOR_REVISION: Final[
     Literal["pypdf-5.3.1-supervised-template-r1-v1"]
 ] = SUPERVISED_TEMPLATE_EXTRACTOR_REVISION
@@ -2729,9 +2725,10 @@ def select_best_source_attested_synthetic_development_result(
         return first
 
     expected_engines = {"pdf_text_layer", "paddleocr", "docling"}
-    if len(results) != len(expected_engines) or {
-        result.engine_kind for result in results
-    } != expected_engines:
+    if (
+        len(results) != len(expected_engines)
+        or {result.engine_kind for result in results} != expected_engines
+    ):
         raise SourceAttestedSyntheticPdfTruthError("source_layout_development_result_set_invalid")
     passing = [result for result in results if result.passed]
     if not passing:

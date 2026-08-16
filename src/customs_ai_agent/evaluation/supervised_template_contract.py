@@ -31,9 +31,9 @@ SUPERVISED_TEMPLATE_EVALUATION_SCOPE: Final[
 SUPERVISED_TEMPLATE_CANDIDATE_PARSER_REVISION: Final[
     Literal["synthetic-pdf-supervised-template-normalizer-v11"]
 ] = "synthetic-pdf-supervised-template-normalizer-v11"
-SUPERVISED_TEMPLATE_EXTRACTOR_REVISION: Final[
-    Literal["pypdf-5.3.1-supervised-template-r1-v1"]
-] = "pypdf-5.3.1-supervised-template-r1-v1"
+SUPERVISED_TEMPLATE_EXTRACTOR_REVISION: Final[Literal["pypdf-5.3.1-supervised-template-r1-v1"]] = (
+    "pypdf-5.3.1-supervised-template-r1-v1"
+)
 SUPERVISED_TEMPLATE_MODEL_ID: Final[Literal["synthetic-customs-pdf-2000-r1-native-template"]] = (
     "synthetic-customs-pdf-2000-r1-native-template"
 )

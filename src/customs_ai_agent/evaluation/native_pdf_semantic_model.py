@@ -183,8 +183,10 @@ class HashBoundNativePdfSemanticModelV1:
 
 
 def _validate_expected_sha256(value: str) -> str:
-    if not isinstance(value, str) or len(value) != 64 or any(
-        character not in "0123456789abcdef" for character in value
+    if (
+        not isinstance(value, str)
+        or len(value) != 64
+        or any(character not in "0123456789abcdef" for character in value)
     ):
         raise NativePdfSemanticModelError("semantic_model_expected_sha256_invalid")
     return value

@@ -192,9 +192,7 @@ def _test_chain(tmp_path: Path) -> _TestChain:
         items=[_item(by_id[f"e-2-{suffix.lower()}"]) for suffix in ("BL", "INV", "PL")],
     )
     development_path = (
-        root
-        / "source-attested-packets"
-        / f"{development.packet_receipt_sha256}.json"
+        root / "source-attested-packets" / f"{development.packet_receipt_sha256}.json"
     )
     sealed_path = root / "source-attested-packets" / f"{sealed.packet_receipt_sha256}.json"
     _write_canonical(development_path, development.model_dump(mode="json"))
@@ -236,7 +234,9 @@ def _test_chain(tmp_path: Path) -> _TestChain:
                 "normalizer": normalizer,
                 "normalized_value_sha256": _sha(f"test-value:{asset.asset_id}:{field_name}"),
             }
-            for field_name, normalizer in R1_SUPERVISED_TEMPLATE_REQUIRED_FIELDS[asset.document_type]
+            for field_name, normalizer in R1_SUPERVISED_TEMPLATE_REQUIRED_FIELDS[
+                asset.document_type
+            ]
         ]
         record: dict[str, object] = {
             "asset_id": asset.asset_id,
@@ -288,9 +288,7 @@ def _test_chain(tmp_path: Path) -> _TestChain:
         field_label_count=80,
     )
     split_path = (
-        root
-        / "supervised-template-training-splits"
-        / f"{split.training_split_receipt_sha256}.json"
+        root / "supervised-template-training-splits" / f"{split.training_split_receipt_sha256}.json"
     )
     labels_path = (
         root
@@ -319,8 +317,8 @@ def _test_chain(tmp_path: Path) -> _TestChain:
         "training_recipe_sha256": _sha("recipe"),
         "training_environment_inventory_sha256": _sha("inventory"),
     }
-    model_receipt_payload["model_training_receipt_sha256"] = provenance._model_training_receipt_sha256(
-        model_receipt_payload
+    model_receipt_payload["model_training_receipt_sha256"] = (
+        provenance._model_training_receipt_sha256(model_receipt_payload)
     )
     model_receipt = provenance._ModelTrainingReceiptV1.model_validate(model_receipt_payload)
     model_receipt_path = (
@@ -416,9 +414,7 @@ def test_rejects_label_artifact_that_carries_a_selector(tmp_path: Path) -> None:
     payload["training_labels_receipt_sha256"] = changed_digest
     changed_path = chain.root / "supervised-template-training-labels" / f"{changed_digest}.json"
     _write_canonical(changed_path, payload)
-    changed_policy = replace(
-        chain.policy, training_labels_receipt_sha256=changed_digest
-    )
+    changed_policy = replace(chain.policy, training_labels_receipt_sha256=changed_digest)
 
     with pytest.raises(
         provenance.SupervisedTemplateProvenanceError,
@@ -466,11 +462,7 @@ def test_provenance_module_has_no_source_truth_training_or_csv_import() -> None:
         for node in ast.walk(tree)
         if isinstance(node, ast.Import)
         for alias in node.names
-    ] + [
-        node.module or ""
-        for node in ast.walk(tree)
-        if isinstance(node, ast.ImportFrom)
-    ]
+    ] + [node.module or "" for node in ast.walk(tree) if isinstance(node, ast.ImportFrom)]
 
     assert all("source_attested_synthetic_pdf_truth" not in name for name in imported_modules)
     assert all("supervised_template_training" not in name for name in imported_modules)

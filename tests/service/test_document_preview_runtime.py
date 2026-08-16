@@ -2299,9 +2299,7 @@ def test_canonical_r1_source_attested_results_pin_the_supervised_profile(
 
 
 def test_canonical_r1_source_attested_pointer_pins_the_supervised_profile() -> None:
-    pointer = json.loads(
-        _source_attested_activation_pointer(extractor_revision=_PDF_TEXT_LAYER_V1)
-    )
+    pointer = json.loads(_source_attested_activation_pointer(extractor_revision=_PDF_TEXT_LAYER_V1))
     evaluation = cast(dict[str, object], pointer["evaluation"])
     evaluation["dataset_id"] = "synthetic-customs-pdf-2000"
     evaluation["dataset_revision"] = "20260811-r1"
@@ -2315,7 +2313,9 @@ def test_canonical_r1_source_attested_pointer_pins_the_supervised_profile() -> N
 
     engine = cast(dict[str, object], pointer["engine"])
     engine["extractor_revision"] = _PDF_TEXT_LAYER_SUPERVISED
-    parsed = parse_source_attested_synthetic_pdf_preview_activation(_canonical(pointer, newline=True))
+    parsed = parse_source_attested_synthetic_pdf_preview_activation(
+        _canonical(pointer, newline=True)
+    )
     assert parsed.extractor_revision == _PDF_TEXT_LAYER_SUPERVISED
 
 

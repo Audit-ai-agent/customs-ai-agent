@@ -394,11 +394,7 @@ def test_semantic_runtime_does_not_import_source_truth_or_training_only_modules(
         for node in ast.walk(tree)
         if isinstance(node, ast.Import)
         for alias in node.names
-    ] + [
-        node.module or ""
-        for node in ast.walk(tree)
-        if isinstance(node, ast.ImportFrom)
-    ]
+    ] + [node.module or "" for node in ast.walk(tree) if isinstance(node, ast.ImportFrom)]
 
     assert all("source_attested_synthetic_pdf_truth" not in name for name in imports)
     assert all("supervised_template_training" not in name for name in imports)

@@ -271,32 +271,37 @@ def _without_digest(value: BaseModel | Mapping[str, object], digest_key: str) ->
 def _training_asset_list_sha256(assets: Sequence[_TrainingAssetV1]) -> str:
     return sha256_bytes(
         canonical_json_bytes(
-            [
-                {"asset_id": asset.asset_id, "source_sha256": asset.source_sha256}
-                for asset in assets
-            ]
+            [{"asset_id": asset.asset_id, "source_sha256": asset.source_sha256} for asset in assets]
         )
     )
 
 
 def _training_split_sha256(value: _TrainingSplitV1 | Mapping[str, object]) -> str:
-    return sha256_bytes(canonical_json_bytes(_without_digest(value, "training_split_receipt_sha256")))
+    return sha256_bytes(
+        canonical_json_bytes(_without_digest(value, "training_split_receipt_sha256"))
+    )
 
 
 def _training_label_record_sha256(
     value: _TrainingLabelRecordV1 | Mapping[str, object],
 ) -> str:
-    return sha256_bytes(canonical_json_bytes(_without_digest(value, "training_label_record_sha256")))
+    return sha256_bytes(
+        canonical_json_bytes(_without_digest(value, "training_label_record_sha256"))
+    )
 
 
 def _training_labels_sha256(value: _TrainingLabelsV1 | Mapping[str, object]) -> str:
-    return sha256_bytes(canonical_json_bytes(_without_digest(value, "training_labels_receipt_sha256")))
+    return sha256_bytes(
+        canonical_json_bytes(_without_digest(value, "training_labels_receipt_sha256"))
+    )
 
 
 def _model_training_receipt_sha256(
     value: _ModelTrainingReceiptV1 | Mapping[str, object],
 ) -> str:
-    return sha256_bytes(canonical_json_bytes(_without_digest(value, "model_training_receipt_sha256")))
+    return sha256_bytes(
+        canonical_json_bytes(_without_digest(value, "model_training_receipt_sha256"))
+    )
 
 
 @dataclass(frozen=True, slots=True)
@@ -328,9 +333,7 @@ _EXPECTED_R1_POLICY: Final = _R1ProvenancePolicy(
     dataset_id="synthetic-customs-pdf-2000",
     dataset_revision="20260811-r1",
     dataset_receipt_sha256=R1_SUPERVISED_TEMPLATE_DATASET_RECEIPT_SHA256,
-    development_packet_receipt_sha256=(
-        R1_SUPERVISED_TEMPLATE_DEVELOPMENT_PACKET_RECEIPT_SHA256
-    ),
+    development_packet_receipt_sha256=(R1_SUPERVISED_TEMPLATE_DEVELOPMENT_PACKET_RECEIPT_SHA256),
     sealed_packet_receipt_sha256=R1_SUPERVISED_TEMPLATE_SEALED_PACKET_RECEIPT_SHA256,
     training_split_receipt_sha256=R1_SUPERVISED_TEMPLATE_TRAINING_SPLIT_RECEIPT_SHA256,
     training_labels_receipt_sha256=R1_SUPERVISED_TEMPLATE_TRAINING_LABELS_RECEIPT_SHA256,
@@ -395,8 +398,7 @@ class R1SupervisedTemplateProvenanceBinding:
         )
         if (
             refreshed.dataset_receipt_sha256 != self.dataset_receipt_sha256
-            or refreshed.development_packet_receipt_sha256
-            != self.development_packet_receipt_sha256
+            or refreshed.development_packet_receipt_sha256 != self.development_packet_receipt_sha256
             or refreshed.sealed_packet_receipt_sha256 != self.sealed_packet_receipt_sha256
             or refreshed.training_split_receipt_sha256 != self.training_split_receipt_sha256
             or refreshed.training_labels_receipt_sha256 != self.training_labels_receipt_sha256
@@ -462,10 +464,10 @@ def _require_hash_named_path(*, path: Path, digest: str, code: str) -> None:
         raise SupervisedTemplateProvenanceError(code)
 
 
-def _read_canonical_dataset_receipt(
-    *, path: Path, expected_sha256: str
-) -> DatasetReceiptV1:
-    expected_sha256 = _require_sha256(expected_sha256, code="supervised_template_dataset_hash_invalid")
+def _read_canonical_dataset_receipt(*, path: Path, expected_sha256: str) -> DatasetReceiptV1:
+    expected_sha256 = _require_sha256(
+        expected_sha256, code="supervised_template_dataset_hash_invalid"
+    )
     raw = _read_regular_artifact_bytes(
         path=path,
         max_bytes=_MAX_DATASET_RECEIPT_BYTES,
@@ -489,7 +491,9 @@ def _read_canonical_dataset_receipt(
 
 
 def _read_canonical_packet(*, path: Path, expected_sha256: str) -> EvaluationPacketV2:
-    expected_sha256 = _require_sha256(expected_sha256, code="supervised_template_packet_hash_invalid")
+    expected_sha256 = _require_sha256(
+        expected_sha256, code="supervised_template_packet_hash_invalid"
+    )
     raw = _read_regular_artifact_bytes(
         path=path,
         max_bytes=_MAX_PACKET_BYTES,
@@ -513,7 +517,9 @@ def _read_canonical_packet(*, path: Path, expected_sha256: str) -> EvaluationPac
 
 
 def _read_canonical_training_split(*, path: Path, expected_sha256: str) -> _TrainingSplitV1:
-    expected_sha256 = _require_sha256(expected_sha256, code="supervised_template_split_hash_invalid")
+    expected_sha256 = _require_sha256(
+        expected_sha256, code="supervised_template_split_hash_invalid"
+    )
     raw = _read_regular_artifact_bytes(
         path=path,
         max_bytes=_MAX_TRAINING_SPLIT_BYTES,
@@ -537,7 +543,9 @@ def _read_canonical_training_split(*, path: Path, expected_sha256: str) -> _Trai
 
 
 def _read_canonical_training_labels(*, path: Path, expected_sha256: str) -> _TrainingLabelsV1:
-    expected_sha256 = _require_sha256(expected_sha256, code="supervised_template_labels_hash_invalid")
+    expected_sha256 = _require_sha256(
+        expected_sha256, code="supervised_template_labels_hash_invalid"
+    )
     raw = _read_regular_artifact_bytes(
         path=path,
         max_bytes=_MAX_TRAINING_LABELS_BYTES,
@@ -758,17 +766,18 @@ def _build_rederived_training_split(
     if (
         excluded_count != policy.excluded_family_asset_count
         or len(training_assets) != policy.training_asset_count
-        or any(asset.asset_id in development_asset_ids | sealed_asset_ids for asset in training_assets)
+        or any(
+            asset.asset_id in development_asset_ids | sealed_asset_ids for asset in training_assets
+        )
     ):
         raise SupervisedTemplateProvenanceError("supervised_template_family_exclusion_invalid")
     counts: dict[tuple[str, str], int] = {}
     for asset in training_assets:
         key = (asset.fixture_kind, asset.document_type)
         counts[key] = counts.get(key, 0) + 1
-    if (
-        len(counts) != policy.training_stratum_count
-        or set(counts.values()) != {policy.training_assets_per_stratum}
-    ):
+    if len(counts) != policy.training_stratum_count or set(counts.values()) != {
+        policy.training_assets_per_stratum
+    }:
         raise SupervisedTemplateProvenanceError("supervised_template_training_strata_invalid")
     payload: dict[str, object] = {
         "schema_version": "1.0",
@@ -953,7 +962,9 @@ def _load_with_policy(
         )
         validate_r1_supervised_template_model(model.artifact)
     except (NativePdfSemanticModelError, SupervisedTemplateContractError) as error:
-        raise SupervisedTemplateProvenanceError("supervised_template_model_artifact_invalid") from error
+        raise SupervisedTemplateProvenanceError(
+            "supervised_template_model_artifact_invalid"
+        ) from error
     if model.artifact_sha256 != model_training_receipt.model_artifact_sha256:
         raise SupervisedTemplateProvenanceError("supervised_template_model_receipt_binding_invalid")
     return R1SupervisedTemplateProvenanceBinding(
@@ -980,9 +991,7 @@ def _document_preview_artifact_paths(
     root = _require_absolute_path(
         document_preview_root, code="supervised_template_document_preview_root_invalid"
     )
-    _reject_symlink_path_components(
-        root, code="supervised_template_document_preview_root_invalid"
-    )
+    _reject_symlink_path_components(root, code="supervised_template_document_preview_root_invalid")
     try:
         root_mode = root.lstat().st_mode
     except OSError as error:

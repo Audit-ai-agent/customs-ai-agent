@@ -40,9 +40,7 @@ from customs_ai_agent.service.document_preview_runtime import local_files_only
 # contract used when source-PDF training labels are compiled.  They live here
 # (rather than importing the training/source parser) so byte-only runtime
 # inference remains independent from source truth and training-only code.
-_NUMERIC_TOKEN = re.compile(
-    r"(?<![A-Za-z0-9])(?:\d{1,3}(?:,\d{3})*|\d+)(?:\.\d+)?(?![A-Za-z0-9])"
-)
+_NUMERIC_TOKEN = re.compile(r"(?<![A-Za-z0-9])(?:\d{1,3}(?:,\d{3})*|\d+)(?:\.\d+)?(?![A-Za-z0-9])")
 _ALPHA_TOKEN = re.compile(r"[A-Za-z]+")
 
 

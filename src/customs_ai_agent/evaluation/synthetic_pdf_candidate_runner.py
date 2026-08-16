@@ -423,9 +423,7 @@ def _load_supervised_template_model(
     """Load the exact r1 model only after runtime profile checks have passed."""
 
     model_artifact = profile.configuration.options.get("semantic_model_artifact")
-    training_receipt_sha256 = profile.configuration.options.get(
-        "model_training_receipt_sha256"
-    )
+    training_receipt_sha256 = profile.configuration.options.get("model_training_receipt_sha256")
     if not isinstance(model_artifact, str) or not isinstance(training_receipt_sha256, str):
         raise SyntheticPdfCandidateRunnerError("candidate_supervised_model_binding_unavailable")
     try:
@@ -436,9 +434,7 @@ def _load_supervised_template_model(
 
         binding = load_r1_supervised_template_provenance(
             document_preview_root=profile.document_preview_root,
-            model_artifact_path=profile.document_preview_root.joinpath(
-                *Path(model_artifact).parts
-            ),
+            model_artifact_path=profile.document_preview_root.joinpath(*Path(model_artifact).parts),
             expected_model_training_receipt_sha256=training_receipt_sha256,
             expected_model_artifact_sha256=Path(model_artifact).stem,
         )

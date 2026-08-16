@@ -955,9 +955,7 @@ def test_canonical_r1_selection_validates_one_fixed_profile_without_ranking() ->
     with pytest.raises(
         SourceAttestedSyntheticPdfTruthError, match="supervised_development_profile_invalid"
     ):
-        build_source_attested_synthetic_development_selection(
-            results=[supervised, alternative]
-        )
+        build_source_attested_synthetic_development_selection(results=[supervised, alternative])
 
 
 def test_canonical_r1_selection_requires_the_fixed_passing_supervised_profile() -> None:
@@ -1018,9 +1016,7 @@ def test_sealed_binding_revalidates_a_mutated_development_selection(tmp_path: Pa
         engine_kind=selection.selected_engine_kind,
     )
 
-    with pytest.raises(
-        SourceAttestedSyntheticPdfTruthError, match="selection_binding_mismatch"
-    ):
+    with pytest.raises(SourceAttestedSyntheticPdfTruthError, match="selection_binding_mismatch"):
         build_source_attested_synthetic_sealed_run(
             packet=sealed_packet,
             layout_truth=sealed_truth,

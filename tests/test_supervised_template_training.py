@@ -40,7 +40,9 @@ def _sha(value: bytes | str) -> str:
     return hashlib.sha256(raw).hexdigest()
 
 
-def _scope(receipt: DatasetReceiptV1, *, sets: int, clean: int, error: int) -> SourceAttestedSyntheticDatasetScopeV1:
+def _scope(
+    receipt: DatasetReceiptV1, *, sets: int, clean: int, error: int
+) -> SourceAttestedSyntheticDatasetScopeV1:
     return SourceAttestedSyntheticDatasetScopeV1(
         dataset_id=receipt.dataset_id,
         dataset_revision=receipt.dataset_revision,
@@ -232,8 +234,14 @@ def _invoice_pdf(*, marker: str, total: str) -> bytes:
     )
 
 
-def _label_fixture(tmp_path: Path) -> tuple[
-    Path, DatasetReceiptV1, EvaluationPacketV2, EvaluationPacketV2, SourceAttestedSyntheticDatasetScopeV1
+def _label_fixture(
+    tmp_path: Path,
+) -> tuple[
+    Path,
+    DatasetReceiptV1,
+    EvaluationPacketV2,
+    EvaluationPacketV2,
+    SourceAttestedSyntheticDatasetScopeV1,
 ]:
     source_directory = tmp_path / "workspace" / "_local" / "data" / "synthetic-pdf"
     assets: list[DatasetAssetReceiptV1] = []
@@ -265,7 +273,9 @@ def _label_fixture(tmp_path: Path) -> tuple[
         assets=assets,
     )
     assets_by_id = {asset.asset_id: asset for asset in assets}
-    development = _packet(receipt=receipt, split="development", items=[_item(assets_by_id["c-1-inv"])])
+    development = _packet(
+        receipt=receipt, split="development", items=[_item(assets_by_id["c-1-inv"])]
+    )
     sealed = _packet(receipt=receipt, split="sealed", items=[_item(assets_by_id["e-2-inv"])])
     return source_directory, receipt, development, sealed, _scope(receipt, sets=3, clean=3, error=3)
 
@@ -326,7 +336,9 @@ def test_labels_are_pdf_derived_compact_and_immutable(tmp_path: Path) -> None:
         output_directory=preview_root / "supervised-template-model-training-receipts",
     )
     assert (
-        read_canonical_source_attested_supervised_template_model_training_receipt(model_receipt_path)
+        read_canonical_source_attested_supervised_template_model_training_receipt(
+            model_receipt_path
+        )
         == model_receipt
     )
 
@@ -356,7 +368,11 @@ def test_label_compilation_refuses_source_asset_tampering(tmp_path: Path) -> Non
 def test_runtime_modules_do_not_import_training_only_labels() -> None:
     repository = Path(__file__).resolve().parents[1]
     runtime_modules = tuple((repository / "src" / "customs_ai_agent" / "service").glob("*.py")) + (
-        repository / "src" / "customs_ai_agent" / "evaluation" / "synthetic_pdf_candidate_runner.py",
+        repository
+        / "src"
+        / "customs_ai_agent"
+        / "evaluation"
+        / "synthetic_pdf_candidate_runner.py",
     )
     for path in runtime_modules:
         tree = ast.parse(path.read_text(encoding="utf-8"))
@@ -365,11 +381,7 @@ def test_runtime_modules_do_not_import_training_only_labels() -> None:
             for node in ast.walk(tree)
             if isinstance(node, ast.Import)
             for alias in node.names
-        ] + [
-            node.module or ""
-            for node in ast.walk(tree)
-            if isinstance(node, ast.ImportFrom)
-        ]
+        ] + [node.module or "" for node in ast.walk(tree) if isinstance(node, ast.ImportFrom)]
         assert all("supervised_template_training" not in name for name in imports), path.name
 
 

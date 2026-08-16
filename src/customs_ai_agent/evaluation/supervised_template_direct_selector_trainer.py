@@ -83,15 +83,15 @@ SUPERVISED_TEMPLATE_DIRECT_SELECTOR_TRAINER_REVISION: Literal[
 SUPERVISED_TEMPLATE_DIRECT_SELECTOR_RECIPE_KIND: Literal[
     "source_attested_supervised_template_direct_selector_trainer_recipe"
 ] = "source_attested_supervised_template_direct_selector_trainer_recipe"
-SUPERVISED_TEMPLATE_DIRECT_SELECTOR_MODEL_KIND: Literal[
+SUPERVISED_TEMPLATE_DIRECT_SELECTOR_MODEL_KIND: Literal["native_pdf_semantic_model"] = (
     "native_pdf_semantic_model"
-] = "native_pdf_semantic_model"
+)
 SUPERVISED_TEMPLATE_DIRECT_SELECTOR_MODEL_ID: Literal[
     "synthetic-customs-pdf-2000-r1-native-template"
 ] = "synthetic-customs-pdf-2000-r1-native-template"
-SUPERVISED_TEMPLATE_DIRECT_SELECTOR_MODEL_REVISION: Literal[
+SUPERVISED_TEMPLATE_DIRECT_SELECTOR_MODEL_REVISION: Literal["supervised-native-selector-r1-v1"] = (
     "supervised-native-selector-r1-v1"
-] = "supervised-native-selector-r1-v1"
+)
 
 _CANDIDATE_EVIDENCE_REVISION: Final = "native-pdf-vector-grid-v1"
 _CANONICAL_SELECTOR_ORDER_REVISION: Final = "candidate-native-selector-order-v1"
@@ -104,9 +104,7 @@ _REQUIRED_DOCUMENT_TYPES: Final[tuple[SyntheticDocumentType, ...]] = (
 # profile.  It has no source run, coordinate, transform, label text, or
 # template identity; the trainer independently learns all selectors from
 # candidate-native evidence.
-_REQUIRED_FIELDS: Final[
-    Mapping[SyntheticDocumentType, tuple[tuple[str, FieldNormalizer], ...]]
-] = {
+_REQUIRED_FIELDS: Final[Mapping[SyntheticDocumentType, tuple[tuple[str, FieldNormalizer], ...]]] = {
     "bill_of_lading": (
         ("bl_no", "identifier-v1"),
         ("consignee", "text-v1"),
@@ -198,9 +196,7 @@ _TRANSFORM_RANK: Final[Mapping[str, int]] = {
 # transform contract.  The trainer has no source-truth import; final adapter
 # replay below proves there was no implementation drift before any artifact is
 # returned for writing.
-_NUMERIC_TOKEN = re.compile(
-    r"(?<![A-Za-z0-9])(?:\d{1,3}(?:,\d{3})*|\d+)(?:\.\d+)?(?![A-Za-z0-9])"
-)
+_NUMERIC_TOKEN = re.compile(r"(?<![A-Za-z0-9])(?:\d{1,3}(?:,\d{3})*|\d+)(?:\.\d+)?(?![A-Za-z0-9])")
 _ALPHA_TOKEN = re.compile(r"[A-Za-z]+")
 
 
@@ -220,18 +216,18 @@ class SourceAttestedSupervisedTemplateDirectSelectorTrainerRecipeV1(_WireModel):
     """Content-free recipe for the deterministic candidate-native learner."""
 
     schema_version: Literal["1.0"] = "1.0"
-    artifact_kind: Literal[
-        "source_attested_supervised_template_direct_selector_trainer_recipe"
-    ] = SUPERVISED_TEMPLATE_DIRECT_SELECTOR_RECIPE_KIND
-    trainer_revision: Literal[
-        "source-attested-supervised-template-direct-selector-trainer-v1"
-    ] = SUPERVISED_TEMPLATE_DIRECT_SELECTOR_TRAINER_REVISION
-    model_kind: Literal["native_pdf_semantic_model"] = SUPERVISED_TEMPLATE_DIRECT_SELECTOR_MODEL_KIND
+    artifact_kind: Literal["source_attested_supervised_template_direct_selector_trainer_recipe"] = (
+        SUPERVISED_TEMPLATE_DIRECT_SELECTOR_RECIPE_KIND
+    )
+    trainer_revision: Literal["source-attested-supervised-template-direct-selector-trainer-v1"] = (
+        SUPERVISED_TEMPLATE_DIRECT_SELECTOR_TRAINER_REVISION
+    )
+    model_kind: Literal["native_pdf_semantic_model"] = (
+        SUPERVISED_TEMPLATE_DIRECT_SELECTOR_MODEL_KIND
+    )
     model_id: str = Field(min_length=1, max_length=128, pattern=_IDENTIFIER)
     model_revision: str = Field(min_length=1, max_length=128, pattern=_IDENTIFIER)
-    candidate_evidence_revision: Literal["native-pdf-vector-grid-v1"] = (
-        _CANDIDATE_EVIDENCE_REVISION
-    )
+    candidate_evidence_revision: Literal["native-pdf-vector-grid-v1"] = _CANDIDATE_EVIDENCE_REVISION
     canonical_selector_order_revision: Literal["candidate-native-selector-order-v1"] = (
         _CANONICAL_SELECTOR_ORDER_REVISION
     )
@@ -240,7 +236,9 @@ class SourceAttestedSupervisedTemplateDirectSelectorTrainerRecipeV1(_WireModel):
     trainer_recipe_sha256: str = Field(pattern=_SHA256)
 
     @model_validator(mode="after")
-    def _is_bound_and_scoped(self) -> "SourceAttestedSupervisedTemplateDirectSelectorTrainerRecipeV1":
+    def _is_bound_and_scoped(
+        self,
+    ) -> "SourceAttestedSupervisedTemplateDirectSelectorTrainerRecipeV1":
         if tuple(self.document_types) != _REQUIRED_DOCUMENT_TYPES:
             raise ValueError("trainer recipe document types are invalid")
         if not math.isclose(self.anchor_tolerance, _ANCHOR_TOLERANCE, abs_tol=1e-12):
@@ -288,6 +286,8 @@ class _AnchorObservation:
 
 
 _OptionKey = tuple[str, tuple[str, ...]]
+
+
 def _recipe_payload(
     recipe: SourceAttestedSupervisedTemplateDirectSelectorTrainerRecipeV1 | Mapping[str, object],
 ) -> dict[str, object]:
@@ -455,9 +455,9 @@ def read_canonical_source_attested_supervised_template_training_split_for_select
         raise SupervisedTemplateDirectSelectorTrainerError(
             "supervised_template_selector_training_split_invalid"
         ) from error
-    if raw != canonical_json_file_bytes(split.model_dump(mode="json", warnings=False)) or path.name != (
-        f"{split.training_split_receipt_sha256}.json"
-    ):
+    if raw != canonical_json_file_bytes(
+        split.model_dump(mode="json", warnings=False)
+    ) or path.name != (f"{split.training_split_receipt_sha256}.json"):
         raise SupervisedTemplateDirectSelectorTrainerError(
             "supervised_template_selector_training_split_invalid"
         )
@@ -480,9 +480,9 @@ def read_canonical_source_attested_supervised_template_training_labels_for_selec
         raise SupervisedTemplateDirectSelectorTrainerError(
             "supervised_template_selector_training_labels_invalid"
         ) from error
-    if raw != canonical_json_file_bytes(labels.model_dump(mode="json", warnings=False)) or path.name != (
-        f"{labels.training_labels_receipt_sha256}.json"
-    ):
+    if raw != canonical_json_file_bytes(
+        labels.model_dump(mode="json", warnings=False)
+    ) or path.name != (f"{labels.training_labels_receipt_sha256}.json"):
         raise SupervisedTemplateDirectSelectorTrainerError(
             "supervised_template_selector_training_labels_invalid"
         )
@@ -505,9 +505,9 @@ def read_canonical_source_attested_dataset_receipt_for_selector_training(
         raise SupervisedTemplateDirectSelectorTrainerError(
             "supervised_template_selector_dataset_receipt_invalid"
         ) from error
-    if raw != canonical_json_file_bytes(receipt.model_dump(mode="json", warnings=False)) or path.name != (
-        f"{receipt_sha256(receipt)}.json"
-    ):
+    if raw != canonical_json_file_bytes(
+        receipt.model_dump(mode="json", warnings=False)
+    ) or path.name != (f"{receipt_sha256(receipt)}.json"):
         raise SupervisedTemplateDirectSelectorTrainerError(
             "supervised_template_selector_dataset_receipt_invalid"
         )
@@ -528,10 +528,12 @@ def read_canonical_source_attested_packet_for_selector_training(path: Path) -> E
         raise SupervisedTemplateDirectSelectorTrainerError(
             "supervised_template_selector_packet_invalid"
         ) from error
-    if raw != canonical_json_file_bytes(packet.model_dump(mode="json", warnings=False)) or path.name != (
-        f"{packet_receipt_sha256(packet)}.json"
-    ):
-        raise SupervisedTemplateDirectSelectorTrainerError("supervised_template_selector_packet_invalid")
+    if raw != canonical_json_file_bytes(
+        packet.model_dump(mode="json", warnings=False)
+    ) or path.name != (f"{packet_receipt_sha256(packet)}.json"):
+        raise SupervisedTemplateDirectSelectorTrainerError(
+            "supervised_template_selector_packet_invalid"
+        )
     return packet
 
 
@@ -550,7 +552,9 @@ def _validate_expected_r1_split(split: SourceAttestedSupervisedTemplateTrainingS
         )
 
 
-def _expected_field_schema(document_type: SyntheticDocumentType) -> tuple[tuple[str, FieldNormalizer], ...]:
+def _expected_field_schema(
+    document_type: SyntheticDocumentType,
+) -> tuple[tuple[str, FieldNormalizer], ...]:
     expected = _REQUIRED_FIELDS.get(document_type)
     if expected is None:
         raise SupervisedTemplateDirectSelectorTrainerError(
@@ -616,9 +620,7 @@ def _validate_split_and_labels(
                 "supervised_template_selector_label_split_binding_invalid"
             )
         expected_fields = _expected_field_schema(asset.document_type)
-        actual_fields = tuple(
-            (label.field_name, label.normalizer) for label in record.field_labels
-        )
+        actual_fields = tuple((label.field_name, label.normalizer) for label in record.field_labels)
         if actual_fields != expected_fields:
             raise SupervisedTemplateDirectSelectorTrainerError(
                 "supervised_template_selector_label_schema_invalid"
@@ -626,9 +628,7 @@ def _validate_split_and_labels(
     return labels_by_asset_id
 
 
-def _source_pdf_path(
-    *, source_directory: Path, asset: SupervisedTemplateTrainingAssetV1
-) -> Path:
+def _source_pdf_path(*, source_directory: Path, asset: SupervisedTemplateTrainingAssetV1) -> Path:
     try:
         fixture_directory = _FIXTURE_DIRECTORY[asset.fixture_kind]
         prefix = _FIXTURE_PREFIX[asset.fixture_kind]
@@ -759,14 +759,18 @@ def _candidate_unary_options_for_label(
         ):
             options.add(("raw-v1", (item.selector_key,)))
         numeric = _single_token(text=item.text, pattern=_NUMERIC_TOKEN)
-        if numeric is not None and _normalized_value_sha256(
-            value=numeric, normalizer=label.normalizer
-        ) == label.normalized_value_sha256:
+        if (
+            numeric is not None
+            and _normalized_value_sha256(value=numeric, normalizer=label.normalizer)
+            == label.normalized_value_sha256
+        ):
             options.add(("single-numeric-token-v1", (item.selector_key,)))
         alpha = _single_token(text=item.text, pattern=_ALPHA_TOKEN)
-        if alpha is not None and _normalized_value_sha256(
-            value=alpha, normalizer=label.normalizer
-        ) == label.normalized_value_sha256:
+        if (
+            alpha is not None
+            and _normalized_value_sha256(value=alpha, normalizer=label.normalizer)
+            == label.normalized_value_sha256
+        ):
             options.add(("single-alpha-token-v1", (item.selector_key,)))
     return options
 
@@ -791,7 +795,9 @@ def _candidate_join_options_for_label(
     return options
 
 
-def _anchor_points(extraction: NativePdfVectorGridExtraction) -> tuple[tuple[int, float, float], ...]:
+def _anchor_points(
+    extraction: NativePdfVectorGridExtraction,
+) -> tuple[tuple[int, float, float], ...]:
     # Keep duplicate positions.  A structural selector must resolve exactly
     # one span, so collapsing co-located candidate runs would create a false
     # positive during training that runtime rightly rejects.
@@ -883,9 +889,7 @@ def _choose_stable_option(
     selector_by_key: Mapping[str, NativePdfSemanticSelectorV1],
     selector_sort_keys: Mapping[str, tuple[int, int, int, int, int]],
 ) -> tuple[
-    Literal[
-        "raw-v1", "single-numeric-token-v1", "single-alpha-token-v1", "join-slash-v1"
-    ],
+    Literal["raw-v1", "single-numeric-token-v1", "single-alpha-token-v1", "join-slash-v1"],
     list[NativePdfSemanticSelectorV1],
 ]:
     if not options:
@@ -898,7 +902,9 @@ def _choose_stable_option(
     )
     transform, selector_keys = selected
     if transform not in _VALUE_TRANSFORMS:
-        raise SupervisedTemplateDirectSelectorTrainerError("supervised_template_selector_option_invalid")
+        raise SupervisedTemplateDirectSelectorTrainerError(
+            "supervised_template_selector_option_invalid"
+        )
     try:
         selectors = [selector_by_key[key] for key in selector_keys]
     except KeyError as error:
@@ -918,10 +924,11 @@ def _validate_model_scope(
         or model.model_id != SUPERVISED_TEMPLATE_DIRECT_SELECTOR_MODEL_ID
         or model.model_revision != SUPERVISED_TEMPLATE_DIRECT_SELECTOR_MODEL_REVISION
         or model.inference_revision != "native-template-selector-v1"
-        or tuple(document.document_type for document in model.documents)
-        != _REQUIRED_DOCUMENT_TYPES
+        or tuple(document.document_type for document in model.documents) != _REQUIRED_DOCUMENT_TYPES
     ):
-        raise SupervisedTemplateDirectSelectorTrainerError("supervised_template_selector_model_scope_invalid")
+        raise SupervisedTemplateDirectSelectorTrainerError(
+            "supervised_template_selector_model_scope_invalid"
+        )
     for document in model.documents:
         if document.document_type not in _REQUIRED_DOCUMENT_TYPES:
             raise SupervisedTemplateDirectSelectorTrainerError(
@@ -958,12 +965,12 @@ def _assert_model_has_no_training_identifiers(
     training_split: SourceAttestedSupervisedTemplateTrainingSplitV1,
     training_labels: SourceAttestedSupervisedTemplateTrainingLabelsV1,
 ) -> None:
-    forbidden = {
-        asset.asset_id.encode("utf-8") for asset in training_split.training_assets
-    } | {asset.source_sha256.encode("ascii") for asset in training_split.training_assets}
-    forbidden |= {
-        record.asset_id.encode("utf-8") for record in training_labels.records
-    } | {record.source_sha256.encode("ascii") for record in training_labels.records}
+    forbidden = {asset.asset_id.encode("utf-8") for asset in training_split.training_assets} | {
+        asset.source_sha256.encode("ascii") for asset in training_split.training_assets
+    }
+    forbidden |= {record.asset_id.encode("utf-8") for record in training_labels.records} | {
+        record.source_sha256.encode("ascii") for record in training_labels.records
+    }
     forbidden |= {
         label.normalized_value_sha256.encode("ascii")
         for record in training_labels.records
@@ -1006,9 +1013,11 @@ def _verify_model_against_all_training_inputs(
             )
         for field_name, field in actual.items():
             label = expected.get(field_name)
-            if label is None or _normalized_value_sha256(
-                value=field.value, normalizer=label.normalizer
-            ) != label.normalized_value_sha256:
+            if (
+                label is None
+                or _normalized_value_sha256(value=field.value, normalizer=label.normalizer)
+                != label.normalized_value_sha256
+            ):
                 raise SupervisedTemplateDirectSelectorTrainerError(
                     "supervised_template_selector_field_coverage_invalid"
                 )
@@ -1068,7 +1077,9 @@ def train_source_attested_supervised_template_direct_selector_model(
             )
         try:
             extraction = extract_native_pdf_vector_grid_from_pdf_bytes(
-                pdf_bytes=_read_verified_training_pdf(source_directory=source_directory, asset=asset)
+                pdf_bytes=_read_verified_training_pdf(
+                    source_directory=source_directory, asset=asset
+                )
             )
         except SupervisedTemplateDirectSelectorTrainerError:
             raise
@@ -1228,7 +1239,9 @@ def train_source_attested_supervised_template_direct_selector_model(
             "supervised_template_selector_model_invalid"
         ) from error
     _validate_model_scope(model=model, learned_structural_shapes=learned_structural_shapes)
-    model_bytes = canonical_json_file_bytes(model.model_dump(mode="json", warnings=False, exclude_none=True))
+    model_bytes = canonical_json_file_bytes(
+        model.model_dump(mode="json", warnings=False, exclude_none=True)
+    )
     model_sha256 = hashlib.sha256(model_bytes).hexdigest()
     try:
         bound_model = bind_native_pdf_semantic_model_artifact(

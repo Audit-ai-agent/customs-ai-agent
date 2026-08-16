@@ -158,7 +158,9 @@ def test_rejects_raw_value_and_invalid_selector_shape() -> None:
 def test_rejects_hash_mismatch_and_memory_binding_mutation() -> None:
     artifact_bytes = _artifact_bytes()
 
-    with pytest.raises(NativePdfSemanticModelError, match="semantic_model_artifact_sha256_mismatch"):
+    with pytest.raises(
+        NativePdfSemanticModelError, match="semantic_model_artifact_sha256_mismatch"
+    ):
         bind_native_pdf_semantic_model_artifact(
             artifact_bytes=artifact_bytes,
             expected_sha256="0" * 64,
@@ -173,7 +175,9 @@ def test_rejects_hash_mismatch_and_memory_binding_mutation() -> None:
         mutated.verified_artifact()
 
 
-def test_loader_reads_only_explicit_regular_artifact(tmp_path: Path, monkeypatch: pytest.MonkeyPatch) -> None:
+def test_loader_reads_only_explicit_regular_artifact(
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+) -> None:
     artifact_path = tmp_path / "semantic-model.json"
     artifact_bytes = _artifact_bytes()
     artifact_path.write_bytes(artifact_bytes)
@@ -212,7 +216,9 @@ def test_loader_rejects_symlink_before_opening_artifact(
 
     monkeypatch.setattr(Path, "lstat", symlink_lstat)
 
-    with pytest.raises(NativePdfSemanticModelError, match="semantic_model_artifact_symlink_invalid"):
+    with pytest.raises(
+        NativePdfSemanticModelError, match="semantic_model_artifact_symlink_invalid"
+    ):
         load_hash_bound_native_pdf_semantic_model(
             artifact_path=artifact_path,
             expected_sha256=_sha256(artifact_bytes),

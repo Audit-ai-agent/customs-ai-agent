@@ -81,7 +81,9 @@ def test_accepts_exact_public_r1_supervised_template_model_schema() -> None:
 def test_rejects_wrong_profile_identity(attribute: str, replacement: str) -> None:
     model = _r1_model()
 
-    with pytest.raises(SupervisedTemplateContractError, match="supervised_template_model_scope_invalid"):
+    with pytest.raises(
+        SupervisedTemplateContractError, match="supervised_template_model_scope_invalid"
+    ):
         validate_r1_supervised_template_model(model.model_copy(update={attribute: replacement}))
 
 
@@ -95,5 +97,7 @@ def test_rejects_a_public_field_schema_change() -> None:
     documents[1] = invoice.model_copy(update={"fields": fields})
     mutated = mutated.model_copy(update={"documents": documents})
 
-    with pytest.raises(SupervisedTemplateContractError, match="supervised_template_model_scope_invalid"):
+    with pytest.raises(
+        SupervisedTemplateContractError, match="supervised_template_model_scope_invalid"
+    ):
         validate_r1_supervised_template_model(mutated)
