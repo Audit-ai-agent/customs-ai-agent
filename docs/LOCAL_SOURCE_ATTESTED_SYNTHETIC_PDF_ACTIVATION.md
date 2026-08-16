@@ -84,10 +84,13 @@ symlink/Windows junction(reparse point)은 activation과 runtime 모두에서 �
 `cpu_threads: 1`)와 detection, recognition, classifier의 **세** local model directory를
 모두 명시해야 한다. classifier를 사용하지 않아도 PaddleOCR 2.9.1은 기본 classifier
 downloader를 초기화할 수 있으므로, `cls_model_directory`를 생략할 수 없다. Docling profile은
-`ocr_enabled: false`, `device: cpu`, `num_threads: 1`, table structure `fast`와 cell matching
-고정만 허용한다. 이 후보는 inventory된 Docling layout/table artifact를 쓰는 로컬 구조·표
-parser이며 EasyOCR downloader를 쓰지 않는다. 따라서 자동 certificate에서 Docling을 일반
-optical OCR로 표현하지 않는다.
+`ocr_enabled: false`, `device: cpu`, `num_threads: 1`, table structure `fast`, cell matching,
+`pdf_backend: "pypdfium2"` 고정만 허용한다. 마지막 값은 adapter가
+`PyPdfiumDocumentBackend`를 직접 선택하게 하며 기본 `DoclingParseV2` 또는 다른 PDF
+backend fallback을 허용하지 않는다. 이 후보는 inventory된 Docling layout/table artifact를
+쓰는 로컬 구조·표 parser이며 EasyOCR downloader를 쓰지 않는다. StandardPdfPipeline의
+native GLM 경계 때문에 기존 ASCII-only `site-packages` preflight는 유지한다. 따라서 자동
+certificate에서 Docling을 일반 optical OCR로 표현하지 않는다.
 
 ## 활성화
 

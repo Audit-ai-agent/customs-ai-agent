@@ -13,20 +13,24 @@ from typing import Literal, cast
 import pytest
 from pydantic import SecretStr
 
+import customs_ai_agent.evaluation.synthetic_pdf_candidate_runner as candidate_runner_module
 import customs_ai_agent.service.document_preview_runtime as runtime_module
 from customs_ai_agent.schemas.document_extraction import (
     DocumentPreviewPageV1,
     DocumentSpanV1,
     PreviewCandidateV1,
     PreviewInputV1,
+    canonical_preview_text,
 )
 from customs_ai_agent.schemas.document_extraction import DocumentExtractionRequestMetadataV1
-from customs_ai_agent.service.document_extraction import DocumentPreviewUnavailable
+from customs_ai_agent.service.document_extraction import (
+    DocumentPreviewExecutionError,
+    DocumentPreviewUnavailable,
+)
 from customs_ai_agent.service.document_preview_runtime import (
     AutoActivatingSourceAttestedPdfPreviewEngine,
     ApprovedPdfOnlyPreviewEngine,
     DocumentPreviewRuntimeError,
-    _docling_preview_pages,
     load_approved_pdf_preview_binding,
     load_source_attested_synthetic_receipt_binding,
     local_files_only,
@@ -313,7 +317,7 @@ def _source_attested_evaluation(
     layout_truth_parser_spec_sha256: str = "d" * 64,
     development_selection_receipt_sha256: str = "e" * 64,
     sealed_run_receipt_sha256: str = "f" * 64,
-    candidate_parser_revision: str = "synthetic-pdf-visible-layout-normalizer-v3",
+    candidate_parser_revision: str = "synthetic-pdf-visible-layout-normalizer-v5",
     candidate_bundle_sha256: str = "1" * 64,
     candidate_execution_receipt_sha256: str = "2" * 64,
     engine_kind: str = "pdf_text_layer",
@@ -406,7 +410,7 @@ def _write_source_attested_receipt_chain(
     root: Path,
     configuration_sha256: str,
     inventory_sha256: str,
-    candidate_parser_revision: str = "synthetic-pdf-visible-layout-normalizer-v3",
+    candidate_parser_revision: str = "synthetic-pdf-visible-layout-normalizer-v5",
 ) -> dict[str, str | bytes]:
     """Build a complete local source-attested chain, not hash-shaped placeholders."""
 
@@ -1206,6 +1210,7 @@ def test_runtime_rejects_an_added_file_in_the_active_docling_model_directory(
         "extractor_revision": "docling-test-v1",
         "options": {
             "artifacts_directory": "models/docling",
+            "pdf_backend": "pypdfium2",
             "ocr_enabled": False,
             "device": "cpu",
             "num_threads": 1,
@@ -1295,7 +1300,7 @@ def test_docling_native_runtime_probe_is_cached_and_discards_its_result(
     adapter = runtime_module.DoclingPdfPreviewAdapter(
         extractor_revision="docling-test-v1",
         model_root=_root(tmp_path),
-        options={"artifacts_directory": "models/docling"},
+        options={"artifacts_directory": "models/docling", "pdf_backend": "pypdfium2"},
     )
     adapter._converter = (FakeConverter(), FakeDocumentStream)
     monkeypatch.setattr(runtime_module, "_require_docling_native_ascii_package_paths", lambda: None)
@@ -1325,7 +1330,7 @@ def test_docling_native_runtime_probe_fails_closed(
     adapter = runtime_module.DoclingPdfPreviewAdapter(
         extractor_revision="docling-test-v1",
         model_root=_root(tmp_path),
-        options={"artifacts_directory": "models/docling"},
+        options={"artifacts_directory": "models/docling", "pdf_backend": "pypdfium2"},
     )
     adapter._converter = (FailingConverter(), FakeDocumentStream)
     monkeypatch.setattr(runtime_module, "_require_docling_native_ascii_package_paths", lambda: None)
@@ -1402,12 +1407,42 @@ def test_docling_profile_rejects_easyocr_download_mode() -> None:
             "extractor_revision": "docling-test-v1",
             "options": {
                 "artifacts_directory": "models/docling",
+                "pdf_backend": "pypdfium2",
                 "ocr_enabled": True,
                 "device": "cpu",
                 "num_threads": 1,
                 "do_table_structure": True,
                 "table_structure_mode": "fast",
             },
+        },
+        newline=True,
+    )
+
+    with pytest.raises(DocumentPreviewRuntimeError, match="document_preview_configuration_invalid"):
+        runtime_module.parse_runtime_configuration(raw)
+
+
+@pytest.mark.parametrize(
+    "pdf_backend",
+    [None, "docling_parse_v2"],
+)
+def test_docling_profile_requires_the_pinned_pypdfium_backend(pdf_backend: str | None) -> None:
+    options: dict[str, object] = {
+        "artifacts_directory": "models/docling",
+        "ocr_enabled": False,
+        "device": "cpu",
+        "num_threads": 1,
+        "do_table_structure": True,
+        "table_structure_mode": "fast",
+    }
+    if pdf_backend is not None:
+        options["pdf_backend"] = pdf_backend
+    raw = _canonical(
+        {
+            "schema_version": "1.0",
+            "engine_kind": "docling",
+            "extractor_revision": "docling-test-v1",
+            "options": options,
         },
         newline=True,
     )
@@ -1665,6 +1700,7 @@ def test_runtime_profiles_accept_only_the_explicit_offline_options() -> None:
                 "extractor_revision": "docling-test-v1",
                 "options": {
                     "artifacts_directory": "models/docling",
+                    "pdf_backend": "pypdfium2",
                     "ocr_enabled": False,
                     "device": "cpu",
                     "num_threads": 1,
@@ -1688,12 +1724,114 @@ def test_runtime_profiles_accept_only_the_explicit_offline_options() -> None:
     }
     assert docling.options == {
         "artifacts_directory": "models/docling",
+        "pdf_backend": "pypdfium2",
         "ocr_enabled": False,
         "device": "cpu",
         "num_threads": 1,
         "do_table_structure": True,
         "table_structure_mode": "fast",
     }
+
+
+def test_docling_adapter_rejects_an_unpinned_pdf_backend_before_loading_packages(
+    tmp_path: Path,
+) -> None:
+    adapter = runtime_module.DoclingPdfPreviewAdapter(
+        extractor_revision="docling-test-v1",
+        model_root=_root(tmp_path),
+        options={"artifacts_directory": "models/docling", "pdf_backend": "docling_parse_v2"},
+    )
+
+    with pytest.raises(
+        DocumentPreviewUnavailable, match="Docling PDF backend configuration is invalid"
+    ):
+        adapter._docling_converter()
+
+
+def test_docling_adapter_builds_the_explicit_pypdfium_converter(
+    monkeypatch: pytest.MonkeyPatch, tmp_path: Path
+) -> None:
+    captured: dict[str, object] = {}
+
+    class FakeDocumentStream:
+        pass
+
+    class FakeInputFormat:
+        PDF = "pdf"
+
+    class FakePdfPipelineOptions:
+        def __init__(self) -> None:
+            self.table_structure_options = SimpleNamespace()
+            self.artifacts_path: str | None = None
+
+    class FakeAcceleratorDevice:
+        CPU = "cpu"
+
+    class FakeAcceleratorOptions:
+        def __init__(self, **kwargs: object) -> None:
+            self.kwargs = kwargs
+
+    class FakeTableFormerMode:
+        FAST = "fast"
+
+    class FakePyPdfiumDocumentBackend:
+        pass
+
+    class FakePdfFormatOption:
+        def __init__(self, *, backend: object, pipeline_options: object) -> None:
+            captured["backend"] = backend
+            captured["pipeline"] = pipeline_options
+
+    class FakeDocumentConverter:
+        def __init__(self, *, format_options: object) -> None:
+            captured["format_options"] = format_options
+
+    docling = ModuleType("docling")
+    docling.__path__ = []  # type: ignore[attr-defined]
+    backend = ModuleType("docling.backend")
+    backend.__path__ = []  # type: ignore[attr-defined]
+    pypdfium_backend = ModuleType("docling.backend.pypdfium2_backend")
+    pypdfium_backend.PyPdfiumDocumentBackend = FakePyPdfiumDocumentBackend  # type: ignore[attr-defined]
+    datamodel = ModuleType("docling.datamodel")
+    datamodel.__path__ = []  # type: ignore[attr-defined]
+    base_models = ModuleType("docling.datamodel.base_models")
+    base_models.DocumentStream = FakeDocumentStream  # type: ignore[attr-defined]
+    base_models.InputFormat = FakeInputFormat  # type: ignore[attr-defined]
+    pipeline_options = ModuleType("docling.datamodel.pipeline_options")
+    pipeline_options.AcceleratorDevice = FakeAcceleratorDevice  # type: ignore[attr-defined]
+    pipeline_options.AcceleratorOptions = FakeAcceleratorOptions  # type: ignore[attr-defined]
+    pipeline_options.PdfPipelineOptions = FakePdfPipelineOptions  # type: ignore[attr-defined]
+    pipeline_options.TableFormerMode = FakeTableFormerMode  # type: ignore[attr-defined]
+    document_converter = ModuleType("docling.document_converter")
+    document_converter.DocumentConverter = FakeDocumentConverter  # type: ignore[attr-defined]
+    document_converter.PdfFormatOption = FakePdfFormatOption  # type: ignore[attr-defined]
+    for module in (
+        docling,
+        backend,
+        pypdfium_backend,
+        datamodel,
+        base_models,
+        pipeline_options,
+        document_converter,
+    ):
+        monkeypatch.setitem(sys.modules, module.__name__, module)
+    monkeypatch.setattr(runtime_module, "_require_docling_native_ascii_package_paths", lambda: None)
+    adapter = runtime_module.DoclingPdfPreviewAdapter(
+        extractor_revision="docling-test-v1",
+        model_root=_root(tmp_path),
+        options={"artifacts_directory": "models/docling", "pdf_backend": "pypdfium2"},
+    )
+
+    adapter._docling_converter()
+
+    assert captured["backend"] is FakePyPdfiumDocumentBackend
+    pipeline = captured["pipeline"]
+    assert isinstance(pipeline, FakePdfPipelineOptions)
+    assert pipeline.do_ocr is False
+    assert pipeline.do_table_structure is True
+    assert pipeline.table_structure_options.mode == "fast"
+    assert pipeline.table_structure_options.do_cell_matching is True
+    assert pipeline.artifacts_path == str(_root(tmp_path) / "models" / "docling")
 
 
 def test_paddle_adapter_passes_pinned_offline_arguments(
@@ -2666,10 +2804,10 @@ def test_source_attested_loader_rejects_execution_receipt_mismatch(tmp_path: Pat
         )
 
 
-def test_source_attested_loader_accepts_one_consistent_visible_layout_v3_chain(
+def test_source_attested_loader_accepts_one_consistent_visible_layout_v5_chain(
     tmp_path: Path,
 ) -> None:
-    """The new v3 parser is accepted only when every immutable binding agrees."""
+    """The v5 parser is accepted only when every immutable binding agrees."""
 
     root = _root(tmp_path)
     root.mkdir(parents=True)
@@ -2683,7 +2821,7 @@ def test_source_attested_loader_accepts_one_consistent_visible_layout_v3_chain(
         root=root,
         configuration_sha256=configuration_sha256,
         inventory_sha256=inventory_sha256,
-        candidate_parser_revision="synthetic-pdf-visible-layout-normalizer-v3",
+        candidate_parser_revision="synthetic-pdf-visible-layout-normalizer-v5",
     )
     evaluation = chain["evaluation"]
     assert isinstance(evaluation, bytes)
@@ -2694,16 +2832,16 @@ def test_source_attested_loader_accepts_one_consistent_visible_layout_v3_chain(
     )
 
     assert binding.development_selection.candidate_parser_revision == (
-        "synthetic-pdf-visible-layout-normalizer-v3"
+        "synthetic-pdf-visible-layout-normalizer-v5"
     )
     assert binding.sealed_run.candidate_parser_revision == (
-        "synthetic-pdf-visible-layout-normalizer-v3"
+        "synthetic-pdf-visible-layout-normalizer-v5"
     )
     assert binding.sealed_run_state_path.name.startswith("sealed-run-state-")
     assert binding.sealed_evaluation_state_path.name.startswith("sealed-evaluation-state-")
 
 
-def test_source_attested_loader_rejects_a_coherent_v2_candidate_parser_chain(
+def test_source_attested_loader_rejects_a_coherent_v4_candidate_parser_chain(
     tmp_path: Path,
 ) -> None:
     """Equality alone cannot authorize a fully self-consistent old parser."""
@@ -2720,7 +2858,7 @@ def test_source_attested_loader_rejects_a_coherent_v2_candidate_parser_chain(
         root=root,
         configuration_sha256=configuration_sha256,
         inventory_sha256=inventory_sha256,
-        candidate_parser_revision="synthetic-pdf-label-normalizer-v2",
+        candidate_parser_revision="synthetic-pdf-visible-layout-normalizer-v4",
     )
     evaluation = chain["evaluation"]
     assert isinstance(evaluation, bytes)
@@ -2898,10 +3036,175 @@ def test_local_adapter_network_guard_blocks_socket_connection() -> None:
         socket.create_connection(("127.0.0.1", 9), timeout=0.01)
 
 
-def test_docling_markdown_preview_keeps_every_bounded_chunk_without_guessing_pages() -> None:
-    markdown = "A" * 8_000 + "B" * 19
+def _docling_bbox(*, left: float, top: float, right: float, bottom: float) -> SimpleNamespace:
+    return SimpleNamespace(l=left, t=top, r=right, b=bottom, coord_origin="TOPLEFT")
 
-    pages = _docling_preview_pages(page_numbers=[1, 2], markdown_text=markdown)
 
-    assert [span.text for span in pages[0].spans] == ["A" * 8_000, "B" * 19]
-    assert pages[1].spans == []
+def _docling_provenance(
+    *, page_number: int, left: float, top: float, right: float, bottom: float
+) -> SimpleNamespace:
+    return SimpleNamespace(
+        page_no=page_number,
+        bbox=_docling_bbox(left=left, top=top, right=right, bottom=bottom),
+    )
+
+
+def _docling_table_cell(
+    *,
+    text: str,
+    row: int,
+    column: int,
+    bbox: SimpleNamespace | None = None,
+) -> SimpleNamespace:
+    return SimpleNamespace(
+        text=text,
+        start_row_offset_idx=row,
+        end_row_offset_idx=row + 1,
+        start_col_offset_idx=column,
+        end_col_offset_idx=column + 1,
+        bbox=bbox,
+    )
+
+
+def _structured_docling_document(
+    *,
+    text_provenance: SimpleNamespace | None = None,
+    table_cell_bbox: SimpleNamespace | None = None,
+) -> SimpleNamespace:
+    title_provenance = text_provenance or _docling_provenance(
+        page_number=1, left=10, top=20, right=50, bottom=40
+    )
+    heading = SimpleNamespace(text="Invoice", prov=[title_provenance])
+    header = _docling_table_cell(
+        text="Item",
+        row=0,
+        column=0,
+        bbox=table_cell_bbox or _docling_bbox(left=10, top=50, right=60, bottom=70),
+    )
+    value = _docling_table_cell(
+        text="Widget",
+        row=1,
+        column=0,
+        bbox=_docling_bbox(left=10, top=70, right=60, bottom=90),
+    )
+    table = SimpleNamespace(
+        prov=[_docling_provenance(page_number=1, left=10, top=50, right=60, bottom=90)],
+        data=SimpleNamespace(
+            num_rows=2,
+            num_cols=1,
+            table_cells=[header, value],
+            grid=[[header], [value]],
+        ),
+    )
+    footer = SimpleNamespace(
+        text="Page two",
+        prov=[_docling_provenance(page_number=2, left=5, top=10, right=35, bottom=25)],
+    )
+    document = SimpleNamespace(
+        pages={
+            1: SimpleNamespace(size=SimpleNamespace(width=100, height=200)),
+            2: SimpleNamespace(size=SimpleNamespace(width=80, height=120)),
+        },
+        iterate_items=lambda: iter(((heading, 0), (table, 0), (footer, 0))),
+    )
+    document.export_to_markdown = lambda: pytest.fail("structured path must not export Markdown")
+    return document
+
+
+def test_docling_structured_extractor_preserves_page_provenance_grid_and_raw_cells() -> None:
+    extraction = runtime_module._extract_docling_structured_document(_structured_docling_document())
+
+    assert [(page.page_number, page.width, page.height) for page in extraction.pages] == [
+        (1, 100, 200),
+        (2, 80, 120),
+    ]
+    assert [span.text for span in extraction.pages[0].spans] == ["Invoice", "Item", "Widget"]
+    assert extraction.pages[0].spans[0].bbox == runtime_module.BoundingBoxV1(
+        x=0.1, y=0.1, width=0.4, height=0.1
+    )
+    assert [span.text for span in extraction.pages[1].spans] == ["Page two"]
+    assert [
+        (cell.page_number, cell.table_index, cell.row_index, cell.column_index, cell.text)
+        for cell in extraction.table_cells
+    ] == [
+        (1, 1, 0, 0, "Item"),
+        (1, 1, 1, 0, "Widget"),
+    ]
+    # The candidate CER stream includes the raw TableCell text once, rather
+    # than a Markdown reconstruction or duplicated merged-grid cells.
+    assert canonical_preview_text(list(extraction.pages)) == "Invoice\nItem\nWidget\nPage two"
+
+
+@pytest.mark.parametrize(
+    "document",
+    [
+        _structured_docling_document(
+            text_provenance=_docling_provenance(page_number=3, left=10, top=20, right=50, bottom=40)
+        ),
+        _structured_docling_document(
+            table_cell_bbox=_docling_bbox(left=-1, top=50, right=60, bottom=70)
+        ),
+    ],
+)
+def test_docling_structured_extractor_rejects_invalid_provenance_or_bbox(
+    document: SimpleNamespace,
+) -> None:
+    with pytest.raises(DocumentPreviewExecutionError, match="Docling structured output is invalid"):
+        runtime_module._extract_docling_structured_document(document)
+
+
+def test_docling_runtime_does_not_call_markdown_export(
+    monkeypatch: pytest.MonkeyPatch, tmp_path: Path
+) -> None:
+    document = _structured_docling_document()
+    adapter = runtime_module.DoclingPdfPreviewAdapter(
+        extractor_revision="docling-test-v1",
+        model_root=_root(tmp_path),
+        options={"artifacts_directory": "models/docling", "pdf_backend": "pypdfium2"},
+    )
+    monkeypatch.setattr(
+        runtime_module.DoclingPdfPreviewAdapter,
+        "verify_native_runtime",
+        lambda _self: None,
+    )
+    monkeypatch.setattr(
+        runtime_module.DoclingPdfPreviewAdapter,
+        "_convert_pdf_bytes",
+        lambda _self, _content: SimpleNamespace(document=document),
+    )
+
+    preview = adapter.extract_raster_or_image(_pdf_input())
+
+    assert [span.text for span in preview.pages[0].spans] == ["Invoice", "Item", "Widget"]
+
+
+def test_docling_preview_and_candidate_consume_the_same_structured_extractor(
+    monkeypatch: pytest.MonkeyPatch, tmp_path: Path
+) -> None:
+    extraction = runtime_module._extract_docling_structured_document(_structured_docling_document())
+    adapter = runtime_module.DoclingPdfPreviewAdapter(
+        extractor_revision="docling-test-v1",
+        model_root=_root(tmp_path),
+        options={"artifacts_directory": "models/docling", "pdf_backend": "pypdfium2"},
+    )
+    calls = 0
+
+    def shared_extractor(_preview_input: PreviewInputV1) -> object:
+        nonlocal calls
+        calls += 1
+        return extraction
+
+    monkeypatch.setattr(
+        runtime_module.DoclingPdfPreviewAdapter,
+        "extract_structured_pdf",
+        lambda _self, preview_input: shared_extractor(preview_input),
+    )
+
+    preview = adapter.extract_raster_or_image(_pdf_input())
+    candidate = candidate_runner_module._DoclingCandidateAdapter(adapter).extract_pdf(_pdf_input())
+
+    assert calls == 2
+    assert [span.text for span in preview.pages[0].spans] == [
+        span.text for span in candidate.spans if span.page_number == 1
+    ]
+    assert [cell.text for cell in candidate.table_cells] == ["Item", "Widget"]

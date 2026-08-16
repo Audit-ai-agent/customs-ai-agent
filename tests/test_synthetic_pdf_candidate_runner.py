@@ -40,6 +40,7 @@ from customs_ai_agent.evaluation.synthetic_pdf_candidate_runner import (
     normalize_synthetic_pdf_docling_table_cells,
     normalize_synthetic_pdf_fields,
     run_synthetic_pdf_ocr_candidate,
+    select_synthetic_pdf_candidate_table_cells,
 )
 from customs_ai_agent.service.document_preview_runtime import (
     DocumentPreviewRuntimeError,
@@ -202,6 +203,7 @@ def _profile_sidecars(root: Path, engine_kind: str) -> tuple[Path, Path]:
             "extractor_revision": "docling-test-v1",
             "options": {
                 "artifacts_directory": "models/docling",
+                "pdf_backend": "pypdfium2",
                 "ocr_enabled": False,
                 "device": "cpu",
                 "num_threads": 1,
@@ -328,7 +330,11 @@ class _FakeAdapter:
             socket.create_connection(("127.0.0.1", 9), timeout=0.01)
         text = "Invoice No: INV-001\nAmount: 10.00\nTOTAL: 10.00"
         if self.markdown_table:
-            text += "\n\n| Item | Qty |\n| --- | ---: |\n| Widget | 2 |"
+            text += (
+                "\n\n| Marks/No. | Description of Goods | Quantity | Unit Price | Amount |\n"
+                "| --- | --- | ---: | ---: | ---: |\n"
+                "| - | Widget | 2 PCS | 1.00 | 2.00 |"
+            )
         table_cells = (
             (
                 CandidateTableCellV1(
@@ -475,9 +481,9 @@ class _FullInvoiceDoclingMarkdownFakeAdapter:
 
     def extract_pdf(self, _preview_input) -> CandidateExtractionV1:  # type: ignore[no-untyped-def]
         self.calls += 1
-        # The current pinned Docling boundary emits Markdown spans, not direct
-        # table cells.  This generic engine-shaped output exercises the sole
-        # allowed pipe-table fallback without consulting a local PDF or truth.
+        # This generic engine-shaped output proves the default runner does
+        # not reconstruct table cells from Markdown without a local PDF or
+        # source-truth input.
         return CandidateExtractionV1(
             spans=(
                 CandidateSpanV1(
@@ -545,7 +551,12 @@ def test_runner_binds_every_engine_profile_and_preserves_adapter_cells(
         "amount",
         "total",
     ]
-    assert bundle.documents[0].table_cells[0].text == "Widget"
+    if engine_kind == "docling":
+        # A single unclassified cell cannot be passed through as a synthetic
+        # target table; direct Docling cells need one complete visible target.
+        assert bundle.documents[0].table_cells == []
+    else:
+        assert bundle.documents[0].table_cells[0].text == "Widget"
     assert adapter.calls == 1
 
 
@@ -597,7 +608,7 @@ def test_candidate_profile_rejects_missing_paddle_postprocess_package(tmp_path: 
         )
 
 
-def test_runner_v3_full_invoice_fake_adapter_uses_visible_candidate_output_only(
+def test_runner_v4_full_invoice_fake_adapter_uses_visible_candidate_output_only(
     tmp_path: Path,
 ) -> None:
     """The runner can emit every Invoice field without a source-truth input."""
@@ -630,7 +641,7 @@ def test_runner_v3_full_invoice_fake_adapter_uses_visible_candidate_output_only(
     assert adapter.calls == 1
 
 
-def test_runner_v3_derives_full_docling_markdown_candidate_without_direct_table_cells(
+def test_runner_does_not_derive_docling_table_cells_from_markdown_spans(
     tmp_path: Path,
 ) -> None:
     fixture = _fixture(tmp_path, engine_kind="docling")
@@ -650,14 +661,9 @@ def test_runner_v3_derives_full_docling_markdown_candidate_without_direct_table_
         "inv_no",
         "inv_date",
         "lc_no",
-        "good",
-        "unit",
-        "qty",
-        "unit_price",
-        "amount",
         "total",
     ]
-    assert len(bundle.documents[0].table_cells) == 10
+    assert bundle.documents[0].table_cells == []
     assert adapter.calls == 1
 
 
@@ -721,7 +727,7 @@ def test_runner_v3_derives_full_docling_markdown_candidate_without_direct_table_
         ),
     ],
 )
-def test_v3_visible_layout_normalizer_derives_every_rendered_field_from_fake_candidate_output(
+def test_v4_visible_layout_normalizer_derives_every_rendered_field_from_fake_candidate_output(
     document_type: str, expected_fields: list[str]
 ) -> None:
     extraction = _full_visible_layout_extraction(document_type)
@@ -735,7 +741,7 @@ def test_v3_visible_layout_normalizer_derives_every_rendered_field_from_fake_can
     assert [field.field_name for field in fields] == expected_fields
 
 
-def test_v3_visible_layout_normalizer_fails_closed_for_ambiguous_or_missing_table_fields() -> None:
+def test_v4_visible_layout_normalizer_fails_closed_for_ambiguous_or_missing_table_fields() -> None:
     extraction = _full_visible_layout_extraction("invoice")
     ambiguous_cells = tuple(
         cell
@@ -780,13 +786,27 @@ def test_v3_visible_layout_normalizer_fails_closed_for_ambiguous_or_missing_tabl
     ]
 
 
-def test_v3_normalizer_has_only_candidate_span_and_table_inputs() -> None:
-    parameters = inspect.signature(normalize_synthetic_pdf_fields).parameters
-    assert tuple(parameters) == ("document_type", "spans", "table_cells")
+def test_v5_normalizers_have_only_candidate_span_and_table_inputs() -> None:
+    field_parameters = inspect.signature(normalize_synthetic_pdf_fields).parameters
+    docling_parameters = inspect.signature(normalize_synthetic_pdf_docling_table_cells).parameters
+    direct_selector_parameters = inspect.signature(
+        select_synthetic_pdf_candidate_table_cells
+    ).parameters
+    assert tuple(field_parameters) == ("document_type", "spans", "table_cells")
+    assert tuple(docling_parameters) == ("document_type", "spans")
+    assert tuple(direct_selector_parameters) == ("table_cells",)
+    assert all(
+        forbidden not in parameter_name
+        for parameter_name in (*field_parameters, *docling_parameters, *direct_selector_parameters)
+        for forbidden in ("gold", "csv", "source")
+    )
     implementation = inspect.getsource(normalize_synthetic_pdf_fields)
     assert "source_attested" not in implementation
     assert "clean_manifest" not in implementation
     assert "error_labels" not in implementation
+    selector_implementation = inspect.getsource(select_synthetic_pdf_candidate_table_cells)
+    assert "document_type" not in selector_implementation
+    assert "_matching_table_header" not in selector_implementation
 
 
 @pytest.mark.parametrize(
@@ -930,6 +950,27 @@ def test_default_factory_has_one_direct_boundary_per_engine(
     assert type(build_default_synthetic_pdf_candidate_adapter(profile)).__name__ == expected_type
 
 
+def test_v4_label_slash_space_matching_does_not_rewrite_candidate_values() -> None:
+    fields = normalize_synthetic_pdf_fields(
+        document_type="packing_list",
+        spans=[
+            CandidateSpanV1(page_number=1, reading_order=1, text="No. of L / C: LC / 001"),
+            CandidateSpanV1(
+                page_number=1,
+                reading_order=2,
+                text="Net / Gross Weight: 3 / 4 KG",
+            ),
+        ],
+    )
+
+    # Only the labels normalize slash spacing.  The candidate's field values
+    # stay untouched for the evaluator's field-owned normalizer.
+    assert [(field.field_name, field.value) for field in fields] == [
+        ("lc_no", "LC / 001"),
+        ("net_gross_weight", "3 / 4 KG"),
+    ]
+
+
 def test_normalizer_uses_only_explicit_labelled_candidate_spans() -> None:
     fields = normalize_synthetic_pdf_fields(
         document_type="packing_list",
@@ -949,35 +990,117 @@ def test_normalizer_uses_only_explicit_labelled_candidate_spans() -> None:
     ]
 
 
-def test_docling_markdown_table_normalizer_keeps_multiple_explicit_tables() -> None:
+def test_v4_packing_list_flattened_item_cell_uses_one_terminal_ascii_quantity_unit() -> None:
+    fields = normalize_synthetic_pdf_fields(
+        document_type="packing_list",
+        spans=(),
+        table_cells=_table_cells(
+            headers=(
+                "Marks / Numbers / PKGS",
+                "Goods Description",
+                "Net Weight",
+                "Gross Weight",
+                "Measurement",
+            ),
+            values=("3 CTNS", "Widget 5 PCS", "10 KG", "12 KG", "0.20 CBM"),
+        ),
+    )
+
+    assert [(field.field_name, field.value) for field in fields] == [
+        ("good", "Widget"),
+        ("unit", "PCS"),
+        ("qty", "5"),
+        ("cartons", "3 CTNS"),
+        ("net_weight", "10 KG"),
+        ("gross_weight", "12 KG"),
+        ("cbm", "0.20 CBM"),
+        ("net_gross_weight", "10 KG / 12 KG"),
+    ]
+
+
+@pytest.mark.parametrize("item_cell", ["Widget 5 PCS 2 CTNS", "Widget 5 개"])
+def test_v4_packing_list_flattened_item_cell_rejects_ambiguous_or_non_ascii_quantity_unit(
+    item_cell: str,
+) -> None:
+    fields = normalize_synthetic_pdf_fields(
+        document_type="packing_list",
+        spans=(),
+        table_cells=_table_cells(
+            headers=(
+                "Marks/Numbers/PKGS",
+                "Goods Description",
+                "Net Weight",
+                "Gross Weight",
+                "Measurement",
+            ),
+            values=("3 CTNS", item_cell, "10 KG", "12 KG", "0.20 CBM"),
+        ),
+    )
+
+    values = {field.field_name: field.value for field in fields}
+    assert {"good", "qty", "unit"}.isdisjoint(values)
+    assert values["cartons"] == "3 CTNS"
+    assert values["net_gross_weight"] == "10 KG / 12 KG"
+
+
+def test_v4_docling_markdown_table_normalizer_selects_one_complete_target_and_reindexes() -> None:
     cells = normalize_synthetic_pdf_docling_table_cells(
+        document_type="invoice",
         spans=[
             CandidateSpanV1(
                 page_number=1,
                 reading_order=1,
-                text="Before\n| Item | Qty |\n| --- | ---: |\n| Widget",
+                text="Before\n| Country |\n| --- |\n| KR |",
             ),
             CandidateSpanV1(
                 page_number=1,
                 reading_order=2,
-                text=(" | 2 |\n| Screw \\| bolt | 3 |\n\n| Country |\n| :--- |\n| KR |\nAfter"),
+                text=(
+                    "\n\n| Marks/No. | Description of Goods | Quantity | Unit Price | Amount |\n"
+                    "| --- | --- | ---: | ---: | ---: |\n"
+                    "| - | Widget | 2 PCS | 1.00 | 2.00 |\nAfter"
+                ),
             ),
-        ]
+        ],
     )
 
     assert [
         (cell.page_number, cell.table_index, cell.row_index, cell.column_index, cell.text)
         for cell in cells
     ] == [
-        (1, 1, 0, 0, "Item"),
-        (1, 1, 0, 1, "Qty"),
-        (1, 1, 1, 0, "Widget"),
-        (1, 1, 1, 1, "2"),
-        (1, 1, 2, 0, "Screw | bolt"),
-        (1, 1, 2, 1, "3"),
-        (1, 2, 0, 0, "Country"),
-        (1, 2, 1, 0, "KR"),
+        (1, 1, 0, 0, "Marks/No."),
+        (1, 1, 0, 1, "Description of Goods"),
+        (1, 1, 0, 2, "Quantity"),
+        (1, 1, 0, 3, "Unit Price"),
+        (1, 1, 0, 4, "Amount"),
+        (1, 1, 1, 0, "-"),
+        (1, 1, 1, 1, "Widget"),
+        (1, 1, 1, 2, "2 PCS"),
+        (1, 1, 1, 3, "1.00"),
+        (1, 1, 1, 4, "2.00"),
     ]
+
+
+def test_v4_docling_markdown_table_normalizer_rejects_multiple_complete_targets() -> None:
+    cells = normalize_synthetic_pdf_docling_table_cells(
+        document_type="invoice",
+        spans=[
+            CandidateSpanV1(
+                page_number=1,
+                reading_order=1,
+                text=(
+                    "| Description of Goods | Quantity | Unit Price | Amount |\n"
+                    "| --- | ---: | ---: | ---: |\n"
+                    "| Widget | 2 PCS | 1.00 | 2.00 |\n\n"
+                    "| Description of Goods | Quantity | Unit Price | Amount |\n"
+                    "| --- | ---: | ---: | ---: |\n"
+                    "| Spare | 3 PCS | 1.00 | 3.00 |"
+                ),
+            )
+        ],
+    )
+
+    assert cells == []
 
 
 @pytest.mark.parametrize(
@@ -991,27 +1114,192 @@ def test_docling_markdown_table_normalizer_keeps_multiple_explicit_tables() -> N
 def test_docling_markdown_table_normalizer_rejects_no_or_malformed_table(text: str) -> None:
     assert (
         normalize_synthetic_pdf_docling_table_cells(
-            spans=[CandidateSpanV1(page_number=1, reading_order=1, text=text)]
+            document_type="invoice",
+            spans=[CandidateSpanV1(page_number=1, reading_order=1, text=text)],
         )
         == []
     )
 
 
-def test_docling_runner_derives_table_cells_only_from_explicit_markdown(tmp_path: Path) -> None:
+def _direct_docling_five_column_cells(
+    *,
+    table_index: int,
+    opaque_prefix: str,
+    page_number: int = 1,
+    trailing_rows: tuple[tuple[int, ...], ...] = (),
+) -> list[CandidateTableCellV1]:
+    """Build coordinate-only fixtures; values are not header aliases."""
+
+    cells = [
+        CandidateTableCellV1(
+            page_number=page_number,
+            table_index=table_index,
+            row_index=row_index,
+            column_index=column_index,
+            text=f"{opaque_prefix}-{row_index}-{column_index}",
+        )
+        for row_index in (0, 1)
+        for column_index in range(5)
+    ]
+    for row_index, columns in enumerate(trailing_rows, start=2):
+        cells.extend(
+            CandidateTableCellV1(
+                page_number=page_number,
+                table_index=table_index,
+                row_index=row_index,
+                column_index=column_index,
+                text=f"{opaque_prefix}-{row_index}-{column_index}",
+            )
+            for column_index in columns
+        )
+    return cells
+
+
+@pytest.mark.parametrize(
+    ("document_type", "opaque_prefix"),
+    [
+        ("bill_of_lading", "bl"),
+        ("invoice", "invoice"),
+        ("packing_list", "packing"),
+    ],
+    ids=["B/L", "Invoice", "Packing-List"],
+)
+def test_v5_direct_docling_selector_reindexes_one_structural_target_for_every_document_type(
+    document_type: str, opaque_prefix: str
+) -> None:
+    """All fixed document forms use the same coordinate-only direct policy."""
+
+    raw_cells = [
+        CandidateTableCellV1(
+            page_number=1,
+            table_index=2,
+            row_index=0,
+            column_index=0,
+            text=f"unrelated-{document_type}",
+        ),
+        *_direct_docling_five_column_cells(table_index=7, opaque_prefix=opaque_prefix),
+    ]
+
+    selected = select_synthetic_pdf_candidate_table_cells(table_cells=raw_cells)
+
+    assert len(selected) == 10
+    assert {(cell.page_number, cell.table_index) for cell in selected} == {(1, 1)}
+    assert {(cell.row_index, cell.column_index) for cell in selected} == {
+        (row_index, column_index) for row_index in (0, 1) for column_index in range(5)
+    }
+    assert [cell.text for cell in selected] == [
+        cell.text for cell in raw_cells if cell.table_index == 7
+    ]
+
+
+def test_v5_direct_docling_selector_allows_trailing_partial_footer_rows() -> None:
+    raw_cells = _direct_docling_five_column_cells(
+        table_index=7,
+        opaque_prefix="target",
+        trailing_rows=((0, 1), (2,)),
+    )
+
+    selected = select_synthetic_pdf_candidate_table_cells(table_cells=raw_cells)
+
+    assert len(selected) == 10
+    assert [cell.text for cell in selected] == [cell.text for cell in raw_cells[:10]]
+
+
+@pytest.mark.parametrize("malformation", ["missing", "duplicate", "row_gap", "sixth_column"])
+def test_v5_direct_docling_selector_rejects_missing_duplicate_or_nonrectangular_coordinates(
+    malformation: str,
+) -> None:
+    raw_cells = _direct_docling_five_column_cells(table_index=7, opaque_prefix="target")
+    if malformation == "missing":
+        raw_cells = [cell for cell in raw_cells if (cell.row_index, cell.column_index) != (1, 4)]
+    elif malformation == "duplicate":
+        raw_cells.append(raw_cells[0])
+    elif malformation == "row_gap":
+        raw_cells.append(
+            CandidateTableCellV1(
+                page_number=1,
+                table_index=7,
+                row_index=3,
+                column_index=0,
+                text="gap",
+            )
+        )
+    else:
+        raw_cells.append(
+            CandidateTableCellV1(
+                page_number=1,
+                table_index=7,
+                row_index=1,
+                column_index=5,
+                text="outside",
+            )
+        )
+
+    assert select_synthetic_pdf_candidate_table_cells(table_cells=raw_cells) == []
+
+
+def test_v5_direct_docling_selector_rejects_an_extra_complete_five_column_body_row() -> None:
+    raw_cells = _direct_docling_five_column_cells(
+        table_index=7,
+        opaque_prefix="target",
+        trailing_rows=(tuple(range(5)),),
+    )
+
+    assert select_synthetic_pdf_candidate_table_cells(table_cells=raw_cells) == []
+
+
+def test_v5_direct_docling_selector_rejects_zero_or_multiple_structural_targets() -> None:
+    assert select_synthetic_pdf_candidate_table_cells(table_cells=[]) == []
+    assert (
+        select_synthetic_pdf_candidate_table_cells(
+            table_cells=[
+                *_direct_docling_five_column_cells(table_index=1, opaque_prefix="first"),
+                *_direct_docling_five_column_cells(table_index=2, opaque_prefix="second"),
+            ]
+        )
+        == []
+    )
+
+
+def test_docling_runner_never_assigns_table_cells_from_markdown(tmp_path: Path) -> None:
     fixture = _fixture(tmp_path, engine_kind="docling")
     summary = _run(fixture, _FakeAdapter(include_table_cells=False, markdown_table=True))
     output = fixture["output_directory"] / summary["candidate_file"]  # type: ignore[operator]
     bundle = SyntheticPdfCandidateOutputBundleV1.model_validate_json(output.read_bytes())
 
-    assert [
-        (cell.table_index, cell.row_index, cell.column_index, cell.text)
-        for cell in bundle.documents[0].table_cells
-    ] == [
-        (1, 0, 0, "Item"),
-        (1, 0, 1, "Qty"),
-        (1, 1, 0, "Widget"),
-        (1, 1, 1, "2"),
-    ]
+    assert bundle.documents[0].table_cells == []
+
+
+def test_docling_runner_routes_raw_structured_cells_through_selection_hook(
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    fixture = _fixture(tmp_path, engine_kind="docling")
+    seen: dict[str, object] = {}
+
+    def select_target_table(*, table_cells: object) -> list[CandidateTableCellV1]:
+        seen["table_cells"] = table_cells
+        return [
+            CandidateTableCellV1(
+                page_number=1,
+                table_index=1,
+                row_index=0,
+                column_index=0,
+                text="selected-only",
+            )
+        ]
+
+    monkeypatch.setattr(
+        candidate_runner_module,
+        "select_synthetic_pdf_candidate_table_cells",
+        select_target_table,
+    )
+
+    summary = _run(fixture, _FakeAdapter())
+    output = fixture["output_directory"] / summary["candidate_file"]  # type: ignore[operator]
+    bundle = SyntheticPdfCandidateOutputBundleV1.model_validate_json(output.read_bytes())
+
+    assert isinstance(seen["table_cells"], tuple)
+    assert [cell.text for cell in bundle.documents[0].table_cells] == ["selected-only"]
 
 
 def test_runner_rejects_source_drift_before_adapter_invocation(tmp_path: Path) -> None:

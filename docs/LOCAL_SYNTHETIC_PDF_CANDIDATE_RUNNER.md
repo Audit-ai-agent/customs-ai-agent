@@ -49,6 +49,12 @@ Windows에서 non-ASCII `site-packages` 경로의 package-owned resource를 안�
 전 `document_preview_docling_native_runtime_unavailable`으로 중단한다. 제품 코드가
 drive mapping이나 junction을 자동으로 만들지는 않는다.
 
+Docling configuration은 `pdf_backend: "pypdfium2"`를 반드시 명시한다. adapter는
+이를 `PyPdfiumDocumentBackend`로 직접 전달하므로 pinned Docling의 기본
+`DoclingParseV2` PDF backend를 선택하거나 다른 backend로 fallback하지 않는다.
+다만 StandardPdfPipeline의 native GLM 실행은 남아 있으므로 위 ASCII-only
+`site-packages` 검사와 memory-only native self-test는 그대로 필수이다.
+
 프로젝트 경로에 한글 등이 있어도 **Docling을 설치해 실행하는 virtual environment
 자체**를 ASCII-only 위치에 명시적으로 둘 수 있다. 이는 재생성 가능한 Python 환경일
 뿐이며 PDF·Gold·OCR 결과·모델을 그 위치에 복사하지 않는다.
@@ -94,7 +100,7 @@ uv run python tools/run_synthetic_pdf_ocr_candidate.py `
 
 - engine kind와 extractor revision
 - configuration SHA-256와 model inventory SHA-256
-- `synthetic-pdf-visible-layout-normalizer-v3` parser revision
+- `synthetic-pdf-visible-layout-normalizer-v5` parser revision
 - `offline_synthetic_pdf_evaluation` profile mode
 - 모든 위 값과 candidate document를 묶은 `candidate_bundle_sha256`
 
@@ -120,18 +126,32 @@ uv run python tools/evaluate_synthetic_pdf_ocr.py `
 
 ## field와 table의 제한
 
-`synthetic-pdf-visible-layout-normalizer-v3`은 후보 엔진이 낸 span과
+`synthetic-pdf-visible-layout-normalizer-v5`은 후보 엔진이 낸 span과
 table cell만 읽습니다. B/L 13개, Invoice 15개, Packing List 12개라는
 **렌더링된 field 계약**을 대상으로 다음 두 가지 visible 의미만 사용합니다.
 
 - form field는 명시적 `:`/`#`/dash label-value 또는 form label 바로 다음의
   같은 page value만 읽습니다. table caption은 다음 cell을 form value로
-  사용하지 않습니다.
+  사용하지 않습니다. label/header의 `/` 앞뒤 공백만 같은 label로 취급하며,
+  후보가 낸 field value의 slash 표기는 바꾸지 않습니다.
 - table field는 동일 table의 row-0 header와 단 하나의 row-1 body가 모두
   명시적으로 있을 때만 읽습니다. 열 위치·bbox·다른 문서·PDF content stream은
   사용하지 않습니다. Invoice/PL의 `qty + unit`은 `숫자 한 개 + 영문 unit 한
-  개`이라는 명시적 cell token에서만 분리하고, PL `net_gross_weight`는 같은
-  표의 Net/Gross cell 두 개를 `net / gross`로 결합합니다.
+  개`이라는 명시적 cell token에서만 분리합니다. 단, Packing List의 Goods
+  Description 한 cell이 줄바꿈 없이 평탄화된 경우에는 **종단의 단 하나인**
+  `숫자 + ASCII 영문 unit` token만 분리합니다. token이 둘 이상이거나 종단이
+  아니거나 ASCII unit이 아니면 item boundary를 추측하지 않습니다. PL
+  `net_gross_weight`는 같은 표의 Net/Gross cell 두 개를 `net / gross`로
+  결합합니다.
+
+Docling의 **직접 구조화 table cell**을 bundle에 넣기 전에는 header label이나
+문서 종류를 읽지 않는 별도 좌표 정책을 적용합니다. 정확히 한 table만 row 0과
+row 1에 각각 column 0--4의 다섯 cell을 모두 가져야 합니다. 뒤따르는 footer는
+다섯 column의 엄격한 부분집합인 partial row만 허용하며, 두 번째 완전 5-column
+body, 좌표 누락·중복·gap·여섯 번째 column, 또는 target table이 0개/2개 이상이면
+cell을 전부 비웁니다. 통과한 header/body 10개 cell만 `page=1`, `table=1`로
+재색인합니다. 이 선택은 후보가 낸 좌표 외의 Gold·CSV·source truth·PDF content
+stream·raw header label을 읽지 않습니다.
 
 Packing List의 비렌더링 `containers` column은 평가 field에 포함하지 않습니다.
 label/header의 중복, 값 충돌, body row 추가, 누락 또는 형식 불명확성은 해당
@@ -139,24 +159,25 @@ field를 비워 두며, Gold/CSV/다른 문서의 값으로 채우지 않습니�
 normalizer가 source-truth content parser나 `clean_manifest.csv`,
 `error_labels.csv`를 import하거나 받지 않습니다.
 
-현재 runtime preview adapter는 structured table cell을 공개하지 않습니다.
-실제 adapter가 `CandidateExtractionV1.table_cells`를 제공하면 실행기는
-그 값을 그대로 보존합니다. 현 Docling 후보는 예외적으로 page-1 Markdown
-span 안의 **명시적 pipe table**만 고정 문법으로 읽을 수 있습니다.
+runtime preview API는 structured table cell을 별도 필드로 공개하지 않습니다.
+그러나 Docling 후보와 preview는 같은 in-memory structured extractor를 사용합니다.
+이 extractor는 `DoclingDocument.iterate_items()`의 실제 page provenance와
+`TableItem.data.grid`의 `(row, column, text)`를 그대로 읽고, `data.table_cells`의
+원문 cell text를 CER span으로 한 번씩 유지합니다. 따라서 page·table·row·column은
+Markdown 순서나 pipe 문법으로 추정하지 않습니다.
 
-- header row → `| --- |` separator row → 최소 한 개의 같은 폭 data row가
-  모두 있어야 table로 인정합니다.
-- page number는 1, Markdown 순서의 table index는 1부터, header row index는
-  0, data row는 1부터, column index는 0부터입니다. separator row는 cell로
-  기록하지 않습니다.
-- Gold 검수자도 위 좌표 규칙으로 table cell을 확인해야 합니다. Gold나 CSV
-  값, bbox, 추정한 행·열 경계로 빈 cell을 채우지 않습니다.
+adapter가 보존한 raw table cell은 candidate bundle 직전에 별도 target-table
+selection hook을 거칩니다. 문서 유형별 필수 header와 정확히 한 body row를 가진
+완전한 대상 표가 **정확히 하나**일 때만 그 표를 page 1, table index 1로 재번호화합니다.
+0개 또는 둘 이상의 대상 표는 빈 cell로 끝납니다. adapter가 다른 표를 합치거나
+Gold·CSV·source truth·PDF content stream을 보고 셀을 만드는 경로는 없습니다.
 
-Pdf text layer와 PaddleOCR가 structured cell을 내지 않으면 빈 목록이며 F1
-Gate를 통과하지 못합니다. Docling도 pipe table을 내지 않거나 Markdown이
-깨져 있으면 동일하게 실패합니다. 따라서 이 추가 parser는 합성 PDF의
-명시적 Markdown table 범위에서만 Gate를 가능하게 하며, 일반 문서 table
-품질을 주장하는 기능이 아닙니다.
+page provenance가 하나가 아니거나, page/bbox가 유효 범위를 벗어나거나, grid와
+cell offset이 불완전하면 Docling 후보는 fail-closed 합니다. 빈 cell은 채우지 않으며,
+Gold·CSV·PDF content stream도 읽지 않습니다. Pdf text layer와 PaddleOCR가 자체적으로
+검증된 structured cell을 내지 않으면 여전히 빈 목록이고 F1 Gate를 통과하지 못합니다.
+이는 합성 PDF의 고정된 Docling structure/table output만 측정하는 범위이며 일반 문서
+table 품질을 보장한다는 뜻은 아닙니다.
 
 ## 봉인 평가
 
