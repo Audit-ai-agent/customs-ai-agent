@@ -6,7 +6,7 @@ import json
 import socket
 import stat
 from types import SimpleNamespace
-from dataclasses import dataclass
+from dataclasses import dataclass, replace
 from datetime import date
 from pathlib import Path
 import pytest
@@ -24,12 +24,28 @@ from customs_ai_agent.evaluation.document_ocr_quality import (
     CandidateTableCellV1,
     EvaluationPacketV2,
     StratifiedPacketItemV2,
+    SyntheticDocumentType,
     SyntheticPdfCandidateOutputBundleV1,
     canonical_json_file_bytes,
     packet_receipt_sha256,
     validate_synthetic_candidate_output_provenance,
 )
 from customs_ai_agent.evaluation.native_pdf_vector_grid import NativePdfVectorFormRegion
+from customs_ai_agent.evaluation.native_pdf_semantic_adapter import (
+    NativePdfSemanticAdapter,
+    NativePdfSemanticAdapterOutputV1,
+)
+from customs_ai_agent.evaluation.native_pdf_semantic_model import (
+    NativePdfSemanticModelArtifactV1,
+    bind_native_pdf_semantic_model_artifact,
+)
+from customs_ai_agent.evaluation.supervised_template_contract import (
+    R1_SUPERVISED_TEMPLATE_DOCUMENT_TYPES,
+    R1_SUPERVISED_TEMPLATE_REQUIRED_FIELDS,
+    SUPERVISED_TEMPLATE_EXTRACTOR_REVISION,
+    SUPERVISED_TEMPLATE_MODEL_ID,
+    SUPERVISED_TEMPLATE_MODEL_REVISION,
+)
 from customs_ai_agent.evaluation.synthetic_pdf_candidate_runner import (
     CandidateExtractionV1,
     EvaluationRuntimeProfileV1,
@@ -51,8 +67,10 @@ from customs_ai_agent.service.document_preview_runtime import (
 )
 from customs_ai_agent.schemas.document_extraction import (
     BoundingBoxV1,
+    DocumentExtractionRequestMetadataV1,
     DocumentPreviewPageV1,
     DocumentSpanV1,
+    PreviewInputV1,
 )
 from tools.run_synthetic_pdf_ocr_candidate import _parser, main
 
@@ -89,6 +107,86 @@ def _package(name: str) -> dict[str, object]:
         "license_id": "test-license",
         "source_uri": "https://example.test/models/",
     }
+
+
+def _supervised_r1_model_binding():  # type: ignore[no-untyped-def]
+    """Build a schema-valid opaque r1 model binding for boundary tests."""
+
+    documents: list[dict[str, object]] = []
+    for document_index, document_type in enumerate(R1_SUPERVISED_TEMPLATE_DOCUMENT_TYPES):
+        documents.append(
+            {
+                "document_type": document_type,
+                "structural_signature": {
+                    "page_count": 1,
+                    "minimum_span_count": 1,
+                    "minimum_table_cell_count": 1,
+                    "required_selectors": [
+                        {
+                            "source_kind": "span_anchor",
+                            "page_number": 1,
+                            "anchor_x": 0.1 + document_index / 10,
+                            "anchor_y": 0.2,
+                            "anchor_tolerance": 0.00001,
+                        }
+                    ],
+                },
+                "fields": [
+                    {
+                        "field_name": field_name,
+                        "normalizer": normalizer,
+                        "selectors": [
+                            {
+                                "source_kind": "span_reading_order",
+                                "page_number": 1,
+                                "reading_order": field_index + 1,
+                            }
+                        ],
+                        "value_transform": "raw-v1",
+                    }
+                    for field_index, (field_name, normalizer) in enumerate(
+                        R1_SUPERVISED_TEMPLATE_REQUIRED_FIELDS[document_type]
+                    )
+                ],
+            }
+        )
+    artifact = NativePdfSemanticModelArtifactV1.model_validate(
+        {
+            "schema_version": "1.0",
+            "artifact_kind": "native_pdf_semantic_model",
+            "model_id": SUPERVISED_TEMPLATE_MODEL_ID,
+            "model_revision": SUPERVISED_TEMPLATE_MODEL_REVISION,
+            "inference_revision": "native-template-selector-v1",
+            "documents": documents,
+        }
+    )
+    artifact_bytes = canonical_json_file_bytes(
+        artifact.model_dump(mode="json", warnings=False, exclude_none=True)
+    )
+    return bind_native_pdf_semantic_model_artifact(
+        artifact_bytes=artifact_bytes,
+        expected_sha256=_sha(artifact_bytes),
+    )
+
+
+def _supervised_direct_fields(document_type: SyntheticDocumentType) -> tuple[CandidateFieldV1, ...]:
+    return tuple(
+        CandidateFieldV1(field_name=field_name, value=f"opaque-{field_name}")
+        for field_name, _normalizer in R1_SUPERVISED_TEMPLATE_REQUIRED_FIELDS[document_type]
+    )
+
+
+def _semantic_preview_input(content: bytes) -> PreviewInputV1:
+    return PreviewInputV1(
+        metadata=DocumentExtractionRequestMetadataV1(
+            document_asset_id="opaque-asset",
+            extraction_request_id="opaque-request",
+            source_sha256="0" * 64,
+            media_type="application/pdf",
+        ),
+        byte_size=len(content),
+        content=content,
+    )
 
 
 _DOCLING_EXECUTION_PACKAGE_NAMES = (
@@ -1012,6 +1110,273 @@ def test_default_factory_has_one_direct_boundary_per_engine(
     )
 
     assert type(build_default_synthetic_pdf_candidate_adapter(profile)).__name__ == expected_type
+
+
+def test_supervised_default_factory_requires_or_accepts_a_bound_model_loader(
+    tmp_path: Path,
+) -> None:
+    fixture = _fixture(tmp_path, engine_kind="pdf_text_layer")
+    profile = load_unapproved_local_candidate_profile(
+        document_preview_root=fixture["root"],  # type: ignore[arg-type]
+        configuration_path=fixture["configuration_path"],  # type: ignore[arg-type]
+        inventory_path=fixture["inventory_path"],  # type: ignore[arg-type]
+        engine_kind="pdf_text_layer",
+        package_version_reader=lambda _name: "test-v1",
+    )
+    supervised_profile = replace(
+        profile,
+        extractor_revision=SUPERVISED_TEMPLATE_EXTRACTOR_REVISION,
+    )
+
+    with pytest.raises(
+        SyntheticPdfCandidateRunnerError,
+        match="candidate_supervised_model_binding_unavailable",
+    ):
+        build_default_synthetic_pdf_candidate_adapter(supervised_profile)
+
+    adapter = build_default_synthetic_pdf_candidate_adapter(
+        supervised_profile,
+        supervised_template_model_loader=lambda _profile: _supervised_r1_model_binding(),
+    )
+
+    assert type(adapter).__name__ == "_SupervisedNativePdfSemanticCandidateAdapter"
+
+
+def test_supervised_semantic_adapter_uses_only_selected_bytes_and_preserves_native_evidence(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    expected_fields = _supervised_direct_fields("invoice")
+    expected_spans = (
+        CandidateSpanV1(
+            page_number=1,
+            reading_order=1,
+            text="opaque-native-span",
+            anchor_x=0.1,
+            anchor_y=0.2,
+        ),
+    )
+    expected_cells = _table_cells(
+        headers=("h0", "h1", "h2", "h3", "h4"),
+        values=("v0", "v1", "v2", "v3", "v4"),
+    )
+    expected_regions = (
+        NativePdfVectorFormRegion(
+            page_number=1,
+            x=0.1,
+            y=0.1,
+            width=0.3,
+            height=0.1,
+        ),
+    )
+    semantic_output = NativePdfSemanticAdapterOutputV1(
+        document_type="invoice",
+        model_id=SUPERVISED_TEMPLATE_MODEL_ID,
+        model_revision=SUPERVISED_TEMPLATE_MODEL_REVISION,
+        model_artifact_sha256="0" * 64,
+        fields=expected_fields,
+        spans=expected_spans,
+        table_cells=expected_cells,
+        form_regions=expected_regions,
+    )
+    seen: dict[str, bytes] = {}
+
+    def extract_pdf_bytes(_self: object, pdf_bytes: bytes) -> NativePdfSemanticAdapterOutputV1:
+        seen["pdf_bytes"] = pdf_bytes
+        return semantic_output
+
+    monkeypatch.setattr(NativePdfSemanticAdapter, "extract_pdf_bytes", extract_pdf_bytes)
+    adapter = candidate_runner_module._SupervisedNativePdfSemanticCandidateAdapter(
+        model=_supervised_r1_model_binding()
+    )
+    adapter.preflight_native_runtime()
+    extraction = adapter.extract_pdf(_semantic_preview_input(b"selected-pdf-bytes"))
+
+    assert seen == {"pdf_bytes": b"selected-pdf-bytes"}
+    assert extraction.spans == expected_spans
+    assert extraction.table_cells == expected_cells
+    assert extraction.form_regions == expected_regions
+    assert extraction.direct_fields == expected_fields
+    assert extraction.direct_fields_are_model_bound is True
+    assert extraction.table_cells_are_direct is True
+    assert extraction.semantic_document_type == "invoice"
+
+
+@pytest.mark.parametrize(
+    ("document_type", "fields", "expected_code"),
+    [
+        (None, _supervised_direct_fields("invoice"), "candidate_supervised_document_type_invalid"),
+        (
+            "invoice",
+            _supervised_direct_fields("invoice")[:-1],
+            "candidate_supervised_fields_invalid",
+        ),
+        (
+            "invoice",
+            _supervised_direct_fields("invoice")
+            + (CandidateFieldV1(field_name="unexpected", value="opaque"),),
+            "candidate_supervised_fields_invalid",
+        ),
+    ],
+)
+def test_supervised_semantic_adapter_rejects_invalid_direct_output(
+    monkeypatch: pytest.MonkeyPatch,
+    document_type: str | None,
+    fields: tuple[CandidateFieldV1, ...],
+    expected_code: str,
+) -> None:
+    semantic_output = NativePdfSemanticAdapterOutputV1(
+        document_type=document_type,
+        model_id=SUPERVISED_TEMPLATE_MODEL_ID,
+        model_revision=SUPERVISED_TEMPLATE_MODEL_REVISION,
+        model_artifact_sha256="0" * 64,
+        fields=fields,
+        spans=(),
+        table_cells=(),
+        form_regions=(),
+    )
+    monkeypatch.setattr(
+        NativePdfSemanticAdapter,
+        "extract_pdf_bytes",
+        lambda _self, _pdf_bytes: semantic_output,
+    )
+    adapter = candidate_runner_module._SupervisedNativePdfSemanticCandidateAdapter(
+        model=_supervised_r1_model_binding()
+    )
+
+    with pytest.raises(SyntheticPdfCandidateRunnerError, match=expected_code):
+        adapter.extract_pdf(_semantic_preview_input(b"selected-pdf-bytes"))
+
+
+def _supervised_test_profile(fixture: dict[str, object]) -> EvaluationRuntimeProfileV1:
+    profile = load_unapproved_local_candidate_profile(
+        document_preview_root=fixture["root"],  # type: ignore[arg-type]
+        configuration_path=fixture["configuration_path"],  # type: ignore[arg-type]
+        inventory_path=fixture["inventory_path"],  # type: ignore[arg-type]
+        engine_kind="pdf_text_layer",
+        package_version_reader=lambda _name: "test-v1",
+    )
+    return replace(profile, extractor_revision=SUPERVISED_TEMPLATE_EXTRACTOR_REVISION)
+
+
+def _supervised_direct_extraction(
+    *,
+    semantic_document_type: SyntheticDocumentType = "invoice",
+    fields: tuple[CandidateFieldV1, ...] | None = None,
+) -> CandidateExtractionV1:
+    return CandidateExtractionV1(
+        spans=(
+            CandidateSpanV1(
+                page_number=1,
+                reading_order=1,
+                text="opaque-native-span",
+                anchor_x=0.1,
+                anchor_y=0.2,
+            ),
+        ),
+        table_cells=_table_cells(
+            headers=("h0", "h1", "h2", "h3", "h4"),
+            values=("v0", "v1", "v2", "v3", "v4"),
+        ),
+        table_cells_are_direct=True,
+        form_regions=(
+            NativePdfVectorFormRegion(
+                page_number=1,
+                x=0.1,
+                y=0.1,
+                width=0.3,
+                height=0.1,
+            ),
+        ),
+        direct_fields=fields if fields is not None else _supervised_direct_fields("invoice"),
+        direct_fields_are_model_bound=True,
+        semantic_document_type=semantic_document_type,
+    )
+
+
+def test_supervised_runner_uses_only_model_bound_fields_and_direct_native_evidence(
+    tmp_path: Path,
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    fixture = _fixture(tmp_path, engine_kind="pdf_text_layer")
+    profile = _supervised_test_profile(fixture)
+    monkeypatch.setattr(
+        candidate_runner_module,
+        "load_unapproved_local_candidate_profile",
+        lambda **_kwargs: profile,
+    )
+    for function_name in (
+        "normalize_synthetic_pdf_fields",
+        "project_native_pdf_vector_form_fields",
+        "project_native_pdf_text_layer_fields",
+        "project_synthetic_pdf_visitor_table_cells",
+    ):
+        monkeypatch.setattr(
+            candidate_runner_module,
+            function_name,
+            lambda **_kwargs: pytest.fail(
+                "supervised path must not use heuristic field/table projection"
+            ),
+        )
+
+    direct_fields = _supervised_direct_fields("invoice")
+    summary = _run(
+        fixture,
+        _StaticExtractionFakeAdapter(
+            extraction=_supervised_direct_extraction(fields=direct_fields)
+        ),
+    )
+    output = fixture["output_directory"] / summary["candidate_file"]  # type: ignore[operator]
+    bundle = SyntheticPdfCandidateOutputBundleV1.model_validate_json(output.read_bytes())
+
+    assert bundle.documents[0].fields == list(direct_fields)
+    assert bundle.documents[0].spans == [
+        CandidateSpanV1(
+            page_number=1,
+            reading_order=1,
+            text="opaque-native-span",
+            anchor_x=0.1,
+            anchor_y=0.2,
+        )
+    ]
+    assert len(bundle.documents[0].table_cells) == 10
+
+
+@pytest.mark.parametrize(
+    ("extraction", "expected_code"),
+    [
+        (
+            _supervised_direct_extraction(semantic_document_type="packing_list"),
+            "candidate_supervised_evidence_invalid",
+        ),
+        (
+            _supervised_direct_extraction(fields=_supervised_direct_fields("invoice")[:-1]),
+            "candidate_supervised_fields_invalid",
+        ),
+        (
+            _supervised_direct_extraction(
+                fields=_supervised_direct_fields("invoice")
+                + (CandidateFieldV1(field_name="unexpected", value="opaque"),)
+            ),
+            "candidate_supervised_fields_invalid",
+        ),
+    ],
+)
+def test_supervised_runner_rejects_wrong_document_or_field_schema(
+    tmp_path: Path,
+    monkeypatch: pytest.MonkeyPatch,
+    extraction: CandidateExtractionV1,
+    expected_code: str,
+) -> None:
+    fixture = _fixture(tmp_path, engine_kind="pdf_text_layer")
+    profile = _supervised_test_profile(fixture)
+    monkeypatch.setattr(
+        candidate_runner_module,
+        "load_unapproved_local_candidate_profile",
+        lambda **_kwargs: profile,
+    )
+
+    with pytest.raises(SyntheticPdfCandidateRunnerError, match=expected_code):
+        _run(fixture, _StaticExtractionFakeAdapter(extraction=extraction))
 
 
 def test_v4_label_slash_space_matching_does_not_rewrite_candidate_values() -> None:

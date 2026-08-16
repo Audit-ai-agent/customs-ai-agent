@@ -20,7 +20,7 @@ import socket
 import stat
 from dataclasses import dataclass
 from pathlib import Path
-from typing import Callable, Literal, Protocol, Sequence
+from typing import Callable, Literal, Protocol, Sequence, cast
 
 from pydantic import ValidationError
 
@@ -51,6 +51,15 @@ from customs_ai_agent.evaluation.native_pdf_vector_form_fields import (
     project_native_pdf_vector_form_fields,
 )
 from customs_ai_agent.evaluation.native_pdf_vector_grid import NativePdfVectorFormRegion
+from customs_ai_agent.evaluation.native_pdf_semantic_model import (
+    HashBoundNativePdfSemanticModelV1,
+)
+from customs_ai_agent.evaluation.supervised_template_contract import (
+    R1_SUPERVISED_TEMPLATE_DOCUMENT_TYPES,
+    R1_SUPERVISED_TEMPLATE_REQUIRED_FIELDS,
+    SUPERVISED_TEMPLATE_EXTRACTOR_REVISION,
+    validate_r1_supervised_template_model,
+)
 from customs_ai_agent.evaluation.synthetic_pdf_visitor_table_projector import (
     project_synthetic_pdf_visitor_table_cells,
 )
@@ -129,6 +138,13 @@ class CandidateExtractionV1:
     # Normalized non-table rectangles are local geometry evidence for the
     # vector form projector.  They contain no semantic field mapping.
     form_regions: tuple[NativePdfVectorFormRegion, ...] = ()
+    # Direct fields are reserved for the hash-bound supervised native-template
+    # model.  They cannot be mixed with heuristic visible/positioned/vector
+    # field projectors, because that would make the evaluated model output
+    # ambiguous.
+    direct_fields: tuple[CandidateFieldV1, ...] = ()
+    direct_fields_are_model_bound: bool = False
+    semantic_document_type: SyntheticDocumentType | None = None
 
 
 def _has_complete_validated_bbox_geometry(spans: Sequence[CandidateSpanV1]) -> bool:
@@ -208,6 +224,45 @@ class SyntheticPdfCandidateAdapter(Protocol):
     def extract_pdf(self, preview_input: PreviewInputV1) -> CandidateExtractionV1: ...
 
 
+SupervisedTemplateModelLoader = Callable[
+    [EvaluationRuntimeProfileV1], HashBoundNativePdfSemanticModelV1
+]
+
+
+def _is_supervised_native_template_profile(profile: EvaluationRuntimeProfileV1) -> bool:
+    """Recognize the one profile allowed to emit model-bound direct fields."""
+
+    return (
+        profile.engine_kind == "pdf_text_layer"
+        and profile.extractor_revision == SUPERVISED_TEMPLATE_EXTRACTOR_REVISION
+    )
+
+
+def _validated_supervised_template_document_type(
+    document_type: str | None,
+) -> SyntheticDocumentType:
+    """Require the semantic model to classify exactly one r1 document kind."""
+
+    if document_type not in R1_SUPERVISED_TEMPLATE_DOCUMENT_TYPES:
+        raise SyntheticPdfCandidateRunnerError("candidate_supervised_document_type_invalid")
+    return cast(SyntheticDocumentType, document_type)
+
+
+def _validated_supervised_template_direct_fields(
+    *,
+    document_type: SyntheticDocumentType,
+    fields: Sequence[CandidateFieldV1],
+) -> tuple[CandidateFieldV1, ...]:
+    """Require every and only public r1 fields from the bound model output."""
+
+    expected = R1_SUPERVISED_TEMPLATE_REQUIRED_FIELDS[document_type]
+    expected_names = tuple(field_name for field_name, _normalizer in expected)
+    actual_names = tuple(field.field_name for field in fields)
+    if len(actual_names) != len(expected_names) or set(actual_names) != set(expected_names):
+        raise SyntheticPdfCandidateRunnerError("candidate_supervised_fields_invalid")
+    return tuple(fields)
+
+
 def _candidate_from_preview(candidate: PreviewCandidateV1 | None) -> CandidateExtractionV1:
     if candidate is None:
         return CandidateExtractionV1(spans=())
@@ -256,6 +311,51 @@ class _PdfTextLayerCandidateAdapter:
                 )
                 for fragment in self.adapter.extract_pdf_text_layer_fragments(preview_input)
             )
+        )
+
+
+@dataclass(slots=True)
+class _SupervisedNativePdfSemanticCandidateAdapter:
+    """Byte-only r1 semantic candidate adapter.
+
+    The provenance/runtime layer supplies an already hash-bound in-memory
+    model.  Inference deliberately receives no asset ID, request metadata,
+    source path, Gold, CSV, source truth, or parser profile: only the selected
+    PDF byte sequence and that model binding cross this boundary.
+    """
+
+    model: HashBoundNativePdfSemanticModelV1
+
+    def preflight_native_runtime(self) -> None:
+        """Validate the immutable model before any selected PDF is opened."""
+
+        validate_r1_supervised_template_model(self.model.verified_artifact())
+
+    def extract_pdf(self, preview_input: PreviewInputV1) -> CandidateExtractionV1:
+        # Keep this import lazy.  The HTTP runtime may install its own semantic
+        # adapter without making the offline candidate runner part of its
+        # import graph.
+        from customs_ai_agent.evaluation.native_pdf_semantic_adapter import (
+            NativePdfSemanticAdapter,
+        )
+
+        output = NativePdfSemanticAdapter(model=self.model).extract_pdf_bytes(preview_input.content)
+        document_type = _validated_supervised_template_document_type(output.document_type)
+        direct_fields = _validated_supervised_template_direct_fields(
+            document_type=document_type,
+            fields=output.fields,
+        )
+        # The semantic adapter returns the native vector grid unchanged.  Mark
+        # the structured evidence direct so the runner retains it and never
+        # replaces it with the weaker visitor geometry reconstruction.
+        return CandidateExtractionV1(
+            spans=output.spans,
+            table_cells=output.table_cells,
+            table_cells_are_direct=True,
+            form_regions=output.form_regions,
+            direct_fields=direct_fields,
+            direct_fields_are_model_bound=True,
+            semantic_document_type=document_type,
         )
 
 
@@ -317,8 +417,26 @@ class _DoclingCandidateAdapter:
         return CandidateExtractionV1(spans=spans, table_cells=table_cells)
 
 
+def _load_supervised_template_model(
+    profile: EvaluationRuntimeProfileV1,
+) -> HashBoundNativePdfSemanticModelV1:
+    """Lazy provenance seam for the default supervised candidate factory.
+
+    The dedicated provenance module is intentionally integrated by the
+    runtime/configuration change, not by this candidate-only module.  Until
+    that boundary supplies a verified binding, the default factory refuses to
+    open a selected PDF.  Callers that already hold a verified binding can
+    inject it through ``supervised_template_model_loader`` below.
+    """
+
+    del profile
+    raise SyntheticPdfCandidateRunnerError("candidate_supervised_model_binding_unavailable")
+
+
 def build_default_synthetic_pdf_candidate_adapter(
     profile: EvaluationRuntimeProfileV1,
+    *,
+    supervised_template_model_loader: SupervisedTemplateModelLoader | None = None,
 ) -> SyntheticPdfCandidateAdapter:
     """Create one direct engine adapter with no text-layer fallback.
 
@@ -327,6 +445,18 @@ def build_default_synthetic_pdf_candidate_adapter(
     """
 
     if profile.engine_kind == "pdf_text_layer":
+        if _is_supervised_native_template_profile(profile):
+            loader = supervised_template_model_loader or _load_supervised_template_model
+            try:
+                model = loader(profile)
+                validate_r1_supervised_template_model(model.verified_artifact())
+            except SyntheticPdfCandidateRunnerError:
+                raise
+            except Exception as error:
+                raise SyntheticPdfCandidateRunnerError(
+                    "candidate_supervised_model_binding_invalid"
+                ) from error
+            return _SupervisedNativePdfSemanticCandidateAdapter(model=model)
         return _PdfTextLayerCandidateAdapter(
             PdfTextLayerPreviewAdapter(extractor_revision=profile.extractor_revision)
         )
@@ -1579,10 +1709,11 @@ def run_synthetic_pdf_ocr_candidate(
         adapter = adapter_factory(profile)
     except Exception as error:
         raise SyntheticPdfCandidateRunnerError("candidate_adapter_unavailable") from error
-    # A native P3/PaddleX or Docling profile must prove its local model stack
-    # on an in-memory probe before the first selected source PDF is opened.
-    # Legacy P2 adapters deliberately have no probe method, preserving their
-    # historic behavior without treating their constructor as P3-compatible.
+    # A supervised native-template, P3/PaddleX, or Docling profile must prove
+    # its local model stack on an in-memory probe before the first selected
+    # source PDF is opened.  Legacy P2 adapters deliberately have no probe
+    # method, preserving their historic behavior without treating their
+    # constructor as P3-compatible.
     native_preflight = getattr(adapter, "preflight_native_runtime", None)
     if callable(native_preflight):
         try:
@@ -1615,6 +1746,33 @@ def run_synthetic_pdf_ocr_candidate(
             raise SyntheticPdfCandidateRunnerError("candidate_engine_execution_failed") from error
         except Exception as error:
             raise SyntheticPdfCandidateRunnerError("candidate_engine_execution_failed") from error
+        is_supervised_native_template = _is_supervised_native_template_profile(profile)
+        if is_supervised_native_template:
+            # A supervised profile has exactly one permissible field source:
+            # the hash-bound semantic model's direct output.  The packet item
+            # is used only here to cross-check the model's own structural
+            # classification; it is never passed into byte-only inference.
+            if (
+                not extracted.direct_fields_are_model_bound
+                or not extracted.table_cells_are_direct
+                or extracted.semantic_document_type != item.document_type
+            ):
+                raise SyntheticPdfCandidateRunnerError("candidate_supervised_evidence_invalid")
+            direct_fields = _validated_supervised_template_direct_fields(
+                document_type=item.document_type,
+                fields=extracted.direct_fields,
+            )
+        else:
+            # No historic OCR/layout profile may smuggle in a privileged direct
+            # semantic result.  It must continue through its explicit local
+            # candidate normalization path below.
+            if (
+                extracted.direct_fields_are_model_bound
+                or extracted.direct_fields
+                or extracted.semantic_document_type is not None
+            ):
+                raise SyntheticPdfCandidateRunnerError("candidate_supervised_evidence_invalid")
+            direct_fields = ()
         # Adapter-provided structured cells are the normal table evidence.
         # A native vector/grid text-layer profile reads only this selected
         # candidate PDF's own content stream and has already proven its cells
@@ -1633,9 +1791,12 @@ def run_synthetic_pdf_ocr_candidate(
             profile.engine_kind == "paddleocr"
             and _has_complete_validated_bbox_geometry(extracted.spans)
         )
-        uses_positioned_fields = profile.engine_kind == "pdf_text_layer" or (
-            profile.engine_kind == "paddleocr"
-            and _has_complete_validated_bbox_geometry(extracted.spans)
+        uses_positioned_fields = (not is_supervised_native_template) and (
+            profile.engine_kind == "pdf_text_layer"
+            or (
+                profile.engine_kind == "paddleocr"
+                and _has_complete_validated_bbox_geometry(extracted.spans)
+            )
         )
         raw_table_cells = tuple(extracted.table_cells)
         if uses_candidate_geometry:
@@ -1658,40 +1819,46 @@ def run_synthetic_pdf_ocr_candidate(
                 ) from error
         else:
             table_cells = list(raw_table_cells)
-        visible_fields = normalize_synthetic_pdf_fields(
-            document_type=item.document_type,
-            spans=extracted.spans,
-            table_cells=table_cells,
-        )
-        vector_form_fields: list[CandidateFieldV1] = []
-        if extracted.form_regions:
-            try:
-                vector_form_fields = project_native_pdf_vector_form_fields(
-                    spans=extracted.spans,
-                    regions=extracted.form_regions,
-                    specifications=_native_vector_form_field_specifications(item.document_type),
-                )
-            except Exception as error:
-                raise SyntheticPdfCandidateRunnerError(
-                    "candidate_vector_form_projection_invalid"
-                ) from error
-        if uses_positioned_fields:
-            try:
-                positioned_fields = project_native_pdf_text_layer_fields(
-                    document_type=item.document_type,
-                    spans=extracted.spans,
-                )
-            except Exception as error:
-                raise SyntheticPdfCandidateRunnerError(
-                    "candidate_field_projection_invalid"
-                ) from error
-            fields = merge_synthetic_pdf_candidate_fields(
-                vector_form_fields,
-                positioned_fields,
-                visible_fields,
-            )
+        if is_supervised_native_template:
+            # Do not merge model fields with visible labels, vector-form
+            # heuristics, or positioned text.  That would turn an evaluated
+            # supervised model result into an untracked hybrid path.
+            fields = list(direct_fields)
         else:
-            fields = merge_synthetic_pdf_candidate_fields(vector_form_fields, visible_fields)
+            visible_fields = normalize_synthetic_pdf_fields(
+                document_type=item.document_type,
+                spans=extracted.spans,
+                table_cells=table_cells,
+            )
+            vector_form_fields: list[CandidateFieldV1] = []
+            if extracted.form_regions:
+                try:
+                    vector_form_fields = project_native_pdf_vector_form_fields(
+                        spans=extracted.spans,
+                        regions=extracted.form_regions,
+                        specifications=_native_vector_form_field_specifications(item.document_type),
+                    )
+                except Exception as error:
+                    raise SyntheticPdfCandidateRunnerError(
+                        "candidate_vector_form_projection_invalid"
+                    ) from error
+            if uses_positioned_fields:
+                try:
+                    positioned_fields = project_native_pdf_text_layer_fields(
+                        document_type=item.document_type,
+                        spans=extracted.spans,
+                    )
+                except Exception as error:
+                    raise SyntheticPdfCandidateRunnerError(
+                        "candidate_field_projection_invalid"
+                    ) from error
+                fields = merge_synthetic_pdf_candidate_fields(
+                    vector_form_fields,
+                    positioned_fields,
+                    visible_fields,
+                )
+            else:
+                fields = merge_synthetic_pdf_candidate_fields(vector_form_fields, visible_fields)
         documents.append(
             CandidateDocumentOutputV1(
                 asset_id=item.asset_id,
@@ -1728,6 +1895,7 @@ __all__ = [
     "SYNTHETIC_PDF_LABEL_NORMALIZER_REVISION",
     "SyntheticPdfCandidateAdapter",
     "SyntheticPdfCandidateRunnerError",
+    "SupervisedTemplateModelLoader",
     "build_default_synthetic_pdf_candidate_adapter",
     "load_local_synthetic_pdf_evaluation_inputs",
     "load_unapproved_local_candidate_profile",
