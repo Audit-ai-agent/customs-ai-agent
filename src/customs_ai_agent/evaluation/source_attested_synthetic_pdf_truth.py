@@ -97,16 +97,13 @@ SOURCE_LAYOUT_PARSER_SPEC_REVISION: Final[
 # This is intentionally fixed at the source-truth writer as well as at the
 # runtime boundary.  Merely requiring every receipt in a chain to agree would
 # let a coherent, older parser version create a new automatic approval.
-# Version 7 is the only normalizer accepted for this scope.  It preserves the
-# complete rendered B/L-13, Invoice-15, and Packing-list-12 field surface and
-# adds the direct structured-table selection plus native visitor-anchor table
-# projection, positioned candidate-field projection, and coalesced native
-# visitor table geometry.  Version 7 or older
-# must not regain eligibility merely by producing a self-consistent chain of
-# newer receipts.
+# Version 9 is the only normalizer accepted for this scope.  It has a
+# separately reviewed contract for the complete rendered B/L-13, Invoice-15,
+# and Packing-list-12 field surface.  Version 8 or older must not regain
+# eligibility merely by producing a self-consistent chain of newer receipts.
 SOURCE_ATTESTED_CANDIDATE_PARSER_REVISION: Final[
-    Literal["synthetic-pdf-visible-layout-normalizer-v8"]
-] = "synthetic-pdf-visible-layout-normalizer-v8"
+    Literal["synthetic-pdf-visible-layout-normalizer-v9"]
+] = "synthetic-pdf-visible-layout-normalizer-v9"
 
 # This automatic path has one deliberately narrow approval target.  These
 # values are a compact identity for the existing human-checked, 2,000-set PDF
