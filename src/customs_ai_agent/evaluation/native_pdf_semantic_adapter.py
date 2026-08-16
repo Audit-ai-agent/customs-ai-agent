@@ -188,6 +188,7 @@ def _transformed_field_value(
             return None
         source_keys.add(source_key)
         values.append(selected.text)
+    result: str | None
     if field.value_transform == "raw-v1":
         result = values[0]
     elif field.value_transform == "single-numeric-token-v1":
