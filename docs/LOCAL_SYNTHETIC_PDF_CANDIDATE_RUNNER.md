@@ -77,6 +77,30 @@ uv sync --active --locked --extra document-preview-docling --group dev
 않는다. 이 단계가 실패하면 environment를 바로잡은 뒤 provisioning부터 다시 해야
 하며 development/sealed candidate를 실행해서는 안 된다.
 
+### Docling Accurate TableFormer의 명시적 staging
+
+`accurate` mode는 fast 모델을 재사용하거나 자동 fallback하지 않는다. 운영자가 이
+profile을 실제로 평가하려면 먼저 아래 명령에 `--confirm-download`를 명시해야 한다.
+이 명령은 HTTPS 고정 source인 `ds4sd/docling-models` snapshot
+`36bebf56681740529abd09f5473a93a69373fbf0`의 `tm_config.json`과
+`tableformer_accurate.safetensors` 두 파일만 받고, 각각 7,060 bytes/Git blob SHA-1과
+212,758,388 bytes/SHA-256
+`66d8912f290375d3466f91be2048030a16317e84c8f1f69d3dbd7adc6d6cd2a9`를 검증한다.
+12 GiB 여유 공간·link/junction 부재·원자적 directory publish도 모두 필수이며, 기존
+accurate target은 정상 여부와 무관하게 절대 덮어쓰지 않는다.
+
+```powershell
+& "$env:VIRTUAL_ENV\Scripts\python.exe" tools/stage_docling_accurate_tableformer.py `
+  --document-preview-root <workspace>/_local/data/document-preview `
+  --confirm-download
+```
+
+성공해도 이는 모델 파일의 local staging뿐이다. configuration/inventory sidecar,
+candidate bundle, evaluation result, sealed reservation, active pointer는 전혀 쓰지
+않는다. accurate 전용 configuration·provenance를 준비하고 기존 inventory builder와
+local-only provisioner를 다시 통과한 뒤에만 별도의 development candidate를 실행할 수
+있다.
+
 ## 개발 평가 실행
 
 각 엔진을 별도 configuration/inventory로 정확히 한 번씩 실행합니다.
