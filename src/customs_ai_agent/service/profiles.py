@@ -2291,7 +2291,9 @@ class ProfileRuntime:
             "items": [
                 {
                     "hs_code": item.get("hs_code") if isinstance(item, dict) else None,
-                    "origin_country": item.get("origin_country") if isinstance(item, dict) else None,
+                    "origin_country": item.get("origin_country")
+                    if isinstance(item, dict)
+                    else None,
                     "description": item.get("description") if isinstance(item, dict) else None,
                 }
                 for item in workflow_output.retrieval_items
