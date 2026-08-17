@@ -14,7 +14,7 @@ import re
 import unicodedata
 from dataclasses import dataclass, field as dataclass_field, replace
 from decimal import Decimal, InvalidOperation
-from typing import Any, Iterable, Literal, Mapping, Protocol, cast
+from typing import Any, Callable, Iterable, Literal, Mapping, Protocol, cast
 
 from customs_ai_agent.adapters.llm import DocumentAnalysis
 from customs_ai_agent.schemas.llm import ClaudeDocumentCandidate
@@ -320,10 +320,22 @@ def run_bounded_workflow(
     analyzer: _Analyzer,
     *,
     transcript: ScenarioTranscriptRun | None = None,
+    on_stage: Callable[[str, str], None] | None = None,
 ) -> BoundedWorkflowOutput:
     """Extract once, make at most one focused retry per document, then compare."""
 
+    def _notify(stage: str, status: str) -> None:
+        # Display-only progress; a broken listener must never break the review.
+        if on_stage is None:
+            return
+        try:
+            on_stage(stage, status)
+        except Exception:
+            pass
+
     planner = _BoundedPlanner()
+    _notify("classify_documents", "running")
+    _notify("extract_facts", "running")
     initial: dict[str, DocumentAnalysis] = {}
     for document in request.documents:
         initial[document.document_id] = analyzer.analyze(
@@ -334,6 +346,9 @@ def run_bounded_workflow(
         status="completed",
         summary="문서 유형과 원문 인용이 있는 사실만 추출·정규화했습니다.",
     )
+    _notify("classify_documents", "completed")
+    _notify("extract_facts", "completed")
+    _notify("normalize_facts", "completed")
 
     retry_targets = _reextraction_targets(request, initial)
     analyses = dict(initial)
@@ -341,6 +356,7 @@ def run_bounded_workflow(
     retry_unavailable = False
     if retry_targets:
         planner.start_retry_cycle()
+        _notify("reextract_documents", "running")
     for document in request.documents:
         requested_fields = retry_targets.get(document.document_id)
         if not requested_fields:
@@ -382,6 +398,9 @@ def run_bounded_workflow(
             ),
         )
 
+    if reextractions:
+        _notify("reextract_documents", "completed")
+    _notify("match_documents", "running")
     rendered = [
         _render_analysis(document, analyses[document.document_id]) for document in request.documents
     ]
@@ -399,6 +418,8 @@ def run_bounded_workflow(
         status="completed",
         summary="코드 기반 수량·금액·원산지·B/L 비교 규칙을 실행했습니다.",
     )
+    _notify("match_documents", "completed")
+    _notify("validate_documents", "completed")
     findings = _findings_from_comparisons(comparisons)
     findings.extend(_warning_findings(rendered))
     (

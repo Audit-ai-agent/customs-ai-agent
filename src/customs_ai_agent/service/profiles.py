@@ -33,6 +33,7 @@ from customs_ai_agent.schemas.assistant import (
     KnowledgeAnswerRequestV1,
     KnowledgeAnswerResponseV1,
 )
+from customs_ai_agent.service.progress import PROGRESS
 from customs_ai_agent.scenario_transcript import (
     KnowledgeTranscriptRoot,
     KnowledgeTranscriptTurn,
@@ -1002,7 +1003,7 @@ def _retrieve_request(
         "review_as_of": request.review_as_of.isoformat(),
         "jurisdiction": request.jurisdiction,
         "trade_type": request.trade_type,
-        "top_k": 10,
+        "top_k": 30,
         "items": items,
     }
     # The law-history profile owns the extra legal-evidence branch.  Preserve
@@ -2086,13 +2087,18 @@ class ProfileRuntime:
                     "reason": "local-development uses the deterministic document analyzer",
                 },
             )
+        PROGRESS.begin(request.review_run_id)
         try:
             workflow_output = run_bounded_workflow(
                 request,
                 self._analyzer,
                 transcript=transcript,
+                on_stage=lambda stage, status: PROGRESS.update(
+                    request.review_run_id, stage, status
+                ),
             )
             if workflow_output.retrieval_items:
+                PROGRESS.update(request.review_run_id, "retrieve_evidence", "running")
                 data_response = self._retriever.retrieve(
                     _retrieve_request(
                         request,
@@ -2111,6 +2117,10 @@ class ProfileRuntime:
                 )
                 evidence_records = _evidence_from_data(data_response)
                 workflow_output = workflow_output.with_evidence_status(str(data_response["status"]))
+                PROGRESS.update(request.review_run_id, "retrieve_evidence", "completed")
+                evidence_records = self._relevant_evidence(
+                    request, workflow_output, evidence_records, transcript=transcript
+                )
             else:
                 # Data rejects an empty retrieval request by contract.  This is
                 # an input limitation, not an unhealthy or partial Data store.
@@ -2138,13 +2148,16 @@ class ProfileRuntime:
                 EvidenceV3.model_validate(item) for item in _public_evidence(evidence_records)
             ]
         except RetrievalError:
+            PROGRESS.finish(request.review_run_id, "failed")
             raise RuntimeExecutionError(
                 "evidence_dependency_unready",
                 "The Data Evidence service is unavailable or profile-mismatched.",
             ) from None
         except RuntimeExecutionError:
+            PROGRESS.finish(request.review_run_id, "failed")
             raise
         except Exception:
+            PROGRESS.finish(request.review_run_id, "failed")
             raise RuntimeExecutionError(
                 "profile_review_execution_failed", "The local Agent review could not be completed."
             ) from None
@@ -2169,6 +2182,7 @@ class ProfileRuntime:
             )
         )
         actions = _actions(findings)
+        PROGRESS.update(request.review_run_id, "generate_result", "running")
         report_sections = build_grounded_report_sections(
             analyses=workflow_output.document_analyses,
             comparisons=workflow_output.comparisons,
@@ -2246,7 +2260,75 @@ class ProfileRuntime:
                     else "deterministic",
                 },
             )
+        PROGRESS.finish(request.review_run_id, "completed")
         return result
+
+    def _relevant_evidence(
+        self,
+        request: Any,
+        workflow_output: Any,
+        evidence_records: list[dict[str, Any]],
+        *,
+        transcript: Any,
+    ) -> list[dict[str, Any]]:
+        """Trim retrieval context to what the case needs, via one model call.
+
+        Requirement evidence (``eligibility == "finding"``) is never dropped —
+        it backs the required-document findings. Only supporting passages are
+        screened, and any failure keeps everything (fail-open): a filter must
+        never lose evidence or break the review.
+        """
+
+        if self.mode != "functional-uat" or self._grounded_responder is None:
+            return evidence_records
+        candidates = [
+            record for record in evidence_records if record.get("eligibility") != "finding"
+        ]
+        if len(candidates) <= 3:
+            return evidence_records
+        payload = {
+            "trade_type": request.trade_type,
+            "items": [
+                {
+                    "hs_code": item.get("hs_code") if isinstance(item, dict) else None,
+                    "origin_country": item.get("origin_country") if isinstance(item, dict) else None,
+                    "description": item.get("description") if isinstance(item, dict) else None,
+                }
+                for item in workflow_output.retrieval_items
+            ],
+            "findings": [
+                {
+                    "code": getattr(finding, "code", None),
+                    "message": str(getattr(finding, "message", ""))[:200],
+                }
+                for finding in workflow_output.findings[:20]
+            ],
+            "evidence": [
+                {
+                    "evidence_id": record["evidence_id"],
+                    "title": str(record.get("title", ""))[:200],
+                    "law_name": str(record.get("law_name", ""))[:100],
+                    "text": str(record.get("text", ""))[:400],
+                }
+                for record in candidates
+            ],
+        }
+        try:
+            answer = self._grounded_responder.respond(
+                payload, transcript=transcript, purpose="evidence_relevance"
+            )
+            keep = answer.get("relevant_evidence_ids")
+            if not isinstance(keep, list) or not keep:
+                return evidence_records
+            keep_ids = {str(item) for item in keep}
+            kept = [
+                record
+                for record in evidence_records
+                if record.get("eligibility") == "finding" or record["evidence_id"] in keep_ids
+            ]
+            return kept if kept else evidence_records
+        except Exception:
+            return evidence_records
 
     def close(self) -> None:
         self._closed = True
