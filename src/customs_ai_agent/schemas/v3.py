@@ -33,6 +33,17 @@ class TextDocumentInputV3(V3WireModel):
     declared_type: str | None = Field(default=None, max_length=64)
 
 
+class ReviewerHsSelectionV3(V3WireModel):
+    """Reviewer-confirmed HSK code, labelled human-provided context.
+
+    It never overrides a document-cited HS code; the workflow may use it only
+    as the retrieval commodity when no input document cites a code itself.
+    """
+
+    code: str = Field(pattern=r"^[0-9]{10}$")
+    source_kind: Literal["human_provided"]
+
+
 class ServiceReviewRunRequestV3(V3WireModel):
     case_id: str = Field(
         min_length=1,
@@ -55,6 +66,7 @@ class ServiceReviewRunRequestV3(V3WireModel):
     )
     applied_correction_proposal_ids: list[str] = Field(default_factory=list, max_length=50)
     human_corrections: list["HumanCorrectionInputV3"] = Field(default_factory=list, max_length=50)
+    reviewer_hs_selection: ReviewerHsSelectionV3 | None = None
 
     @model_validator(mode="after")
     def _document_ids_are_unique(self) -> "ServiceReviewRunRequestV3":

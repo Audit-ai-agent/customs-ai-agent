@@ -191,6 +191,9 @@ class BoundedWorkflowOutput:
     retrieval_skip_reason: (
         Literal["no_hs_qualified_commodity", "export_destination_country_missing"] | None
     )
+    # Set only when no document cited an HS code and retrieval used the
+    # reviewer-confirmed HSK selection supplied by the Backend.
+    retrieval_reviewer_hs_code: str | None
     planner_state: _BoundedPlanner
 
     def with_evidence_status(self, data_status: str) -> "BoundedWorkflowOutput":
@@ -203,14 +206,16 @@ class BoundedWorkflowOutput:
             retrieval_status = "needs_review"
         else:
             retrieval_status = "failed"
+        summary = _evidence_summary(
+            data_status,
+            excluded_document_count=len(self.retrieval_excluded_document_ids),
+            reviewer_hs_code=self.retrieval_reviewer_hs_code,
+        )
         stages = [
             stage.model_copy(
                 update={
                     "status": retrieval_status,
-                    "summary": _evidence_summary(
-                        data_status,
-                        excluded_document_count=len(self.retrieval_excluded_document_ids),
-                    ),
+                    "summary": summary,
                 }
             )
             if stage.stage == "retrieve_evidence"
@@ -221,10 +226,7 @@ class BoundedWorkflowOutput:
         planner.record(
             "retrieve_evidence",
             status=retrieval_status,
-            summary=_evidence_summary(
-                data_status,
-                excluded_document_count=len(self.retrieval_excluded_document_ids),
-            ),
+            summary=summary,
         )
         workflow_status: Literal["completed", "partial", "failed"]
         if data_status == "failed":
@@ -427,6 +429,7 @@ def run_bounded_workflow(
         retrieval_document_ids,
         retrieval_excluded_document_ids,
         retrieval_skip_reason,
+        retrieval_reviewer_hs_code,
     ) = retrieval_plan_from_analyses(request, rendered)
     stages = _workflow_stages(
         rendered,
@@ -451,6 +454,7 @@ def run_bounded_workflow(
         retrieval_document_ids=retrieval_document_ids,
         retrieval_excluded_document_ids=retrieval_excluded_document_ids,
         retrieval_skip_reason=retrieval_skip_reason,
+        retrieval_reviewer_hs_code=retrieval_reviewer_hs_code,
         planner_state=planner,
     )
 
@@ -472,6 +476,7 @@ def retrieval_plan_from_analyses(
     dict[str, list[str]],
     list[str],
     Literal["no_hs_qualified_commodity", "export_destination_country_missing"] | None,
+    str | None,
 ]:
     """Group source-grounded facts into one Data item per commodity.
 
@@ -480,6 +485,12 @@ def retrieval_plan_from_analyses(
     all linked document IDs available for findings without extending the Data
     HTTP contract.  Documents without an HS code, including ordinary B/L
     documents, are not sent as malformed retrieval fallback items.
+
+    When no document cites a code at all and the Backend supplied a
+    reviewer-confirmed HSK selection, that labelled human-provided code
+    becomes the one retrieval commodity; the fifth returned value carries the
+    code actually used so the trace can attribute it. It never overrides a
+    document-cited code.
     """
 
     candidates: list[dict[str, Any]] = []
@@ -524,6 +535,43 @@ def retrieval_plan_from_analyses(
             excluded_document_ids.append(document.document_id)
         candidates.extend(document_candidates)
 
+    reviewer_hs_code: str | None = None
+    if not candidates and request.reviewer_hs_selection is not None:
+        reviewer_hs_code = request.reviewer_hs_selection.code
+        description_fact = None
+        for analysis in analyses:
+            for line_item in analysis.line_items:
+                description_fact = _first_fact(line_item.facts, *_DESCRIPTION_FIELDS)
+                if description_fact is not None:
+                    break
+            if description_fact is None:
+                description_fact = _first_fact(analysis.facts, *_DESCRIPTION_FIELDS)
+            if description_fact is not None:
+                break
+        origin_values = {
+            fact.normalized_value
+            for analysis in analyses
+            for fact in analysis.facts
+            if fact.name in _ORIGIN_FIELDS and fact.normalized_value
+        }
+        fallback_description = (
+            description_fact.raw_value
+            if description_fact is not None
+            else request.documents[0].content_text
+        )[:2000]
+        for document in request.documents:
+            candidates.append(
+                {
+                    "document_id": document.document_id,
+                    "description": fallback_description,
+                    "hs_code": reviewer_hs_code,
+                    "origin_country": (
+                        next(iter(origin_values)) if len(origin_values) == 1 else None
+                    ),
+                }
+            )
+        excluded_document_ids = []
+
     origins_by_hs: dict[str, set[str]] = {}
     for candidate in candidates:
         hs_code = str(candidate["hs_code"])
@@ -537,7 +585,7 @@ def retrieval_plan_from_analyses(
                 candidate["origin_country"] = next(iter(origins))
 
     if not candidates:
-        return [], {}, sorted(set(excluded_document_ids)), "no_hs_qualified_commodity"
+        return [], {}, sorted(set(excluded_document_ids)), "no_hs_qualified_commodity", None
 
     destination_country = "KR"
     if request.trade_type == "export":
@@ -551,6 +599,7 @@ def retrieval_plan_from_analyses(
                 {},
                 sorted(set(excluded_document_ids)),
                 "export_destination_country_missing",
+                None,
             )
 
     groups: dict[tuple[str, str | None], dict[str, Any]] = {}
@@ -591,7 +640,13 @@ def retrieval_plan_from_analyses(
             }
         )
         document_ids_by_item[item_id] = sorted(group["document_ids"])
-    return items[:100], document_ids_by_item, sorted(set(excluded_document_ids)), None
+    return (
+        items[:100],
+        document_ids_by_item,
+        sorted(set(excluded_document_ids)),
+        None,
+        reviewer_hs_code,
+    )
 
 
 def finding_for_evidence_requirement(
@@ -1919,12 +1974,22 @@ def _workflow_stages(
     ]
 
 
-def _evidence_summary(data_status: str, *, excluded_document_count: int = 0) -> str:
+def _evidence_summary(
+    data_status: str,
+    *,
+    excluded_document_count: int = 0,
+    reviewer_hs_code: str | None = None,
+) -> str:
     summary = {
         "ok": "품목 기준으로 법령 근거를 한 번 조회했습니다.",
         "partial": "일부 법령 근거 조회 결과를 확인하지 못해 담당자 검토가 필요합니다.",
         "failed": "법령 근거 조회에 실패했습니다.",
     }.get(data_status, "법령 근거 조회 상태를 확인할 수 없습니다.")
+    if reviewer_hs_code:
+        summary += (
+            f" 문서에 HS 코드가 없어 담당자가 확정한 HSK 코드({reviewer_hs_code})를"
+            " 품목 기준으로 사용했습니다."
+        )
     if excluded_document_count:
         return summary + " HS 코드가 없는 문서는 법령 근거 조회 대상에서 제외했습니다."
     return summary

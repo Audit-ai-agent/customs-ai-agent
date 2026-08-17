@@ -579,6 +579,100 @@ def test_retrieval_groups_one_commodity_and_excludes_no_hs_bill_of_lading() -> N
     assert output.retrieval_excluded_document_ids == []
 
 
+def _no_hs_invoice_scenario(
+    *, reviewer_code: str | None
+) -> tuple[ServiceReviewRunRequestV3, dict[str, list[ClaudeDocumentCandidate]]]:
+    invoice_line = (
+        "Description: Widget | Quantity: 2 PCS | Unit: PCS | Unit Price: USD 10 | Amount: USD 20"
+    )
+    invoice_text = "\n".join(
+        (
+            "COMMERCIAL INVOICE",
+            "Invoice No: INV-001",
+            "Total Amount: USD 20",
+            "Country of Origin: KR",
+            invoice_line,
+        )
+    )
+    payload: dict[str, Any] = {
+        "case_id": "case-no-hs",
+        "review_run_id": "run-no-hs",
+        "review_as_of": "2026-08-05",
+        "trade_type": "import",
+        "jurisdiction": "KR",
+        "documents": [
+            {"document_id": "invoice", "filename": "invoice.txt", "content_text": invoice_text}
+        ],
+    }
+    if reviewer_code is not None:
+        payload["reviewer_hs_selection"] = {"code": reviewer_code, "source_kind": "human_provided"}
+    request = ServiceReviewRunRequestV3.model_validate(payload)
+    candidates = {
+        "invoice": [
+            ClaudeDocumentCandidate(
+                document_type="invoice",
+                classification_source_quote="COMMERCIAL INVOICE",
+                fields=[
+                    _field("invoice_no", "INV-001", "Invoice No: INV-001"),
+                    _field("total_amount", "USD 20", "Total Amount: USD 20"),
+                    _field("country_of_origin", "KR", "Country of Origin: KR"),
+                ],
+                line_items=[
+                    _line(
+                        invoice_line,
+                        ("description", "Widget"),
+                        ("quantity", "2 PCS"),
+                        ("unit", "PCS"),
+                        ("unit_price", "USD 10"),
+                        ("amount", "USD 20"),
+                    )
+                ],
+            )
+        ]
+    }
+    return request, candidates
+
+
+def test_retrieval_uses_reviewer_hs_selection_when_no_document_cites_a_code() -> None:
+    request, candidates = _no_hs_invoice_scenario(reviewer_code="6109101000")
+    output = run_bounded_workflow(request, _SequenceAnalyzer(candidates))
+
+    assert output.retrieval_skip_reason is None
+    assert output.retrieval_reviewer_hs_code == "6109101000"
+    assert len(output.retrieval_items) == 1
+    item = output.retrieval_items[0]
+    assert item["hs_code"] == "6109101000"
+    assert item["description"] == "Widget"
+    assert item["origin_country"] == "KR"
+    assert output.retrieval_document_ids[item["item_id"]] == ["invoice"]
+    assert output.retrieval_excluded_document_ids == []
+    complete = output.with_evidence_status("ok")
+    retrieve = next(
+        stage for stage in complete.workflow.stages if stage.stage == "retrieve_evidence"
+    )
+    assert "담당자가 확정한 HSK 코드(6109101000)" in retrieve.summary
+
+
+def test_retrieval_without_reviewer_selection_still_skips_when_no_code() -> None:
+    request, candidates = _no_hs_invoice_scenario(reviewer_code=None)
+    output = run_bounded_workflow(request, _SequenceAnalyzer(candidates))
+
+    assert output.retrieval_items == []
+    assert output.retrieval_skip_reason == "no_hs_qualified_commodity"
+    assert output.retrieval_reviewer_hs_code is None
+
+
+def test_reviewer_hs_selection_never_overrides_document_cited_codes() -> None:
+    request, candidates = _scenario()
+    payload = request.input_manifest_wire()
+    payload["reviewer_hs_selection"] = {"code": "6109101000", "source_kind": "human_provided"}
+    request = ServiceReviewRunRequestV3.model_validate(payload)
+    output = run_bounded_workflow(request, _SequenceAnalyzer(candidates))
+
+    assert output.retrieval_reviewer_hs_code is None
+    assert [item["hs_code"] for item in output.retrieval_items] == ["123456"]
+
+
 def test_hs_code_alias_is_canonical_for_required_field_checks() -> None:
     request, candidates = _scenario()
     certificate = candidates["certificate"][0]

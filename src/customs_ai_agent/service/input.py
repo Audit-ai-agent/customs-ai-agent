@@ -35,7 +35,10 @@ _CHILD_REQUEST_FIELDS = {
     "applied_correction_proposal_ids",
     "human_corrections",
 }
-_ALLOWED_REQUEST_FIELDS = _REQUIRED_REQUEST_FIELDS | _CHILD_REQUEST_FIELDS
+_ALLOWED_REQUEST_FIELDS = (
+    _REQUIRED_REQUEST_FIELDS | _CHILD_REQUEST_FIELDS | {"reviewer_hs_selection"}
+)
+_REVIEWER_HS_CODE = re.compile(r"^[0-9]{10}$")
 _CORRECTION_REQUIRED_FIELDS = {
     "correction_proposal_id",
     "document_id",
@@ -297,6 +300,16 @@ def inspect_text_request(payload: bytes, settings: ServiceSettings) -> Inspected
         if text_characters > settings.max_text_characters:
             raise ServiceHttpError("request_too_large", 413)
     _inspect_child_context(decoded)
+    reviewer_hs_selection = decoded.get("reviewer_hs_selection")
+    if reviewer_hs_selection is not None:
+        if (
+            not isinstance(reviewer_hs_selection, dict)
+            or set(reviewer_hs_selection) != {"code", "source_kind"}
+            or not isinstance(reviewer_hs_selection["code"], str)
+            or _REVIEWER_HS_CODE.fullmatch(reviewer_hs_selection["code"]) is None
+            or reviewer_hs_selection["source_kind"] != "human_provided"
+        ):
+            raise ServiceHttpError("request_invalid", 422)
     canonical = json.dumps(
         decoded,
         ensure_ascii=False,
