@@ -553,6 +553,60 @@ def create_app(
         return JSONResponse(status_code=200, headers=_NO_STORE_HEADERS, content=outcome.result)
 
     @app.post(
+        "/internal/agent/v3/law-search",
+        summary="Proxy one reviewer-facing free-text statute search to Data",
+        openapi_extra={"security": _BEARER_SECURITY},
+        responses={
+            401: {"content": {"application/json": {"schema": ERROR_RESPONSE_SCHEMA}}},
+            403: {"content": {"application/json": {"schema": ERROR_RESPONSE_SCHEMA}}},
+            422: {"content": {"application/json": {"schema": ERROR_RESPONSE_SCHEMA}}},
+            502: {"content": {"application/json": {"schema": ERROR_RESPONSE_SCHEMA}}},
+            503: _PRE_EXECUTION_503_RESPONSE,
+            504: {"content": {"application/json": {"schema": ERROR_RESPONSE_SCHEMA}}},
+        },
+    )
+    async def law_search(request: Request) -> JSONResponse:
+        _authorize(request, active_settings)
+        payload = await admitted_body(request)
+        controller: AgentServiceController = request.app.state.controller
+        outcome = await controller.execute(payload=payload, runtime_method_name="law_search_json")
+        if outcome.result is None:
+            raise ServiceHttpError(
+                outcome.error_code or "internal_error",
+                outcome.status_code,
+                retryable=outcome.retryable,
+                retry_after_seconds=outcome.retry_after_seconds,
+            )
+        return JSONResponse(status_code=200, headers=_NO_STORE_HEADERS, content=outcome.result)
+
+    @app.post(
+        "/internal/agent/v3/law-catalog",
+        summary="Proxy the searchable-statute catalog from Data",
+        openapi_extra={"security": _BEARER_SECURITY},
+        responses={
+            401: {"content": {"application/json": {"schema": ERROR_RESPONSE_SCHEMA}}},
+            403: {"content": {"application/json": {"schema": ERROR_RESPONSE_SCHEMA}}},
+            422: {"content": {"application/json": {"schema": ERROR_RESPONSE_SCHEMA}}},
+            502: {"content": {"application/json": {"schema": ERROR_RESPONSE_SCHEMA}}},
+            503: _PRE_EXECUTION_503_RESPONSE,
+            504: {"content": {"application/json": {"schema": ERROR_RESPONSE_SCHEMA}}},
+        },
+    )
+    async def law_catalog(request: Request) -> JSONResponse:
+        _authorize(request, active_settings)
+        payload = await admitted_body(request)
+        controller: AgentServiceController = request.app.state.controller
+        outcome = await controller.execute(payload=payload, runtime_method_name="law_catalog_json")
+        if outcome.result is None:
+            raise ServiceHttpError(
+                outcome.error_code or "internal_error",
+                outcome.status_code,
+                retryable=outcome.retryable,
+                retry_after_seconds=outcome.retry_after_seconds,
+            )
+        return JSONResponse(status_code=200, headers=_NO_STORE_HEADERS, content=outcome.result)
+
+    @app.post(
         "/internal/agent/v2/knowledge/answers",
         summary="Answer one official-source grounded customs knowledge question",
         openapi_extra={

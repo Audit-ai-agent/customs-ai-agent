@@ -1698,3 +1698,111 @@ def test_http_review_accepts_bounded_child_correction_context(
     actions = response.json()["workflow"]["planner"]["actions"]
     correction = next(action for action in actions if action["action"] == "apply_human_corrections")
     assert correction["correction_proposal_ids"] == ["proposal-origin"]
+
+
+def test_law_search_proxies_a_bounded_reviewer_query(monkeypatch: pytest.MonkeyPatch) -> None:
+    retriever = ProfileEvidenceRetriever(_settings())
+    monkeypatch.setattr(retriever, "readiness", lambda **_kwargs: {"status": "ready"})
+    captured: dict[str, object] = {}
+
+    def fake_request(path, *, method, payload=None, **_kwargs):
+        captured["path"] = path
+        captured["method"] = method
+        captured["payload"] = payload
+        return {
+            "schema_version": "3.0",
+            "request_id": payload["request_id"],
+            "status": "ok",
+            "as_of": payload["as_of"],
+            "results": [],
+        }
+
+    monkeypatch.setattr(retriever, "_request", fake_request)
+    response = retriever.law_search(
+        {
+            "schema_version": "3.0",
+            "request_id": "law-search-1",
+            "query": "원산지증명서 제출",
+            "top_k": 10,
+            "as_of": "2026-08-05",
+        }
+    )
+    assert captured["path"] == "/internal/rag/v3/law-search"
+    assert captured["method"] == "POST"
+    assert response["status"] == "ok"
+
+
+def test_law_search_rejects_an_invalid_request() -> None:
+    retriever = ProfileEvidenceRetriever(_settings())
+    base = {
+        "schema_version": "3.0",
+        "request_id": "law-search-2",
+        "query": "관세",
+        "top_k": 10,
+        "as_of": "2026-08-05",
+    }
+    for broken in (
+        {**base, "query": ""},
+        {**base, "query": "가" * 201},
+        {**base, "top_k": 50},
+        {**base, "request_id": "bad id!"},
+        {**base, "as_of": 20260805},
+    ):
+        with pytest.raises(RetrievalError, match="law-search request is invalid"):
+            retriever.law_search(broken)
+
+
+def test_law_search_rejects_a_contract_breaking_response(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    retriever = ProfileEvidenceRetriever(_settings())
+    monkeypatch.setattr(retriever, "readiness", lambda **_kwargs: {"status": "ready"})
+    monkeypatch.setattr(
+        retriever,
+        "_request",
+        lambda *_args, **_kwargs: {
+            "schema_version": "3.0",
+            "request_id": "law-search-3",
+            "status": "failed",
+            "results": [],
+        },
+    )
+    with pytest.raises(RetrievalError, match="law-search response"):
+        retriever.law_search(
+            {
+                "schema_version": "3.0",
+                "request_id": "law-search-3",
+                "query": "관세",
+                "top_k": 5,
+                "as_of": "2026-08-05",
+            }
+        )
+
+
+def test_law_catalog_proxies_and_validates(monkeypatch: pytest.MonkeyPatch) -> None:
+    retriever = ProfileEvidenceRetriever(_settings())
+    monkeypatch.setattr(retriever, "readiness", lambda **_kwargs: {"status": "ready"})
+    monkeypatch.setattr(
+        retriever,
+        "_request",
+        lambda path, **_kwargs: {
+            "schema_version": "3.0",
+            "request_id": "law-catalog-1",
+            "status": "ok",
+            "as_of": "2026-08-05",
+            "laws": [
+                {
+                    "law_id": "LAW-226",
+                    "law_name": "관세법",
+                    "hierarchy": "법률",
+                    "article_count": 280,
+                }
+            ],
+        },
+    )
+    response = retriever.law_catalog(
+        {"schema_version": "3.0", "request_id": "law-catalog-1", "as_of": "2026-08-05"}
+    )
+    assert response["laws"][0]["law_name"] == "관세법"
+    with pytest.raises(RetrievalError, match="law-catalog request is invalid"):
+        retriever.law_catalog({"schema_version": "3.0", "request_id": "law-catalog-2"})

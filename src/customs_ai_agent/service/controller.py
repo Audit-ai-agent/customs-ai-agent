@@ -118,7 +118,12 @@ class AgentServiceController:
     async def execute(self, *, payload: bytes, runtime_method_name: str) -> ServiceOutcome:
         """Run one non-idempotent internal capability under the same bound."""
 
-        if runtime_method_name not in {"assistant_answer_json", "knowledge_answer_json"}:
+        if runtime_method_name not in {
+            "assistant_answer_json",
+            "knowledge_answer_json",
+            "law_search_json",
+            "law_catalog_json",
+        }:
             raise ServiceHttpError("capability_unavailable", 503, retryable=True)
         if self._closing:
             raise ServiceHttpError("service_draining", 503, retryable=True)
@@ -141,7 +146,13 @@ class AgentServiceController:
                 asyncio.to_thread(method, payload),
                 timeout=self._settings.run_timeout_seconds,
             )
-            public = result.model_dump(mode="json", warnings=False)
+            # The law-reference proxies pass through an already-validated Data
+            # JSON object; every other capability returns a pydantic model.
+            public = (
+                result.model_dump(mode="json", warnings=False)
+                if hasattr(result, "model_dump")
+                else result
+            )
             json.dumps(public, ensure_ascii=False, allow_nan=False, separators=(",", ":"))
             return ServiceOutcome(status_code=200, result=public)
         except TimeoutError:

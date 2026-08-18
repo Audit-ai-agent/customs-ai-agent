@@ -279,6 +279,8 @@ class ProfileEvidenceRetriever:
     readiness_path = "/internal/rag/v3/health/ready"
     retrieve_path = "/internal/rag/v3/retrieve"
     guidance_query_path = "/internal/rag/v3/guidance/query"
+    law_search_path = "/internal/rag/v3/law-search"
+    law_catalog_path = "/internal/rag/v3/law-catalog"
 
     def __init__(
         self, settings: ServiceSettings, *, transcript_root: ScenarioTranscriptRoot | None = None
@@ -386,7 +388,9 @@ class ProfileEvidenceRetriever:
         )
         timeout = (
             self._evidence_retrieve_timeout
-            if peer == "evidence" and method == "POST" and path == self.retrieve_path
+            if peer == "evidence"
+            and method == "POST"
+            and path in (self.retrieve_path, self.law_search_path, self.law_catalog_path)
             else self._readiness_timeout
         )
         try:
@@ -584,6 +588,68 @@ class ProfileEvidenceRetriever:
                 error_code="data_contract_invalid",
             )
             raise
+        return response
+
+    def law_search(self, request: dict[str, Any]) -> dict[str, Any]:
+        """Proxy one bounded reviewer statute search to the Data store.
+
+        This is a read-only reference lookup for a person: it carries no
+        case, item, or HS meaning and never contributes to a review result.
+        """
+
+        if (
+            request.get("schema_version") != "3.0"
+            or not isinstance(request.get("request_id"), str)
+            or _SAFE_RUN_ID.fullmatch(request["request_id"]) is None
+            or not isinstance(request.get("query"), str)
+            or not 1 <= len(request["query"].strip()) <= 200
+            or not isinstance(request.get("top_k"), int)
+            or not 1 <= request["top_k"] <= 20
+            or not isinstance(request.get("as_of"), str)
+        ):
+            raise RetrievalError("Data law-search request is invalid")
+        self.readiness()
+        response = self._request(self.law_search_path, method="POST", payload=request)
+        if (
+            response.get("schema_version") != "3.0"
+            or response.get("request_id") != request["request_id"]
+            or response.get("status") != "ok"
+            or not isinstance(response.get("results"), list)
+        ):
+            self._record_failure(
+                None,
+                method="POST",
+                path=self.law_search_path,
+                error_code="data_contract_invalid",
+            )
+            raise RetrievalError("Data law-search response does not satisfy the shared contract")
+        return response
+
+    def law_catalog(self, request: dict[str, Any]) -> dict[str, Any]:
+        """List the statutes the Data store can search, for the reviewer screen."""
+
+        if (
+            request.get("schema_version") != "3.0"
+            or not isinstance(request.get("request_id"), str)
+            or _SAFE_RUN_ID.fullmatch(request["request_id"]) is None
+            or not isinstance(request.get("as_of"), str)
+        ):
+            raise RetrievalError("Data law-catalog request is invalid")
+        self.readiness()
+        response = self._request(self.law_catalog_path, method="POST", payload=request)
+        if (
+            response.get("schema_version") != "3.0"
+            or response.get("request_id") != request["request_id"]
+            or response.get("status") != "ok"
+            or not isinstance(response.get("laws"), list)
+        ):
+            self._record_failure(
+                None,
+                method="POST",
+                path=self.law_catalog_path,
+                error_code="data_contract_invalid",
+            )
+            raise RetrievalError("Data law-catalog response does not satisfy the shared contract")
         return response
 
     def guidance_query(
@@ -1980,6 +2046,41 @@ class ProfileRuntime:
                 registry_version=registry_version,
             )
         return answer
+
+    def law_search_json(self, payload: bytes) -> dict[str, Any]:
+        """Proxy one reviewer-facing statute search; no case or review meaning."""
+
+        self._assert_open()
+        request = self._decode_law_reference(payload)
+        try:
+            return self._retriever.law_search(request)
+        except RetrievalError as error:
+            raise RuntimeExecutionError("law_reference_unavailable", str(error)) from None
+
+    def law_catalog_json(self, payload: bytes) -> dict[str, Any]:
+        """List the statutes the Data store can search, for the reviewer screen."""
+
+        self._assert_open()
+        request = self._decode_law_reference(payload)
+        try:
+            return self._retriever.law_catalog(request)
+        except RetrievalError as error:
+            raise RuntimeExecutionError("law_reference_unavailable", str(error)) from None
+
+    @staticmethod
+    def _decode_law_reference(payload: bytes) -> dict[str, Any]:
+        try:
+            parsed = json.loads(payload.decode("utf-8"))
+        except (UnicodeDecodeError, ValueError):
+            raise RuntimeInputError(
+                "law_reference_request_invalid",
+                "The law reference request does not satisfy the service contract.",
+            ) from None
+        if not isinstance(parsed, dict):
+            raise RuntimeInputError(
+                "law_reference_request_invalid", "The law reference request is invalid."
+            )
+        return parsed
 
     def knowledge_answer_json(self, payload: bytes) -> KnowledgeAnswerResponseV1:
         """Answer one standalone, official-source-grounded knowledge question.
