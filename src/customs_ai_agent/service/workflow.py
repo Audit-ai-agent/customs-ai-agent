@@ -510,7 +510,7 @@ def retrieval_plan_from_analyses(
                         :2000
                     ],
                     "hs_code": hs.normalized_value or hs.raw_value,
-                    "origin_country": origin.normalized_value if origin else None,
+                    "origin_country": _retrieval_origin(origin),
                 }
             )
         if not document_candidates:
@@ -525,7 +525,7 @@ def retrieval_plan_from_analyses(
                             description.raw_value if description else document.content_text[:2000]
                         )[:2000],
                         "hs_code": document_hs.normalized_value or document_hs.raw_value,
-                        "origin_country": origin.normalized_value if origin else None,
+                        "origin_country": _retrieval_origin(origin),
                     }
                 )
         if not document_candidates and analysis.document_type not in {
@@ -552,7 +552,9 @@ def retrieval_plan_from_analyses(
             fact.normalized_value
             for analysis in analyses
             for fact in analysis.facts
-            if fact.name in _ORIGIN_FIELDS and fact.normalized_value
+            if fact.name in _ORIGIN_FIELDS
+            and fact.normalized_value
+            and _is_country_code(fact.normalized_value)
         }
         fallback_description = (
             description_fact.raw_value
@@ -2017,6 +2019,20 @@ def _export_destination_country(analyses: Iterable[DocumentAnalysisV3]) -> str |
 
 def _is_country_code(value: str) -> bool:
     return bool(re.fullmatch(r"[A-Z]{2}", value))
+
+
+def _retrieval_origin(origin: Any) -> str | None:
+    """Origin for a Data retrieval item: a valid ISO-2 code or nothing.
+
+    Documents often spell the origin out ("REPUBLIC OF KOREA"); the Evidence
+    API only accepts two-letter codes and rejects the whole retrieval
+    otherwise.  An unnormalisable origin degrades to None — retrieval proceeds
+    without an origin instead of failing the review, and no name-to-code
+    mapping is invented here.
+    """
+
+    value = getattr(origin, "normalized_value", None) if origin is not None else None
+    return value if isinstance(value, str) and _is_country_code(value) else None
 
 
 def _reextraction_targets(
