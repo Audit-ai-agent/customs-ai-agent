@@ -17,6 +17,7 @@ import os
 from pathlib import Path, PurePosixPath
 import re
 import shutil
+import sys
 from typing import Any, Iterator, Literal, Mapping, Sequence
 import uuid
 
@@ -267,7 +268,7 @@ def _same_or_child(root: Path, path: Path) -> bool:
 def _operational_path(path: Path, *, force_short: bool = False) -> Path:
     """Use an equivalent existing 8.3 spelling for deep Windows operations."""
 
-    if os.name != "nt":
+    if sys.platform != "win32":
         return path
     value = str(path)
     if not force_short and value.isascii() and len(value) <= 160:
@@ -275,11 +276,12 @@ def _operational_path(path: Path, *, force_short: bool = False) -> Path:
     try:
         import ctypes
 
-        required = ctypes.windll.kernel32.GetShortPathNameW(value, None, 0)
+        kernel32 = ctypes.windll.kernel32
+        required = kernel32.GetShortPathNameW(value, None, 0)
         if not isinstance(required, int) or required < 1:
             raise OSError
         buffer = ctypes.create_unicode_buffer(required + 1)
-        written = ctypes.windll.kernel32.GetShortPathNameW(value, buffer, len(buffer))
+        written = kernel32.GetShortPathNameW(value, buffer, len(buffer))
         if not isinstance(written, int) or not 0 < written < len(buffer):
             raise OSError
         short = buffer.value

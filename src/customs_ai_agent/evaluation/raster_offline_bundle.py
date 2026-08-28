@@ -17,6 +17,7 @@ import os
 from dataclasses import dataclass
 from pathlib import Path, PurePosixPath
 import re
+import sys
 from typing import Any, Iterable, Mapping, Protocol
 
 from pydantic import BaseModel, ConfigDict, Field, ValidationError, field_validator, model_validator
@@ -430,7 +431,7 @@ def _windows_operational_path(path: Path, *, force_short: bool = False) -> Path:
     host this fixed native bundle and fails closed.
     """
 
-    if os.name != "nt":
+    if sys.platform != "win32":
         return path
     try:
         import ctypes

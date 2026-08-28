@@ -484,14 +484,19 @@ class _WindowsProcessApi(Protocol):
 
 class _CtypesWindowsProcessApi:
     def __init__(self) -> None:
-        kernel32 = ctypes.WinDLL("kernel32", use_last_error=True)  # type: ignore[attr-defined]
+        if sys.platform != "win32":
+            raise OSError("windows process API unavailable")
+        kernel32 = ctypes.WinDLL("kernel32", use_last_error=True)
         kernel32.OpenProcess.argtypes = [wintypes.DWORD, wintypes.BOOL, wintypes.DWORD]
         kernel32.OpenProcess.restype = wintypes.HANDLE
         kernel32.GetExitCodeProcess.argtypes = [wintypes.HANDLE, wintypes.LPDWORD]
         kernel32.GetExitCodeProcess.restype = wintypes.BOOL
         kernel32.CloseHandle.argtypes = [wintypes.HANDLE]
         kernel32.CloseHandle.restype = wintypes.BOOL
-        self._kernel32 = kernel32
+        # ``ctypes`` exposes the dynamic DLL handle only on Windows.  Keep the
+        # untyped boundary on that handle, while the public adapter remains a
+        # typed protocol on every platform.
+        self._kernel32: Any = kernel32
 
     def open_process(self, pid: int) -> int:
         # Read-only query plus wait permission.  No terminate right is opened.
@@ -508,6 +513,8 @@ class _CtypesWindowsProcessApi:
         self._kernel32.CloseHandle(handle)
 
     def last_error(self) -> int:
+        if sys.platform != "win32":
+            raise OSError("windows process API unavailable")
         return int(ctypes.get_last_error())
 
 

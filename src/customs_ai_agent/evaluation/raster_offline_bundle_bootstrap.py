@@ -386,7 +386,7 @@ def _document_preview_root(path: Path) -> Path:
 def _windows_operational_path(path: Path, *, force_short: bool = False) -> Path:
     """Return the existing short path used for deep Windows package trees."""
 
-    if os.name != "nt":
+    if sys.platform != "win32":
         return path
     try:
         import ctypes
@@ -419,7 +419,7 @@ def _windows_extended_write_path(path: Path) -> Path:
     native execution continue to use canonical/short paths.
     """
 
-    if os.name != "nt":
+    if sys.platform != "win32":
         return path
     value = str(path)
     if value.startswith("\\\\?\\"):
@@ -455,7 +455,7 @@ def _project_root() -> Path:
 
 
 def _ensure_supported_platform() -> None:
-    if os.name != "nt" or sys.version_info[:2] != (3, 11) or sys.maxsize <= 2**32:
+    if sys.platform != "win32" or sys.version_info[:2] != (3, 11) or sys.maxsize <= 2**32:
         raise RasterOfflineBundleBootstrapError("raster_bundle_bootstrap_platform_unsupported")
 
 
@@ -482,6 +482,9 @@ def _bootstrap_lock(root: Path) -> Iterator[None]:
     still rejected, while Windows releases the lock automatically if its owner
     dies.  The file is intentionally retained as an inert lock target.
     """
+
+    if sys.platform != "win32":
+        raise RasterOfflineBundleBootstrapError("raster_bundle_bootstrap_platform_unsupported")
 
     lock = root / _BOOTSTRAP_LOCK_NAME
     stream = None

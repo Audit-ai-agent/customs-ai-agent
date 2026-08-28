@@ -22,6 +22,7 @@ import os
 from pathlib import Path, PurePosixPath
 import shutil
 import subprocess
+import sys
 import sysconfig
 import tempfile
 import time
@@ -431,7 +432,7 @@ def _operational_path(path: Path, *, force_short: bool = False) -> Path:
     equivalent existing 8.3 spelling.
     """
 
-    if os.name != "nt":
+    if sys.platform != "win32":
         return path
     value = str(path)
     # A release root can be just below MAX_PATH while a legitimate child
@@ -443,11 +444,12 @@ def _operational_path(path: Path, *, force_short: bool = False) -> Path:
     try:
         import ctypes
 
-        required = ctypes.windll.kernel32.GetShortPathNameW(value, None, 0)
+        kernel32 = ctypes.windll.kernel32
+        required = kernel32.GetShortPathNameW(value, None, 0)
         if not isinstance(required, int) or required < 1:
             raise OSError
         buffer = ctypes.create_unicode_buffer(required + 1)
-        written = ctypes.windll.kernel32.GetShortPathNameW(value, buffer, len(buffer))
+        written = kernel32.GetShortPathNameW(value, buffer, len(buffer))
         if not isinstance(written, int) or not 0 < written < len(buffer):
             raise OSError
         short = buffer.value

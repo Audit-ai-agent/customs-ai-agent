@@ -768,7 +768,7 @@ def _windows_operational_model_path(path: Path) -> Path:
     keeps those two operations on the exact already-validated directory.
     """
 
-    if os.name != "nt":
+    if sys.platform != "win32":
         return path
     try:
         import ctypes

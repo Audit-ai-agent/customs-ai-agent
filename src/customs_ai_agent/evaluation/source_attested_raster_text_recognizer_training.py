@@ -954,17 +954,18 @@ def _native_export_prefix(text_rec_directory: Path) -> Path:
     """
 
     canonical = text_rec_directory.resolve(strict=True)
-    if os.name != "nt":
+    if sys.platform != "win32":
         return canonical / "inference"
     try:
         import ctypes
 
         value = str(canonical)
-        required = ctypes.windll.kernel32.GetShortPathNameW(value, None, 0)
+        kernel32 = ctypes.windll.kernel32
+        required = kernel32.GetShortPathNameW(value, None, 0)
         if not isinstance(required, int) or required < 1:
             raise OSError
         buffer = ctypes.create_unicode_buffer(required + 1)
-        written = ctypes.windll.kernel32.GetShortPathNameW(value, buffer, len(buffer))
+        written = kernel32.GetShortPathNameW(value, buffer, len(buffer))
         if not isinstance(written, int) or not 0 < written < len(buffer):
             raise OSError
         short = buffer.value

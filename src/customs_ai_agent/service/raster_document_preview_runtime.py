@@ -18,6 +18,7 @@ import os
 import re
 import struct
 import subprocess
+import sys
 import tempfile
 import threading
 from dataclasses import dataclass, field, replace
@@ -2699,7 +2700,7 @@ def _document_preview_root(path: Path) -> Path:
 def _windows_operational_sidecar_path(path: Path) -> Path:
     """Return a validated short Windows alias for deep sidecar package paths."""
 
-    if os.name != "nt":
+    if sys.platform != "win32":
         return path
     try:
         import ctypes
