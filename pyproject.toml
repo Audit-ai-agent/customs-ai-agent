@@ -10,7 +10,11 @@ readme = "README.md"
 requires-python = ">=3.11,<3.12"
 dependencies = [
   "fastapi>=0.115,<1",
+  # Raster OCR v2 always needs local PDF/image decoding.  The heavy Paddle
+  # stack remains isolated in the hash-pinned sidecar bundle.
+  "pillow==10.4.0",
   "pydantic>=2.7,<3",
+  "pypdfium2==4.30.0",
   "uvicorn>=0.32,<1",
 ]
 
@@ -52,6 +56,9 @@ customs-ai-agent-serve = "customs_ai_agent.service.__main__:main"
 customs-ai-agent-dev-serve = "customs_ai_agent.service.__main__:dev_main"
 customs-ai-agent-functional-uat-serve = "customs_ai_agent.service.__main__:functional_uat_main"
 customs-ai-agent-verify-knowledge-transcript = "customs_ai_agent.knowledge_transcript_verifier:main"
+# Installed only in an explicitly provisioned, hash-pinned local OCR runtime.
+# It is never invoked by normal service startup.
+customs-ai-agent-ppstructurev3-sidecar = "customs_ai_agent.service.ppstructurev3_sidecar:main"
 
 [tool.setuptools.packages.find]
 where = ["src"]

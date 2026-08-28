@@ -22,7 +22,7 @@ import stat
 import zlib
 from dataclasses import dataclass
 from pathlib import Path
-from typing import Final, Iterable, Literal, Mapping, Sequence
+from typing import Callable, Final, Iterable, Literal, Mapping, Sequence
 
 from pydantic import BaseModel, ConfigDict, Field, ValidationError, model_validator
 
@@ -1090,8 +1090,19 @@ def _pop_operands(
     return values
 
 
-def _parse_pdf_content_stream_v1(pdf_bytes: bytes) -> _ParsedContentStream:
-    """Parse only the known final-PDF content stream without external libraries."""
+def _parse_pdf_content_stream_v1(
+    pdf_bytes: bytes,
+    *,
+    text_run_decoder: Callable[[str, str], str] | None = None,
+) -> _ParsedContentStream:
+    """Parse the known final-PDF content stream without external libraries.
+
+    The historical source-attested PDF path keeps its original Latin-1 view
+    when no decoder is supplied.  A caller that needs Unicode text can supply
+    a decoder derived solely from the final PDF's own font resources.  That
+    keeps the content stream as the source of truth while avoiding a false
+    equivalence between a PDF character code and its rendered Unicode glyph.
+    """
 
     if len(pdf_bytes) < 1 or len(pdf_bytes) > _MAX_PDF_BYTES:
         raise SourceAttestedSyntheticPdfTruthError("source_layout_pdf_size_invalid")
@@ -1104,6 +1115,7 @@ def _parse_pdf_content_stream_v1(pdf_bytes: bytes) -> _ParsedContentStream:
     matrix: tuple[float, ...] = (1.0, 0.0, 0.0, 1.0, 0.0, 0.0)
     leading = 0.0
     in_text = False
+    active_font_name: str | None = None
     allowed_operators = {"cm", "BT", "ET", "Tf", "TL", "Tm", "T*", "Tj", "w", "re", "S", "n"}
 
     while token := lexer.next_token():
@@ -1140,7 +1152,11 @@ def _parse_pdf_content_stream_v1(pdf_bytes: bytes) -> _ParsedContentStream:
             values = _pop_operands(operands, count=2, code="source_layout_pdf_operand_invalid")
             if not in_text or values[0][0] != "name":
                 raise SourceAttestedSyntheticPdfTruthError("source_layout_pdf_text_state_invalid")
+            font_name = values[0][1]
+            if not isinstance(font_name, str) or not font_name:
+                raise SourceAttestedSyntheticPdfTruthError("source_layout_pdf_text_state_invalid")
             _parse_pdf_number(values[1], code="source_layout_pdf_operand_invalid")
+            active_font_name = font_name
             continue
         if operator == "TL":
             values = _pop_operands(operands, count=1, code="source_layout_pdf_operand_invalid")
@@ -1172,6 +1188,19 @@ def _parse_pdf_content_stream_v1(pdf_bytes: bytes) -> _ParsedContentStream:
             text = values[0][1]
             if not isinstance(text, str) or not text.strip():
                 raise SourceAttestedSyntheticPdfTruthError("source_layout_pdf_text_invalid")
+            if text_run_decoder is not None:
+                if active_font_name is None:
+                    raise SourceAttestedSyntheticPdfTruthError(
+                        "source_layout_pdf_text_state_invalid"
+                    )
+                try:
+                    text = text_run_decoder(active_font_name, text)
+                except (TypeError, UnicodeError, ValueError):
+                    raise SourceAttestedSyntheticPdfTruthError(
+                        "source_layout_pdf_text_encoding_invalid"
+                    ) from None
+                if not text.strip():
+                    raise SourceAttestedSyntheticPdfTruthError("source_layout_pdf_text_invalid")
             text_runs.append(
                 _TextRun(
                     reading_order=len(text_runs) + 1,

@@ -23,6 +23,8 @@ _SHA256 = re.compile(r"^[a-f0-9]{64}$")
 ServiceMode = Literal["local-development", "functional-uat"]
 GuidanceRegistryVersion = Literal["1.0", "2.0"]
 DocumentPreviewAutoActivationMode = Literal["source-attested-synthetic"]
+RasterDocumentPreviewAutoActivationMode = Literal["source-attested-synthetic-raster-v1"]
+RasterTextPreviewAutoActivationMode = Literal["source-attested-synthetic-raster-text-v1"]
 # This is intentionally the Data-owned local profile name, rather than an
 # Agent runtime profile name.  The composed V2 + law-history Agent profile
 # therefore resolves to the same expected Evidence profile as review-only
@@ -93,6 +95,36 @@ def _document_preview_approval_path(value: str) -> Path:
     return path
 
 
+def _raster_document_preview_approval_path(value: str) -> Path:
+    """Accept only the separate Git-excluded raster approval pointer."""
+
+    path = Path(value)
+    if (
+        not path.is_absolute()
+        or path.name != "raster-preview-active.json"
+        or path.parent.name != "approvals"
+        or tuple(part.casefold() for part in path.parent.parent.parts[-3:])
+        != ("_local", "data", "document-preview")
+    ):
+        raise ServiceConfigurationError("customs_agent_raster_preview_approval_path_invalid")
+    return path
+
+
+def _raster_text_preview_approval_path(value: str) -> Path:
+    """Accept only the independent text-only active pointer location."""
+
+    path = Path(value)
+    if (
+        not path.is_absolute()
+        or path.name != "raster-text-active.json"
+        or path.parent.name != "approvals"
+        or tuple(part.casefold() for part in path.parent.parent.parts[-3:])
+        != ("_local", "data", "document-preview")
+    ):
+        raise ServiceConfigurationError("customs_agent_raster_text_preview_approval_path_invalid")
+    return path
+
+
 @dataclass(frozen=True, slots=True)
 class ServiceSettings:
     """All service traffic stays on loopback and uses one peer-mode handshake.
@@ -134,12 +166,36 @@ class ServiceSettings:
     document_preview_approval_path: Path | None = None
     document_preview_approval_sha256: str | None = None
     document_preview_auto_activation_mode: DocumentPreviewAutoActivationMode | None = None
+    # Raster v2 retains its hash-pinned static mode.  Its separate automatic
+    # source-attested mode is deliberately opt-in and derives a fresh pointer
+    # digest from the one fixed local pointer path on each request.  It never
+    # accepts a model, executable, profile, or network source from settings.
+    raster_document_preview_approval_path: Path | None = None
+    raster_document_preview_approval_sha256: str | None = None
+    raster_document_preview_auto_activation_mode: RasterDocumentPreviewAutoActivationMode | None = (
+        None
+    )
+    # Text-only raster OCR has its own pointer and source-attested Gate.  It
+    # may not borrow the structured OCR/table pointer as evidence of quality.
+    raster_text_preview_approval_path: Path | None = None
+    raster_text_preview_approval_sha256: str | None = None
+    raster_text_preview_auto_activation_mode: RasterTextPreviewAutoActivationMode | None = None
     max_documents: int = _MAX_DOCUMENTS
     max_text_characters: int = _MAX_TEXT_CHARACTERS
     body_read_timeout_seconds: float = 15.0
     max_concurrency: int = 2
     queue_wait_seconds: float = 1.0
     run_timeout_seconds: float = 420.0
+    # Raster OCR has a deliberately tighter customer-facing deadline than the
+    # preserved born-digital preview path.  The native sidecar owns a slightly
+    # shorter deadline and tears itself down first; this value is the HTTP
+    # safety bound, not a license to leave work running after a response.
+    raster_run_timeout_seconds: float = 60.0
+    raster_page_render_timeout_seconds: float = 20.0
+    # One PP-StructureV3 worker already consumes all six CPU threads in the
+    # approved profile.  Parallel requests would oversubscribe the host and
+    # invalidate the measured latency profile, so v1 is intentionally serial.
+    raster_max_concurrency: int = 1
     replay_ttl_seconds: float = 600.0
     replay_max_entries: int = 1_000
     readiness_timeout_seconds: float = 5.0
@@ -168,6 +224,16 @@ class ServiceSettings:
         has_preview_approval_path = self.document_preview_approval_path is not None
         has_preview_approval_sha256 = self.document_preview_approval_sha256 is not None
         has_preview_auto_activation = self.document_preview_auto_activation_mode is not None
+        has_raster_preview_approval_path = self.raster_document_preview_approval_path is not None
+        has_raster_preview_approval_sha256 = (
+            self.raster_document_preview_approval_sha256 is not None
+        )
+        has_raster_preview_auto_activation = (
+            self.raster_document_preview_auto_activation_mode is not None
+        )
+        has_raster_text_approval_path = self.raster_text_preview_approval_path is not None
+        has_raster_text_approval_sha256 = self.raster_text_preview_approval_sha256 is not None
+        has_raster_text_auto_activation = self.raster_text_preview_auto_activation_mode is not None
         if has_preview_auto_activation:
             if self.document_preview_auto_activation_mode != "source-attested-synthetic":
                 raise ServiceConfigurationError(
@@ -187,6 +253,52 @@ class ServiceSettings:
             if _SHA256.fullmatch(self.document_preview_approval_sha256) is None:
                 raise ServiceConfigurationError(
                     "customs_agent_document_preview_approval_sha256_invalid"
+                )
+        if has_raster_preview_auto_activation:
+            if (
+                self.raster_document_preview_auto_activation_mode
+                != "source-attested-synthetic-raster-v1"
+            ):
+                raise ServiceConfigurationError(
+                    "customs_agent_raster_preview_auto_activation_invalid"
+                )
+            if not has_raster_preview_approval_path or has_raster_preview_approval_sha256:
+                raise ServiceConfigurationError(
+                    "customs_agent_raster_preview_auto_activation_incomplete"
+                )
+        elif has_raster_preview_approval_path != has_raster_preview_approval_sha256:
+            raise ServiceConfigurationError("customs_agent_raster_preview_approval_incomplete")
+        if has_raster_preview_approval_path:
+            assert self.raster_document_preview_approval_path is not None
+            _raster_document_preview_approval_path(str(self.raster_document_preview_approval_path))
+        if has_raster_preview_approval_sha256:
+            assert self.raster_document_preview_approval_sha256 is not None
+            if _SHA256.fullmatch(self.raster_document_preview_approval_sha256) is None:
+                raise ServiceConfigurationError(
+                    "customs_agent_raster_preview_approval_sha256_invalid"
+                )
+        if has_raster_text_auto_activation:
+            if (
+                self.raster_text_preview_auto_activation_mode
+                != "source-attested-synthetic-raster-text-v1"
+            ):
+                raise ServiceConfigurationError(
+                    "customs_agent_raster_text_preview_auto_activation_invalid"
+                )
+            if not has_raster_text_approval_path or has_raster_text_approval_sha256:
+                raise ServiceConfigurationError(
+                    "customs_agent_raster_text_preview_auto_activation_incomplete"
+                )
+        elif has_raster_text_approval_path != has_raster_text_approval_sha256:
+            raise ServiceConfigurationError("customs_agent_raster_text_preview_approval_incomplete")
+        if has_raster_text_approval_path:
+            assert self.raster_text_preview_approval_path is not None
+            _raster_text_preview_approval_path(str(self.raster_text_preview_approval_path))
+        if has_raster_text_approval_sha256:
+            assert self.raster_text_preview_approval_sha256 is not None
+            if _SHA256.fullmatch(self.raster_text_preview_approval_sha256) is None:
+                raise ServiceConfigurationError(
+                    "customs_agent_raster_text_preview_approval_sha256_invalid"
                 )
         if has_guidance_base_url != has_guidance_token:
             raise ServiceConfigurationError("guidance_service_peer_incomplete")
@@ -240,6 +352,14 @@ class ServiceSettings:
             raise ServiceConfigurationError("customs_agent_queue_wait_seconds_invalid")
         if not 1 <= self.run_timeout_seconds <= 3_600:
             raise ServiceConfigurationError("customs_agent_run_timeout_seconds_invalid")
+        if not 1 <= self.raster_run_timeout_seconds <= 60:
+            raise ServiceConfigurationError("customs_agent_raster_run_timeout_seconds_invalid")
+        if not 1 <= self.raster_page_render_timeout_seconds <= 30:
+            raise ServiceConfigurationError(
+                "customs_agent_raster_page_render_timeout_seconds_invalid"
+            )
+        if self.raster_max_concurrency != 1:
+            raise ServiceConfigurationError("customs_agent_raster_max_concurrency_invalid")
         if not 1 <= self.replay_ttl_seconds <= 86_400:
             raise ServiceConfigurationError("customs_agent_replay_ttl_seconds_invalid")
         if not 1 <= self.replay_max_entries <= 10_000:
@@ -285,6 +405,20 @@ class ServiceSettings:
         has_preview_approval_path = "CUSTOMS_AGENT_DOCUMENT_PREVIEW_APPROVAL_PATH" in source
         has_preview_approval_sha256 = "CUSTOMS_AGENT_DOCUMENT_PREVIEW_APPROVAL_SHA256" in source
         has_preview_auto_activation = "CUSTOMS_AGENT_DOCUMENT_PREVIEW_AUTO_ACTIVATION" in source
+        has_raster_preview_approval_path = "CUSTOMS_AGENT_RASTER_PREVIEW_APPROVAL_PATH" in source
+        has_raster_preview_approval_sha256 = (
+            "CUSTOMS_AGENT_RASTER_PREVIEW_APPROVAL_SHA256" in source
+        )
+        has_raster_preview_auto_activation = (
+            "CUSTOMS_AGENT_RASTER_PREVIEW_AUTO_ACTIVATION" in source
+        )
+        has_raster_text_approval_path = "CUSTOMS_AGENT_RASTER_TEXT_PREVIEW_APPROVAL_PATH" in source
+        has_raster_text_approval_sha256 = (
+            "CUSTOMS_AGENT_RASTER_TEXT_PREVIEW_APPROVAL_SHA256" in source
+        )
+        has_raster_text_auto_activation = (
+            "CUSTOMS_AGENT_RASTER_TEXT_PREVIEW_AUTO_ACTIVATION" in source
+        )
         if has_guidance_base_url != has_guidance_token:
             raise ServiceConfigurationError("guidance_service_peer_incomplete")
         if has_guidance_registry_version != has_guidance_base_url:
@@ -294,6 +428,16 @@ class ServiceSettings:
             and has_preview_approval_path != has_preview_approval_sha256
         ):
             raise ServiceConfigurationError("customs_agent_document_preview_approval_incomplete")
+        if (
+            not has_raster_preview_auto_activation
+            and has_raster_preview_approval_path != has_raster_preview_approval_sha256
+        ):
+            raise ServiceConfigurationError("customs_agent_raster_preview_approval_incomplete")
+        if (
+            not has_raster_text_auto_activation
+            and has_raster_text_approval_path != has_raster_text_approval_sha256
+        ):
+            raise ServiceConfigurationError("customs_agent_raster_text_preview_approval_incomplete")
         guidance_base_url: str | None = None
         guidance_service_token: SecretStr | None = None
         guidance_registry_version: GuidanceRegistryVersion | None = None
@@ -301,6 +445,14 @@ class ServiceSettings:
         document_preview_approval_path: Path | None = None
         document_preview_approval_sha256: str | None = None
         document_preview_auto_activation_mode: DocumentPreviewAutoActivationMode | None = None
+        raster_document_preview_approval_path: Path | None = None
+        raster_document_preview_approval_sha256: str | None = None
+        raster_document_preview_auto_activation_mode: (
+            RasterDocumentPreviewAutoActivationMode | None
+        ) = None
+        raster_text_preview_approval_path: Path | None = None
+        raster_text_preview_approval_sha256: str | None = None
+        raster_text_preview_auto_activation_mode: RasterTextPreviewAutoActivationMode | None = None
         if "CUSTOMS_AGENT_EVIDENCE_PROFILE" in source:
             configured_evidence_profile = _required(source, "CUSTOMS_AGENT_EVIDENCE_PROFILE")
             if configured_evidence_profile not in _EVIDENCE_PROFILES:
@@ -336,6 +488,48 @@ class ServiceSettings:
             document_preview_approval_sha256 = _required(
                 source, "CUSTOMS_AGENT_DOCUMENT_PREVIEW_APPROVAL_SHA256"
             )
+        if has_raster_preview_approval_path:
+            raster_document_preview_approval_path = _raster_document_preview_approval_path(
+                _required(source, "CUSTOMS_AGENT_RASTER_PREVIEW_APPROVAL_PATH")
+            )
+        if has_raster_preview_approval_sha256:
+            raster_document_preview_approval_sha256 = _required(
+                source, "CUSTOMS_AGENT_RASTER_PREVIEW_APPROVAL_SHA256"
+            )
+        if has_raster_preview_auto_activation:
+            configured_raster_auto_activation = _required(
+                source, "CUSTOMS_AGENT_RASTER_PREVIEW_AUTO_ACTIVATION"
+            )
+            if configured_raster_auto_activation != "source-attested-synthetic-raster-v1":
+                raise ServiceConfigurationError(
+                    "customs_agent_raster_preview_auto_activation_invalid"
+                )
+            if not has_raster_preview_approval_path or has_raster_preview_approval_sha256:
+                raise ServiceConfigurationError(
+                    "customs_agent_raster_preview_auto_activation_incomplete"
+                )
+            raster_document_preview_auto_activation_mode = "source-attested-synthetic-raster-v1"
+        if has_raster_text_approval_path:
+            raster_text_preview_approval_path = _raster_text_preview_approval_path(
+                _required(source, "CUSTOMS_AGENT_RASTER_TEXT_PREVIEW_APPROVAL_PATH")
+            )
+        if has_raster_text_approval_sha256:
+            raster_text_preview_approval_sha256 = _required(
+                source, "CUSTOMS_AGENT_RASTER_TEXT_PREVIEW_APPROVAL_SHA256"
+            )
+        if has_raster_text_auto_activation:
+            configured_raster_text_auto_activation = _required(
+                source, "CUSTOMS_AGENT_RASTER_TEXT_PREVIEW_AUTO_ACTIVATION"
+            )
+            if configured_raster_text_auto_activation != "source-attested-synthetic-raster-text-v1":
+                raise ServiceConfigurationError(
+                    "customs_agent_raster_text_preview_auto_activation_invalid"
+                )
+            if not has_raster_text_approval_path or has_raster_text_approval_sha256:
+                raise ServiceConfigurationError(
+                    "customs_agent_raster_text_preview_auto_activation_incomplete"
+                )
+            raster_text_preview_auto_activation_mode = "source-attested-synthetic-raster-text-v1"
         return cls(
             bearer_token=SecretStr(_required(source, "CUSTOMS_AGENT_SERVICE_BEARER_TOKEN")),
             evidence_base_url=_required(source, "EVIDENCE_SERVICE_BASE_URL"),
@@ -374,6 +568,14 @@ class ServiceSettings:
             document_preview_approval_path=document_preview_approval_path,
             document_preview_approval_sha256=document_preview_approval_sha256,
             document_preview_auto_activation_mode=document_preview_auto_activation_mode,
+            raster_document_preview_approval_path=raster_document_preview_approval_path,
+            raster_document_preview_approval_sha256=raster_document_preview_approval_sha256,
+            raster_document_preview_auto_activation_mode=(
+                raster_document_preview_auto_activation_mode
+            ),
+            raster_text_preview_approval_path=raster_text_preview_approval_path,
+            raster_text_preview_approval_sha256=raster_text_preview_approval_sha256,
+            raster_text_preview_auto_activation_mode=raster_text_preview_auto_activation_mode,
             max_documents=_integer(
                 source, "CUSTOMS_AGENT_MAX_DOCUMENTS", _MAX_DOCUMENTS, 1, _MAX_DOCUMENTS
             ),
@@ -390,6 +592,15 @@ class ServiceSettings:
             max_concurrency=_integer(source, "CUSTOMS_AGENT_MAX_CONCURRENCY", 2, 1, 32),
             queue_wait_seconds=_number(source, "CUSTOMS_AGENT_QUEUE_WAIT_SECONDS", 1, 0.01, 60),
             run_timeout_seconds=_number(source, "CUSTOMS_AGENT_RUN_TIMEOUT_SECONDS", 420, 1, 3_600),
+            raster_run_timeout_seconds=_number(
+                source, "CUSTOMS_AGENT_RASTER_RUN_TIMEOUT_SECONDS", 60, 1, 60
+            ),
+            raster_page_render_timeout_seconds=_number(
+                source, "CUSTOMS_AGENT_RASTER_PAGE_RENDER_TIMEOUT_SECONDS", 20, 1, 30
+            ),
+            raster_max_concurrency=_integer(
+                source, "CUSTOMS_AGENT_RASTER_MAX_CONCURRENCY", 1, 1, 1
+            ),
             replay_ttl_seconds=_number(source, "CUSTOMS_AGENT_REPLAY_TTL_SECONDS", 600, 1, 86_400),
             replay_max_entries=_integer(
                 source, "CUSTOMS_AGENT_REPLAY_MAX_ENTRIES", 1_000, 1, 10_000
@@ -410,6 +621,8 @@ class ServiceSettings:
 __all__ = [
     "EvidenceProfile",
     "GuidanceRegistryVersion",
+    "RasterDocumentPreviewAutoActivationMode",
+    "RasterTextPreviewAutoActivationMode",
     "ServiceConfigurationError",
     "ServiceMode",
     "ServiceSettings",

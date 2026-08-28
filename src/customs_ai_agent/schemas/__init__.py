@@ -28,6 +28,29 @@ from customs_ai_agent.schemas.document_extraction import (
     PreviewCandidateV1,
     PreviewInputV1,
 )
+from customs_ai_agent.schemas.raster_document_extraction import (
+    NormalizedPointV2,
+    NormalizedPolygonV2,
+    RasterDocumentExtractionRequestMetadataV2,
+    RasterDocumentExtractionResultV2,
+    RasterDocumentPreviewPageV2,
+    RasterDocumentSpanV2,
+    RasterExtractionWarningV2,
+    RasterFieldCandidateV2,
+    RasterPreviewCandidateV2,
+    RasterPreviewInputV2,
+    RasterTableCellV2,
+    RasterTableRowV2,
+    RasterTableV2,
+)
+from customs_ai_agent.schemas.raster_text_extraction import (
+    RasterTextExtractionRequestMetadataV1,
+    RasterTextExtractionResultV1,
+    RasterTextInputV1,
+    RasterTextPageV1,
+    RasterTextPreviewCandidateV1,
+    RasterTextWarningV1,
+)
 
 __all__ = [
     "ClaudeDocumentCandidate",
@@ -53,4 +76,23 @@ __all__ = [
     "DocumentSpanV1",
     "PreviewCandidateV1",
     "PreviewInputV1",
+    "NormalizedPointV2",
+    "NormalizedPolygonV2",
+    "RasterDocumentExtractionRequestMetadataV2",
+    "RasterDocumentExtractionResultV2",
+    "RasterDocumentPreviewPageV2",
+    "RasterDocumentSpanV2",
+    "RasterExtractionWarningV2",
+    "RasterFieldCandidateV2",
+    "RasterPreviewCandidateV2",
+    "RasterPreviewInputV2",
+    "RasterTableCellV2",
+    "RasterTableRowV2",
+    "RasterTableV2",
+    "RasterTextExtractionRequestMetadataV1",
+    "RasterTextExtractionResultV1",
+    "RasterTextInputV1",
+    "RasterTextPageV1",
+    "RasterTextPreviewCandidateV1",
+    "RasterTextWarningV1",
 ]

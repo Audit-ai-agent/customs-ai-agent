@@ -251,6 +251,134 @@ def _run_preview_auto_importer_check(
     )
 
 
+def _run_raster_preview_auto_importer_check(
+    workspace: Path,
+    *,
+    enable: bool,
+    preserve_and_clear: bool = False,
+) -> subprocess.CompletedProcess[str]:
+    if _POWERSHELL is None:
+        pytest.skip("PowerShell is required to test the Agent profile importer")
+
+    importer = workspace / "customs-ai-agent" / "tools" / "Import-AgentProfile.ps1"
+    pointer = (
+        workspace
+        / "_local"
+        / "data"
+        / "document-preview"
+        / "approvals"
+        / "raster-preview-active.json"
+    )
+    switch = " -EnableSourceAttestedRasterPreviewAutoActivation" if enable else ""
+    if preserve_and_clear:
+        command = (
+            "& { $ErrorActionPreference = 'Stop'; "
+            f"$env:CUSTOMS_AGENT_RASTER_PREVIEW_APPROVAL_PATH = {_powershell_literal(str(pointer))}; "
+            "$env:CUSTOMS_AGENT_RASTER_PREVIEW_APPROVAL_SHA256 = 'dddddddddddddddddddddddddddddddddddddddddddddddddddddddddddddddd'; "
+            f". {_powershell_literal(str(importer))} -Profile 'dev-fixture'; "
+            "$static = ($env:CUSTOMS_AGENT_RASTER_PREVIEW_APPROVAL_PATH -eq "
+            f"{_powershell_literal(str(pointer))} -and $env:CUSTOMS_AGENT_RASTER_PREVIEW_APPROVAL_SHA256 -eq 'dddddddddddddddddddddddddddddddddddddddddddddddddddddddddddddddd' -and "
+            "-not (Test-Path -LiteralPath 'Env:CUSTOMS_AGENT_RASTER_PREVIEW_AUTO_ACTIVATION')); "
+            "$env:CUSTOMS_AGENT_RASTER_PREVIEW_AUTO_ACTIVATION = 'source-attested-synthetic-raster-v1'; "
+            f". {_powershell_literal(str(importer))} -Profile 'dev-fixture'; "
+            "$cleared = (-not (Test-Path -LiteralPath 'Env:CUSTOMS_AGENT_RASTER_PREVIEW_AUTO_ACTIVATION') -and "
+            "-not (Test-Path -LiteralPath 'Env:CUSTOMS_AGENT_RASTER_PREVIEW_APPROVAL_PATH') -and "
+            "-not (Test-Path -LiteralPath 'Env:CUSTOMS_AGENT_RASTER_PREVIEW_APPROVAL_SHA256')); "
+            "if ($static -and $cleared) { [Console]::Out.Write('RASTER_ENV_OK') } else { [Console]::Out.Write('RASTER_ENV_BAD') } }"
+        )
+    else:
+        command = (
+            "& { $ErrorActionPreference = 'Stop'; "
+            f". {_powershell_literal(str(importer))} -Profile 'dev-fixture'{switch}; "
+            "$ok = ($env:CUSTOMS_AGENT_RASTER_PREVIEW_AUTO_ACTIVATION -eq 'source-attested-synthetic-raster-v1' -and "
+            f"$env:CUSTOMS_AGENT_RASTER_PREVIEW_APPROVAL_PATH -eq {_powershell_literal(str(pointer))} -and "
+            "-not (Test-Path -LiteralPath 'Env:CUSTOMS_AGENT_RASTER_PREVIEW_APPROVAL_SHA256')); "
+            "if ($ok) { [Console]::Out.Write('RASTER_AUTO_OK') } else { [Console]::Out.Write('RASTER_AUTO_BAD') } }"
+        )
+    return subprocess.run(
+        [_POWERSHELL, "-NoProfile", "-NonInteractive", "-Command", command],
+        cwd=workspace,
+        env=os.environ.copy(),
+        capture_output=True,
+        text=True,
+        check=False,
+    )
+
+
+def test_raster_auto_importer_can_bind_an_explicit_shared_workspace_root(
+    tmp_path: Path,
+) -> None:
+    if _POWERSHELL is None:
+        pytest.skip("PowerShell is required to test the Agent profile importer")
+
+    workspace = _write_workspace(tmp_path, profile="dev-fixture", secret_contents=None)
+    isolated_tools = tmp_path / "isolated-agent" / "tools"
+    isolated_tools.mkdir(parents=True)
+    importer = isolated_tools / "Import-AgentProfile.ps1"
+    shutil.copy2(
+        workspace / "customs-ai-agent" / "tools" / "Import-AgentProfile.ps1",
+        importer,
+    )
+    pointer = (
+        workspace
+        / "_local"
+        / "data"
+        / "document-preview"
+        / "approvals"
+        / "raster-preview-active.json"
+    )
+    command = (
+        "& { $ErrorActionPreference = 'Stop'; "
+        f". {_powershell_literal(str(importer))} -Profile 'dev-fixture' "
+        f"-WorkspaceRoot {_powershell_literal(str(workspace))} "
+        "-EnableSourceAttestedRasterPreviewAutoActivation; "
+        "$ok = ($env:CUSTOMS_AGENT_RASTER_PREVIEW_AUTO_ACTIVATION -eq "
+        "'source-attested-synthetic-raster-v1' -and "
+        f"$env:CUSTOMS_AGENT_RASTER_PREVIEW_APPROVAL_PATH -eq {_powershell_literal(str(pointer))} -and "
+        "-not (Test-Path -LiteralPath 'Env:CUSTOMS_AGENT_RASTER_PREVIEW_APPROVAL_SHA256')); "
+        "if ($ok) { [Console]::Out.Write('EXPLICIT_WORKSPACE_OK') } "
+        "else { [Console]::Out.Write('EXPLICIT_WORKSPACE_BAD') } }"
+    )
+    result = subprocess.run(
+        [_POWERSHELL, "-NoProfile", "-NonInteractive", "-Command", command],
+        cwd=tmp_path,
+        env=os.environ.copy(),
+        capture_output=True,
+        text=True,
+        check=False,
+    )
+
+    assert result.returncode == 0
+    assert result.stdout == "EXPLICIT_WORKSPACE_OK"
+
+
+def test_importer_rejects_a_non_directory_explicit_workspace_root(tmp_path: Path) -> None:
+    if _POWERSHELL is None:
+        pytest.skip("PowerShell is required to test the Agent profile importer")
+
+    workspace = _write_workspace(tmp_path, profile="dev-fixture", secret_contents=None)
+    importer = workspace / "customs-ai-agent" / "tools" / "Import-AgentProfile.ps1"
+    invalid_root = tmp_path / "not-a-directory.txt"
+    invalid_root.write_text("x", encoding="utf-8")
+    command = (
+        "& { $ErrorActionPreference = 'Stop'; "
+        f". {_powershell_literal(str(importer))} -Profile 'dev-fixture' "
+        f"-WorkspaceRoot {_powershell_literal(str(invalid_root))} "
+        "}"
+    )
+    result = subprocess.run(
+        [_POWERSHELL, "-NoProfile", "-NonInteractive", "-Command", command],
+        cwd=workspace,
+        env=os.environ.copy(),
+        capture_output=True,
+        text=True,
+        check=False,
+    )
+
+    assert result.returncode != 0
+    assert "agent_profile_workspace_root_invalid" in result.stderr
+
+
 def test_functional_uat_imports_only_the_canonical_local_key(tmp_path: Path) -> None:
     workspace = _write_workspace(
         tmp_path,
@@ -326,6 +454,107 @@ def test_importer_preserves_static_preview_pair_but_clears_stale_auto_mode(tmp_p
 
     assert result.returncode == 0
     assert result.stdout == "PREVIEW_ENV_OK"
+    assert _SERVICE_TOKEN not in result.stdout + result.stderr
+
+
+def test_importer_explicitly_enables_fixed_source_attested_raster_discovery(
+    tmp_path: Path,
+) -> None:
+    workspace = _write_workspace(tmp_path, profile="dev-fixture", secret_contents=None)
+    result = _run_raster_preview_auto_importer_check(workspace, enable=True)
+
+    assert result.returncode == 0
+    assert result.stdout == "RASTER_AUTO_OK"
+    assert _SERVICE_TOKEN not in result.stdout + result.stderr
+
+
+def test_importer_preserves_static_raster_pair_but_clears_stale_raster_auto_mode(
+    tmp_path: Path,
+) -> None:
+    workspace = _write_workspace(tmp_path, profile="dev-fixture", secret_contents=None)
+    result = _run_raster_preview_auto_importer_check(
+        workspace, enable=False, preserve_and_clear=True
+    )
+
+    assert result.returncode == 0
+    assert result.stdout == "RASTER_ENV_OK"
+    assert _SERVICE_TOKEN not in result.stdout + result.stderr
+
+
+def test_importer_explicitly_enables_fixed_source_attested_raster_text_discovery(
+    tmp_path: Path,
+) -> None:
+    if _POWERSHELL is None:
+        pytest.skip("PowerShell is required to test the Agent profile importer")
+
+    workspace = _write_workspace(tmp_path, profile="dev-fixture", secret_contents=None)
+    importer = workspace / "customs-ai-agent" / "tools" / "Import-AgentProfile.ps1"
+    pointer = (
+        workspace / "_local" / "data" / "document-preview" / "approvals" / "raster-text-active.json"
+    )
+    command = (
+        "& { $ErrorActionPreference = 'Stop'; "
+        f". {_powershell_literal(str(importer))} -Profile 'dev-fixture' "
+        "-EnableSourceAttestedRasterTextPreviewAutoActivation; "
+        "$ok = ($env:CUSTOMS_AGENT_RASTER_TEXT_PREVIEW_AUTO_ACTIVATION -eq "
+        "'source-attested-synthetic-raster-text-v1' -and "
+        f"$env:CUSTOMS_AGENT_RASTER_TEXT_PREVIEW_APPROVAL_PATH -eq {_powershell_literal(str(pointer))} -and "
+        "-not (Test-Path -LiteralPath 'Env:CUSTOMS_AGENT_RASTER_TEXT_PREVIEW_APPROVAL_SHA256')); "
+        "if ($ok) { [Console]::Out.Write('RASTER_TEXT_AUTO_OK') } "
+        "else { [Console]::Out.Write('RASTER_TEXT_AUTO_BAD') } }"
+    )
+    result = subprocess.run(
+        [_POWERSHELL, "-NoProfile", "-NonInteractive", "-Command", command],
+        cwd=workspace,
+        env=os.environ.copy(),
+        capture_output=True,
+        text=True,
+        check=False,
+    )
+
+    assert result.returncode == 0
+    assert result.stdout == "RASTER_TEXT_AUTO_OK"
+    assert _SERVICE_TOKEN not in result.stdout + result.stderr
+
+
+def test_importer_preserves_static_raster_text_pair_but_clears_stale_auto_mode(
+    tmp_path: Path,
+) -> None:
+    if _POWERSHELL is None:
+        pytest.skip("PowerShell is required to test the Agent profile importer")
+
+    workspace = _write_workspace(tmp_path, profile="dev-fixture", secret_contents=None)
+    importer = workspace / "customs-ai-agent" / "tools" / "Import-AgentProfile.ps1"
+    pointer = (
+        workspace / "_local" / "data" / "document-preview" / "approvals" / "raster-text-active.json"
+    )
+    command = (
+        "& { $ErrorActionPreference = 'Stop'; "
+        f"$env:CUSTOMS_AGENT_RASTER_TEXT_PREVIEW_APPROVAL_PATH = {_powershell_literal(str(pointer))}; "
+        "$env:CUSTOMS_AGENT_RASTER_TEXT_PREVIEW_APPROVAL_SHA256 = 'eeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeee'; "
+        f". {_powershell_literal(str(importer))} -Profile 'dev-fixture'; "
+        "$static = ($env:CUSTOMS_AGENT_RASTER_TEXT_PREVIEW_APPROVAL_PATH -eq "
+        f"{_powershell_literal(str(pointer))} -and $env:CUSTOMS_AGENT_RASTER_TEXT_PREVIEW_APPROVAL_SHA256 -eq 'eeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeee' -and "
+        "-not (Test-Path -LiteralPath 'Env:CUSTOMS_AGENT_RASTER_TEXT_PREVIEW_AUTO_ACTIVATION')); "
+        "$env:CUSTOMS_AGENT_RASTER_TEXT_PREVIEW_AUTO_ACTIVATION = 'source-attested-synthetic-raster-text-v1'; "
+        f". {_powershell_literal(str(importer))} -Profile 'dev-fixture'; "
+        "$cleared = (-not (Test-Path -LiteralPath 'Env:CUSTOMS_AGENT_RASTER_TEXT_PREVIEW_AUTO_ACTIVATION') -and "
+        "-not (Test-Path -LiteralPath 'Env:CUSTOMS_AGENT_RASTER_TEXT_PREVIEW_APPROVAL_PATH') -and "
+        "-not (Test-Path -LiteralPath 'Env:CUSTOMS_AGENT_RASTER_TEXT_PREVIEW_APPROVAL_SHA256')); "
+        "if ($static -and $cleared) { [Console]::Out.Write('RASTER_TEXT_ENV_OK') } "
+        "else { [Console]::Out.Write('RASTER_TEXT_ENV_BAD') } }"
+    )
+    result = subprocess.run(
+        [_POWERSHELL, "-NoProfile", "-NonInteractive", "-Command", command],
+        cwd=workspace,
+        env=os.environ.copy(),
+        capture_output=True,
+        text=True,
+        check=False,
+    )
+
+    assert result.returncode == 0
+    assert result.stdout == "RASTER_TEXT_ENV_OK"
     assert _SERVICE_TOKEN not in result.stdout + result.stderr
 
 

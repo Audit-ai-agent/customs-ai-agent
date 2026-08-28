@@ -218,7 +218,7 @@ Data profile을 같은 PC에서 병렬로 띄울 때에는 각 Data peer를 다�
 
 ## HTTP 계약
 
-Backend가 사용하는 경로는 아래 일곱 개뿐입니다.
+Backend가 사용하는 경로는 아래 열두 개뿐입니다.
 
 ```text
 GET  /health/live
@@ -226,13 +226,68 @@ GET  /health/ready
 GET  /internal/agent/v2/metadata
 POST /internal/agent/v2/reviews
 POST /internal/agent/v2/document-extractions
+POST /internal/agent/v3/raster-document-extractions
+GET  /internal/agent/v3/raster-document-preview-status
+POST /internal/agent/v3/raster-document-pages/{page_number}
+POST /internal/agent/v3/raster-text-extractions
+GET  /internal/agent/v3/raster-text-preview-status
 POST /internal/agent/v2/assistant/answers
 POST /internal/agent/v2/knowledge/answers
 ```
 
 `POST /internal/agent/v2/reviews`는 텍스트 문서, Case ID, 실행 ID, 기준일, 무역 유형, `KR`만 받습니다. 상업송장·포장명세서·B/L·AWB·원산지증명서·수출신고서·보완 증빙 문서를 받아 수입 또는 수출 심사를 수행합니다. V3.2 응답은 사람 검토 상태와 함께 실제 workflow 단계, 최대 2 cycle·6 action의 제한된 계획 trace, 문서별 추출 사실과 원문 인용, 코드 기반 비교 결과, Evidence에 연결된 finding·담당자 조치, 8구역 근거 보고서를 담습니다. 이력 Evidence가 사용된 경우에는 법령·HSK·요건의 기준일을 담은 nullable `temporal_context`와 각 영역의 `covered|unavailable` 상태를 담은 nullable `temporal_coverage`가 함께 추가됩니다. 승인된 사람 수정은 원문을 덮어쓰지 않고 `human_provided` 사실로 별도 표시합니다. 수량·금액·원산지·문서 식별자 판정은 LLM이 아니라 코드가 수행하며, 결과는 언제나 자동완료 대상이 아닙니다.
 
-`POST /internal/agent/v2/document-extractions`는 `/reviews`와 분리된 binary boundary입니다. `Content-Type`은 `application/pdf`·`image/jpeg`·`image/png` 중 하나이고, body에는 identity-encoded raw bytes만 담습니다. Backend는 `X-Document-Asset-ID`, `X-Extraction-Request-ID`, `X-Document-SHA256`을 함께 보내며 Agent는 size·streaming SHA-256·magic·PDF page hint·image pixel limit을 독립 확인합니다. 응답에는 asset/request ID, hash, adapter revision, page/span/normalized bbox, canonical text hash와 content-free warning만 있으며 raw bytes·base64·filename·Case ID는 없습니다. span text는 검수 화면 표시용 후보일 뿐이며 Agent의 일반 로그·scenario transcript·review contract에는 들어가지 않습니다. 기본 preview engine은 `unavailable`입니다. 일반 경로는 사람이 승인한 pointer SHA-256을 process 시작에 고정하며, 합성 source-attested PDF 전용의 명시 opt-in만 sealed chain을 다음 PDF 요청에 자동 반영할 수 있습니다. JPEG·PNG는 어느 경로에서도 계속 `unavailable`입니다.
+`POST /internal/agent/v2/document-extractions`는 `/reviews`와 분리된 binary boundary입니다. `Content-Type`은 `application/pdf`·`image/jpeg`·`image/png` 중 하나이고, body에는 identity-encoded raw bytes만 담습니다. Backend는 `X-Document-Asset-ID`, `X-Extraction-Request-ID`, `X-Document-SHA256`을 함께 보내며 Agent는 size·streaming SHA-256·magic·PDF page hint·image pixel limit을 독립 확인합니다. 응답에는 asset/request ID, hash, adapter revision, page/span/normalized bbox, canonical text hash와 content-free warning만 있으며 raw bytes·base64·filename·Case ID는 없습니다. span text는 검수 화면 표시용 후보일 뿐이며 Agent의 일반 로그·scenario transcript·review contract에는 들어가지 않습니다. 기본 preview engine은 `unavailable`입니다. 일반 경로는 사람이 승인한 pointer SHA-256을 process 시작에 고정하며, 합성 source-attested PDF 전용의 명시 opt-in만 sealed chain을 다음 PDF 요청에 자동 반영할 수 있습니다. 이 기존 v1 text-layer endpoint에서는 JPEG·PNG가 계속 `unavailable`이며, 별도 v3 Raster OCR/Layout 경로만 승인된 profile에서 이를 처리합니다.
+
+`POST /internal/agent/v3/raster-document-extractions`는 기존 v1 PDF text-layer preview를 바꾸지 않는 별도 Raster OCR/Layout v2 경로입니다. `X-Raster-Profile-Revision`을 추가로 요구하며, PDF는 먼저 PDFium으로 rasterize한 단일 페이지로만, PNG/JPEG는 strict full decode·dimension 대조 후에만 local sidecar에 전달합니다. v1 Gate는 단일 페이지에만 봉인돼 있으므로 다중 페이지 PDF와 JPEG EXIF orientation이 `1`이 아닌 입력은 좌표를 추측하거나 일부만 OCR하지 않고 `needs_review`로 끝냅니다. 기본 상태는 계속 `unavailable`입니다. 기존 정적 방식은 `CUSTOMS_AGENT_RASTER_PREVIEW_APPROVAL_PATH`와 SHA를 함께 고정한 채 유지됩니다. 별도 자동 방식은 `CUSTOMS_AGENT_RASTER_PREVIEW_AUTO_ACTIVATION=source-attested-synthetic-raster-v1`과 고정 pointer path만 허용하고 SHA 환경변수는 반드시 비어 있어야 합니다. 이때 `GET /internal/agent/v3/raster-document-preview-status`는 현재 사용할 수 있는 profile revision만 알려 줍니다. pointer가 없거나 검증 중 바뀌거나 package/model/sidecar가 drift하면 이전 engine을 계속 쓰지 않고 `unavailable`으로 끝납니다. pointer가 새 profile로 교체되면 이전 profile의 page 요청은 `profile_superseded`로 끝나며, Backend/Frontend는 새 revision으로 다시 추출하도록 안내합니다. 결과는 언제나 사람 수정용 draft이고, bbox/table geometry 또는 confidence가 부족하면 `preview_ready`가 아니라 `needs_review`입니다.
+
+`POST /internal/agent/v3/raster-text-extractions`는 구조형 OCR/Layout과 완전히 분리된 text-only raster OCR v1 경로입니다. 지원 범위는 영문 단일 페이지 B/L·Commercial Invoice·Packing List의 PDF·JPEG·PNG이며, PDF는 rasterize하고 JPEG/PNG는 strict decode한 뒤 direct OCR sidecar에 전달합니다. 결과는 위치·표·셀을 추측하지 않는 canonical text 초안과 `needs_review` 사유만 담습니다. 자동 모드는 `CUSTOMS_AGENT_RASTER_TEXT_PREVIEW_AUTO_ACTIVATION=source-attested-synthetic-raster-text-v1`, 고정 `raster-text-active.json` pointer path, 비어 있는 SHA 환경변수 조합만 허용합니다. 앱은 pointer가 바뀌면 백그라운드에서 새 engine을 prewarm하고, 준비 전·drift·30초 요청 제한 초과에는 이전 engine을 재사용하지 않고 `unavailable`으로 끝냅니다. `GET /internal/agent/v3/raster-text-preview-status`는 준비된 text profile revision만 알려 줍니다.
+
+text-only OCR의 사람 없는 build·평가·활성화는 아래 한 명령으로 수행합니다. 현재 승인 후보는 public mobile detector, source-Gold family와 분리해 미세조정한 public mobile recognizer, 보수적인 semantic repair를 결속한 V19 profile 하나입니다. 3개 문서 유형과 4개 image profile의 12개 lane 모두에서 핵심값 exact 97% 이상, CER 2% 이하, candidate와 warm-service p95 10초 이하를 만족해야 하며 30초는 정상 목표가 아니라 개별 요청의 절대 실패 한도입니다. 다른 모델·네트워크 다운로드·fallback은 허용하지 않습니다.
+
+자동 명령은 fresh 24-asset 실제 실행과 기존 2,400-asset source-only Gold/evidence 결속을 전부 확인한 뒤에만 schema 11 `approvals/raster-text-active.json`을 원자 교체합니다. 활성화 시에는 전체 package/model/source/Gold/candidate 증거를 검증하지만, 평상시 서비스 시작은 schema 11의 compact runtime binding만 확인하고 HTTP를 먼저 시작한 뒤 OCR child를 백그라운드에서 warm-up합니다. 준비 중에는 status가 `unavailable`, 준비가 끝난 뒤에만 고정 profile revision으로 `available`이 되며 서비스 시작마다 2,400건 평가를 반복하지 않습니다.
+
+현재 CPU 설정은 6 thread, recognizer batch 8, OpenCV 1 thread이고 oneDNN은 검증된 recognizer에만 적용합니다. detector의 oneDNN은 결과 안정성 때문에 끈 상태입니다. pointer 변경·material drift·dead child는 fail-closed로 재검증·재기동하며, 처리 중인 OCR과 1초 주기 prewarm이 겹쳐도 status가 일시적으로 작업을 영구 종료하지 않도록 Agent와 Backend가 함께 보호합니다.
+
+```powershell
+uv run --locked --no-sync --group dev python tools/auto_activate_synthetic_raster_text_v1.py `
+  --document-preview-root <workspace>/_local/data/document-preview
+
+. .\tools\Import-AgentProfile.ps1 -Profile dev-fixture `
+  -EnableSourceAttestedRasterTextPreviewAutoActivation
+uv run --locked --no-sync --group dev customs-ai-agent-dev-serve
+```
+
+합성 raster fixture와 전체 dataset은 Git 밖 document-preview root 아래에만 create-only로 쓸 수 있습니다. `tools/build_synthetic_raster_dataset.py`는 자유 SHA·PDFium version·source path나 build-input path를 받지 않고 `--document-preview-root`만 받습니다. 도구가 고정된 여섯 build input(renderer/font/split/recipe/render seed/inputs)을 create-or-verify한 뒤, 고정 6,000 PDF source tree와 PDFium renderer/profile·좌표 설정, `final_pdf_font_resources_only` 정책을 실제 local bytes에서 다시 묶습니다. final PDF content stream만 다시 읽어 `source-receipt.json`과 24,000 raster/Gold receipt를 만들며, 기존 manifest·error label·JSON·OCR·VLM 출력은 Gold 원천으로 읽지 않습니다. source/PDFium text가 1:1로 맞지 않거나 table cell rectangle·scan PDF text-layer·raster hash가 맞지 않으면 생성과 평가는 fail-closed입니다.
+
+PP-StructureV3 후보 평가는 `tools/run_ppstructurev3_synthetic_raster_candidates.py`가 approval pointer 없이도 같은 local package/model/sidecar 검증을 통과한 engine만 실행해 calibration 또는 sealed split의 content-addressed candidate bundle·execution receipt를 만든다. `tools/evaluate_synthetic_raster.py`는 `--cases`·모델/hash 문자열을 받지 않고, 그 canonical bundle/execution과 receipt-bound Gold를 다시 읽어 metric·calibration threshold·sealed Gate 결과를 만든다. activation도 calibration과 sealed 각각의 bundle/execution hash·split·profile·receipt를 다시 확인한다. 따라서 PaddleOCR3 direct baseline이나 수동 JSON 결과를 PP-StructureV3 sealed 결과로 재라벨링할 수 없다. 이 v1 compiler는 PNG/JPEG single-page output 계약 때문에 현재 multi-page source PDF를 fail-closed로 거부한다. multi-page bundle/receipt 계약과 Gold를 별도로 추가하기 전에는 이를 지원한다고 선언하지 않는다.
+
+`tools/auto_activate_synthetic_raster_v1.py`는 기존 명령명과 V15 text-only transaction을 보존하는 구 compatibility entrypoint입니다. 현재 V19 평가·활성화의 기본 명령은 위 `tools/auto_activate_synthetic_raster_text_v1.py`입니다. compatibility 명령은 tiny recognizer 학습, PP-StructureV3 활성화, V12/combined bundle, 임의 모델 선택이나 fallback을 실행하지 않으며 `approvals/raster-preview-active.json`을 변경하지 않습니다. 구조형 PP-StructureV3 compiler·평가기·하위 활성화 API는 비교와 후속 개발을 위해 보존되지만 현재 서비스 자동 활성화 후보는 아닙니다.
+
+Agent 소스를 임시 worktree에서 실행하되 profile·pointer는 공유 workspace에 둘 때에는 `tools/Import-AgentProfile.ps1`에 `-WorkspaceRoot <공유 workspace 절대경로>`를 함께 준다. 이 값은 Backend profile importer, `_local/profiles`, raster approval pointer를 모두 같은 root로 묶으며, 생략하면 기존처럼 Agent 저장소 상위의 workspace를 사용한다.
+
+# 구 V15 compatibility 확인용이며 현재 V19 활성화 명령이 아닙니다.
+
+```powershell
+uv run --locked --no-sync --group dev python tools/auto_activate_synthetic_raster_v1.py `
+  --document-preview-root <workspace>/_local/data/document-preview
+```
+
+검증된 direct sidecar bundle과 public mobile Paddle bundle이 없으면 기본 V19 명령은 non-zero로 끝나며 active text pointer를 만들거나 바꾸지 않습니다. bundle 공급은 이 명령 밖의 선행 조건이고, dataset·fine-tune·OCR·평가·runtime은 외부 다운로드 없이 그 bundle과 source-attested 합성 데이터만 사용합니다. V19는 public mobile detector, leakage-safe V2 head-finetuned recognizer, 고정 semantic repair, 프로필에 묶인 CPU/oneDNN/OpenCV/batch 설정만 사용하며 V18·V15나 다른 OCR 후보로 fallback하지 않습니다.
+
+direct text sidecar child는 `-B`, `PYTHONDONTWRITEBYTECODE=1`, disposable runtime home 아래의 `PYTHONPYCACHEPREFIX`로 실행합니다. 따라서 immutable bundle 내부에 `__pycache__`나 `.pyc`를 만들지 않으며, 실행 전후 manifest/tree hash가 달라지거나 신고되지 않은 cache가 발견되면 package drift로 fail-closed합니다.
+
+자동 pointer를 실행 중 Agent가 읽게 하려면 시작할 때 다음 explicit opt-in만 추가합니다. 이 자동화는 개발·평가·운영 profile 활성화를 사람 없이 처리하는 것이지, 사용자의 OCR 초안이나 통관 결론을 자동 확정하는 기능은 아닙니다.
+
+```powershell
+. .\tools\Import-AgentProfile.ps1 -Profile dev-fixture `
+  -EnableSourceAttestedRasterTextPreviewAutoActivation
+uv run --locked --no-sync --group dev customs-ai-agent-dev-serve
+```
+
+구조형 OCR/Layout lane에서는 PP-StructureV3가 유일한 설계상 approval 후보지만, 현재 자동 활성화 명령에는 연결되지 않습니다. 비교를 위해서만 `PaddleOcr3DirectRasterBaselineProfileV1`과 `resolve_paddleocr3_direct_raster_baseline()`이 기존 offline P3 det/rec 모델을 그대로 사용할 수 있지만, 이 profile은 `approval_eligible:false`이고 approval pointer를 읽지 않습니다. `tools/run_paddleocr3_direct_raster_baseline.py`는 이 hash-pinned local config으로 한 asset의 candidate를 create-only로 실행하는 비교 runner이다. 따라서 text span 기준선은 실행할 수 있어도 document type·field·table을 만들지 않으며 항상 `needs_review`입니다. 승인된 PP-StructureV3 resolver가 있을 때만 `ApprovedPdfiumRasterPageRenderer.render_pdf_page()`도 함께 제공됩니다. Backend는 같은 raw PDF/header를 `POST /internal/agent/v3/raster-document-pages/{page_number}`에 보내 page PNG를 받아 자기 인증된 `Cache-Control: no-store` reviewer endpoint로만 proxy할 수 있습니다. Agent 응답은 PNG와 source/profile/page/width/height/page-SHA/renderer revision headers만 주며 원본·raster page를 로그·receipt에 저장하지 않습니다.
+
+PP-StructureV3는 bundle 안의 hash-bound Python interpreter가 `-I -B`로 sidecar source module 자체를 직접 실행한다. bundle manifest에는 interpreter root/path, controlled module root, entry command, sidecar source module을 relative path로 선언하되, v2의 entry command는 source module과 **동일한 path와 SHA**여야 한다. executable·source file SHA와 두 root의 complete tree SHA도 profile에 고정해야 한다. controlled module root에는 sidecar 자체와 `paddleocr`·`paddlex`·`paddlepaddle`을 포함한 **모든 non-stdlib dependency**를 함께 넣어야 하며, interpreter root에는 그 interpreter가 쓰는 standard library·DLL도 포함되어야 한다. child는 `PYTHONPATH`를 받지 않고 `PATH`도 bundle directory만 사용하며, bootstrap이 interpreter site-packages를 제거해 controlled module root와 bundle standard library만 import path로 남긴다. `-B`는 실행 중 `__pycache__`가 bundle tree를 바꿔 다음 요청에서 drift로 보이는 일을 막는다. sidecar configuration에는 layout·det·rec·table classifier·wired/wireless structure·wired/wireless cell detector의 **이름과 local directory를 전부** 넣고, 새 release에는 CPU 6 thread, `paddle_static`·`run_mode=paddle`·new IR/CINN `false`, detector long-side `960`·resize `max`·threshold `0.3/0.6/1.5`를 **기본값 없이 필수 hash-bound field**로 넣는다. 기존에 명시적으로 결속된 CPU 1 release는 읽기 호환용으로만 유지하며, CPU 6은 새 configuration SHA·profile revision·calibration·sealed Gate를 반드시 다시 통과해야 한다. HPI/MKLDNN/TensorRT·orientation/unwarp/seal/formula/chart/region·end-to-end table은 `false`, table recognition과 cell-split OCR만 `true`로 고정한다. 이전 config가 이 안전 실행 필드를 모두 갖지 않으면 runtime/approval에서는 `unavailable`이고, fixed legacy bundle을 새 content-addressed release로 이관하는 자동 builder만 새 template·새 Gate를 만든다. 부모 Agent는 command/config/module/interpreter/package/model hash를 매 요청 확인하고, child도 자기 module hash·package inventory·모델 directory를 다시 확인한 뒤 PaddleOCR import 전에 socket 연결을 막는다. 그래서 누락된 local model을 내려받거나 다른 interpreter/package/model로 fallback하는 경우에는 결과를 만들지 않고 `unavailable`로 끝난다. native output에서 `overall_ocr_res`의 text/score/polygon, `parsing_res_list`의 reading order, `table_res_list.cell_box_list`가 모두 확인될 때만 span·field·cell을 만든다. 알려진 B/L·Invoice·Packing List 이외, 누락/모호한 field, 불완전한 table cell은 추측으로 메우지 않고 `needs_review`로 보낸다.
 
 `POST /internal/agent/v2/assistant/answers`는 Backend가 저장한 Review Run snapshot, 질문, 최근 검증 대화 최대 8턴과 선택적 `expected_snapshot_id`만 받습니다. 기존 단일 일반 안내는 그대로 `guidance_resolution` 하나를 사용합니다. V2에서만 방향이 같은 독립 scope 정확히 두 개를 순차 조회할 수 있으며, 첫 응답의 immutable snapshot으로 두 번째 조회를 고정합니다. 두 scope가 모두 `covered`이고 사건의 독립 citation도 있을 때만 `guidance_resolutions` 정확히 두 개, `answer_format="multi_scope_checklist"`, `사건 분석 → 주제 1 공식 안내 → 주제 2 공식 안내 → 사건 확인 목록`의 네 구역을 반환합니다. 각 공식 인용·안내 구역에는 `resolution_index`가 붙고, 마지막 확인 목록은 법적 결론·HS·세액·허가·통관 승인 판단을 만들지 않습니다. 한 scope라도 partial/no coverage/계약 오류이면 인용이나 사건 적용을 섞지 않고 항목화된 `insufficient_evidence`로 끝냅니다. 세 개 이상이거나 방향이 충돌하면 기존 명확화 질문을 반환합니다. 문서 본문처럼 보이는 다줄 붙여넣기는 새 심사 근거가 아니며 Agent·Data·Claude·transcript에 전달하지 않고 문서 등록 또는 교체 후 재심사를 안내합니다. 이 호출은 Case, 문서, finding, 수정 제안을 직접 바꾸지 않습니다.
 

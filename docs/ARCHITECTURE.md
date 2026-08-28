@@ -36,4 +36,4 @@ Frontend → Backend → Agent → Data Evidence API
 - 사건 채팅의 문서형 다줄 붙여넣기는 신규 심사 근거가 아닙니다. Agent는 해당 원문을 Data, Claude, transcript에 전달하지 않고 문서 등록·교체 후 새 Review Run을 안내합니다.
 - Agent는 대화로 상태를 변경하지 않습니다. 수정값은 Backend의 독립 승인 뒤 child Run에만 전달되며, Agent는 원문 인용을 지우지 않고 `human_provided` 사실을 추가해 비교에 우선 사용합니다.
 
-Agent 응답은 언제나 사람 검토 상태입니다. 자동완료, 이미지/OCR/PDF 처리, 서명·승인·commit pin·신뢰 저장소·배포 판정은 이 구조에 없습니다.
+Agent의 core text review 응답은 언제나 사람 검토 상태이며 자동완료, 서명·승인·commit pin·신뢰 저장소·배포 판정을 수행하지 않습니다. 이미지/OCR/PDF 처리는 이 core review 안에서 수행하지 않고 별도 v3 raster-text preview adapter가 승인된 profile로 PDF·JPEG·PNG를 검수용 canonical text 초안으로 변환합니다. Backend가 확정한 텍스트만 기존 review 경로에 전달됩니다.

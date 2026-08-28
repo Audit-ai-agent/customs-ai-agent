@@ -13,6 +13,10 @@ def test_only_live_http_schema_bytes_are_packaged() -> None:
         ("backend", "v3", "document-extraction-result"),
         ("backend", "v3", "knowledge-answer-request"),
         ("backend", "v3", "knowledge-answer-response"),
+        ("backend", "v3", "raster-document-extraction-request"),
+        ("backend", "v3", "raster-document-extraction-result"),
+        ("backend", "v3", "raster-text-extraction-request"),
+        ("backend", "v3", "raster-text-extraction-result"),
         ("backend", "v3", "review-request"),
         ("backend", "v3", "review-result"),
         ("evidence", "v3", "guidance-query"),
@@ -68,6 +72,10 @@ def test_optional_correction_targets_are_omittable_or_null_in_models_and_schema(
     ]
     extraction_request_schema = get_schema("backend", "v3", "document-extraction-request")
     extraction_result_schema = get_schema("backend", "v3", "document-extraction-result")
+    raster_request_schema = get_schema("backend", "v3", "raster-document-extraction-request")
+    raster_result_schema = get_schema("backend", "v3", "raster-document-extraction-result")
+    raster_text_request_schema = get_schema("backend", "v3", "raster-text-extraction-request")
+    raster_text_result_schema = get_schema("backend", "v3", "raster-text-extraction-result")
     assert extraction_request_schema["required"] == [
         "document_asset_id",
         "extraction_request_id",
@@ -81,6 +89,19 @@ def test_optional_correction_targets_are_omittable_or_null_in_models_and_schema(
     ]
     assert "base64" not in extraction_request_schema["properties"]
     assert "base64" not in extraction_result_schema["properties"]
+    assert raster_request_schema["required"][-1] == "raster_profile_revision"
+    assert raster_result_schema["properties"]["schema_version"] == {
+        "const": "2.0",
+        "type": "string",
+    }
+    assert "base64" not in raster_request_schema["properties"]
+    assert "base64" not in raster_result_schema["properties"]
+    assert raster_text_request_schema["required"][-1] == "raster_text_profile_revision"
+    assert raster_text_result_schema["properties"]["byte_size"]["maximum"] == 16 * 1024 * 1024
+    assert raster_text_result_schema["properties"]["canonical_text"]["maxLength"] == 200_000
+    assert raster_text_result_schema["$defs"]["Reason"]["properties"]["code"]["minLength"] == 2
+    assert "base64" not in raster_text_request_schema["properties"]
+    assert "base64" not in raster_text_result_schema["properties"]
     assert "case_input_notice" in response_schema["properties"]
     assert "guidance_resolution" in knowledge_response_schema["properties"]
     assert "guidance_resolutions" in knowledge_response_schema["properties"]
