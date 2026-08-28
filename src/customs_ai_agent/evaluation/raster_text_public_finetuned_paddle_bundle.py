@@ -170,9 +170,7 @@ class RasterTextPublicFineTunedPaddleBundleManifestV1(_WireModel):
     source_recognizer_model_snapshot_sha256: str = Field(pattern=_SHA256)
     source_recognizer_output_class_count: Literal[438] = 438
     text_detection_model_name: Literal["PP-OCRv5_mobile_det"] = "PP-OCRv5_mobile_det"
-    text_recognition_model_name: Literal[
-        "source_attested_en_PP-OCRv5_mobile_rec_head_v2"
-    ] = (
+    text_recognition_model_name: Literal["source_attested_en_PP-OCRv5_mobile_rec_head_v2"] = (
         "source_attested_en_PP-OCRv5_mobile_rec_head_v2"
     )
     local_model_root_relative_path: Literal["models"] = "models"

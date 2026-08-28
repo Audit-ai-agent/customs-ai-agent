@@ -45,7 +45,10 @@ def _request_payload(*, source_sha256: str = _SHA, revision: str = _REVISION) ->
         "raster_text_profile_revision": revision,
         "pages": [{"page_number": 1, "width": 1, "height": 1}],
     }
-    return json.dumps(header, separators=(",", ":"), sort_keys=True).encode("utf-8") + b"\n\x00\x00\x00"
+    return (
+        json.dumps(header, separators=(",", ":"), sort_keys=True).encode("utf-8")
+        + b"\n\x00\x00\x00"
+    )
 
 
 def _frame(payload: bytes) -> bytes:
@@ -140,9 +143,7 @@ def _install_service_material_environment(
     # This helper deliberately exercises the real model verifier while
     # avoiding external Paddle package installation in the parent test venv.
     monkeypatch.setattr(sidecar, "_profile_from_configuration", lambda _raw: profile)
-    monkeypatch.setattr(
-        sidecar, "_verify_package_inventory", lambda *_args, **_kwargs: None
-    )
+    monkeypatch.setattr(sidecar, "_verify_package_inventory", lambda *_args, **_kwargs: None)
     return model_root, detection_model
 
 
@@ -300,9 +301,7 @@ def test_service_post_prediction_model_drift_withholds_response(
         original(**kwargs)  # type: ignore[arg-type]
 
     monkeypatch.setattr(sidecar, "_verify_model_inventory", verify_inventory)
-    monkeypatch.setattr(
-        sidecar, "configuration_from_environment", lambda: (profile, model_root)
-    )
+    monkeypatch.setattr(sidecar, "configuration_from_environment", lambda: (profile, model_root))
     monkeypatch.setattr(sidecar, "_engine", lambda *_args: object())
 
     def predict_then_change_model(*_args: object) -> list[dict[str, object]]:
@@ -439,10 +438,13 @@ def test_service_engine_load_remains_inside_network_guard(
 
 
 def test_main_selects_service_protocol_without_replacing_evaluation_selector(
-    monkeypatch: pytest.MonkeyPatch) -> None:
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
     calls: list[str] = []
     monkeypatch.setattr(sidecar, "run_once_from_stdio", lambda *_args: calls.append("once"))
-    monkeypatch.setattr(sidecar, "run_session_from_stdio", lambda *_args: calls.append("evaluation"))
+    monkeypatch.setattr(
+        sidecar, "run_session_from_stdio", lambda *_args: calls.append("evaluation")
+    )
     monkeypatch.setattr(sidecar, "run_service_from_stdio", lambda *_args: calls.append("service"))
     monkeypatch.setattr(sidecar.sys, "stdin", SimpleNamespace(buffer=io.BytesIO()))
     monkeypatch.setattr(sidecar.sys, "stdout", SimpleNamespace(buffer=io.BytesIO()))

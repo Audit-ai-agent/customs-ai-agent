@@ -55,12 +55,8 @@ def _binding(
         byte_size=1,
         width=100,
         height=200,
-        asset_relative_path=(
-            f"synthetic-bl-repair-audit-v1/assets/{asset_id}-{profile_id}.png"
-        ),
-        gold_relative_path=(
-            f"synthetic-bl-repair-audit-v1/gold/{asset_id}-{profile_id}.json"
-        ),
+        asset_relative_path=(f"synthetic-bl-repair-audit-v1/assets/{asset_id}-{profile_id}.png"),
+        gold_relative_path=(f"synthetic-bl-repair-audit-v1/gold/{asset_id}-{profile_id}.json"),
         gold_sha256=f"{index + 8:x}" * 64,
     )
 
@@ -121,9 +117,7 @@ def test_bl_repair_audit_checkpoint_resumes_missing_only(
 
     class Provider:
         @contextmanager
-        def open_evaluation_session(
-            self, *, parent_materials_verified: bool
-        ) -> Iterator[object]:
+        def open_evaluation_session(self, *, parent_materials_verified: bool) -> Iterator[object]:
             sessions.append(parent_materials_verified)
             yield object()
 
@@ -147,9 +141,7 @@ def test_bl_repair_audit_checkpoint_resumes_missing_only(
 
     def verify_material(**_kwargs: object) -> bytes:
         if state["material_drift"]:
-            raise activation.SyntheticRasterTextActivationError(
-                "bl_repair_audit_material_invalid"
-            )
+            raise activation.SyntheticRasterTextActivationError("bl_repair_audit_material_invalid")
         return b"x"
 
     monkeypatch.setattr(
@@ -231,9 +223,7 @@ def test_bl_repair_audit_checkpoint_resumes_missing_only(
         )
     state["material_drift"] = False
 
-    checkpoint = next(
-        root.glob("synthetic-bl-repair-audit-v1/candidate-checkpoints/*/*.json")
-    )
+    checkpoint = next(root.glob("synthetic-bl-repair-audit-v1/candidate-checkpoints/*/*.json"))
     checkpoint.write_bytes(b"{")
     with pytest.raises(
         activation.SyntheticRasterTextActivationError,
@@ -268,9 +258,7 @@ def test_bl_repair_audit_reuses_only_identical_media_profile_and_bytes(
 
     class Provider:
         @contextmanager
-        def open_evaluation_session(
-            self, *, parent_materials_verified: bool
-        ) -> Iterator[object]:
+        def open_evaluation_session(self, *, parent_materials_verified: bool) -> Iterator[object]:
             assert parent_materials_verified
             yield object()
 
@@ -331,12 +319,8 @@ def test_bl_repair_audit_gate_failure_is_specific_and_never_activates(
     bundle = SimpleNamespace()
     failed_evaluation = SimpleNamespace(gate_passed=False)
 
-    monkeypatch.setattr(
-        activation, "compile_bl_repair_audit_dataset", lambda **_kwargs: receipt
-    )
-    monkeypatch.setattr(
-        activation, "verify_bl_repair_audit_dataset", lambda **_kwargs: receipt
-    )
+    monkeypatch.setattr(activation, "compile_bl_repair_audit_dataset", lambda **_kwargs: receipt)
+    monkeypatch.setattr(activation, "verify_bl_repair_audit_dataset", lambda **_kwargs: receipt)
     monkeypatch.setattr(
         activation, "bl_repair_audit_receipt_sha256", lambda _receipt: _RECEIPT_SHA256
     )
@@ -350,12 +334,8 @@ def test_bl_repair_audit_gate_failure_is_specific_and_never_activates(
             runtime_configuration_sha256=_RUNTIME_SHA256,
         ),
     )
-    monkeypatch.setattr(
-        activation, "_run_bl_repair_audit_observations", lambda **_kwargs: []
-    )
-    monkeypatch.setattr(
-        activation, "BlRepairAuditCandidateBundleV1", lambda **_kwargs: bundle
-    )
+    monkeypatch.setattr(activation, "_run_bl_repair_audit_observations", lambda **_kwargs: [])
+    monkeypatch.setattr(activation, "BlRepairAuditCandidateBundleV1", lambda **_kwargs: bundle)
     monkeypatch.setattr(
         activation,
         "write_bl_repair_audit_candidate_bundle",
@@ -438,18 +418,14 @@ def test_shared_v2_transaction_runs_audit_after_warm_and_before_sealed(
     )
     monkeypatch.setattr(activation, "_calibrated_floor", lambda *_args, **_kwargs: 0.5)
     monkeypatch.setattr(activation, "_read", lambda *_args, **_kwargs: b"profile")
-    monkeypatch.setattr(
-        activation, "parse_raster_text_offline_profile", lambda _raw: final_profile
-    )
+    monkeypatch.setattr(activation, "parse_raster_text_offline_profile", lambda _raw: final_profile)
 
     def warm(**_kwargs: object) -> tuple[str, str]:
         calls.append("warm")
         return "warm.json", "4" * 64
 
     monkeypatch.setattr(activation, "run_warm_service_raster_text_smoke", warm)
-    monkeypatch.setattr(
-        activation, "_require_auto_activation_warm_latency", lambda **_kwargs: None
-    )
+    monkeypatch.setattr(activation, "_require_auto_activation_warm_latency", lambda **_kwargs: None)
     monkeypatch.setattr(
         activation,
         "write_fresh_raster_text_sealed_stage1_decision",

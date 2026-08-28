@@ -558,6 +558,7 @@ def test_auto_v7_training_child_failure_never_enters_evaluation_or_changes_point
         "write_fresh_raster_text_scope_selection_receipt",
         lambda **_kwargs: (_SELECTION_PATH, _SELECTION_SHA),
     )
+
     def fail_fine_tune(*_args: object, **_kwargs: object) -> None:
         events.append("fine-tune-child")
         raise SyntheticRasterTextActivationError(failure_code)

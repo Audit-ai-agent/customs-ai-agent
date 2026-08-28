@@ -144,7 +144,9 @@ def _profile_from_configuration(raw: bytes) -> _Profile:
         "text_detection_box_threshold": value["text_detection_box_threshold"],
         "text_detection_unclip_ratio": value["text_detection_unclip_ratio"],
     }
-    if any(isinstance(item, bool) or not isinstance(item, (int, float)) for item in numeric.values()):
+    if any(
+        isinstance(item, bool) or not isinstance(item, (int, float)) for item in numeric.values()
+    ):
         raise RasterTextSidecarError("raster_text_sidecar_configuration_invalid")
     if (
         value.get("schema_version") != "1.0"
@@ -170,7 +172,9 @@ def _profile_from_configuration(raw: bytes) -> _Profile:
         text_detection_model_name="PP-OCRv5_server_det",
         text_detection_model_directory=_required_string(value["text_detection_model_directory"]),
         text_recognition_model_name="en_PP-OCRv5_mobile_rec",
-        text_recognition_model_directory=_required_string(value["text_recognition_model_directory"]),
+        text_recognition_model_directory=_required_string(
+            value["text_recognition_model_directory"]
+        ),
         cpu_threads=int(numeric["cpu_threads"]),
         text_detection_limit_side_len=int(numeric["text_detection_limit_side_len"]),
         text_detection_limit_type="max",
@@ -230,7 +234,12 @@ def _verify_model_inventory(raw: bytes, *, expected_sha256: str, model_root: Pat
         root = model_root.resolve(strict=True)
     except (KeyError, TypeError, OSError, json.JSONDecodeError):
         raise RasterTextSidecarError("raster_text_sidecar_model_invalid") from None
-    if model_root.is_symlink() or not root.is_dir() or not isinstance(artifacts, list) or not artifacts:
+    if (
+        model_root.is_symlink()
+        or not root.is_dir()
+        or not isinstance(artifacts, list)
+        or not artifacts
+    ):
         raise RasterTextSidecarError("raster_text_sidecar_model_invalid")
     expected: set[str] = set()
     for item in artifacts:
@@ -491,8 +500,7 @@ def _polygon_geometry(value: object) -> tuple[float, float, float] | None:
         for point in points:
             pair = _sequence(point)
             if len(pair) != 2 or any(
-                isinstance(item, bool) or not isinstance(item, (int, float))
-                for item in pair
+                isinstance(item, bool) or not isinstance(item, (int, float)) for item in pair
             ):
                 return None
             x, y = float(cast(int | float, pair[0])), float(cast(int | float, pair[1]))
@@ -590,7 +598,9 @@ def _prediction_lines(prediction: object) -> list[tuple[str, float]]:
             row, key=lambda item: (item[3], item[2], item[5])
         )
     ]
-    ordered.extend((text, score) for text, score, *_rest in sorted(unpositioned, key=lambda item: item[5]))
+    ordered.extend(
+        (text, score) for text, score, *_rest in sorted(unpositioned, key=lambda item: item[5])
+    )
     return ordered
 
 
@@ -633,11 +643,15 @@ def run_once_from_stdio(stream: BinaryIO, output: BinaryIO) -> None:
     with deny_network_connections():
         engine = _engine(profile, model_root)
         text_pages = _predict_pages(engine, pages)
-    encoded = _response_bytes(profile=profile, source_sha256=source_sha256, revision=revision, text_pages=text_pages)
+    encoded = _response_bytes(
+        profile=profile, source_sha256=source_sha256, revision=revision, text_pages=text_pages
+    )
     output.write(encoded)
 
 
-def _response_bytes(*, profile: _Profile, source_sha256: str, revision: str, text_pages: list[dict[str, object]]) -> bytes:
+def _response_bytes(
+    *, profile: _Profile, source_sha256: str, revision: str, text_pages: list[dict[str, object]]
+) -> bytes:
     """Serialize one bounded response for both one-shot and persistent modes."""
 
     encoded = json.dumps(

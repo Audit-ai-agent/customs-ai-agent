@@ -360,7 +360,9 @@ class VerifiedRasterTextReleaseReferenceV1:
         try:
             return self.file_sha256_by_relative_path[path]
         except KeyError:
-            raise RasterOfflineBundleError("raster_text_offline_bundle_material_unavailable") from None
+            raise RasterOfflineBundleError(
+                "raster_text_offline_bundle_material_unavailable"
+            ) from None
 
 
 @dataclass(frozen=True, slots=True)
@@ -803,7 +805,9 @@ def verify_raster_text_direct_model_material(
         ):
             raise RasterOfflineBundleError("raster_text_offline_bundle_material_unavailable")
         artifacts = inventory.get("artifacts")
-        if not isinstance(artifacts, list) or len(artifacts) != len(_RASTER_TEXT_DIRECT_MODEL_PATHS):
+        if not isinstance(artifacts, list) or len(artifacts) != len(
+            _RASTER_TEXT_DIRECT_MODEL_PATHS
+        ):
             raise RasterOfflineBundleError("raster_text_offline_bundle_material_unavailable")
         normalized_artifacts: list[dict[str, object]] = []
         for expected_path, artifact in zip(_RASTER_TEXT_DIRECT_MODEL_PATHS, artifacts, strict=True):
@@ -860,9 +864,10 @@ def verify_raster_text_direct_model_material(
                 or bundle.file_sha256(bundle_path) != expected_digest
             ):
                 raise RasterOfflineBundleError("raster_text_offline_bundle_material_unavailable")
-        if bundle.file_sha256(inventory_relative_path) != hashlib.sha256(
-            _canonical_json(inventory)
-        ).hexdigest():
+        if (
+            bundle.file_sha256(inventory_relative_path)
+            != hashlib.sha256(_canonical_json(inventory)).hexdigest()
+        ):
             raise RasterOfflineBundleError("raster_text_offline_bundle_material_unavailable")
         return VerifiedRasterTextDirectModelMaterialV1(
             local_model_root_relative_path=model_root_relative_path,

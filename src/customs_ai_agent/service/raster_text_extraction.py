@@ -241,10 +241,10 @@ def _orientation_needs_review(
     # The text draft does not expose geometry, but accepting rotated JPEGs
     # would silently alter reading order relative to the stored source.  Keep
     # the same v1 scope as raster-v2 until orientation handling is measured.
-    if (
-        raster_input.metadata.media_type == "image/jpeg"
-        and structure.jpeg_exif_orientation not in {None, 1}
-    ):
+    if raster_input.metadata.media_type == "image/jpeg" and structure.jpeg_exif_orientation not in {
+        None,
+        1,
+    }:
         warning = RasterTextWarningV1(code="jpeg_exif_orientation_unsupported")
         return RasterTextExtractionResultV1(
             document_asset_id=raster_input.metadata.document_asset_id,

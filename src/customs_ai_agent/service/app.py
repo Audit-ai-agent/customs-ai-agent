@@ -194,8 +194,7 @@ def _raster_text_prewarm_callable(
     """
 
     if (
-        settings.raster_text_preview_auto_activation_mode
-        != _RASTER_TEXT_AUTO_ACTIVATION_MODE
+        settings.raster_text_preview_auto_activation_mode != _RASTER_TEXT_AUTO_ACTIVATION_MODE
         or injected_engine is not None
     ):
         return None
@@ -479,9 +478,7 @@ def create_app(
     if active_settings.raster_document_preview_auto_activation_mode == (
         "source-attested-synthetic-raster-v1"
     ):
-        app.state.raster_document_preview_activation_reason = (
-            "raster_source_attested_auto_pending"
-        )
+        app.state.raster_document_preview_activation_reason = "raster_source_attested_auto_pending"
     # Kept for compatibility with existing local test seams.  Requests use
     # the unified runtime facade below, never this mutable app-state object.
     app.state.raster_document_page_renderer = (
@@ -699,7 +696,9 @@ def create_app(
         except RasterDocumentPreviewInputError:
             raise ServiceHttpError("document_decode_invalid", 422) from None
         except RasterDocumentPreviewUnavailable:
-            raise ServiceHttpError("raster_page_renderer_unavailable", 503, retryable=True) from None
+            raise ServiceHttpError(
+                "raster_page_renderer_unavailable", 503, retryable=True
+            ) from None
         except Exception:
             raise ServiceHttpError("raster_document_page_failed", 502, retryable=True) from None
         finally:
@@ -1201,7 +1200,9 @@ def create_app(
         },
         responses={
             200: {
-                "content": {"application/json": {"schema": raster_document_extraction_result_schema}}
+                "content": {
+                    "application/json": {"schema": raster_document_extraction_result_schema}
+                }
             },
             400: {"content": {"application/json": {"schema": ERROR_RESPONSE_SCHEMA}}},
             401: {"content": {"application/json": {"schema": ERROR_RESPONSE_SCHEMA}}},

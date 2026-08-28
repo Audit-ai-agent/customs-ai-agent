@@ -999,10 +999,7 @@ def test_auto_activation_v15_orders_staged_evidence_before_schema5_pointer(
                 assert kwargs["fresh_projection_kind"] == "sealed-stage1-50-family-v1"
             else:
                 assert kwargs["fresh_projection_kind"] == "sealed-stage2-100-family-v1"
-                assert (
-                    kwargs["parent_stage1_decision_relative_path"]
-                    == "stages/decision.json"
-                )
+                assert kwargs["parent_stage1_decision_relative_path"] == "stages/decision.json"
         calls.append(f"candidate:{scope}:{config}")
         return SimpleNamespace(
             source_gold_receipt_relative_path=f"gold/{scope}-{config}",

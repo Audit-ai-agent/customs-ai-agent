@@ -63,8 +63,7 @@ def _root(path: Path) -> Path:
         if (
             root.is_symlink()
             or not root.is_dir()
-            or tuple(part.casefold() for part in root.parts[-3:])
-            != _DOCUMENT_PREVIEW_ROOT_SUFFIX
+            or tuple(part.casefold() for part in root.parts[-3:]) != _DOCUMENT_PREVIEW_ROOT_SUFFIX
         ):
             raise OSError
         return root
@@ -125,20 +124,17 @@ def _verify_release_provenance(
             != f"{sys.version_info.major}.{sys.version_info.minor}"
             or sha256_file(module_path) != receipt.training_module_sha256
             or sha256_file(corpus_module_path) != receipt.balanced_corpus_module_sha256
-            or sha256_file(source_crop_base_path)
-            != receipt.source_crop_base_module_sha256
+            or sha256_file(source_crop_base_path) != receipt.source_crop_base_module_sha256
             or runtime.file_sha256(inventory_relative)
             != receipt.direct_runtime_package_inventory_sha256
-            or sha256_file(inventory_path)
-            != receipt.direct_runtime_package_inventory_sha256
+            or sha256_file(inventory_path) != receipt.direct_runtime_package_inventory_sha256
             or mobile.manifest.source_model_inventory_sha256
             != receipt.public_mobile_source_inventory_sha256
             or mobile.manifest.source_model_snapshot_sha256
             != receipt.public_mobile_source_snapshot_sha256
             or dictionary.dictionary_sha256 != receipt.base_dictionary_sha256
             or dictionary.output_class_count != receipt.output_class_count
-            or dictionary.implicit_space_class_index
-            != receipt.implicit_space_class_index
+            or dictionary.implicit_space_class_index != receipt.implicit_space_class_index
         ):
             raise ValueError
         for relative, expected in receipt.public_recognizer_artifact_sha256s.items():
@@ -187,13 +183,9 @@ def ensure_source_attested_public_recognizer_overfit_v1(
                     )
                 return _verify_release_provenance(root, result)
     except LocalProcessLockBusy:
-        raise SourceAttestedPublicRecognizerFineTuneError(
-            "public_finetune_locked"
-        ) from None
+        raise SourceAttestedPublicRecognizerFineTuneError("public_finetune_locked") from None
     except LocalProcessLockInvalid:
-        raise SourceAttestedPublicRecognizerFineTuneError(
-            "public_finetune_lock_invalid"
-        ) from None
+        raise SourceAttestedPublicRecognizerFineTuneError("public_finetune_lock_invalid") from None
     except SourceAttestedPublicRecognizerFineTuneError:
         raise
     except (
@@ -214,9 +206,7 @@ def ensure_source_attested_public_recognizer_leakage_safe_v2(
 
     root = _root(document_preview_root)
     if tuning_scope != "head":
-        raise SourceAttestedPublicRecognizerFineTuneError(
-            "public_finetune_scope_invalid"
-        )
+        raise SourceAttestedPublicRecognizerFineTuneError("public_finetune_scope_invalid")
     try:
         with exclusive_local_process_lock(root / _LOCK_FILE):
             with network_disabled():
@@ -235,13 +225,9 @@ def ensure_source_attested_public_recognizer_leakage_safe_v2(
                     )
                 return _verify_release_provenance(root, result)
     except LocalProcessLockBusy:
-        raise SourceAttestedPublicRecognizerFineTuneError(
-            "public_finetune_locked"
-        ) from None
+        raise SourceAttestedPublicRecognizerFineTuneError("public_finetune_locked") from None
     except LocalProcessLockInvalid:
-        raise SourceAttestedPublicRecognizerFineTuneError(
-            "public_finetune_lock_invalid"
-        ) from None
+        raise SourceAttestedPublicRecognizerFineTuneError("public_finetune_lock_invalid") from None
     except SourceAttestedPublicRecognizerFineTuneError:
         raise
     except (

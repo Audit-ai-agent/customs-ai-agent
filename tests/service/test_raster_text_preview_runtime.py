@@ -584,9 +584,7 @@ def _v13_profile() -> RasterTextOfflineProfileV13:
     )
 
 
-def _v14_profile(
-    *, minimum_page_confidence: float | None = None
-) -> RasterTextOfflineProfileV14:
+def _v14_profile(*, minimum_page_confidence: float | None = None) -> RasterTextOfflineProfileV14:
     """Full V14 profile with V13 OCR material and distinct repair identity."""
 
     values = _v13_profile().model_dump(
@@ -1211,18 +1209,15 @@ def test_v14_parser_runtime_and_fingerprint_are_distinct_from_v13(
     for schema_version, engine_kind in (
         (
             "13.0",
-            "direct_paddle_mobile_text_harmonic_recall_native960_lowbox_"
-            "strip2_semantic_repair_v2",
+            "direct_paddle_mobile_text_harmonic_recall_native960_lowbox_strip2_semantic_repair_v2",
         ),
         (
             "14.0",
-            "direct_paddle_mobile_text_harmonic_recall_native960_lowbox_"
-            "strip2_semantic_repair",
+            "direct_paddle_mobile_text_harmonic_recall_native960_lowbox_strip2_semantic_repair",
         ),
         (
             "9.0",
-            "direct_paddle_mobile_text_harmonic_recall_native960_lowbox_"
-            "strip2_semantic_repair_v2",
+            "direct_paddle_mobile_text_harmonic_recall_native960_lowbox_strip2_semantic_repair_v2",
         ),
     ):
         values = profile.model_dump(mode="json", warnings=False)
@@ -1251,9 +1246,12 @@ def test_activation_pointer_parser_preserves_v1_and_requires_v2_metric() -> None
         raster_text_runtime.parse_raster_text_activation_pointer(_canonical_pointer(missing_metric))
 
     pointer_v3, _calibration_v3, _evaluation_v3 = _semantic_v3_evidence_models()
-    assert raster_text_runtime.parse_raster_text_activation_pointer(
-        _canonical_pointer(pointer_v3.model_dump(mode="json", warnings=False))
-    ) == pointer_v3
+    assert (
+        raster_text_runtime.parse_raster_text_activation_pointer(
+            _canonical_pointer(pointer_v3.model_dump(mode="json", warnings=False))
+        )
+        == pointer_v3
+    )
     v3_missing_metric = pointer_v3.model_dump(mode="json", warnings=False)
     v3_missing_metric.pop("metric_revision")
     with pytest.raises(RasterTextRuntimeError, match="activation_invalid"):
@@ -1262,9 +1260,12 @@ def test_activation_pointer_parser_preserves_v1_and_requires_v2_metric() -> None
         )
 
     pointer_v4, _calibration_v4, _evaluation_v4 = _fresh_v4_evidence_models()
-    assert raster_text_runtime.parse_raster_text_activation_pointer(
-        _canonical_pointer(pointer_v4.model_dump(mode="json", warnings=False))
-    ) == pointer_v4
+    assert (
+        raster_text_runtime.parse_raster_text_activation_pointer(
+            _canonical_pointer(pointer_v4.model_dump(mode="json", warnings=False))
+        )
+        == pointer_v4
+    )
     for missing_field in ("metric_revision", "evidence_revision"):
         missing_binding = pointer_v4.model_dump(mode="json", warnings=False)
         missing_binding.pop(missing_field)
@@ -1311,12 +1312,16 @@ def test_runtime_semantic_evidence_models_match_writer_schema() -> None:
             parser(_canonical(missing_metric))
 
     _pointer_v4, calibration_v4, evaluation_v4 = _fresh_v4_evidence_models()
-    assert EvaluationCalibrationV4.model_validate(
-        calibration_v4.model_dump(mode="json", warnings=False)
-    ) == calibration_v4
-    assert EvaluationSealedV4.model_validate(
-        evaluation_v4.model_dump(mode="json", warnings=False)
-    ) == evaluation_v4
+    assert (
+        EvaluationCalibrationV4.model_validate(
+            calibration_v4.model_dump(mode="json", warnings=False)
+        )
+        == calibration_v4
+    )
+    assert (
+        EvaluationSealedV4.model_validate(evaluation_v4.model_dump(mode="json", warnings=False))
+        == evaluation_v4
+    )
     for parser, artifact in (
         (raster_text_runtime._parse_raster_text_calibration_receipt, calibration_v4),  # noqa: SLF001
         (raster_text_runtime._parse_raster_text_sealed_evaluation, evaluation_v4),  # noqa: SLF001
@@ -1460,9 +1465,7 @@ def test_fresh_v4_chain_binds_floors_and_latencies_fail_closed(
     calibration_configuration_path = root / "profiles" / "calibration-v14.json"
     calibration_configuration_path.parent.mkdir(parents=True)
     calibration_configuration_path.write_bytes(calibration_configuration_raw)
-    calibration_configuration_sha256 = hashlib.sha256(
-        calibration_configuration_raw
-    ).hexdigest()
+    calibration_configuration_sha256 = hashlib.sha256(calibration_configuration_raw).hexdigest()
     final_runtime_sha256 = "c" * 64
     pointer, calibration, evaluation = _fresh_v4_evidence_models()
     pointer = pointer.model_copy(

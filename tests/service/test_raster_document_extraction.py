@@ -166,12 +166,10 @@ def test_multi_page_pdf_is_needs_review_before_unmeasured_ocr_execution() -> Non
         def extract_layout(self, *_args: object, **_kwargs: object) -> RasterOcrLayoutLedgerV2:
             raise AssertionError("multi-page PDF must not reach OCR")
 
-    content = (
-        b"%PDF-1.7\n1 0 obj<</Type /Page>>endobj\n"
-        b"2 0 obj<</Type /Page>>endobj\n%%EOF\n"
-    )
+    content = b"%PDF-1.7\n1 0 obj<</Type /Page>>endobj\n2 0 obj<</Type /Page>>endobj\n%%EOF\n"
     app = create_app(
-        _settings(), raster_document_preview_engine=MediaAwareRasterPreviewEngine(Adapter(), Provider())
+        _settings(),
+        raster_document_preview_engine=MediaAwareRasterPreviewEngine(Adapter(), Provider()),
     )
     with TestClient(app, raise_server_exceptions=False) as client:
         response = client.post(
@@ -225,7 +223,8 @@ def test_media_aware_engine_passes_only_rasterized_pdf_pages_to_provider() -> No
 
     content = b"%PDF-1.7\n1 0 obj<</Type /Page>>endobj\n%%EOF\n"
     app = create_app(
-        _settings(), raster_document_preview_engine=MediaAwareRasterPreviewEngine(Adapter(), Provider())
+        _settings(),
+        raster_document_preview_engine=MediaAwareRasterPreviewEngine(Adapter(), Provider()),
     )
     with TestClient(app, raise_server_exceptions=False) as client:
         response = client.post(
@@ -365,7 +364,9 @@ def test_ledger_projection_preserves_provider_fields_and_table_cells() -> None:
     ] == [(0, 0, "items-r0-c0"), (1, 0, "items-r1-c0")]
 
 
-def test_raster_page_endpoint_requires_a_sealed_pdfium_renderer_not_an_injected_ocr_engine() -> None:
+def test_raster_page_endpoint_requires_a_sealed_pdfium_renderer_not_an_injected_ocr_engine() -> (
+    None
+):
     content = b"%PDF-1.7\n1 0 obj<</Type /Page>>endobj\n%%EOF\n"
     app = create_app(_settings(), raster_document_preview_engine=object())
     with TestClient(app, raise_server_exceptions=False) as client:
@@ -394,7 +395,9 @@ def test_openapi_exposes_v3_binary_contract_without_base64() -> None:
     assert result["$id"].endswith("/v3/raster-document-extraction-result.schema.json")
     assert "base64" not in metadata["properties"]
     assert "base64" not in result["properties"]
-    page_endpoint = schema["paths"]["/internal/agent/v3/raster-document-pages/{page_number}"]["post"]
+    page_endpoint = schema["paths"]["/internal/agent/v3/raster-document-pages/{page_number}"][
+        "post"
+    ]
     assert set(page_endpoint["requestBody"]["content"]) == {"application/pdf"}
     assert set(page_endpoint["responses"]["200"]["content"]) == {"image/png"}
     assert page_endpoint["x-customs-raster-page-response-headers"]["X-Raster-Page-SHA256"]
@@ -403,7 +406,14 @@ def test_openapi_exposes_v3_binary_contract_without_base64() -> None:
 def test_raster_auto_activation_settings_require_fixed_path_without_static_hash(
     tmp_path: Path,
 ) -> None:
-    pointer = tmp_path / "_local" / "data" / "document-preview" / "approvals" / "raster-preview-active.json"
+    pointer = (
+        tmp_path
+        / "_local"
+        / "data"
+        / "document-preview"
+        / "approvals"
+        / "raster-preview-active.json"
+    )
     source = {
         "CUSTOMS_AGENT_SERVICE_BEARER_TOKEN": _TOKEN,
         "EVIDENCE_SERVICE_BASE_URL": "http://127.0.0.1:18083",
@@ -450,7 +460,9 @@ def test_raster_runtime_has_a_separate_serial_sixty_second_bound() -> None:
     with pytest.raises(
         ServiceConfigurationError, match="customs_agent_raster_run_timeout_seconds_invalid"
     ):
-        ServiceSettings.from_environment({**source, "CUSTOMS_AGENT_RASTER_RUN_TIMEOUT_SECONDS": "61"})
+        ServiceSettings.from_environment(
+            {**source, "CUSTOMS_AGENT_RASTER_RUN_TIMEOUT_SECONDS": "61"}
+        )
     with pytest.raises(
         ServiceConfigurationError, match="customs_agent_raster_max_concurrency_invalid"
     ):
@@ -458,7 +470,14 @@ def test_raster_runtime_has_a_separate_serial_sixty_second_bound() -> None:
 
 
 def test_raster_status_endpoint_is_authenticated_no_store_and_content_free(tmp_path: Path) -> None:
-    pointer = tmp_path / "_local" / "data" / "document-preview" / "approvals" / "raster-preview-active.json"
+    pointer = (
+        tmp_path
+        / "_local"
+        / "data"
+        / "document-preview"
+        / "approvals"
+        / "raster-preview-active.json"
+    )
     pointer.parent.mkdir(parents=True)
     settings = _settings(
         raster_document_preview_approval_path=pointer,

@@ -58,8 +58,7 @@ def _verified_document_preview_root(path: Path) -> Path:
         if (
             root.is_symlink()
             or not root.is_dir()
-            or tuple(part.casefold() for part in root.parts[-3:])
-            != _DOCUMENT_PREVIEW_ROOT_SUFFIX
+            or tuple(part.casefold() for part in root.parts[-3:]) != _DOCUMENT_PREVIEW_ROOT_SUFFIX
         ):
             raise OSError
         return root
@@ -126,8 +125,8 @@ def verified_direct_training_imports(
 
     manifest = bundle.manifest
     canonical_module_root, operational_module_root = _verified_operational_module_root(bundle)
-    canonical_support_root, operational_support_root = (
-        _verified_operational_interpreter_packages(bundle)
+    canonical_support_root, operational_support_root = _verified_operational_interpreter_packages(
+        bundle
     )
     if any(name in sys.modules for name in (*_NATIVE_TRAINING_MODULES, *_NATIVE_SUPPORT_MODULES)):
         raise SourceAttestedRecognizerTrainingError("training_native_module_preloaded")
@@ -160,9 +159,7 @@ def verified_direct_training_imports(
         except SourceAttestedRecognizerTrainingError:
             raise
         except Exception:
-            raise SourceAttestedRecognizerTrainingError(
-                "training_runtime_unavailable"
-            ) from None
+            raise SourceAttestedRecognizerTrainingError("training_runtime_unavailable") from None
         yield bundle.bundle_root.joinpath(
             *PurePosixPath(manifest.sidecar_package_inventory_relative_path).parts
         )
@@ -227,9 +224,7 @@ def _verify_release_training_provenance(
     try:
         module_path = Path(module_path_value).resolve(strict=True)
     except OSError:
-        raise SourceAttestedRecognizerTrainingError(
-            "training_release_provenance_drift"
-        ) from None
+        raise SourceAttestedRecognizerTrainingError("training_release_provenance_drift") from None
     if sha256_file(module_path) != receipt.training_module_sha256:
         raise SourceAttestedRecognizerTrainingError("training_release_provenance_drift")
     manifest_sha256 = receipt.training_runtime_bundle_manifest_sha256
@@ -245,9 +240,7 @@ def _verify_release_training_provenance(
             bundle.manifest.sidecar_package_inventory_relative_path
         )
     except RasterTextDirectPaddleBundleError:
-        raise SourceAttestedRecognizerTrainingError(
-            "training_release_provenance_drift"
-        ) from None
+        raise SourceAttestedRecognizerTrainingError("training_release_provenance_drift") from None
     if inventory_sha256 != receipt.package_inventory_sha256:
         raise SourceAttestedRecognizerTrainingError("training_release_provenance_drift")
 
@@ -281,12 +274,8 @@ def discover_verified_source_attested_recognizer_release(
             or not candidate.is_dir()
             or _SHA256.fullmatch(candidate.name) is None
         ):
-            raise SourceAttestedRecognizerTrainingError(
-                "recognizer_release_collection_invalid"
-            )
-        release = load_verified_source_attested_raster_text_recognizer_release(
-            root, candidate.name
-        )
+            raise SourceAttestedRecognizerTrainingError("recognizer_release_collection_invalid")
+        release = load_verified_source_attested_raster_text_recognizer_release(root, candidate.name)
         _verify_release_training_provenance(root, release, bundles)
         verified.append(release)
     stage_rank = {"full": 0, "pilot": 1, "overfit": 2}

@@ -43,9 +43,7 @@ class RasterDocumentExtractionRequestMetadataV2(RasterDocumentExtractionWireMode
     extraction_request_id: str = Field(min_length=1, max_length=128, pattern=_IDENTIFIER_PATTERN)
     source_sha256: str = Field(pattern=r"^[a-f0-9]{64}$")
     media_type: DocumentMediaType
-    raster_profile_revision: str = Field(
-        min_length=1, max_length=128, pattern=_REVISION_PATTERN
-    )
+    raster_profile_revision: str = Field(min_length=1, max_length=128, pattern=_REVISION_PATTERN)
 
 
 class NormalizedPointV2(RasterDocumentExtractionWireModel):
@@ -184,9 +182,7 @@ class RasterDocumentExtractionResultV2(RasterDocumentExtractionWireModel):
     schema_version: Literal["2.0"] = "2.0"
     document_asset_id: str = Field(min_length=1, max_length=128, pattern=_IDENTIFIER_PATTERN)
     extraction_request_id: str = Field(min_length=1, max_length=128, pattern=_IDENTIFIER_PATTERN)
-    raster_profile_revision: str = Field(
-        min_length=1, max_length=128, pattern=_REVISION_PATTERN
-    )
+    raster_profile_revision: str = Field(min_length=1, max_length=128, pattern=_REVISION_PATTERN)
     status: RasterDocumentPreviewStatus
     media_type: DocumentMediaType
     byte_size: int = Field(ge=1, le=32 * 1024 * 1024)
@@ -225,12 +221,17 @@ class RasterDocumentExtractionResultV2(RasterDocumentExtractionWireModel):
             raise ValueError("table page_number must refer to an extracted page")
         evidence_lists = [field.evidence_span_ids for field in self.field_candidates]
         evidence_lists.extend(
-            cell.evidence_span_ids for table in self.tables for row in table.rows for cell in row.cells
+            cell.evidence_span_ids
+            for table in self.tables
+            for row in table.rows
+            for cell in row.cells
         )
         if any(not set(ids) <= span_ids for ids in evidence_lists):
             raise ValueError("field and table evidence must refer to extracted span IDs")
         has_content = bool(self.pages or self.field_candidates or self.tables)
-        has_provenance = self.extractor_revision is not None or self.canonical_text_sha256 is not None
+        has_provenance = (
+            self.extractor_revision is not None or self.canonical_text_sha256 is not None
+        )
         if self.status == "unavailable":
             if (
                 has_content
@@ -260,7 +261,8 @@ class RasterDocumentExtractionResultV2(RasterDocumentExtractionWireModel):
             if any(field.bbox is None for field in self.field_candidates):
                 raise ValueError("preview_ready raster fields require bbox")
             if any(
-                table.bbox is None or any(cell.bbox is None for row in table.rows for cell in row.cells)
+                table.bbox is None
+                or any(cell.bbox is None for row in table.rows for cell in row.cells)
                 for table in self.tables
             ):
                 raise ValueError("preview_ready raster tables require bbox")

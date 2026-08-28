@@ -626,26 +626,30 @@ def test_service_session_reuses_one_process_and_reaps_it_on_close() -> None:
     profile = _automatic_v2_profile(revision).model_copy(update={"evaluation_batch_size": 4})
     page = RasterizedPageV2(page_number=1, width=1, height=1, pixels=b"\x00\x00\x00")
 
-    result = PpStructureV3SidecarResultV1(
-        source_sha256="a" * 64,
-        raster_profile_revision=revision,
-        provider_revision=profile.extractor_revision,
-        document_type="unknown",
-        classification_confidence=None,
-        pages=[
-            {
-                "page_number": 1,
-                "width": 1,
-                "height": 1,
-                "coordinate_unit": "pixels",
-                "spans": [],
-            }
-        ],
-        field_candidates=[],
-        tables=[],
-        warnings=[],
-        needs_review_reasons=[],
-    ).model_dump_json().encode("utf-8")
+    result = (
+        PpStructureV3SidecarResultV1(
+            source_sha256="a" * 64,
+            raster_profile_revision=revision,
+            provider_revision=profile.extractor_revision,
+            document_type="unknown",
+            classification_confidence=None,
+            pages=[
+                {
+                    "page_number": 1,
+                    "width": 1,
+                    "height": 1,
+                    "coordinate_unit": "pixels",
+                    "spans": [],
+                }
+            ],
+            field_candidates=[],
+            tables=[],
+            warnings=[],
+            needs_review_reasons=[],
+        )
+        .model_dump_json()
+        .encode("utf-8")
+    )
 
     class FakeProcess:
         def __init__(self) -> None:
@@ -658,7 +662,9 @@ def test_service_session_reuses_one_process_and_reaps_it_on_close() -> None:
                 sort_keys=True,
             ).encode("utf-8")
             self.stdin = io.BytesIO()
-            self.stdout = io.BytesIO(_batch_frame(ready) + _batch_frame(result) + _batch_frame(result))
+            self.stdout = io.BytesIO(
+                _batch_frame(ready) + _batch_frame(result) + _batch_frame(result)
+            )
             self.terminated = 0
             self.waited = 0
 
@@ -682,18 +688,24 @@ def test_service_session_reuses_one_process_and_reaps_it_on_close() -> None:
         cleanup_home=lambda: cleaned.append(object()),
     )
     session.verify_ready()
-    assert session.extract_layout(
-        (page,),
-        source_sha256="a" * 64,
-        raster_profile_revision=revision,
-        profile=profile,
-    ).source_sha256 == "a" * 64
-    assert session.extract_layout(
-        (page,),
-        source_sha256="a" * 64,
-        raster_profile_revision=revision,
-        profile=profile,
-    ).source_sha256 == "a" * 64
+    assert (
+        session.extract_layout(
+            (page,),
+            source_sha256="a" * 64,
+            raster_profile_revision=revision,
+            profile=profile,
+        ).source_sha256
+        == "a" * 64
+    )
+    assert (
+        session.extract_layout(
+            (page,),
+            source_sha256="a" * 64,
+            raster_profile_revision=revision,
+            profile=profile,
+        ).source_sha256
+        == "a" * 64
+    )
     session.close()
 
     assert process.terminated == 1

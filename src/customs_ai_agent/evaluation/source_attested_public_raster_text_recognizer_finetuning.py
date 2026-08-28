@@ -178,9 +178,9 @@ class PublicFineTuneCropManifestV2(_WireModel):
     corpus_revision: Literal["source-attested-family-first-two-profile-crops-v2"] = (
         "source-attested-family-first-two-profile-crops-v2"
     )
-    overlap_verifier_revision: Literal[
+    overlap_verifier_revision: Literal["selection-v2-all-holdouts-zero-overlap-v1"] = (
         "selection-v2-all-holdouts-zero-overlap-v1"
-    ] = "selection-v2-all-holdouts-zero-overlap-v1"
+    )
     source_crop_manifest_sha256: str = Field(pattern=_SHA256)
     source_receipt_sha256: str = Field(pattern=_SHA256)
     raster_receipt_sha256: str = Field(pattern=_SHA256)
@@ -201,9 +201,9 @@ class PublicFineTuneCropManifestV2(_WireModel):
     base_dictionary_sha256: str = Field(pattern=_SHA256)
     source_profile_crop_counts: dict[str, int]
     usable_profile_crop_counts: dict[str, int]
-    critical_evidence_policy: Literal[
+    critical_evidence_policy: Literal["gold-field-value-equals-ordered-evidence-spans-v1"] = (
         "gold-field-value-equals-ordered-evidence-spans-v1"
-    ] = "gold-field-value-equals-ordered-evidence-spans-v1"
+    )
     critical_field_crop_count: int = Field(ge=200, le=1_000)
     critical_field_ids_sha256: str = Field(pattern=_SHA256)
     critical_field_crop_counts: dict[str, int]
@@ -216,8 +216,7 @@ class PublicFineTuneCropManifestV2(_WireModel):
         expected_families = 500 if self.split == "train" else 100
         expected_crops = expected_families * self.crops_per_family
         expected_selection_path = (
-            "synthetic-raster-text-v1/fresh-scope-selections/"
-            f"{self.selection_receipt_sha256}.json"
+            f"synthetic-raster-text-v1/fresh-scope-selections/{self.selection_receipt_sha256}.json"
         )
         if (
             self.family_count != expected_families
@@ -238,9 +237,7 @@ class PublicFineTuneCropManifestV2(_WireModel):
             - min(self.document_type_crop_counts.values())
             > 2
             or self.critical_field_ids_sha256
-            != sha256_bytes(
-                canonical_json_bytes(sorted(self.critical_field_crop_counts))
-            )
+            != sha256_bytes(canonical_json_bytes(sorted(self.critical_field_crop_counts)))
             or self.source_label_length_p50 > self.source_label_length_p95
         ):
             raise ValueError("leakage-safe public fine-tune crop counts do not match")
@@ -287,9 +284,9 @@ class PublicFineTuneReceiptV1(_WireModel):
     ctc_blank_index: Literal[0] = 0
     dictionary_first_class_index: Literal[1] = 1
     implicit_space_class_index: int = Field(ge=2, le=513)
-    form_marker_policy: Literal[
+    form_marker_policy: Literal["remove-black-square-checkbox-and-underscore-run-ge-2-v1"] = (
         "remove-black-square-checkbox-and-underscore-run-ge-2-v1"
-    ] = "remove-black-square-checkbox-and-underscore-run-ge-2-v1"
+    )
     whitespace_policy: Literal[
         "nfc-map-control-whitespace-one-for-one-preserve-ascii-spaces-v1"
     ] = "nfc-map-control-whitespace-one-for-one-preserve-ascii-spaces-v1"
@@ -338,12 +335,9 @@ class PublicFineTuneReceiptV1(_WireModel):
             self.train_crop_manifest.split != "train"
             or self.development_crop_manifest.split != "development"
             or _manifest_sha256(self.train_crop_manifest) != self.train_manifest_sha256
-            or _manifest_sha256(self.development_crop_manifest)
-            != self.development_manifest_sha256
-            or self.train_crop_manifest.base_dictionary_sha256
-            != self.base_dictionary_sha256
-            or self.development_crop_manifest.base_dictionary_sha256
-            != self.base_dictionary_sha256
+            or _manifest_sha256(self.development_crop_manifest) != self.development_manifest_sha256
+            or self.train_crop_manifest.base_dictionary_sha256 != self.base_dictionary_sha256
+            or self.development_crop_manifest.base_dictionary_sha256 != self.base_dictionary_sha256
             or self.train_crop_manifest.source_receipt_sha256
             != self.development_crop_manifest.source_receipt_sha256
             or self.train_crop_manifest.raster_receipt_sha256
@@ -359,9 +353,7 @@ class PublicFineTuneReceiptV1(_WireModel):
         ):
             raise ValueError("public recognizer CTC class mapping is invalid")
         expected_head_contract = sha256_bytes(canonical_json_bytes(_EXPECTED_HEAD_SHAPES))
-        expected_head_names = sha256_bytes(
-            canonical_json_bytes(sorted(_EXPECTED_HEAD_SHAPES))
-        )
+        expected_head_names = sha256_bytes(canonical_json_bytes(sorted(_EXPECTED_HEAD_SHAPES)))
         if (
             self.head_tensor_contract_sha256 != expected_head_contract
             or (
@@ -375,10 +367,7 @@ class PublicFineTuneReceiptV1(_WireModel):
             )
             or (
                 self.tuning_scope == "connected_tail"
-                and (
-                    self.trainable_tensor_count <= 2
-                    or self.learning_rate != _TAIL_LEARNING_RATE
-                )
+                and (self.trainable_tensor_count <= 2 or self.learning_rate != _TAIL_LEARNING_RATE)
             )
         ):
             raise ValueError("public recognizer trainable tensor contract is invalid")
@@ -393,9 +382,7 @@ class PublicFineTuneReceiptV1(_WireModel):
             )
         ):
             raise ValueError("public recognizer fine-tune did not improve development")
-        expected_development_counts = (
-            self.development_crop_manifest.usable_profile_crop_counts
-        )
+        expected_development_counts = self.development_crop_manifest.usable_profile_crop_counts
         if any(
             self.baseline_development_by_profile[profile].crop_count
             != expected_development_counts[profile]
@@ -418,14 +405,14 @@ class PublicFineTuneReceiptV1(_WireModel):
         ):
             characters = sum(item.reference_character_count for item in metrics.values())
             crops = sum(item.crop_count for item in metrics.values())
-            weighted_cer = sum(
-                item.semantic_cer * item.reference_character_count
-                for item in metrics.values()
-            ) / characters
-            weighted_exact = sum(
-                item.semantic_crop_exact_match * item.crop_count
-                for item in metrics.values()
-            ) / crops
+            weighted_cer = (
+                sum(item.semantic_cer * item.reference_character_count for item in metrics.values())
+                / characters
+            )
+            weighted_exact = (
+                sum(item.semantic_crop_exact_match * item.crop_count for item in metrics.values())
+                / crops
+            )
             if (
                 abs(weighted_cer - overall_cer) > 1.0e-8
                 or abs(weighted_exact - overall_exact) > 1.0e-8
@@ -457,9 +444,9 @@ class PublicFineTuneReceiptV2(PublicFineTuneReceiptV1):
     selection_receipt_relative_path: str = Field(min_length=1, max_length=240)
     selection_receipt_sha256: str = Field(pattern=_SHA256)
     parent_selection_receipt_sha256: str = Field(pattern=_SHA256)
-    overlap_verifier_revision: Literal[
+    overlap_verifier_revision: Literal["selection-v2-all-holdouts-zero-overlap-v1"] = (
         "selection-v2-all-holdouts-zero-overlap-v1"
-    ] = "selection-v2-all-holdouts-zero-overlap-v1"
+    )
     train_holdout_overlap_count: Literal[0] = 0
     maximum_epochs: Literal[4] = 4
     completed_epochs: int = Field(ge=1, le=4)
@@ -470,8 +457,7 @@ class PublicFineTuneReceiptV2(PublicFineTuneReceiptV1):
         train = self.train_crop_manifest
         development = self.development_crop_manifest
         expected_path = (
-            "synthetic-raster-text-v1/fresh-scope-selections/"
-            f"{self.selection_receipt_sha256}.json"
+            f"synthetic-raster-text-v1/fresh-scope-selections/{self.selection_receipt_sha256}.json"
         )
         if (
             self.selection_receipt_relative_path != expected_path
@@ -479,12 +465,9 @@ class PublicFineTuneReceiptV2(PublicFineTuneReceiptV1):
             or development.selection_receipt_relative_path != expected_path
             or train.selection_receipt_sha256 != self.selection_receipt_sha256
             or development.selection_receipt_sha256 != self.selection_receipt_sha256
-            or train.parent_selection_receipt_sha256
-            != self.parent_selection_receipt_sha256
-            or development.parent_selection_receipt_sha256
-            != self.parent_selection_receipt_sha256
-            or train.excluded_family_ids_sha256
-            != development.excluded_family_ids_sha256
+            or train.parent_selection_receipt_sha256 != self.parent_selection_receipt_sha256
+            or development.parent_selection_receipt_sha256 != self.parent_selection_receipt_sha256
+            or train.excluded_family_ids_sha256 != development.excluded_family_ids_sha256
             or train.holdout_overlap_count != self.train_holdout_overlap_count
             or train.family_count != 500
             or train.usable_crop_count != 1_000
@@ -568,8 +551,7 @@ def _root(path: Path) -> Path:
         if (
             root.is_symlink()
             or not root.is_dir()
-            or tuple(part.casefold() for part in root.parts[-3:])
-            != _DOCUMENT_PREVIEW_ROOT_SUFFIX
+            or tuple(part.casefold() for part in root.parts[-3:]) != _DOCUMENT_PREVIEW_ROOT_SUFFIX
         ):
             raise OSError
         return root
@@ -665,9 +647,7 @@ def semantic_ocr_crop_label_v1(value: str) -> str | None:
     if normalized and any(not character.isspace() for character in normalized):
         return normalized
     source_nonspace = "".join(
-        character
-        for character in unicodedata.normalize("NFC", value)
-        if not character.isspace()
+        character for character in unicodedata.normalize("NFC", value) if not character.isspace()
     )
     decorative_source = "".join(
         character
@@ -675,8 +655,7 @@ def semantic_ocr_crop_label_v1(value: str) -> str | None:
         if character not in {_BLACK_SQUARE, *_CHECKBOX_MARKERS}
     )
     if not source_nonspace or (
-        decorative_source
-        and _DECORATIVE_UNDERSCORE_RUN.fullmatch(decorative_source) is None
+        decorative_source and _DECORATIVE_UNDERSCORE_RUN.fullmatch(decorative_source) is None
     ):
         raise SourceAttestedPublicRecognizerFineTuneError("public_finetune_label_invalid")
     return None
@@ -743,8 +722,7 @@ def _strict_metric_improvement(
     baseline_exact: float,
 ) -> bool:
     return candidate_cer < baseline_cer - 1.0e-9 or (
-        abs(candidate_cer - baseline_cer) <= 1.0e-9
-        and candidate_exact > baseline_exact + 1.0e-9
+        abs(candidate_cer - baseline_cer) <= 1.0e-9 and candidate_exact > baseline_exact + 1.0e-9
     )
 
 
@@ -814,12 +792,16 @@ def _semantic_split(
             )
         source_profile_counts[profile] += 1
         if raw_label is None or sha256_bytes(raw_label.encode("utf-8")) != crop.label_sha256:
-            raise SourceAttestedPublicRecognizerFineTuneError("public_finetune_label_binding_invalid")
+            raise SourceAttestedPublicRecognizerFineTuneError(
+                "public_finetune_label_binding_invalid"
+            )
         semantic = semantic_ocr_crop_label_v1(raw_label)
         if semantic is None:
             skipped.append(crop.sample_id)
             continue
-        unsupported = {character for character in semantic if character not in dictionary.character_to_index}
+        unsupported = {
+            character for character in semantic if character not in dictionary.character_to_index
+        }
         if unsupported:
             raise SourceAttestedPublicRecognizerFineTuneError(
                 "public_finetune_label_dictionary_unsupported"
@@ -895,9 +877,7 @@ def build_verified_public_finetune_overfit_corpus_v1(
         source_receipt_sha256=source.source_receipt_sha256,
         raster_receipt_sha256=source.raster_receipt_sha256,
         scan_duplicate_pair_count=source.development_scan_duplicate_pair_count,
-        scan_duplicate_pixel_list_sha256=(
-            source.development_scan_duplicate_pixel_list_sha256
-        ),
+        scan_duplicate_pixel_list_sha256=(source.development_scan_duplicate_pixel_list_sha256),
     )
     train_manifest, train, train_labels = _semantic_split(
         crops=source.train_crops,
@@ -920,9 +900,7 @@ def build_verified_public_finetune_overfit_corpus_v1(
         raster_receipt_sha256=source.raster_receipt_sha256,
         profile_by_sample_id=source.profile_by_sample_id,
         scan_duplicate_pair_count=source.development_scan_duplicate_pair_count,
-        scan_duplicate_pixel_list_sha256=(
-            source.development_scan_duplicate_pixel_list_sha256
-        ),
+        scan_duplicate_pixel_list_sha256=(source.development_scan_duplicate_pixel_list_sha256),
         dictionary=dictionary,
     )
     if {crop.family_id for crop in train} & {crop.family_id for crop in development}:
@@ -980,9 +958,7 @@ def _raw_family_first_manifest_sha256_v2(
                 "corpus_revision": _CORPUS_REVISION_V2,
                 "excluded_family_ids_sha256": excluded_family_ids_sha256,
                 "overlap_verifier_revision": _OVERLAP_VERIFIER_REVISION_V2,
-                "parent_selection_receipt_sha256": (
-                    parent_selection_receipt_sha256
-                ),
+                "parent_selection_receipt_sha256": (parent_selection_receipt_sha256),
                 "raster_receipt_sha256": raster_receipt_sha256,
                 "records": records,
                 "selected_family_ids_sha256": selected_family_ids_sha256,
@@ -1019,9 +995,7 @@ def _semantic_split_v2(
     document_counts = {document_type: 0 for document_type in _DOCUMENT_TYPES}
     for crop in crops:
         if crop.split != split:
-            raise SourceAttestedPublicRecognizerFineTuneError(
-                "public_finetune_split_invalid"
-            )
+            raise SourceAttestedPublicRecognizerFineTuneError("public_finetune_split_invalid")
         raw_label = labels_by_sample_id.get(crop.sample_id)
         profile = profile_by_sample_id.get(crop.sample_id)
         field_key = field_key_by_sample_id.get(crop.sample_id)
@@ -1048,9 +1022,7 @@ def _semantic_split_v2(
             raise SourceAttestedPublicRecognizerFineTuneError(
                 "public_finetune_family_first_candidate_invalid"
             )
-        if any(
-            character not in dictionary.character_to_index for character in semantic
-        ):
+        if any(character not in dictionary.character_to_index for character in semantic):
             raise SourceAttestedPublicRecognizerFineTuneError(
                 "public_finetune_label_dictionary_unsupported"
             )
@@ -1119,9 +1091,7 @@ def _semantic_split_v2(
         source_profile_crop_counts=profile_counts,
         usable_profile_crop_counts=profile_counts,
         critical_field_crop_count=expected_crops,
-        critical_field_ids_sha256=sha256_bytes(
-            canonical_json_bytes(sorted(field_counts))
-        ),
+        critical_field_ids_sha256=sha256_bytes(canonical_json_bytes(sorted(field_counts))),
         critical_field_crop_counts=field_counts,
         document_type_crop_counts=document_counts,
         source_label_length_p50=percentile_nearest_rank(50),
@@ -1204,14 +1174,10 @@ def build_verified_public_finetune_leakage_safe_corpus_v2(
         dictionary=dictionary,
     )
     if {crop.family_id for crop in train} & {crop.family_id for crop in development}:
-        raise SourceAttestedPublicRecognizerFineTuneError(
-            "public_finetune_family_leakage"
-        )
+        raise SourceAttestedPublicRecognizerFineTuneError("public_finetune_family_leakage")
     labels = {**train_labels, **development_labels}
     if len(labels) != 1_200:
-        raise SourceAttestedPublicRecognizerFineTuneError(
-            "public_finetune_label_binding_invalid"
-        )
+        raise SourceAttestedPublicRecognizerFineTuneError("public_finetune_label_binding_invalid")
     return VerifiedPublicFineTuneCorpusV2(
         train_manifest=train_manifest,
         development_manifest=development_manifest,
@@ -1233,9 +1199,7 @@ def _public_recognizer_artifacts(
         path = _safe_path(bundle.bundle_root, relative)
         digest = sha256_file(path)
         if bundle.file_sha256(relative) != digest:
-            raise SourceAttestedPublicRecognizerFineTuneError(
-                "public_finetune_base_model_drift"
-            )
+            raise SourceAttestedPublicRecognizerFineTuneError("public_finetune_base_model_drift")
         result[relative] = digest
     return result
 
@@ -1302,9 +1266,7 @@ def _ctc_loss(
         time_steps = int(probabilities.shape[1])
         batch_size = int(probabilities.shape[0])
         input_lengths = paddle.full((batch_size,), time_steps, dtype="int64")
-        log_probabilities = paddle.log(
-            paddle.clip(probabilities, min=1.0e-7, max=1.0)
-        )
+        log_probabilities = paddle.log(paddle.clip(probabilities, min=1.0e-7, max=1.0))
         loss = paddle.nn.functional.ctc_loss(
             log_probabilities.transpose([1, 0, 2]),
             labels,
@@ -1352,10 +1314,10 @@ def select_public_recognizer_trainable_parameters_v1(
             labels=labels,
             label_lengths=label_lengths,
         ).backward()
-        connected = tuple(sorted(name for name, value in parameters.items() if value.grad is not None))
-        head = tuple(
-            sorted(name for name in connected if name in _EXPECTED_HEAD_SHAPES)
+        connected = tuple(
+            sorted(name for name, value in parameters.items() if value.grad is not None)
         )
+        head = tuple(sorted(name for name in connected if name in _EXPECTED_HEAD_SHAPES))
         if set(head) != set(_EXPECTED_HEAD_SHAPES):
             raise SourceAttestedPublicRecognizerFineTuneError(
                 "public_finetune_head_topology_invalid"
@@ -1368,7 +1330,9 @@ def select_public_recognizer_trainable_parameters_v1(
             parameter.stop_gradient = name not in chosen
         selected = tuple((name, parameters[name]) for name in chosen)
         if tuning_scope == "head":
-            shapes = {name: tuple(int(value) for value in parameter.shape) for name, parameter in selected}
+            shapes = {
+                name: tuple(int(value) for value in parameter.shape) for name, parameter in selected
+            }
             expected_shapes = {
                 "linear_8.b_0_0": (output_class_count,),
                 "linear_8.w_0_0": (120, output_class_count),
@@ -1393,14 +1357,10 @@ def _load_verified_training_page(
     profile_id: str,
 ) -> Any:
     if profile_id not in _TRAINING_PROFILES:
-        raise SourceAttestedPublicRecognizerFineTuneError(
-            "public_finetune_profile_binding_invalid"
-        )
+        raise SourceAttestedPublicRecognizerFineTuneError("public_finetune_profile_binding_invalid")
     path = _safe_path(document_preview_root, crop.asset_relative_path)
     if sha256_file(path) != crop.raster_sha256:
-        raise SourceAttestedPublicRecognizerFineTuneError(
-            "public_finetune_raster_drift"
-        )
+        raise SourceAttestedPublicRecognizerFineTuneError("public_finetune_raster_drift")
     try:
         from PIL import Image
 
@@ -1467,16 +1427,10 @@ def _prepare_public_paddle_batch(
         pad_y = height * 0.15
         left = max(0, math.floor((x - pad_x) * crop.page_width))
         top = max(0, math.floor((y - pad_y) * crop.page_height))
-        right = min(
-            crop.page_width, math.ceil((x + width + pad_x) * crop.page_width)
-        )
-        bottom = min(
-            crop.page_height, math.ceil((y + height + pad_y) * crop.page_height)
-        )
+        right = min(crop.page_width, math.ceil((x + width + pad_x) * crop.page_width))
+        bottom = min(crop.page_height, math.ceil((y + height + pad_y) * crop.page_height))
         if right - left < 2 or bottom - top < 2:
-            raise SourceAttestedPublicRecognizerFineTuneError(
-                "public_finetune_crop_invalid"
-            )
+            raise SourceAttestedPublicRecognizerFineTuneError("public_finetune_crop_invalid")
         image = page.crop((left, top, right, bottom))
         resized_width = min(
             3_200,
@@ -1541,9 +1495,7 @@ def _train_batch(
     loss.backward()
     for _name, parameter in selected_parameters:
         if parameter.grad is None or not bool(paddle.isfinite(parameter.grad).all().item()):
-            raise SourceAttestedPublicRecognizerFineTuneError(
-                "public_finetune_gradient_invalid"
-            )
+            raise SourceAttestedPublicRecognizerFineTuneError("public_finetune_gradient_invalid")
     optimizer.step()
     optimizer.clear_grad()
 
@@ -1572,9 +1524,7 @@ def _evaluate(
     cache: PageLruCache[Any] = PageLruCache(16)
     model.eval()
     with paddle.no_grad():
-        for batch in deterministic_width_batches(
-            crops, epoch=0, seed=seed, batch_size=batch_size
-        ):
+        for batch in deterministic_width_batches(crops, epoch=0, seed=seed, batch_size=batch_size):
             images, labels, label_lengths = _prepare_public_paddle_batch(
                 paddle,
                 document_preview_root=document_preview_root,
@@ -1619,9 +1569,7 @@ def _evaluate(
     by_profile: dict[str, SemanticDevelopmentMetricV1] = {}
     for profile, values in profile_totals.items():
         if values["total"] < 1 or values["characters"] < 1:
-            raise SourceAttestedPublicRecognizerFineTuneError(
-                "public_finetune_evaluation_invalid"
-            )
+            raise SourceAttestedPublicRecognizerFineTuneError("public_finetune_evaluation_invalid")
         by_profile[profile] = SemanticDevelopmentMetricV1(
             crop_count=values["total"],
             reference_character_count=values["characters"],
@@ -1648,7 +1596,11 @@ def _model_artifact_hashes(directory: Path) -> dict[str, str]:
     result: dict[str, str] = {}
     for relative in _MODEL_FILES:
         path = directory.parent.joinpath(*PurePosixPath(relative).parts)
-        if path.is_symlink() or not path.is_file() or not 1 <= path.stat().st_size <= _MAX_FILE_BYTES:
+        if (
+            path.is_symlink()
+            or not path.is_file()
+            or not 1 <= path.stat().st_size <= _MAX_FILE_BYTES
+        ):
             raise SourceAttestedPublicRecognizerFineTuneError(
                 "public_finetune_static_export_invalid"
             )
@@ -1667,9 +1619,7 @@ def _native_export_prefix(text_rec_directory: Path) -> Path:
         if not isinstance(required, int) or required < 1:
             raise OSError
         buffer = ctypes.create_unicode_buffer(required + 1)
-        written = ctypes.windll.kernel32.GetShortPathNameW(
-            str(canonical), buffer, len(buffer)
-        )
+        written = ctypes.windll.kernel32.GetShortPathNameW(str(canonical), buffer, len(buffer))
         if not isinstance(written, int) or not 0 < written < len(buffer):
             raise OSError
         if not buffer.value or not buffer.value.isascii():
@@ -1699,9 +1649,7 @@ def export_public_finetuned_recognizer_v1(
         prefix = _native_export_prefix(text_rec_directory)
         model.eval()
         widths = (128, 320)
-        probes = {
-            width: paddle.zeros((1, 3, 48, width), dtype="float32") for width in widths
-        }
+        probes = {width: paddle.zeros((1, 3, 48, width), dtype="float32") for width in widths}
         failure_stage = "eager_probe"
         before = {
             width: _probability_output(
@@ -1779,9 +1727,7 @@ def export_public_finetuned_recognizer_v1(
         failure_stage = "native_prediction"
         for width in widths:
             native_input.reshape([1, 3, 48, width])
-            native_input.copy_from_cpu(
-                np.zeros((1, 3, 48, width), dtype="float32")
-            )
+            native_input.copy_from_cpu(np.zeros((1, 3, 48, width), dtype="float32"))
             predictor.run()
             native = predictor.get_output_handle(output_names[0]).copy_to_cpu()
             if (
@@ -1935,9 +1881,7 @@ def publish_public_finetuned_recognizer_release_v2(
         files, directories = _tree_entries(stage)
         if files != set(_MODEL_FILES) or directories != {"text-rec"}:
             raise OSError
-        artifacts = {
-            relative: sha256_file(stage / relative) for relative in _MODEL_FILES
-        }
+        artifacts = {relative: sha256_file(stage / relative) for relative in _MODEL_FILES}
         if receipt_payload.get("model_artifact_sha256s") != artifacts:
             raise ValueError
         candidate = dict(receipt_payload)
@@ -1967,22 +1911,15 @@ def publish_public_finetuned_recognizer_release_v2(
         _write_new(stage / "manifest.json", raw_manifest)
         releases = collection / "releases"
         releases.mkdir(parents=True, exist_ok=True)
-        final = (
-            _operational_path(releases.resolve(strict=True), force_short=True)
-            / release_sha
-        )
+        final = _operational_path(releases.resolve(strict=True), force_short=True) / release_sha
         if final.exists() or final.is_symlink():
-            existing = load_verified_public_finetuned_recognizer_release_v1(
-                root, release_sha
-            )
+            existing = load_verified_public_finetuned_recognizer_release_v1(root, release_sha)
             shutil.rmtree(stage)
             if not isinstance(existing.receipt, PublicFineTuneReceiptV2):
                 raise ValueError
             return existing
         os.rename(stage, final)
-        published = load_verified_public_finetuned_recognizer_release_v1(
-            root, release_sha
-        )
+        published = load_verified_public_finetuned_recognizer_release_v1(root, release_sha)
         if not isinstance(published.receipt, PublicFineTuneReceiptV2):
             raise ValueError
         return published
@@ -2006,7 +1943,10 @@ def load_verified_public_finetuned_recognizer_release_v1(
     value, raw = _read_json(manifest_path)
     try:
         manifest = PublicFineTuneReleaseManifestV1.model_validate(value)
-        if raw != _canonical_model_bytes(manifest) or hashlib.sha256(raw).hexdigest() != release_sha256:
+        if (
+            raw != _canonical_model_bytes(manifest)
+            or hashlib.sha256(raw).hexdigest() != release_sha256
+        ):
             raise ValueError
         files, directories = _tree_entries(release)
         if files != {*_RELEASE_FILES, "manifest.json"} or directories != {"text-rec"}:
@@ -2021,9 +1961,7 @@ def load_verified_public_finetuned_recognizer_release_v1(
             digests[record.path] = record.sha256
         receipt_value, receipt_raw = _read_json(paths["training-receipt.json"])
         if receipt_value.get("schema_version") == "1.0":
-            receipt: PublicFineTuneReceipt = PublicFineTuneReceiptV1.model_validate(
-                receipt_value
-            )
+            receipt: PublicFineTuneReceipt = PublicFineTuneReceiptV1.model_validate(receipt_value)
         elif receipt_value.get("schema_version") == "2.0":
             receipt = PublicFineTuneReceiptV2.model_validate(receipt_value)
         else:
@@ -2063,7 +2001,11 @@ def find_verified_public_finetune_release_by_intent_v1(
         raise SourceAttestedPublicRecognizerFineTuneError("public_finetune_release_invalid")
     found: list[VerifiedPublicFineTunedRecognizerReleaseV1] = []
     for candidate in sorted(releases.iterdir(), key=lambda item: item.name):
-        if candidate.is_symlink() or not candidate.is_dir() or re.fullmatch(_SHA256, candidate.name) is None:
+        if (
+            candidate.is_symlink()
+            or not candidate.is_dir()
+            or re.fullmatch(_SHA256, candidate.name) is None
+        ):
             raise SourceAttestedPublicRecognizerFineTuneError("public_finetune_release_invalid")
         release = load_verified_public_finetuned_recognizer_release_v1(root, candidate.name)
         if release.receipt.training_intent_sha256 == training_intent_sha256:
@@ -2104,9 +2046,7 @@ def _verified_training_bundles(
             "public_finetune_mobile_bundle_invalid"
         ) from None
     if runtime.document_preview_root != mobile.document_preview_root:
-        raise SourceAttestedPublicRecognizerFineTuneError(
-            "public_finetune_bundle_root_mismatch"
-        )
+        raise SourceAttestedPublicRecognizerFineTuneError("public_finetune_bundle_root_mismatch")
     return runtime, mobile
 
 
@@ -2144,18 +2084,12 @@ def train_source_attested_public_recognizer_overfit_v1(
     corpus = build_verified_public_finetune_overfit_corpus_v1(
         root, dictionary=dictionary, seed=seed
     )
-    learning_rate = (
-        _HEAD_LEARNING_RATE if tuning_scope == "head" else _TAIL_LEARNING_RATE
-    )
+    learning_rate = _HEAD_LEARNING_RATE if tuning_scope == "head" else _TAIL_LEARNING_RATE
     module_path = Path(__file__).resolve(strict=True)
     corpus_module_value = source_attested_public_raster_text_corpus.__file__
     source_crop_base_value = source_crop_base.__file__
-    if not isinstance(corpus_module_value, str) or not isinstance(
-        source_crop_base_value, str
-    ):
-        raise SourceAttestedPublicRecognizerFineTuneError(
-            "public_finetune_source_compiler_invalid"
-        )
+    if not isinstance(corpus_module_value, str) or not isinstance(source_crop_base_value, str):
+        raise SourceAttestedPublicRecognizerFineTuneError("public_finetune_source_compiler_invalid")
     try:
         corpus_module_path = Path(corpus_module_value).resolve(strict=True)
         source_crop_base_path = Path(source_crop_base_value).resolve(strict=True)
@@ -2177,9 +2111,7 @@ def train_source_attested_public_recognizer_overfit_v1(
         "ctc_blank_index": 0,
         "dictionary_first_class_index": 1,
         "form_marker_policy": _FORM_MARKER_POLICY,
-        "head_tensor_contract_sha256": sha256_bytes(
-            canonical_json_bytes(_EXPECTED_HEAD_SHAPES)
-        ),
+        "head_tensor_contract_sha256": sha256_bytes(canonical_json_bytes(_EXPECTED_HEAD_SHAPES)),
         "implicit_space_class_index": dictionary.implicit_space_class_index,
         "maximum_epochs": maximum_epochs,
         "model_revision": _MODEL_REVISION,
@@ -2312,18 +2244,14 @@ def train_source_attested_public_recognizer_overfit_v1(
                 best_exact = exact
                 best_by_profile = by_profile
                 best_epoch = completed_epochs
-                best_state = {
-                    name: value.clone() for name, value in model.state_dict().items()
-                }
+                best_state = {name: value.clone() for name, value in model.state_dict().items()}
                 stale_epochs = 0
             elif best_epoch > 0:
                 stale_epochs += 1
                 if stale_epochs >= 2:
                     break
         if best_epoch < 1 or best_state is None or best_by_profile is None:
-            raise SourceAttestedPublicRecognizerFineTuneError(
-                "fine_tune_no_improvement"
-            )
+            raise SourceAttestedPublicRecognizerFineTuneError("fine_tune_no_improvement")
         model.set_state_dict(best_state)
         artifacts = export_public_finetuned_recognizer_v1(
             paddle,
@@ -2345,9 +2273,7 @@ def train_source_attested_public_recognizer_overfit_v1(
                 for profile, metric in baseline_by_profile.items()
             },
             "baseline_development_semantic_cer": round(float(baseline_cer), 10),
-            "baseline_development_semantic_crop_exact_match": round(
-                float(baseline_exact), 10
-            ),
+            "baseline_development_semantic_crop_exact_match": round(float(baseline_exact), 10),
             "development_semantic_cer": round(float(best_cer), 10),
             "development_semantic_crop_exact_match": round(float(best_exact), 10),
             "best_development_by_profile": {
@@ -2365,17 +2291,13 @@ def train_source_attested_public_recognizer_overfit_v1(
             "public_mobile_source_inventory_sha256": (
                 mobile.manifest.source_model_inventory_sha256
             ),
-            "public_mobile_source_snapshot_sha256": (
-                mobile.manifest.source_model_snapshot_sha256
-            ),
+            "public_mobile_source_snapshot_sha256": (mobile.manifest.source_model_snapshot_sha256),
             "static_roundtrip_verified": True,
             "trainable_parameter_count": trainable_count,
             "trainable_parameter_name_list_sha256": trainable_name_list_sha,
             "trainable_tensor_count": len(selected),
             "training_intent_sha256": intent_sha,
-            "train_crop_manifest": corpus.train_manifest.model_dump(
-                mode="json", warnings=False
-            ),
+            "train_crop_manifest": corpus.train_manifest.model_dump(mode="json", warnings=False),
         }
         release = publish_public_finetuned_recognizer_release_v1(
             root,
@@ -2411,15 +2333,11 @@ def train_source_attested_public_recognizer_leakage_safe_v2(
     """Warm-start only the CTC head on the fixed selection-V2-isolated corpus."""
 
     if maximum_epochs != _LEAKAGE_SAFE_MAXIMUM_EPOCHS or not 1 <= batch_size <= 64:
-        raise SourceAttestedPublicRecognizerFineTuneError(
-            "public_finetune_configuration_invalid"
-        )
+        raise SourceAttestedPublicRecognizerFineTuneError("public_finetune_configuration_invalid")
     root = _root(document_preview_root)
     runtime, mobile = _verified_training_bundles(runtime_bundle, mobile_bundle)
     try:
-        package_inventory_sha = verify_paddle_training_package_inventory(
-            package_inventory_path
-        )
+        package_inventory_sha = verify_paddle_training_package_inventory(package_inventory_path)
     except Exception:
         raise SourceAttestedPublicRecognizerFineTuneError(
             "public_finetune_package_inventory_invalid"
@@ -2427,9 +2345,7 @@ def train_source_attested_public_recognizer_leakage_safe_v2(
     if package_inventory_sha != runtime.file_sha256(
         runtime.manifest.sidecar_package_inventory_relative_path
     ):
-        raise SourceAttestedPublicRecognizerFineTuneError(
-            "public_finetune_package_inventory_drift"
-        )
+        raise SourceAttestedPublicRecognizerFineTuneError("public_finetune_package_inventory_drift")
     dictionary = load_public_mobile_recognizer_dictionary_v1(mobile)
     base_artifacts = _public_recognizer_artifacts(mobile)
     corpus = build_verified_public_finetune_leakage_safe_corpus_v2(
@@ -2438,12 +2354,8 @@ def train_source_attested_public_recognizer_leakage_safe_v2(
     module_path = Path(__file__).resolve(strict=True)
     corpus_module_value = source_attested_public_raster_text_corpus.__file__
     source_crop_base_value = source_crop_base.__file__
-    if not isinstance(corpus_module_value, str) or not isinstance(
-        source_crop_base_value, str
-    ):
-        raise SourceAttestedPublicRecognizerFineTuneError(
-            "public_finetune_source_compiler_invalid"
-        )
+    if not isinstance(corpus_module_value, str) or not isinstance(source_crop_base_value, str):
+        raise SourceAttestedPublicRecognizerFineTuneError("public_finetune_source_compiler_invalid")
     try:
         corpus_module_path = Path(corpus_module_value).resolve(strict=True)
         source_crop_base_path = Path(source_crop_base_value).resolve(strict=True)
@@ -2465,29 +2377,19 @@ def train_source_attested_public_recognizer_leakage_safe_v2(
         "ctc_blank_index": 0,
         "dictionary_first_class_index": 1,
         "form_marker_policy": _FORM_MARKER_POLICY,
-        "head_tensor_contract_sha256": sha256_bytes(
-            canonical_json_bytes(_EXPECTED_HEAD_SHAPES)
-        ),
+        "head_tensor_contract_sha256": sha256_bytes(canonical_json_bytes(_EXPECTED_HEAD_SHAPES)),
         "implicit_space_class_index": dictionary.implicit_space_class_index,
         "maximum_epochs": maximum_epochs,
         "model_revision": _MODEL_REVISION_V2,
         "overlap_verifier_revision": _OVERLAP_VERIFIER_REVISION_V2,
         "parent_python_revision": f"{sys.version_info.major}.{sys.version_info.minor}",
-        "parent_selection_receipt_sha256": (
-            corpus.train_manifest.parent_selection_receipt_sha256
-        ),
+        "parent_selection_receipt_sha256": (corpus.train_manifest.parent_selection_receipt_sha256),
         "public_mobile_model_bundle_manifest_sha256": mobile.manifest_sha256,
-        "public_mobile_source_inventory_sha256": (
-            mobile.manifest.source_model_inventory_sha256
-        ),
-        "public_mobile_source_snapshot_sha256": (
-            mobile.manifest.source_model_snapshot_sha256
-        ),
+        "public_mobile_source_inventory_sha256": (mobile.manifest.source_model_inventory_sha256),
+        "public_mobile_source_snapshot_sha256": (mobile.manifest.source_model_snapshot_sha256),
         "public_recognizer_artifact_sha256s": base_artifacts,
         "seed_sha256": sha256_bytes(str(seed).encode("ascii")),
-        "selection_receipt_relative_path": (
-            corpus.train_manifest.selection_receipt_relative_path
-        ),
+        "selection_receipt_relative_path": (corpus.train_manifest.selection_receipt_relative_path),
         "selection_receipt_sha256": corpus.train_manifest.selection_receipt_sha256,
         "semantic_label_revision": _SEMANTIC_LABEL_REVISION,
         "source_crop_base_module_sha256": sha256_file(source_crop_base_path),
@@ -2503,9 +2405,7 @@ def train_source_attested_public_recognizer_leakage_safe_v2(
     existing = find_verified_public_finetune_release_by_intent_v1(root, intent_sha)
     if existing is not None:
         if not isinstance(existing.receipt, PublicFineTuneReceiptV2):
-            raise SourceAttestedPublicRecognizerFineTuneError(
-                "public_finetune_release_invalid"
-            )
+            raise SourceAttestedPublicRecognizerFineTuneError("public_finetune_release_invalid")
         return PublicFineTuneRunResultV1(release=existing, reused=True)
     try:
         import paddle
@@ -2531,9 +2431,7 @@ def train_source_attested_public_recognizer_leakage_safe_v2(
             output_class_count=dictionary.output_class_count,
             tuning_scope="head",
         )
-        trainable_count = sum(
-            int(parameter.numel()) for _name, parameter in selected
-        )
+        trainable_count = sum(int(parameter.numel()) for _name, parameter in selected)
         trainable_name_list_sha = sha256_bytes(
             canonical_json_bytes([name for name, _parameter in selected])
         )
@@ -2619,18 +2517,14 @@ def train_source_attested_public_recognizer_leakage_safe_v2(
                 best_exact = exact
                 best_by_profile = by_profile
                 best_epoch = completed_epochs
-                best_state = {
-                    name: value.clone() for name, value in model.state_dict().items()
-                }
+                best_state = {name: value.clone() for name, value in model.state_dict().items()}
                 stale_epochs = 0
             elif best_epoch > 0:
                 stale_epochs += 1
                 if stale_epochs >= 2:
                     break
         if best_epoch < 1 or best_state is None or best_by_profile is None:
-            raise SourceAttestedPublicRecognizerFineTuneError(
-                "fine_tune_no_improvement"
-            )
+            raise SourceAttestedPublicRecognizerFineTuneError("fine_tune_no_improvement")
         model.set_state_dict(best_state)
         artifacts = export_public_finetuned_recognizer_v1(
             paddle,
@@ -2653,9 +2547,7 @@ def train_source_attested_public_recognizer_leakage_safe_v2(
                 for profile, metric in baseline_by_profile.items()
             },
             "baseline_development_semantic_cer": round(float(baseline_cer), 10),
-            "baseline_development_semantic_crop_exact_match": round(
-                float(baseline_exact), 10
-            ),
+            "baseline_development_semantic_crop_exact_match": round(float(baseline_exact), 10),
             "development_semantic_cer": round(float(best_cer), 10),
             "development_semantic_crop_exact_match": round(float(best_exact), 10),
             "best_development_by_profile": {
@@ -2664,9 +2556,7 @@ def train_source_attested_public_recognizer_leakage_safe_v2(
             },
             "direct_runtime_package_inventory_sha256": package_inventory_sha,
             "early_stopped": completed_epochs < maximum_epochs,
-            "evaluation_contract": (
-                "semantic_crop_cer_and_exact_without_critical_fields_v1"
-            ),
+            "evaluation_contract": ("semantic_crop_cer_and_exact_without_critical_fields_v1"),
             "framework_license": "Apache-2.0",
             "initialization": "pinned_public_inference_graph_warm_start",
             "improvement_contract": "overall-cer-then-crop-exact-strict-v1",
@@ -2677,9 +2567,7 @@ def train_source_attested_public_recognizer_leakage_safe_v2(
             "trainable_parameter_name_list_sha256": trainable_name_list_sha,
             "trainable_tensor_count": len(selected),
             "training_intent_sha256": intent_sha,
-            "train_crop_manifest": corpus.train_manifest.model_dump(
-                mode="json", warnings=False
-            ),
+            "train_crop_manifest": corpus.train_manifest.model_dump(mode="json", warnings=False),
         }
         release = publish_public_finetuned_recognizer_release_v2(
             root,
@@ -2696,9 +2584,7 @@ def train_source_attested_public_recognizer_leakage_safe_v2(
     finally:
         if stage.exists() and stage.name.startswith(".staging-"):
             try:
-                stage.resolve(strict=True).relative_to(
-                    (root / _COLLECTION).resolve(strict=True)
-                )
+                stage.resolve(strict=True).relative_to((root / _COLLECTION).resolve(strict=True))
                 shutil.rmtree(stage)
             except (OSError, ValueError):
                 pass

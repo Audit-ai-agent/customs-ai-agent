@@ -205,7 +205,10 @@ class RasterOcrLayoutLedgerV2:
             raise ValueError("unknown document type must not claim classification confidence")
         if self.document_type != "unknown" and self.classification_confidence is None:
             raise ValueError("known document type requires classification confidence")
-        if self.classification_confidence is not None and not 0 <= self.classification_confidence <= 1:
+        if (
+            self.classification_confidence is not None
+            and not 0 <= self.classification_confidence <= 1
+        ):
             raise ValueError("classification confidence is invalid")
         if len({field.field_id for field in self.fields}) != len(self.fields):
             raise ValueError("raster ledger fields must be unique")
@@ -319,7 +322,9 @@ def raster_ledger_to_preview_candidate(ledger: RasterOcrLayoutLedgerV2) -> Raste
     spans_by_page: dict[int, list[RasterDocumentSpanV2]] = {
         page.page_number: [] for page in ledger.pages
     }
-    for span in sorted(ledger.spans, key=lambda item: (item.page_number, item.reading_order, item.ordinal)):
+    for span in sorted(
+        ledger.spans, key=lambda item: (item.page_number, item.reading_order, item.ordinal)
+    ):
         spans_by_page[span.page_number].append(
             RasterDocumentSpanV2(
                 span_id=span.span_id,
@@ -439,9 +444,7 @@ def _needs_review_for_jpeg_orientation(
         field_candidates=[],
         tables=[],
         warnings=[RasterExtractionWarningV2(code="jpeg_exif_orientation_unsupported")],
-        needs_review_reasons=[
-            RasterExtractionWarningV2(code="jpeg_exif_orientation_unsupported")
-        ],
+        needs_review_reasons=[RasterExtractionWarningV2(code="jpeg_exif_orientation_unsupported")],
     )
 
 

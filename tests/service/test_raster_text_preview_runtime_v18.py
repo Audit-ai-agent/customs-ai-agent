@@ -84,9 +84,7 @@ def _canonical_pointer(value: object) -> bytes:
 
 def _make_verified_bundle_fakes(root: Path) -> tuple[_FakeBundle, _FakeBundle]:
     sidecar_relative = f"raster-text-direct-bundles-v1/releases/{_SIDECAR_SHA256}"
-    server_relative = (
-        f"raster-text-direct-server-rec-bundles-v1/releases/{_SERVER_SHA256}"
-    )
+    server_relative = f"raster-text-direct-server-rec-bundles-v1/releases/{_SERVER_SHA256}"
     sidecar_manifest = SimpleNamespace(
         extractor_revision="direct-paddle-test-v18",
         raster_dpi=216,
@@ -96,8 +94,7 @@ def _make_verified_bundle_fakes(root: Path) -> tuple[_FakeBundle, _FakeBundle]:
         sidecar_interpreter_root_relative_path="sidecar/interpreter-root",
         sidecar_interpreter_root_tree_sha256="c" * 64,
         sidecar_module_relative_path=(
-            "sidecar/module-root/customs_ai_agent/service/"
-            "raster_text_direct_paddle_sidecar.py"
+            "sidecar/module-root/customs_ai_agent/service/raster_text_direct_paddle_sidecar.py"
         ),
         sidecar_module_root_relative_path="sidecar/module-root",
         sidecar_module_root_tree_sha256="d" * 64,
@@ -146,9 +143,7 @@ def _make_verified_bundle_fakes(root: Path) -> tuple[_FakeBundle, _FakeBundle]:
     )
 
 
-def _prepare_fixture(
-    *, tmp_path: Path, monkeypatch: pytest.MonkeyPatch
-) -> _PreparedFixture:
+def _prepare_fixture(*, tmp_path: Path, monkeypatch: pytest.MonkeyPatch) -> _PreparedFixture:
     root = tmp_path / "_local" / "data" / "document-preview"
     root.mkdir(parents=True)
     sidecar, server = _make_verified_bundle_fakes(root)
@@ -273,9 +268,7 @@ def test_v18_profile_rejects_drift_even_with_a_recomputed_fingerprint(
 def _bundle_root_mismatch(bundle: _FakeBundle) -> _FakeBundle:
     return replace(
         bundle,
-        bundle_root_relative_path=(
-            "raster-text-direct-server-rec-bundles-v1/releases/" + "c" * 64
-        ),
+        bundle_root_relative_path=("raster-text-direct-server-rec-bundles-v1/releases/" + "c" * 64),
     )
 
 
@@ -433,20 +426,32 @@ def test_v6_pointer_calibration_and_evaluation_parsers_share_one_evidence_genera
         scores=_passing_v6_scores(),
     )
 
-    assert runtime.parse_raster_text_activation_pointer(
-        _canonical_pointer(pointer.model_dump(mode="json", warnings=False))
-    ) == pointer
-    assert runtime._parse_raster_text_calibration_receipt(  # noqa: SLF001
-        _canonical(calibration.model_dump(mode="json", warnings=False))
-    ) == calibration
-    assert runtime._parse_raster_text_sealed_evaluation(  # noqa: SLF001
-        _canonical(evaluation.model_dump(mode="json", warnings=False))
-    ) == evaluation
-    assert runtime._bound_raster_text_metric_revision(  # noqa: SLF001
-        pointer=pointer,
-        evaluation=evaluation,
-        calibration=calibration,
-    ) == "source-attested-semantic-text-v3"
+    assert (
+        runtime.parse_raster_text_activation_pointer(
+            _canonical_pointer(pointer.model_dump(mode="json", warnings=False))
+        )
+        == pointer
+    )
+    assert (
+        runtime._parse_raster_text_calibration_receipt(  # noqa: SLF001
+            _canonical(calibration.model_dump(mode="json", warnings=False))
+        )
+        == calibration
+    )
+    assert (
+        runtime._parse_raster_text_sealed_evaluation(  # noqa: SLF001
+            _canonical(evaluation.model_dump(mode="json", warnings=False))
+        )
+        == evaluation
+    )
+    assert (
+        runtime._bound_raster_text_metric_revision(  # noqa: SLF001
+            pointer=pointer,
+            evaluation=evaluation,
+            calibration=calibration,
+        )
+        == "source-attested-semantic-text-v3"
+    )
 
     wrong_generation = pointer.model_dump(mode="json", warnings=False)
     wrong_generation["evidence_revision"] = "source-attested-fresh-staged-holdout-v2"

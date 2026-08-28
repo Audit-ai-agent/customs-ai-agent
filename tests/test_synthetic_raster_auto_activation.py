@@ -261,9 +261,7 @@ def _materialize_minimal_raster_text_release(
     selected = ensure_raster_offline_bundle_release_v1(document_preview_root=root)
     selector = root / "raster-offline-bundles-v1" / "current.json"
     selector_before = selector.read_bytes()
-    candidate = materialize_verified_unselected_raster_text_release_v1(
-        document_preview_root=root
-    )
+    candidate = materialize_verified_unselected_raster_text_release_v1(document_preview_root=root)
     assert candidate.manifest_sha256 != selected.manifest_sha256
     assert selector.read_bytes() == selector_before
     return candidate, selector_before
@@ -690,9 +688,7 @@ def test_text_materialization_recovers_from_clean_predecessor_without_replacing_
     recovery_template["raster_profile_revision"] = "text-recovery-next"
     monkeypatch.setattr(bootstrap, "_configuration_template", lambda: recovery_template)
 
-    recovered = materialize_verified_unselected_raster_text_release_v1(
-        document_preview_root=root
-    )
+    recovered = materialize_verified_unselected_raster_text_release_v1(document_preview_root=root)
 
     assert recovered.manifest_sha256 != selected.manifest_sha256
     assert (root / "raster-offline-bundles-v1" / "current.json").read_bytes() == selector_before
@@ -740,7 +736,11 @@ def test_text_materialization_binds_only_the_dedicated_seven_file_model_root(
         f"{candidate.bundle_root_relative_path}/inventories/raster-text-models.json"
     )
     assert profile_payload["model_inventory_sha256"] == material.model_inventory_sha256
-    assert {path.relative_to(direct_root).as_posix() for path in direct_root.rglob("*") if path.is_file()} == {
+    assert {
+        path.relative_to(direct_root).as_posix()
+        for path in direct_root.rglob("*")
+        if path.is_file()
+    } == {
         "text-det/inference.json",
         "text-det/inference.pdiparams",
         "text-det/inference.yml",
@@ -758,7 +758,14 @@ def test_text_materialization_binds_only_the_dedicated_seven_file_model_root(
     )
     assert derivation["raster_text_model_snapshot"] == direct_inventory
     assert candidate.manifest.model_inventory_relative_path == "inventories/models.json"
-    assert len(json.loads((candidate.bundle_root / "inventories" / "models.json").read_text())["artifacts"]) > 7
+    assert (
+        len(
+            json.loads((candidate.bundle_root / "inventories" / "models.json").read_text())[
+                "artifacts"
+            ]
+        )
+        > 7
+    )
     assert (root / "raster-offline-bundles-v1" / "current.json").read_bytes() == selector_before
 
 
@@ -806,9 +813,10 @@ def test_text_release_intent_changes_when_the_direct_source_snapshot_changes(
         base=base, recognition_model_snapshot=None, raster_text_model_snapshot=changed
     )
 
-    assert original_intent["raster_text_model_snapshot"] != changed_intent[
-        "raster_text_model_snapshot"
-    ]
+    assert (
+        original_intent["raster_text_model_snapshot"]
+        != changed_intent["raster_text_model_snapshot"]
+    )
     assert original_sha256 != changed_sha256
 
 
@@ -839,9 +847,9 @@ def test_text_direct_model_material_fails_closed_for_every_nonseven_file_change(
             Path,
             "is_symlink",
             lambda path: (
-                path.name == "inference.json" and path.parent.name == "text-det"
-            )
-            or original_is_symlink(path),
+                (path.name == "inference.json" and path.parent.name == "text-det")
+                or original_is_symlink(path)
+            ),
         )
 
     with pytest.raises(
@@ -879,9 +887,7 @@ def test_text_materialization_reuses_exact_intent_index_without_stage_or_smoke(
     recovery_template["raster_profile_revision"] = "text-index-reuse"
     monkeypatch.setattr(bootstrap, "_configuration_template", lambda: recovery_template)
 
-    first = materialize_verified_unselected_raster_text_release_v1(
-        document_preview_root=root
-    )
+    first = materialize_verified_unselected_raster_text_release_v1(document_preview_root=root)
     intent_directory = root / "raster-offline-bundles-v1" / "raster-text-release-intents-v1"
     index_files = list(intent_directory.glob("*.json"))
     assert len(index_files) == 1
@@ -898,9 +904,7 @@ def test_text_materialization_reuses_exact_intent_index_without_stage_or_smoke(
         lambda **_kwargs: pytest.fail("indexed release must not be smoked again"),
     )
 
-    second = materialize_verified_unselected_raster_text_release_v1(
-        document_preview_root=root
-    )
+    second = materialize_verified_unselected_raster_text_release_v1(document_preview_root=root)
 
     assert second == first
     assert selector.read_bytes() == selector_before
@@ -974,9 +978,7 @@ def test_fast_text_reference_rejects_changed_direct_model_without_generic_fallba
         RasterOfflineBundleBootstrapError,
         match="raster_bundle_unselected_release_intent_candidate_invalid",
     ):
-        resolve_or_materialize_verified_raster_text_release_reference_v1(
-            document_preview_root=root
-        )
+        resolve_or_materialize_verified_raster_text_release_reference_v1(document_preview_root=root)
 
     assert (root / "raster-offline-bundles-v1" / "current.json").read_bytes() == selector_before
 

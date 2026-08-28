@@ -43,7 +43,9 @@ def _training_crop(
     )
 
 
-def _voyage_assets(count: int) -> dict[
+def _voyage_assets(
+    count: int,
+) -> dict[
     str,
     tuple[replay._VerifiedVoyageAsset, replay._VerifiedVoyageAsset],
 ]:
@@ -92,9 +94,7 @@ def _voyage_assets(count: int) -> dict[
                     family_id=family_id,
                     fixture_kind=fixture_kind,  # type: ignore[arg-type]
                     source_pdf_sha256=assets["png-216"]["source_pdf_sha256"],
-                    candidates_by_profile={
-                        profile: candidate for profile in replay._ALL_PROFILES
-                    },
+                    candidates_by_profile={profile: candidate for profile in replay._ALL_PROFILES},
                     assets_by_profile=assets,
                 )
             )
@@ -168,10 +168,8 @@ def test_voyage_split_has_exact_family_and_lane_coverage() -> None:
     train, train_labels, train_profiles, train_recipes = replay._compile_voyage_split(
         assets=_voyage_assets(500), split="train", seed=1_937_429
     )
-    development, dev_labels, dev_profiles, dev_recipes = (
-        replay._compile_voyage_split(
-            assets=_voyage_assets(100), split="development", seed=1_937_429
-        )
+    development, dev_labels, dev_profiles, dev_recipes = replay._compile_voyage_split(
+        assets=_voyage_assets(100), split="development", seed=1_937_429
     )
 
     assert len(train) == len(train_labels) == len(train_profiles) == len(train_recipes) == 500
@@ -199,12 +197,14 @@ def test_general_anchor_is_250_unique_families_and_covers_every_lane() -> None:
     selected = replay._select_general_train_anchors(corpus, seed=1_937_429)
 
     assert len(selected) == len({crop.family_id for crop in selected}) == 250
-    assert {
-        corpus.field_key_by_sample_id[crop.sample_id] for crop in selected
-    } == set(corpus.field_key_by_sample_id.values())
-    assert {
-        corpus.document_type_by_sample_id[crop.sample_id] for crop in selected
-    } == {"bill_of_lading", "commercial_invoice", "packing_list"}
+    assert {corpus.field_key_by_sample_id[crop.sample_id] for crop in selected} == set(
+        corpus.field_key_by_sample_id.values()
+    )
+    assert {corpus.document_type_by_sample_id[crop.sample_id] for crop in selected} == {
+        "bill_of_lading",
+        "commercial_invoice",
+        "packing_list",
+    }
     assert {corpus.profile_by_sample_id[crop.sample_id] for crop in selected} == set(
         replay._PROFILES
     )
@@ -248,9 +248,7 @@ def test_manifest_binds_counts_and_contains_no_plaintext_label() -> None:
     assert "labels_by_sample_id" not in serialized
 
     with pytest.raises(ValueError, match="holdout_overlap_count"):
-        manifest.model_copy(
-            update={"holdout_overlap_count": 1}
-        ).__class__.model_validate(
+        manifest.model_copy(update={"holdout_overlap_count": 1}).__class__.model_validate(
             {
                 **manifest.model_dump(mode="json"),
                 "holdout_overlap_count": 1,
@@ -291,12 +289,8 @@ def test_prepare_crop_applies_g32_g64_and_deterministic_blur_jpeg(
             field_id_sha256=hashlib.sha256(b"bill_of_lading:voyage").hexdigest(),
         )
 
-    g32 = replay.prepare_voyage_replay_crop_image_v1(
-        root, crop_for("g32-png216-v1")
-    )
-    g64 = replay.prepare_voyage_replay_crop_image_v1(
-        root, crop_for("g64-png216-v1")
-    )
+    g32 = replay.prepare_voyage_replay_crop_image_v1(root, crop_for("g32-png216-v1"))
+    g64 = replay.prepare_voyage_replay_crop_image_v1(root, crop_for("g64-png216-v1"))
     degraded_crop = crop_for("g32-png216-blur0p6-jpeg75-v1")
     first = replay.prepare_voyage_replay_crop_image_v1(root, degraded_crop)
     second = replay.prepare_voyage_replay_crop_image_v1(root, degraded_crop)

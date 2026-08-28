@@ -1068,9 +1068,7 @@ def publish_voyage_replay_release_v1(
         candidate = {
             **receipt_payload,
             "schema_version": "3.0",
-            "development_gate": (
-                "voyage-exact-all-eight-lanes-cer0-general-no-regression-v1"
-            ),
+            "development_gate": ("voyage-exact-all-eight-lanes-cer0-general-no-regression-v1"),
             "receipt_sha256": "",
         }
         receipt = VoyageReplayReceiptV3.model_validate(

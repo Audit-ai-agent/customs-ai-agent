@@ -667,9 +667,7 @@ def _verify_parent_inventory(path: Path, *, expected_record: DirectPaddleBundleF
                 raise OSError
             installed[package_name] = distribution.version
         if installed != versions:
-            raise RasterTextDirectPaddleBundleError(
-                "direct_paddle_bundle_parent_renderer_drift"
-            )
+            raise RasterTextDirectPaddleBundleError("direct_paddle_bundle_parent_renderer_drift")
     except (OSError, importlib.metadata.PackageNotFoundError):
         raise RasterTextDirectPaddleBundleError(
             "direct_paddle_bundle_parent_renderer_drift"

@@ -243,7 +243,10 @@ class RasterCandidateShardV1(_WireModel):
             candidate = observation.candidate
             if candidate.raster_profile_revision != self.raster_profile_revision:
                 raise ValueError("raster candidate shard profile binding is invalid")
-            if candidate.status != "unavailable" and candidate.extractor_revision != self.extractor_revision:
+            if (
+                candidate.status != "unavailable"
+                and candidate.extractor_revision != self.extractor_revision
+            ):
                 raise ValueError("raster candidate shard extractor binding is invalid")
             if candidate.status == "unavailable" and (
                 candidate.extractor_revision is not None
@@ -291,7 +294,9 @@ class RasterCandidateBundleV1(_WireModel):
     """Raw local candidate output, with no Gold values or metrics."""
 
     schema_version: Literal["1.0"] = "1.0"
-    artifact_kind: Literal["synthetic_raster_candidate_bundle"] = "synthetic_raster_candidate_bundle"
+    artifact_kind: Literal["synthetic_raster_candidate_bundle"] = (
+        "synthetic_raster_candidate_bundle"
+    )
     dataset_id: Literal["synthetic-raster-v1"] = "synthetic-raster-v1"
     engine_kind: Literal["ppstructurev3"] = "ppstructurev3"
     split: _CandidateSplit
@@ -314,7 +319,10 @@ class RasterCandidateBundleV1(_WireModel):
             candidate = observation.candidate
             if candidate.raster_profile_revision != self.raster_profile_revision:
                 raise ValueError("raster candidate bundle profile binding is invalid")
-            if candidate.status != "unavailable" and candidate.extractor_revision != self.extractor_revision:
+            if (
+                candidate.status != "unavailable"
+                and candidate.extractor_revision != self.extractor_revision
+            ):
                 raise ValueError("raster candidate bundle extractor binding is invalid")
             if candidate.status == "unavailable" and (
                 candidate.extractor_revision is not None
@@ -655,7 +663,10 @@ def validate_raster_candidate_execution(
 ) -> None:
     """Replay the small execution receipt without rerunning OCR."""
 
-    if bundle_raw != candidate_bundle_bytes(bundle) or hashlib.sha256(bundle_raw).hexdigest() != bundle_sha256:
+    if (
+        bundle_raw != candidate_bundle_bytes(bundle)
+        or hashlib.sha256(bundle_raw).hexdigest() != bundle_sha256
+    ):
         raise SyntheticRasterCandidateError("raster_candidate_execution_bundle_invalid")
     expected = build_raster_candidate_execution(
         bundle=bundle,
@@ -688,7 +699,9 @@ def _asset_binding_from_receipt(
 
 def _validated_shard_plan(plan: RasterCandidateShardPlanV1) -> RasterCandidateShardPlanV1:
     try:
-        return RasterCandidateShardPlanV1.model_validate(plan.model_dump(mode="json", warnings=False))
+        return RasterCandidateShardPlanV1.model_validate(
+            plan.model_dump(mode="json", warnings=False)
+        )
     except (AttributeError, TypeError, ValidationError, ValueError):
         raise SyntheticRasterCandidateError("raster_candidate_shard_plan_invalid") from None
 
@@ -793,7 +806,9 @@ def raster_candidate_shard_definition(
     try:
         definition = verified.shards[shard_ordinal]
     except IndexError:
-        raise SyntheticRasterCandidateError("raster_candidate_shard_definition_unavailable") from None
+        raise SyntheticRasterCandidateError(
+            "raster_candidate_shard_definition_unavailable"
+        ) from None
     if definition.shard_ordinal != shard_ordinal:
         raise SyntheticRasterCandidateError("raster_candidate_shard_definition_unavailable")
     return definition
@@ -859,7 +874,9 @@ def build_raster_candidate_shard_plan(
     """Create the sole deterministic shard partition for one run identity."""
 
     _require_sha256(receipt_sha256, code="raster_candidate_shard_plan_receipt_invalid")
-    _require_sha256(runtime_configuration_sha256, code="raster_candidate_shard_plan_runtime_invalid")
+    _require_sha256(
+        runtime_configuration_sha256, code="raster_candidate_shard_plan_runtime_invalid"
+    )
     _require_sha256(runner_implementation_sha256, code="raster_candidate_shard_plan_runner_invalid")
     if receipt_sha256 != synthetic_raster_receipt_sha256(receipt):
         raise SyntheticRasterCandidateError("raster_candidate_shard_plan_receipt_invalid")
@@ -1143,7 +1160,8 @@ def validate_raster_candidate_shard_checkpoint_against_plan(
         or verified_checkpoint.extractor_revision != verified_plan.extractor_revision
         or verified_checkpoint.runner_implementation_sha256
         != verified_plan.runner_implementation_sha256
-        or verified_checkpoint.candidate_shard_plan_sha256 != candidate_shard_plan_sha256(verified_plan)
+        or verified_checkpoint.candidate_shard_plan_sha256
+        != candidate_shard_plan_sha256(verified_plan)
         or verified_checkpoint.shard_id != definition.shard_id
         or verified_checkpoint.candidate_count != len(definition.asset_bindings)
     ):
@@ -1250,7 +1268,10 @@ def read_verified_raster_candidate_shard_checkpoint(
         relative_path=checkpoint.candidate_shard_relative_path,
         expected_sha256=checkpoint.candidate_shard_sha256,
     )
-    if len(shard_raw) != checkpoint.candidate_shard_byte_size or shard_sha256 != checkpoint.candidate_shard_sha256:
+    if (
+        len(shard_raw) != checkpoint.candidate_shard_byte_size
+        or shard_sha256 != checkpoint.candidate_shard_sha256
+    ):
         raise SyntheticRasterCandidateError("raster_candidate_shard_checkpoint_shard_invalid")
     validate_raster_candidate_shard_against_plan(plan=verified_plan, shard=shard)
     if len(shard.candidates) != checkpoint.candidate_count:

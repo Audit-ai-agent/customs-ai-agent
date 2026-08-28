@@ -62,15 +62,12 @@ def _root(path: Path) -> Path:
         if (
             root.is_symlink()
             or not root.is_dir()
-            or tuple(part.casefold() for part in root.parts[-3:])
-            != _DOCUMENT_PREVIEW_ROOT_SUFFIX
+            or tuple(part.casefold() for part in root.parts[-3:]) != _DOCUMENT_PREVIEW_ROOT_SUFFIX
         ):
             raise OSError
         return root
     except OSError:
-        raise VoyageReplayError(
-            "voyage_replay_document_preview_root_invalid"
-        ) from None
+        raise VoyageReplayError("voyage_replay_document_preview_root_invalid") from None
 
 
 def _module_path(module: object) -> Path:
@@ -100,9 +97,7 @@ def _verify_release_provenance(
             manifest_sha256=receipt.public_mobile_model_bundle_manifest_sha256,
         )
         parent = implementation._verified_parent_release(root)
-        release = load_verified_voyage_replay_release_v1(
-            root, result.release.release_sha256
-        )
+        release = load_verified_voyage_replay_release_v1(root, result.release.release_sha256)
         corpus, corpus_path = build_verified_voyage_replay_corpus(root)
         inventory_relative = runtime.manifest.sidecar_package_inventory_relative_path
         inventory_path = runtime.bundle_root.joinpath(
@@ -117,22 +112,18 @@ def _verify_release_provenance(
             or corpus.development_manifest != receipt.development_corpus_manifest
             or receipt.parent_python_revision
             != f"{sys.version_info.major}.{sys.version_info.minor}"
-            or sha256_file(_module_path(implementation))
-            != receipt.training_module_sha256
+            or sha256_file(_module_path(implementation)) != receipt.training_module_sha256
             or sha256_file(corpus_path) != receipt.corpus_module_sha256
             or corpus_path != _module_path(corpus_source)
-            or sha256_file(_module_path(source_crop_base))
-            != receipt.source_crop_base_module_sha256
+            or sha256_file(_module_path(source_crop_base)) != receipt.source_crop_base_module_sha256
             or runtime.file_sha256(inventory_relative)
             != receipt.direct_runtime_package_inventory_sha256
-            or sha256_file(inventory_path)
-            != receipt.direct_runtime_package_inventory_sha256
+            or sha256_file(inventory_path) != receipt.direct_runtime_package_inventory_sha256
             or dictionary.dictionary_sha256 != receipt.base_dictionary_sha256
             or dictionary.output_class_count != receipt.output_class_count
             or parent.receipt.receipt_sha256 != receipt.parent_receipt_sha256
             or parent.release_sha256 != receipt.parent_release_sha256
-            or dict(parent.receipt.model_artifact_sha256s)
-            != receipt.parent_model_artifact_sha256s
+            or dict(parent.receipt.model_artifact_sha256s) != receipt.parent_model_artifact_sha256s
             or receipt.model_artifact_sha256s
             != {
                 relative: release.file_sha256s[relative]

@@ -73,9 +73,7 @@ def exclusive_local_process_lock(lock_path: Path) -> Iterator[None]:
                 raise LocalProcessLockInvalid from None
             fcntl_module = cast(Any, fcntl)
             try:
-                fcntl_module.flock(
-                    stream.fileno(), fcntl_module.LOCK_EX | fcntl_module.LOCK_NB
-                )
+                fcntl_module.flock(stream.fileno(), fcntl_module.LOCK_EX | fcntl_module.LOCK_NB)
             except OSError as error:
                 if error.errno in {errno.EACCES, errno.EAGAIN}:
                     raise LocalProcessLockBusy from None

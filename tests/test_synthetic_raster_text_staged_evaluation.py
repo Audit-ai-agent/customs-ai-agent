@@ -70,8 +70,7 @@ def _projection_payload(kind: str) -> dict[str, object]:
         ),
         "selection_receipt_sha256": selection_sha,
         "full_source_gold_receipt_relative_path": (
-            f"synthetic-raster-text-v1/fresh-source-gold-receipts/{scope}/"
-            f"{'c' * 64}.json"
+            f"synthetic-raster-text-v1/fresh-source-gold-receipts/{scope}/{'c' * 64}.json"
         ),
         "full_source_gold_receipt_sha256": "c" * 64,
         "family_ids": family_ids,
@@ -79,8 +78,7 @@ def _projection_payload(kind: str) -> dict[str, object]:
         "asset_count": len(family_ids) * 24,
         "per_stratum_asset_count": len(family_ids) * 2,
         "parent_stage1_decision_relative_path": (
-            "synthetic-raster-text-v1/fresh-sealed-stage-decisions/"
-            f"{'d' * 64}.json"
+            f"synthetic-raster-text-v1/fresh-sealed-stage-decisions/{'d' * 64}.json"
             if parent
             else None
         ),
@@ -243,9 +241,7 @@ def test_stage_stratum_rejects_impossible_raw_count_nesting(
         "full_gate_recoverable": True,
     }
     with pytest.raises(ValidationError):
-        activation.RasterTextFreshSealedStageStratumV1(
-            **{**payload, **updates}
-        )
+        activation.RasterTextFreshSealedStageStratumV1(**{**payload, **updates})
 
 
 def test_recalculation_overrides_injected_decision_fields() -> None:
@@ -272,9 +268,12 @@ def test_recalculation_overrides_injected_decision_fields() -> None:
         }
     )
 
-    assert injected != activation._fresh_sealed_stage1_strata(  # noqa: SLF001
-        stage_counts=stage, full_counts=full
-    )[0]
+    assert (
+        injected
+        != activation._fresh_sealed_stage1_strata(  # noqa: SLF001
+            stage_counts=stage, full_counts=full
+        )[0]
+    )
 
 
 def test_stage_decision_verifier_rejects_injected_derived_values(

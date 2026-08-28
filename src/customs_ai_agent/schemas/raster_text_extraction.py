@@ -73,8 +73,7 @@ def canonical_raster_text(pages: list[RasterTextPageV1]) -> str:
     """Return deterministic draft text without introducing table semantics."""
 
     return "\n\f\n".join(
-        _normalise_page_text(page.text)
-        for page in sorted(pages, key=lambda item: item.page_number)
+        _normalise_page_text(page.text) for page in sorted(pages, key=lambda item: item.page_number)
     )
 
 

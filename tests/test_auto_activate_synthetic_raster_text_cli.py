@@ -39,9 +39,7 @@ def test_clean_state_command_enters_only_preview97_activation(
         calls.append(document_preview_root)
         return expected
 
-    monkeypatch.setattr(
-        auto_cli, "auto_activate_synthetic_raster_text_preview97_v1", activate
-    )
+    monkeypatch.setattr(auto_cli, "auto_activate_synthetic_raster_text_preview97_v1", activate)
 
     result = auto_cli._run(root)
 

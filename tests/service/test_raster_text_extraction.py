@@ -139,9 +139,7 @@ def test_text_only_engine_returns_editable_canonical_text_without_layout_claims(
                 source_sha256=str(kwargs["source_sha256"]),
                 raster_text_profile_revision=str(kwargs["raster_text_profile_revision"]),
                 provider_revision="direct-text-test-v1",
-                pages=(
-                    RasterTextPageV1(page_number=1, text="COMMERCIAL INVOICE\r\nTOTAL 10.00"),
-                ),
+                pages=(RasterTextPageV1(page_number=1, text="COMMERCIAL INVOICE\r\nTOTAL 10.00"),),
             )
 
     content = _png()
@@ -285,11 +283,7 @@ def test_known_multi_page_pdf_is_rejected_before_rasterization() -> None:
         def extract_text(self, *_args: object, **_kwargs: object) -> RasterTextLedgerV1:
             raise AssertionError("known multi-page PDF must not reach OCR")
 
-    content = (
-        b"%PDF-1.7\n"
-        b"1 0 obj<</Type /Page>>endobj\n"
-        b"2 0 obj<</Type /Page>>endobj\n%%EOF\n"
-    )
+    content = b"%PDF-1.7\n1 0 obj<</Type /Page>>endobj\n2 0 obj<</Type /Page>>endobj\n%%EOF\n"
     app = create_app(
         _settings(),
         raster_text_preview_engine=MediaAwareRasterTextEngine(Adapter(), Provider()),
@@ -322,14 +316,11 @@ def test_text_openapi_has_raw_binary_contract_and_no_layout_fields() -> None:
     assert "base64" not in metadata["properties"]
 
 
-def test_text_auto_activation_settings_require_fixed_path_without_static_hash(tmp_path: Path) -> None:
+def test_text_auto_activation_settings_require_fixed_path_without_static_hash(
+    tmp_path: Path,
+) -> None:
     pointer = (
-        tmp_path
-        / "_local"
-        / "data"
-        / "document-preview"
-        / "approvals"
-        / "raster-text-active.json"
+        tmp_path / "_local" / "data" / "document-preview" / "approvals" / "raster-text-active.json"
     )
     source = {
         "CUSTOMS_AGENT_SERVICE_BEARER_TOKEN": _TOKEN,
@@ -436,19 +427,23 @@ def test_auto_raster_text_prewarm_is_nonblocking_and_reloads_late_pointer(
         with runtime._lock:
             runtime.pending_revision = first_revision
         assert _wait_until(
-            lambda: client.get(
-                "/internal/agent/v3/raster-text-preview-status", headers=_status_headers()
-            ).json()["raster_text_profile_revision"]
-            == first_revision
+            lambda: (
+                client.get(
+                    "/internal/agent/v3/raster-text-preview-status", headers=_status_headers()
+                ).json()["raster_text_profile_revision"]
+                == first_revision
+            )
         )
 
         with runtime._lock:
             runtime.pending_revision = replacement_revision
         assert _wait_until(
-            lambda: client.get(
-                "/internal/agent/v3/raster-text-preview-status", headers=_status_headers()
-            ).json()["raster_text_profile_revision"]
-            == replacement_revision
+            lambda: (
+                client.get(
+                    "/internal/agent/v3/raster-text-preview-status", headers=_status_headers()
+                ).json()["raster_text_profile_revision"]
+                == replacement_revision
+            )
         )
         assert runtime.max_inflight == 1
 

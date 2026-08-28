@@ -242,9 +242,11 @@ def test_candidate_bundle_and_execution_are_canonical_content_addressed(tmp_path
 
     # A one-shot activation rerun can reuse identical content-addressed OCR
     # evidence, but cannot alter a pre-existing hash path.
-    assert write_canonical_raster_candidate_bundle(
-        document_preview_root=root, bundle=bundle
-    ) == (relative_path, bundle_sha256, size)
+    assert write_canonical_raster_candidate_bundle(document_preview_root=root, bundle=bundle) == (
+        relative_path,
+        bundle_sha256,
+        size,
+    )
     assert write_canonical_raster_candidate_execution(
         document_preview_root=root, execution=execution
     ) == (execution_path, execution_sha256)
@@ -343,7 +345,9 @@ def test_candidate_shards_are_plan_bound_and_resume_only_from_valid_checkpoint(
         shard_size=4,
         evaluation_batch_size=4,
     )
-    assert [len(shard.asset_bindings) for shard in iter_raster_candidate_shard_definitions(plan)] == [4, 1]
+    assert [
+        len(shard.asset_bindings) for shard in iter_raster_candidate_shard_definitions(plan)
+    ] == [4, 1]
     assert len(iter_raster_candidate_shard_asset_bindings(plan=plan)) == 5
     assert "gold" not in plan.model_dump_json().casefold()
     validate_raster_candidate_shard_plan_against_receipt(

@@ -64,9 +64,7 @@ BL_REPAIR_AUDIT_DATASET_ID: Final = "synthetic-bl-repair-audit-v1"
 BL_REPAIR_AUDIT_FAMILY_COUNT: Final = 100
 BL_REPAIR_AUDIT_SOURCE_COUNT: Final = 200
 BL_REPAIR_AUDIT_RASTER_COUNT: Final = 800
-BL_REPAIR_AUDIT_RECEIPT_RELATIVE_PATH: Final = (
-    f"{BL_REPAIR_AUDIT_DATASET_ID}/receipt.json"
-)
+BL_REPAIR_AUDIT_RECEIPT_RELATIVE_PATH: Final = f"{BL_REPAIR_AUDIT_DATASET_ID}/receipt.json"
 BL_REPAIR_AUDIT_GENERATOR_REVISION: Final = "independent-bl-form-generator-v1"
 BL_REPAIR_AUDIT_PARSER_REVISION: Final = "independent-bl-content-stream-parser-v1"
 _GENERATION_SEED: Final = b"task-0067-independent-bl-repair-audit-seed-v1\n"
@@ -309,9 +307,7 @@ def _generated_field_values(
         family_index=family_index,
         field_id="container-owner",
     )
-    direction = directions[
-        _derived_int(str(family_index), "voyage-direction") % len(directions)
-    ]
+    direction = directions[_derived_int(str(family_index), "voyage-direction") % len(directions)]
     gross_whole, gross_decimal = divmod(gross_tenths, 10)
     return {
         "exporter_name": f"{exporter_prefix} {exporter_suffix} CORP.",
@@ -364,9 +360,7 @@ def _assemble_pdf(content: bytes) -> bytes:
         ),
         _pdf_object(
             4,
-            f"<< /Length {len(encoded)} /Filter [/ASCII85Decode /FlateDecode] >>\n".encode(
-                "ascii"
-            )
+            f"<< /Length {len(encoded)} /Filter [/ASCII85Decode /FlateDecode] >>\n".encode("ascii")
             + b"stream\n"
             + encoded
             + b"\nendstream",
@@ -402,8 +396,7 @@ def build_bl_repair_audit_source_pdf(
     values = _generated_field_values(family_index=family_index, fixture_kind=fixture_kind)
     commands = ["1 0 0 1 0 0 cm", ".6 w"]
     commands.extend(
-        "n "
-        f"{_pdf_number(x)} {_pdf_number(y)} {_pdf_number(width)} {_pdf_number(height)} re S"
+        f"n {_pdf_number(x)} {_pdf_number(y)} {_pdf_number(width)} {_pdf_number(height)} re S"
         for x, y, width, height in _RECTANGLES
     )
     for run in _RUN_RECIPE:
@@ -430,9 +423,7 @@ class BlRepairAuditContentStreamParserV1:
             source_pdf,
             text_run_decoder=_final_pdf_text_run_decoder(source_pdf),
         )
-        if len(parsed.text_runs) != len(_RUN_RECIPE) or len(parsed.rectangles) != len(
-            _RECTANGLES
-        ):
+        if len(parsed.text_runs) != len(_RUN_RECIPE) or len(parsed.rectangles) != len(_RECTANGLES):
             raise ValueError("B/L repair audit final content-stream shape is invalid")
         fields: list[SourceFieldGoldV1] = []
         spans: list[SourceTextGeometryV1] = []
@@ -511,12 +502,9 @@ class BlRepairAuditRasterBindingV1(_WireModel):
     def _fixed_paths_and_media(self) -> "BlRepairAuditRasterBindingV1":
         suffix = _RASTER_SUFFIX[self.profile_id]
         expected_asset = (
-            f"{BL_REPAIR_AUDIT_DATASET_ID}/assets/"
-            f"{self.asset_id}-{self.profile_id}{suffix}"
+            f"{BL_REPAIR_AUDIT_DATASET_ID}/assets/{self.asset_id}-{self.profile_id}{suffix}"
         )
-        expected_gold = (
-            f"{BL_REPAIR_AUDIT_DATASET_ID}/gold/{self.asset_id}-{self.profile_id}.json"
-        )
+        expected_gold = f"{BL_REPAIR_AUDIT_DATASET_ID}/gold/{self.asset_id}-{self.profile_id}.json"
         if (
             self.asset_relative_path != expected_asset
             or self.gold_relative_path != expected_gold
@@ -528,9 +516,7 @@ class BlRepairAuditRasterBindingV1(_WireModel):
 
 class BlRepairAuditReceiptV1(_WireModel):
     schema_version: Literal["1.0"] = "1.0"
-    artifact_kind: Literal["source_attested_bl_repair_audit"] = (
-        "source_attested_bl_repair_audit"
-    )
+    artifact_kind: Literal["source_attested_bl_repair_audit"] = "source_attested_bl_repair_audit"
     dataset_id: Literal["synthetic-bl-repair-audit-v1"] = BL_REPAIR_AUDIT_DATASET_ID
     generator_revision: Literal["independent-bl-form-generator-v1"] = (
         BL_REPAIR_AUDIT_GENERATOR_REVISION
@@ -611,9 +597,7 @@ class BlRepairAuditScoreV1(_WireModel):
         expected_critical = self.critical_matches / self.critical_total
         expected_voyage = self.voyage_matches / self.voyage_total
         expected_gate = (
-            expected_cer <= 0.02
-            and expected_critical >= 0.98
-            and expected_voyage >= 0.98
+            expected_cer <= 0.02 and expected_critical >= 0.98 and expected_voyage >= 0.98
         )
         if (
             self.critical_matches > self.critical_total
@@ -647,14 +631,11 @@ class BlRepairAuditEvaluationV1(_WireModel):
     @model_validator(mode="after")
     def _complete_gate_matrix(self) -> "BlRepairAuditEvaluationV1":
         expected = {
-            (kind, profile_id)
-            for kind in ("clean", "error")
-            for profile_id in RASTER_PROFILES
+            (kind, profile_id) for kind in ("clean", "error") for profile_id in RASTER_PROFILES
         }
         keys = [(item.fixture_kind, item.profile_id) for item in self.scores]
         expected_bundle_path = (
-            f"{BL_REPAIR_AUDIT_DATASET_ID}/candidate-bundles/"
-            f"{self.candidate_bundle_sha256}.json"
+            f"{BL_REPAIR_AUDIT_DATASET_ID}/candidate-bundles/{self.candidate_bundle_sha256}.json"
         )
         if (
             set(keys) != expected
@@ -758,9 +739,7 @@ def bl_repair_audit_candidate_bundle_sha256(
 
 
 def bl_repair_audit_evaluation_sha256(evaluation: BlRepairAuditEvaluationV1) -> str:
-    return _hash_bytes(
-        _canonical_json_bytes(evaluation.model_dump(mode="json", warnings=False))
-    )
+    return _hash_bytes(_canonical_json_bytes(evaluation.model_dump(mode="json", warnings=False)))
 
 
 def _verify_candidate_bundle_bindings(
@@ -769,9 +748,7 @@ def _verify_candidate_bundle_bindings(
     if bundle.dataset_receipt_sha256 != bl_repair_audit_receipt_sha256(receipt):
         raise ValueError("B/L repair audit candidate dataset binding is invalid")
     bindings = {(item.asset_id, item.image_sha256): item for item in receipt.rasters}
-    candidates = {
-        (item.document_asset_id, item.source_sha256): item for item in bundle.candidates
-    }
+    candidates = {(item.document_asset_id, item.source_sha256): item for item in bundle.candidates}
     if set(bindings) != set(candidates):
         raise ValueError("B/L repair audit candidate coverage is invalid")
     if any(
@@ -828,9 +805,7 @@ def verify_bl_repair_audit_dataset(
             raise ValueError("B/L repair audit source PDF drifted")
         parsed = BlRepairAuditContentStreamParserV1(
             family_id=source_item.family_id
-        ).parse_final_pdf_content_stream(
-            source_pdf=source_pdf, asset_id=source_item.asset_id
-        )
+        ).parse_final_pdf_content_stream(source_pdf=source_pdf, asset_id=source_item.asset_id)
         if parsed.source_pdf_sha256 != source_item.source_pdf_sha256:
             raise ValueError("B/L repair audit source truth drifted")
         source_truths[source_item.asset_id] = parsed
@@ -910,9 +885,7 @@ def verify_bl_repair_audit_dataset(
     return receipt
 
 
-def compile_bl_repair_audit_dataset(
-    *, document_preview_root: Path
-) -> BlRepairAuditReceiptV1:
+def compile_bl_repair_audit_dataset(*, document_preview_root: Path) -> BlRepairAuditReceiptV1:
     """Atomically create or fully verify the fixed 100-family audit corpus."""
 
     root = document_preview_root.resolve(strict=True)
@@ -1072,10 +1045,7 @@ def verify_bl_repair_audit_candidate_bundle(
     expected_runtime_configuration_sha256: str,
 ) -> BlRepairAuditCandidateBundleV1:
     receipt = verify_bl_repair_audit_dataset(document_preview_root=document_preview_root)
-    expected_path = (
-        f"{BL_REPAIR_AUDIT_DATASET_ID}/candidate-bundles/"
-        f"{candidate_bundle_sha256}.json"
-    )
+    expected_path = f"{BL_REPAIR_AUDIT_DATASET_ID}/candidate-bundles/{candidate_bundle_sha256}.json"
     if candidate_bundle_relative_path != expected_path:
         raise ValueError("B/L repair audit candidate bundle path is invalid")
     root = document_preview_root.resolve(strict=True)
@@ -1097,8 +1067,7 @@ def verify_bl_repair_audit_candidate_bundle(
     if (
         raw != _canonical_json_bytes(bundle.model_dump(mode="json", warnings=False))
         or bundle.candidate_profile_revision != expected_candidate_profile_revision
-        or bundle.runtime_configuration_sha256
-        != expected_runtime_configuration_sha256
+        or bundle.runtime_configuration_sha256 != expected_runtime_configuration_sha256
     ):
         raise ValueError("B/L repair audit candidate bundle provenance is invalid")
     _verify_candidate_bundle_bindings(receipt=receipt, bundle=bundle)
@@ -1144,9 +1113,7 @@ def evaluate_bl_repair_audit_candidates(
         voyage_fields = [field for field in gold.fields if field.field_id == "voyage"]
         if len(voyage_fields) != 1:
             raise ValueError("B/L repair audit voyage Gold is invalid")
-        observed = canonicalize_synthetic_raster_semantic_text_v3(
-            candidate.canonical_text or ""
-        )
+        observed = canonicalize_synthetic_raster_semantic_text_v3(candidate.canonical_text or "")
         voyage = canonicalize_synthetic_raster_semantic_text_v3(voyage_fields[0].value)
         if not voyage or " " in voyage:
             raise ValueError("B/L repair audit voyage Gold is invalid")
@@ -1162,14 +1129,8 @@ def evaluate_bl_repair_audit_candidates(
         counts[bucket] = counts.get(bucket, RasterTextMetricCountsV1()) + (
             evaluate_synthetic_raster_semantic_text_case_v3(case)
         )
-        voyage_counts[bucket] = voyage_counts.get(bucket, 0) + int(
-            voyage in observed.split(" ")
-        )
-    expected = {
-        (kind, profile_id)
-        for kind in ("clean", "error")
-        for profile_id in RASTER_PROFILES
-    }
+        voyage_counts[bucket] = voyage_counts.get(bucket, 0) + int(voyage in observed.split(" "))
+    expected = {(kind, profile_id) for kind in ("clean", "error") for profile_id in RASTER_PROFILES}
     if set(counts) != expected or set(voyage_counts) != expected:
         raise ValueError("B/L repair audit score matrix is incomplete")
     scores: list[BlRepairAuditScoreV1] = []
@@ -1219,9 +1180,7 @@ def write_bl_repair_audit_evaluation(
 ) -> tuple[str, str]:
     """Recompute, then canonically persist one content-addressed evaluation."""
 
-    verified_receipt = verify_bl_repair_audit_dataset(
-        document_preview_root=document_preview_root
-    )
+    verified_receipt = verify_bl_repair_audit_dataset(document_preview_root=document_preview_root)
     if verified_receipt != receipt:
         raise ValueError("B/L repair audit receipt argument drifted")
     bundle = verify_bl_repair_audit_candidate_bundle(
@@ -1257,9 +1216,7 @@ def verify_bl_repair_audit_evaluation(
 ) -> BlRepairAuditEvaluationV1:
     """Replay source, candidate, and Gate evidence before pointer use."""
 
-    expected_path = (
-        f"{BL_REPAIR_AUDIT_DATASET_ID}/evaluations/{evaluation_sha256}.json"
-    )
+    expected_path = f"{BL_REPAIR_AUDIT_DATASET_ID}/evaluations/{evaluation_sha256}.json"
     if evaluation_relative_path != expected_path:
         raise ValueError("B/L repair audit evaluation path is invalid")
     receipt = verify_bl_repair_audit_dataset(document_preview_root=document_preview_root)
@@ -1282,10 +1239,8 @@ def verify_bl_repair_audit_evaluation(
     if (
         raw != _canonical_json_bytes(evaluation.model_dump(mode="json", warnings=False))
         or evaluation.dataset_receipt_sha256 != bl_repair_audit_receipt_sha256(receipt)
-        or evaluation.candidate_profile_revision
-        != expected_candidate_profile_revision
-        or evaluation.runtime_configuration_sha256
-        != expected_runtime_configuration_sha256
+        or evaluation.candidate_profile_revision != expected_candidate_profile_revision
+        or evaluation.runtime_configuration_sha256 != expected_runtime_configuration_sha256
     ):
         raise ValueError("B/L repair audit evaluation provenance is invalid")
     bundle = verify_bl_repair_audit_candidate_bundle(

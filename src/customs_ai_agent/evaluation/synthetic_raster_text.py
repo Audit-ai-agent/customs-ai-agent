@@ -106,9 +106,7 @@ def canonicalize_synthetic_raster_semantic_text_v3(value: str) -> str:
     """
 
     canonical_v2 = canonicalize_synthetic_raster_semantic_text_v2(value)
-    without_standalone_circled_digits = _STANDALONE_CIRCLED_DIGIT_PATTERN_V3.sub(
-        "", canonical_v2
-    )
+    without_standalone_circled_digits = _STANDALONE_CIRCLED_DIGIT_PATTERN_V3.sub("", canonical_v2)
     canonical = _WHITESPACE_PATTERN_V2.sub(" ", without_standalone_circled_digits).strip(" ")
     if len(canonical) > _MAX_SEMANTIC_TEXT_CODEPOINTS:
         raise ValueError("raster semantic text output is too large")
@@ -147,9 +145,7 @@ def _levenshtein(reference: str, candidate: str) -> int:
         horizontal = (
             (((equal & positive_vertical) + positive_vertical) ^ positive_vertical) | equal
         ) & full_mask
-        positive_horizontal = (
-            negative_vertical | ~(horizontal | positive_vertical)
-        ) & full_mask
+        positive_horizontal = (negative_vertical | ~(horizontal | positive_vertical)) & full_mask
         negative_horizontal = positive_vertical & horizontal
 
         if positive_horizontal & final_bit:
@@ -181,6 +177,7 @@ class RasterTextGoldArtifactV1(_WireModel):
     canonical_text: str = Field(min_length=1, max_length=200_000)
     critical_values: list[str] = Field(min_length=1, max_length=512)
 
+
 def source_only_text_gold_from_raster_gold(
     gold: RasterGoldArtifactV1,
 ) -> RasterTextGoldArtifactV1:
@@ -190,10 +187,7 @@ def source_only_text_gold_from_raster_gold(
     # a raster.  Reuse the structured evaluator's source-PDFium visual order
     # exactly, so text CER does not silently reward a different ordering rule.
     canonical_text = _canonical_visual_cer_text(
-        spans=[
-            (span.page_number, span.bbox, span.reading_order, span.text)
-            for span in gold.spans
-        ]
+        spans=[(span.page_number, span.bbox, span.reading_order, span.text) for span in gold.spans]
     )
     # Existing raster field Gold is compiled from the same final source PDF
     # content stream and binds source_pdf_sha256.  Its values provide a small
@@ -302,9 +296,8 @@ def _critical_value_match_count(*, critical_values: Sequence[str], observed: str
     for _ordinal, wanted in indexed:
         width = len(wanted)
         for start in range(0, len(observed_tokens) - width + 1):
-            if (
-                tuple(observed_tokens[start : start + width]) == wanted
-                and not any(consumed[start : start + width])
+            if tuple(observed_tokens[start : start + width]) == wanted and not any(
+                consumed[start : start + width]
             ):
                 for index in range(start, start + width):
                     consumed[index] = True
@@ -313,10 +306,14 @@ def _critical_value_match_count(*, critical_values: Sequence[str], observed: str
     return matches
 
 
-def evaluate_synthetic_raster_text_case(case: RasterTextEvaluationCaseV1) -> RasterTextMetricCountsV1:
+def evaluate_synthetic_raster_text_case(
+    case: RasterTextEvaluationCaseV1,
+) -> RasterTextMetricCountsV1:
     """Calculate source-only CER and critical-value exact matches."""
 
-    observed = "" if case.candidate.canonical_text is None else _normalized(case.candidate.canonical_text)
+    observed = (
+        "" if case.candidate.canonical_text is None else _normalized(case.candidate.canonical_text)
+    )
     reference = _normalized(case.gold.canonical_text)
     return RasterTextMetricCountsV1(
         character_errors=_levenshtein(reference, observed),
@@ -352,9 +349,8 @@ def _semantic_critical_value_match_count_v2(
     for _ordinal, wanted in indexed:
         width = len(wanted)
         for start in range(0, len(observed_tokens) - width + 1):
-            if (
-                tuple(observed_tokens[start : start + width]) == wanted
-                and not any(consumed[start : start + width])
+            if tuple(observed_tokens[start : start + width]) == wanted and not any(
+                consumed[start : start + width]
             ):
                 for index in range(start, start + width):
                     consumed[index] = True
@@ -406,9 +402,8 @@ def _semantic_critical_value_match_count_v3(
     for _ordinal, wanted in indexed:
         width = len(wanted)
         for start in range(0, len(observed_tokens) - width + 1):
-            if (
-                tuple(observed_tokens[start : start + width]) == wanted
-                and not any(consumed[start : start + width])
+            if tuple(observed_tokens[start : start + width]) == wanted and not any(
+                consumed[start : start + width]
             ):
                 for index in range(start, start + width):
                     consumed[index] = True
@@ -444,10 +439,14 @@ def evaluate_synthetic_raster_text_gates(
     buckets: dict[tuple[str, str], RasterTextMetricCountsV1] = {}
     for case in cases:
         key = (case.document_type, case.profile_id)
-        buckets[key] = buckets.get(key, RasterTextMetricCountsV1()) + evaluate_synthetic_raster_text_case(
-            case
-        )
-    expected = {(document_type, profile_id) for document_type in _DOCUMENT_TYPES for profile_id in _PROFILE_IDS}
+        buckets[key] = buckets.get(
+            key, RasterTextMetricCountsV1()
+        ) + evaluate_synthetic_raster_text_case(case)
+    expected = {
+        (document_type, profile_id)
+        for document_type in _DOCUMENT_TYPES
+        for profile_id in _PROFILE_IDS
+    }
     if set(buckets) != expected:
         raise ValueError("raster text evaluation requires every document type and profile")
     return [
@@ -543,13 +542,17 @@ def evaluate_synthetic_raster_semantic_text_gates_v3(
     ]
 
 
-def cast_document_type(value: str) -> Literal["bill_of_lading", "commercial_invoice", "packing_list"]:
+def cast_document_type(
+    value: str,
+) -> Literal["bill_of_lading", "commercial_invoice", "packing_list"]:
     if value not in _DOCUMENT_TYPES:
         raise ValueError("raster text document type is invalid")
     return value  # type: ignore[return-value]
 
 
-def cast_profile_id(value: str) -> Literal["png-216", "jpeg-216-q75", "jpeg-150-q75", "scan-pdf-216-q75"]:
+def cast_profile_id(
+    value: str,
+) -> Literal["png-216", "jpeg-216-q75", "jpeg-150-q75", "scan-pdf-216-q75"]:
     if value not in _PROFILE_IDS:
         raise ValueError("raster text profile is invalid")
     return value  # type: ignore[return-value]

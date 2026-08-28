@@ -36,8 +36,7 @@ def _server_yaml(characters: list[str]) -> bytes:
         "  model_name: PP-OCRv5_server_rec\n"
         "PostProcess:\n"
         "  name: CTCLabelDecode\n"
-        "  character_dict:\n"
-        + "".join(f"  - {scalar(value)}\n" for value in characters)
+        "  character_dict:\n" + "".join(f"  - {scalar(value)}\n" for value in characters)
     ).encode("utf-8")
 
 
@@ -91,9 +90,7 @@ def fake_sources(tmp_path: Path, monkeypatch: pytest.MonkeyPatch) -> _Sources:
     mobile = _FakeBundle(
         document_preview_root=root,
         bundle_root=mobile_root,
-        bundle_root_relative_path=(
-            "raster-text-direct-mobile-bundles-v1/releases/" + "a" * 64
-        ),
+        bundle_root_relative_path=("raster-text-direct-mobile-bundles-v1/releases/" + "a" * 64),
         manifest_sha256="a" * 64,
         manifest=SimpleNamespace(text_detection_model_name="PP-OCRv5_mobile_det"),
         hashes=mobile_hashes,
@@ -120,9 +117,7 @@ def fake_sources(tmp_path: Path, monkeypatch: pytest.MonkeyPatch) -> _Sources:
     monkeypatch.setattr(
         server_bundle, "load_verified_raster_text_direct_mobile_paddle_bundle_v1", load_mobile
     )
-    monkeypatch.setattr(
-        server_bundle, "load_verified_raster_offline_bundle_release", load_offline
-    )
+    monkeypatch.setattr(server_bundle, "load_verified_raster_offline_bundle_release", load_offline)
     return _Sources(root=root, mobile=mobile, offline=offline, server_yaml=yml)
 
 

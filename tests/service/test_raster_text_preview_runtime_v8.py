@@ -51,8 +51,7 @@ def _v8_pointer_fields(*, audit_evaluation_sha256: str = _SHA_D) -> dict[str, ob
         "repair_audit_dataset_receipt_path": _AUDIT_RECEIPT_PATH,
         "repair_audit_dataset_receipt_sha256": _SHA_C,
         "repair_audit_evaluation_path": (
-            "synthetic-bl-repair-audit-v1/evaluations/"
-            f"{audit_evaluation_sha256}.json"
+            f"synthetic-bl-repair-audit-v1/evaluations/{audit_evaluation_sha256}.json"
         ),
         "repair_audit_evaluation_sha256": audit_evaluation_sha256,
     }
@@ -404,7 +403,11 @@ def test_v8_load_guard_rejects_old_or_wrong_profile_engine(
 
 def test_v7_load_guard_preserves_only_old_v19_engine() -> None:
     pointer = runtime.RasterTextActivationPointerV7.model_validate(
-        {key: value for key, value in _v8_pointer_fields().items() if not key.startswith("repair_") and key != "engine_kind"}
+        {
+            key: value
+            for key, value in _v8_pointer_fields().items()
+            if not key.startswith("repair_") and key != "engine_kind"
+        }
     )
     old_profile = runtime.RasterTextOfflineProfileV19.model_construct(
         engine_kind=_V19_ENGINE_KIND,

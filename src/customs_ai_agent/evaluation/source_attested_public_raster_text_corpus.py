@@ -48,9 +48,7 @@ _PROFILE_QUOTAS = {
 _LEAKAGE_SAFE_SELECTION_REVISION: Literal["source-receipt-train-holdout-v2"] = (
     "source-receipt-train-holdout-v2"
 )
-_LEAKAGE_SAFE_COMPILER_REVISION = (
-    "source-attested-family-first-two-profile-crops-v2"
-)
+_LEAKAGE_SAFE_COMPILER_REVISION = "source-attested-family-first-two-profile-crops-v2"
 _LEAKAGE_SAFE_TRAIN_FAMILY_COUNT = 500
 _LEAKAGE_SAFE_DEVELOPMENT_FAMILY_COUNT = 100
 _LEAKAGE_SAFE_CROPS_PER_FAMILY = 2
@@ -149,8 +147,7 @@ def _root(path: Path) -> Path:
         if (
             root.is_symlink()
             or not root.is_dir()
-            or tuple(part.casefold() for part in root.parts[-3:])
-            != _DOCUMENT_PREVIEW_ROOT_SUFFIX
+            or tuple(part.casefold() for part in root.parts[-3:]) != _DOCUMENT_PREVIEW_ROOT_SUFFIX
         ):
             raise OSError
         return root
@@ -265,12 +262,12 @@ def _merged_line_groups(spans: Sequence[_GoldSpan]) -> tuple[tuple[_GoldSpan, ..
         for row in rows:
             anchor = row[0]
             center_gap = abs(
-                (span.bbox[1] + span.bbox[3] / 2)
-                - (anchor.bbox[1] + anchor.bbox[3] / 2)
+                (span.bbox[1] + span.bbox[3] / 2) - (anchor.bbox[1] + anchor.bbox[3] / 2)
             )
-            if _vertical_overlap(span, anchor) >= 0.45 and center_gap <= max(
-                span.bbox[3], anchor.bbox[3]
-            ) * 0.65:
+            if (
+                _vertical_overlap(span, anchor) >= 0.45
+                and center_gap <= max(span.bbox[3], anchor.bbox[3]) * 0.65
+            ):
                 chosen = row
                 break
         if chosen is None:
@@ -339,9 +336,7 @@ def _gold_candidates(
                 label=unicodedata.normalize("NFC", text),
             )
         )
-    candidates = [
-        _Candidate("span", (span.span_id,), span.bbox, span.label) for span in spans
-    ]
+    candidates = [_Candidate("span", (span.span_id,), span.bbox, span.label) for span in spans]
     for group in _merged_line_groups(spans):
         candidates.append(
             _Candidate(
@@ -486,9 +481,7 @@ def _verify_scan_duplicate(
     except SourceAttestedPublicCropCorpusError:
         raise
     except Exception:
-        raise SourceAttestedPublicCropCorpusError(
-            "public_crop_scan_duplicate_invalid"
-        ) from None
+        raise SourceAttestedPublicCropCorpusError("public_crop_scan_duplicate_invalid") from None
     finally:
         close = getattr(document, "close", None)
         if callable(close):
@@ -618,8 +611,7 @@ def _compile_split(
         height = _integer(exemplar.get("height"), minimum=1, maximum=20_000)
         if any(
             _integer(by_profile[profile].get("width"), minimum=1, maximum=20_000) != width
-            or _integer(by_profile[profile].get("height"), minimum=1, maximum=20_000)
-            != height
+            or _integer(by_profile[profile].get("height"), minimum=1, maximum=20_000) != height
             for profile in ("jpeg-216-q75", "scan-pdf-216-q75")
         ):
             raise SourceAttestedPublicCropCorpusError("public_crop_profile_geometry_invalid")
@@ -652,7 +644,9 @@ def _compile_split(
             for profile_id in _TRAINING_PROFILES:
                 if quotas[profile_id] == 0:
                     continue
-                crop = _crop(asset=by_profile[profile_id], profile_id=profile_id, candidate=candidate)
+                crop = _crop(
+                    asset=by_profile[profile_id], profile_id=profile_id, candidate=candidate
+                )
                 if crop.sample_id in labels:
                     raise SourceAttestedPublicCropCorpusError("public_crop_sample_collision")
                 crops.append(crop)
@@ -690,9 +684,7 @@ def build_verified_balanced_public_crop_corpus_v1(
         or raster_receipt.get("source_receipt_sha256") != source_sha
     ):
         raise SourceAttestedPublicCropCorpusError("public_crop_receipt_binding_invalid")
-    source_root = _safe(
-        root, source_receipt.get("source_root_relative_path"), directory=True
-    )
+    source_root = _safe(root, source_receipt.get("source_root_relative_path"), directory=True)
     raw_sources = source_receipt.get("assets")
     raw_assets = raster_receipt.get("assets")
     if not isinstance(raw_sources, list) or not isinstance(raw_assets, list):
@@ -778,9 +770,7 @@ def _family_ids_sha256(values: Sequence[str]) -> str:
 def _canonical_selection_bytes(value: object) -> bytes:
     model_dump = getattr(value, "model_dump", None)
     if not callable(model_dump):
-        raise SourceAttestedPublicCropCorpusError(
-            "public_crop_selection_receipt_invalid"
-        )
+        raise SourceAttestedPublicCropCorpusError("public_crop_selection_receipt_invalid")
     return canonical_json_bytes(model_dump(mode="json", warnings=False))
 
 
@@ -807,11 +797,9 @@ def _load_leakage_safe_selection_v2(
             write_fresh_raster_text_scope_selection_receipt,
         )
 
-        relative_path, receipt_sha256 = (
-            write_fresh_raster_text_scope_selection_receipt(
-                document_preview_root=root,
-                selection_revision=_LEAKAGE_SAFE_SELECTION_REVISION,
-            )
+        relative_path, receipt_sha256 = write_fresh_raster_text_scope_selection_receipt(
+            document_preview_root=root,
+            selection_revision=_LEAKAGE_SAFE_SELECTION_REVISION,
         )
         path = _safe(root, relative_path)
         value, raw = _read_json(path)
@@ -819,8 +807,7 @@ def _load_leakage_safe_selection_v2(
         if (
             raw != _canonical_selection_bytes(selection)
             or sha256_bytes(raw) != receipt_sha256
-            or selection.synthetic_raster_receipt_sha256
-            != raster_receipt_sha256
+            or selection.synthetic_raster_receipt_sha256 != raster_receipt_sha256
             or selection.source_receipt_sha256 != source_receipt_sha256
         ):
             raise ValueError
@@ -838,9 +825,7 @@ def _load_leakage_safe_selection_v2(
     except SourceAttestedPublicCropCorpusError:
         raise
     except (OSError, ValueError, ValidationError, SyntheticRasterTextActivationError):
-        raise SourceAttestedPublicCropCorpusError(
-            "public_crop_selection_receipt_invalid"
-        ) from None
+        raise SourceAttestedPublicCropCorpusError("public_crop_selection_receipt_invalid") from None
 
 
 def _trainable_source_candidate(candidate: _Candidate) -> bool:
@@ -858,8 +843,9 @@ def _ranked_profiles_v2(*, family_id: str, split: str, seed: int) -> tuple[str, 
         _TRAINING_PROFILES,
         key=lambda profile_id: (
             sha256_bytes(
-                f"{_LEAKAGE_SAFE_COMPILER_REVISION}:{seed}:{split}:"
-                f"{family_id}:{profile_id}".encode("ascii")
+                f"{_LEAKAGE_SAFE_COMPILER_REVISION}:{seed}:{split}:{family_id}:{profile_id}".encode(
+                    "ascii"
+                )
             ),
             profile_id,
         ),
@@ -905,9 +891,7 @@ def _verified_candidates_for_asset_v2(
             or asset.get("profile_id") != profile_id
             or asset.get("media_type") != _EXPECTED_MEDIA[profile_id]
         ):
-            raise SourceAttestedPublicCropCorpusError(
-                "public_crop_profile_binding_invalid"
-            )
+            raise SourceAttestedPublicCropCorpusError("public_crop_profile_binding_invalid")
         raster_path = _safe(root, asset.get("asset_relative_path"))
         gold_path = _safe(root, asset.get("gold_relative_path"))
         _verify_regular_material(raster_path, asset, "image_sha256")
@@ -963,9 +947,7 @@ def _compile_family_first_split_v2(
         or len(canonical_families) != len(set(canonical_families))
         or set(canonical_families) != set(families)
     ):
-        raise SourceAttestedPublicCropCorpusError(
-            "public_crop_family_first_coverage_invalid"
-        )
+        raise SourceAttestedPublicCropCorpusError("public_crop_family_first_coverage_invalid")
     crops: list[TrainingCropV1] = []
     labels: dict[str, str] = {}
     profiles: dict[str, str] = {}
@@ -978,8 +960,9 @@ def _compile_family_first_split_v2(
         canonical_families,
         key=lambda family_id: (
             sha256_bytes(
-                f"{_LEAKAGE_SAFE_COMPILER_REVISION}:{seed}:{split}:"
-                f"family-lane:{family_id}".encode("ascii")
+                f"{_LEAKAGE_SAFE_COMPILER_REVISION}:{seed}:{split}:family-lane:{family_id}".encode(
+                    "ascii"
+                )
             ),
             family_id,
         ),
@@ -987,15 +970,10 @@ def _compile_family_first_split_v2(
     for family_ordinal, family_id in enumerate(ranked_families):
         asset_groups = families[family_id]
         if len(asset_groups) != 6 or any(
-            set(by_profile) != set(_ALL_PROFILES)
-            for by_profile in asset_groups.values()
+            set(by_profile) != set(_ALL_PROFILES) for by_profile in asset_groups.values()
         ):
-            raise SourceAttestedPublicCropCorpusError(
-                "public_crop_family_first_coverage_invalid"
-            )
-        selected_profiles = _ranked_profiles_v2(
-            family_id=family_id, split=split, seed=seed
-        )
+            raise SourceAttestedPublicCropCorpusError("public_crop_family_first_coverage_invalid")
+        selected_profiles = _ranked_profiles_v2(family_id=family_id, split=split, seed=seed)
         target_document_type = _DOCUMENT_TYPES[family_ordinal % len(_DOCUMENT_TYPES)]
         document_assets = {
             asset_id: by_profile
@@ -1003,9 +981,7 @@ def _compile_family_first_split_v2(
             if by_profile["png-216"].get("document_type") == target_document_type
         }
         if len(document_assets) != 2:
-            raise SourceAttestedPublicCropCorpusError(
-                "public_crop_family_first_coverage_invalid"
-            )
+            raise SourceAttestedPublicCropCorpusError("public_crop_family_first_coverage_invalid")
         ranked_assets = sorted(
             document_assets.items(),
             key=lambda item: (
@@ -1016,9 +992,7 @@ def _compile_family_first_split_v2(
                 item[0],
             ),
         )
-        selected: tuple[
-            _FieldCandidate, Mapping[str, Mapping[str, object]]
-        ] | None = None
+        selected: tuple[_FieldCandidate, Mapping[str, Mapping[str, object]]] | None = None
         for asset_id, by_profile in ranked_assets:
             candidates, selected_assets = _verified_candidates_for_asset_v2(
                 root=root,
@@ -1029,11 +1003,7 @@ def _compile_family_first_split_v2(
                 split=split,
                 selected_profiles=selected_profiles,
             )
-            usable = [
-                item
-                for item in candidates
-                if _trainable_source_candidate(item.candidate)
-            ]
+            usable = [item for item in candidates if _trainable_source_candidate(item.candidate)]
             if not usable:
                 continue
             ordered_fields = sorted(usable, key=lambda item: item.field_id)
@@ -1056,9 +1026,7 @@ def _compile_family_first_split_v2(
                 candidate=candidate,
             )
             if crop.sample_id in labels:
-                raise SourceAttestedPublicCropCorpusError(
-                    "public_crop_sample_collision"
-                )
+                raise SourceAttestedPublicCropCorpusError("public_crop_sample_collision")
             family_crops.append(crop)
             crops.append(crop)
             labels[crop.sample_id] = candidate.label
@@ -1069,9 +1037,7 @@ def _compile_family_first_split_v2(
             field_counts[field_key] = field_counts.get(field_key, 0) + 1
             document_type_counts[target_document_type] += 1
         if len(family_crops) != _LEAKAGE_SAFE_CROPS_PER_FAMILY:
-            raise SourceAttestedPublicCropCorpusError(
-                "public_crop_family_first_coverage_invalid"
-            )
+            raise SourceAttestedPublicCropCorpusError("public_crop_family_first_coverage_invalid")
     expected_crop_count = expected_family_count * _LEAKAGE_SAFE_CROPS_PER_FAMILY
     if (
         len(crops) != expected_crop_count
@@ -1086,14 +1052,11 @@ def _compile_family_first_split_v2(
         or any(value < 1 for value in field_counts.values())
         or max(document_type_counts.values()) - min(document_type_counts.values()) > 2
         or any(
-            sum(crop.family_id == family_id for crop in crops)
-            != _LEAKAGE_SAFE_CROPS_PER_FAMILY
+            sum(crop.family_id == family_id for crop in crops) != _LEAKAGE_SAFE_CROPS_PER_FAMILY
             for family_id in canonical_families
         )
     ):
-        raise SourceAttestedPublicCropCorpusError(
-            "public_crop_family_first_coverage_invalid"
-        )
+        raise SourceAttestedPublicCropCorpusError("public_crop_family_first_coverage_invalid")
     return (
         tuple(sorted(crops, key=lambda item: item.sample_id)),
         labels,
@@ -1124,16 +1087,12 @@ def build_verified_leakage_safe_public_crop_corpus_v2(
         or raster_receipt.get("source_receipt_sha256") != source_sha
     ):
         raise SourceAttestedPublicCropCorpusError("public_crop_receipt_binding_invalid")
-    selection, parent, selection_relative, selection_sha = (
-        _load_leakage_safe_selection_v2(
-            root=root,
-            raster_receipt_sha256=raster_sha,
-            source_receipt_sha256=source_sha,
-        )
+    selection, parent, selection_relative, selection_sha = _load_leakage_safe_selection_v2(
+        root=root,
+        raster_receipt_sha256=raster_sha,
+        source_receipt_sha256=source_sha,
     )
-    source_root = _safe(
-        root, source_receipt.get("source_root_relative_path"), directory=True
-    )
+    source_root = _safe(root, source_receipt.get("source_root_relative_path"), directory=True)
     raw_sources = source_receipt.get("assets")
     raw_assets = raster_receipt.get("assets")
     if not isinstance(raw_sources, list) or not isinstance(raw_assets, list):
@@ -1147,9 +1106,10 @@ def build_verified_leakage_safe_public_crop_corpus_v2(
             raise SourceAttestedPublicCropCorpusError("public_crop_receipt_invalid")
         sources[digest] = value
     family_splits: dict[str, set[str]] = {}
-    grouped: dict[
-        str, dict[str, dict[str, dict[str, Mapping[str, object]]]]
-    ] = {"train": {}, "development": {}}
+    grouped: dict[str, dict[str, dict[str, dict[str, Mapping[str, object]]]]] = {
+        "train": {},
+        "development": {},
+    }
     for value in raw_assets:
         if not isinstance(value, dict):
             raise SourceAttestedPublicCropCorpusError("public_crop_receipt_invalid")
@@ -1181,12 +1141,8 @@ def build_verified_leakage_safe_public_crop_corpus_v2(
         "calibration": 50,
         "sealed": 100,
     }:
-        raise SourceAttestedPublicCropCorpusError(
-            "public_crop_family_first_coverage_invalid"
-        )
-    parent_holdouts = set(parent.fresh_calibration_family_ids) | set(
-        parent.fresh_sealed_family_ids
-    )
+        raise SourceAttestedPublicCropCorpusError("public_crop_family_first_coverage_invalid")
+    parent_holdouts = set(parent.fresh_calibration_family_ids) | set(parent.fresh_sealed_family_ids)
     new_sealed = set(selection.fresh_sealed_family_ids)
     non_train = set().union(
         split_families["development"],
@@ -1203,8 +1159,7 @@ def build_verified_leakage_safe_public_crop_corpus_v2(
         or len(v2_eligible_before_sealed) != 600
         or len(train_families) != _LEAKAGE_SAFE_TRAIN_FAMILY_COUNT
         or len(excluded) != 500
-        or set(selection.fresh_calibration_family_ids)
-        != set(parent.fresh_calibration_family_ids)
+        or set(selection.fresh_calibration_family_ids) != set(parent.fresh_calibration_family_ids)
         or _family_ids_sha256(sorted(non_train | parent_holdouts))
         != selection.excluded_family_ids_sha256
         or _family_ids_sha256(sorted(v2_eligible_before_sealed))
@@ -1241,16 +1196,14 @@ def build_verified_leakage_safe_public_crop_corpus_v2(
         dev_counts,
         dev_field_counts,
         dev_document_counts,
-    ) = (
-        _compile_family_first_split_v2(
-            root=root,
-            source_root=source_root,
-            sources=sources,
-            families=development_groups,
-            selected_family_ids=sorted(split_families["development"]),
-            split="development",
-            seed=seed + 1,
-        )
+    ) = _compile_family_first_split_v2(
+        root=root,
+        source_root=source_root,
+        sources=sources,
+        families=development_groups,
+        selected_family_ids=sorted(split_families["development"]),
+        split="development",
+        seed=seed + 1,
     )
     train_ids = tuple(sorted({crop.family_id for crop in train}))
     development_ids = tuple(sorted({crop.family_id for crop in development}))

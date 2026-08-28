@@ -75,9 +75,7 @@ _LOCAL_ENGLISH_RECOGNITION_MODEL_NAME = "en_PP-OCRv5_mobile_rec"
 _LOCAL_ENGLISH_RECOGNITION_SOURCE_RELATIVE_PATH = PurePosixPath("models/paddleocr3/rec")
 _RECOGNITION_MODEL_TARGET_DIRECTORY = "text-rec"
 _RASTER_TEXT_MODEL_ROOT_RELATIVE_PATH = PurePosixPath("models/raster-text")
-_RASTER_TEXT_MODEL_INVENTORY_RELATIVE_PATH = PurePosixPath(
-    "inventories/raster-text-models.json"
-)
+_RASTER_TEXT_MODEL_INVENTORY_RELATIVE_PATH = PurePosixPath("inventories/raster-text-models.json")
 _RASTER_TEXT_DIRECT_MODEL_PATHS = (
     "text-det/inference.json",
     "text-det/inference.pdiparams",
@@ -862,7 +860,9 @@ def _snapshot_raster_text_direct_model_source(
         )
         rows = inventory.get("artifacts")
         if not isinstance(rows, list):
-            raise RasterOfflineBundleBootstrapError("raster_bundle_raster_text_model_source_invalid")
+            raise RasterOfflineBundleBootstrapError(
+                "raster_bundle_raster_text_model_source_invalid"
+            )
         inventory_sha_by_path: dict[str, str] = {}
         for row in rows:
             relative_path = row.get("relative_path") if isinstance(row, dict) else None
@@ -971,7 +971,9 @@ def _copy_raster_text_direct_models_to_stage(
     except RasterOfflineBundleBootstrapError:
         raise
     except OSError:
-        raise RasterOfflineBundleBootstrapError("raster_bundle_raster_text_model_copy_failed") from None
+        raise RasterOfflineBundleBootstrapError(
+            "raster_bundle_raster_text_model_copy_failed"
+        ) from None
 
 
 def _raster_text_direct_model_material_matches_source(
@@ -1483,18 +1485,14 @@ def _raster_text_release_derivation_intent(
                 "relative_path": relative_path,
                 "sha256": hashlib.sha256(material).hexdigest(),
             }
-            for relative_path, material in sorted(
-                _desired_first_party_sidecar_material().items()
-            )
+            for relative_path, material in sorted(_desired_first_party_sidecar_material().items())
         ]
         if not first_party_files:
             raise RasterOfflineBundleBootstrapError("raster_bundle_release_base_invalid")
         configuration_template_sha256 = hashlib.sha256(
             _canonical_json(_configuration_template())
         ).hexdigest()
-        sidecar_lock_sha256 = _sha256_file(
-            _project_root() / _SIDECAR_REQUIREMENTS_RELATIVE_PATH
-        )[0]
+        sidecar_lock_sha256 = _sha256_file(_project_root() / _SIDECAR_REQUIREMENTS_RELATIVE_PATH)[0]
         recognition_input: dict[str, str] | None = None
         if recognition_model_snapshot is not None:
             recognition_input = {
@@ -1674,16 +1672,16 @@ def _prepare_release_stage(
 
     step = "initialization"
     try:
-        if (raster_text_model_snapshot is None) != (
-            raster_text_derivation_intent_sha256 is None
-        ):
+        if (raster_text_model_snapshot is None) != (raster_text_derivation_intent_sha256 is None):
             raise RasterOfflineBundleBootstrapError("raster_bundle_release_stage_invalid")
         # A direct snapshot is made from the base's already English-configured
         # ``text-rec`` tree.  If a structural server-rec upgrade is pending,
         # this text-only materializer refuses to infer a mixed source: a
         # separately attested current local bundle is required instead.
         if raster_text_model_snapshot is not None and recognition_model_snapshot is not None:
-            raise RasterOfflineBundleBootstrapError("raster_bundle_raster_text_model_source_invalid")
+            raise RasterOfflineBundleBootstrapError(
+                "raster_bundle_raster_text_model_source_invalid"
+            )
         if stage.exists() or stage.is_symlink():
             raise RasterOfflineBundleBootstrapError("raster_bundle_release_stage_invalid")
         source = _windows_operational_path(base.bundle_root, force_short=True)
@@ -1792,16 +1790,14 @@ def _prepare_release_stage(
         }
         if raster_text_derivation_intent_sha256 is not None:
             if _RELEASE_MANIFEST_SHA256.fullmatch(raster_text_derivation_intent_sha256) is None:
-                raise RasterOfflineBundleBootstrapError(
-                    "raster_bundle_release_stage_invalid"
-                )
+                raise RasterOfflineBundleBootstrapError("raster_bundle_release_stage_invalid")
             derivation_payload[_RASTER_TEXT_RELEASE_INTENT_FIELD] = (
                 raster_text_derivation_intent_sha256
             )
             if raster_text_model_snapshot is None:
                 raise RasterOfflineBundleBootstrapError("raster_bundle_release_stage_invalid")
-            derivation_payload["raster_text_model_snapshot"] = (
-                _raster_text_direct_snapshot_payload(raster_text_model_snapshot)
+            derivation_payload["raster_text_model_snapshot"] = _raster_text_direct_snapshot_payload(
+                raster_text_model_snapshot
             )
         if recognition_model_snapshot is not None:
             derivation_payload["recognition_model_snapshot"] = {
@@ -2013,7 +2009,9 @@ def _selected_release_manifest_sha_for_unselected_materialization(
     except RasterOfflineBundleBootstrapError:
         raise
     except OSError:
-        raise RasterOfflineBundleBootstrapError("raster_bundle_unselected_release_unavailable") from None
+        raise RasterOfflineBundleBootstrapError(
+            "raster_bundle_unselected_release_unavailable"
+        ) from None
 
 
 def _verified_predecessor_for_unselected_materialization(
@@ -2064,7 +2062,9 @@ def _verified_predecessor_for_unselected_materialization(
         for part in PurePosixPath(receipt_relative_path).parts:
             receipt_path = receipt_path / part
             if receipt_path.is_symlink():
-                raise RasterOfflineBundleBootstrapError("raster_bundle_unselected_release_unavailable")
+                raise RasterOfflineBundleBootstrapError(
+                    "raster_bundle_unselected_release_unavailable"
+                )
         receipt_sha256, receipt_size = _regular_file_sha256(
             receipt_path, code="raster_bundle_unselected_release_unavailable"
         )
@@ -2090,9 +2090,13 @@ def _verified_predecessor_for_unselected_materialization(
     except RasterOfflineBundleBootstrapError:
         raise
     except RasterOfflineBundleError as error:
-        raise RasterOfflineBundleBootstrapError("raster_bundle_unselected_release_unavailable") from error
+        raise RasterOfflineBundleBootstrapError(
+            "raster_bundle_unselected_release_unavailable"
+        ) from error
     except (OSError, ValueError):
-        raise RasterOfflineBundleBootstrapError("raster_bundle_unselected_release_unavailable") from None
+        raise RasterOfflineBundleBootstrapError(
+            "raster_bundle_unselected_release_unavailable"
+        ) from None
 
 
 def _publish_unselected_release_from_stage(
@@ -2117,7 +2121,9 @@ def _publish_unselected_release_from_stage(
             root=root, operational_root=operational_root
         )
         if stage.is_symlink() or not stage.is_dir() or final.is_symlink():
-            raise RasterOfflineBundleBootstrapError("raster_bundle_unselected_release_publish_conflict")
+            raise RasterOfflineBundleBootstrapError(
+                "raster_bundle_unselected_release_publish_conflict"
+            )
         if final.exists():
             existing = load_verified_raster_offline_bundle_release(
                 document_preview_root=root, manifest_sha256=manifest_sha256
@@ -2135,7 +2141,9 @@ def _publish_unselected_release_from_stage(
             document_preview_root=root, manifest_sha256=manifest_sha256
         )
         if published.manifest_sha256 != manifest_sha256:
-            raise RasterOfflineBundleBootstrapError("raster_bundle_unselected_release_publish_conflict")
+            raise RasterOfflineBundleBootstrapError(
+                "raster_bundle_unselected_release_publish_conflict"
+            )
         return published
     except RasterOfflineBundleBootstrapError:
         raise
@@ -2173,9 +2181,7 @@ def _raster_text_release_intent_index_payload(
     }
 
 
-def _raster_text_release_intent_index_path(
-    *, operational_root: Path, intent_sha256: str
-) -> Path:
+def _raster_text_release_intent_index_path(*, operational_root: Path, intent_sha256: str) -> Path:
     if _RELEASE_MANIFEST_SHA256.fullmatch(intent_sha256) is None:
         raise RasterOfflineBundleBootstrapError("raster_bundle_unselected_release_intent_invalid")
     return (
@@ -2246,14 +2252,11 @@ def _expected_raster_text_release_derivation_receipt(
                 "artifacts",
             }
             or raster_text_model_snapshot.get("schema_version") != "1.0"
-            or raster_text_model_snapshot.get("inventory_kind")
-            != "raster-text-direct-models-v1"
+            or raster_text_model_snapshot.get("inventory_kind") != "raster-text-direct-models-v1"
             or raster_text_model_snapshot.get("source_bundle_manifest_sha256")
             != base_manifest_sha256
             or raster_text_model_snapshot.get("source_model_root_relative_path") != "models"
-            or not isinstance(
-                raster_text_model_snapshot.get("source_model_inventory_sha256"), str
-            )
+            or not isinstance(raster_text_model_snapshot.get("source_model_inventory_sha256"), str)
             or _RELEASE_MANIFEST_SHA256.fullmatch(
                 str(raster_text_model_snapshot.get("source_model_inventory_sha256"))
             )
@@ -2264,8 +2267,7 @@ def _expected_raster_text_release_derivation_receipt(
             )
             is None
             or not isinstance(raster_text_model_snapshot.get("artifacts"), list)
-            or len(raster_text_model_snapshot["artifacts"])
-            != len(_RASTER_TEXT_DIRECT_MODEL_PATHS)
+            or len(raster_text_model_snapshot["artifacts"]) != len(_RASTER_TEXT_DIRECT_MODEL_PATHS)
         ):
             raise TypeError("raster_text_model_snapshot")
         normalized_artifacts: list[dict[str, object]] = []
@@ -2292,9 +2294,10 @@ def _expected_raster_text_release_derivation_receipt(
                     "byte_size": artifact["byte_size"],
                 }
             )
-        if raster_text_model_snapshot["source_snapshot_sha256"] != hashlib.sha256(
-            _canonical_json({"files": normalized_artifacts})
-        ).hexdigest():
+        if (
+            raster_text_model_snapshot["source_snapshot_sha256"]
+            != hashlib.sha256(_canonical_json({"files": normalized_artifacts})).hexdigest()
+        ):
             raise TypeError("raster_text_model_snapshot")
         receipt["raster_text_model_snapshot"] = {
             **raster_text_model_snapshot,
@@ -2375,9 +2378,7 @@ def _verify_raster_text_release_derivation_receipt(
         verify_raster_text_direct_model_material(candidate)
         direct_inventory = _read_canonical_object(
             candidate.bundle_root.joinpath(
-                *PurePosixPath(
-                    candidate.manifest.raster_text_model_inventory_relative_path
-                ).parts
+                *PurePosixPath(candidate.manifest.raster_text_model_inventory_relative_path).parts
             ),
             code="raster_bundle_unselected_release_intent_candidate_invalid",
         )
@@ -2411,9 +2412,7 @@ def _current_raster_text_source_binding() -> dict[str, object]:
                 "relative_path": relative_path,
                 "sha256": hashlib.sha256(material).hexdigest(),
             }
-            for relative_path, material in sorted(
-                _desired_first_party_sidecar_material().items()
-            )
+            for relative_path, material in sorted(_desired_first_party_sidecar_material().items())
         ]
         if not first_party_files:
             raise RasterOfflineBundleBootstrapError("raster_bundle_release_base_invalid")
@@ -2441,8 +2440,7 @@ def _intent_matches_current_raster_text_source(
         intent.get("sidecar_lock_sha256") == source_binding["sidecar_lock_sha256"]
         and intent.get("configuration_template_sha256")
         == source_binding["configuration_template_sha256"]
-        and intent.get("first_party_sidecar_files")
-        == source_binding["first_party_sidecar_files"]
+        and intent.get("first_party_sidecar_files") == source_binding["first_party_sidecar_files"]
     )
 
 
@@ -2550,9 +2548,7 @@ def _validated_current_raster_text_intent_index(
             # leave the exact full-materializer path to decide it later.
             continue
     if len(matches) > 1:
-        raise RasterOfflineBundleBootstrapError(
-            "raster_bundle_unselected_release_intent_ambiguous"
-        )
+        raise RasterOfflineBundleBootstrapError("raster_bundle_unselected_release_intent_ambiguous")
     return matches[0] if matches else None
 
 
@@ -2579,9 +2575,11 @@ def _fast_text_release_path(
             if candidate.is_symlink():
                 raise RasterOfflineBundleBootstrapError(code)
         metadata = candidate.lstat()
-        if _is_link_or_reparse_point(metadata) or (
-            directory and not stat.S_ISDIR(metadata.st_mode)
-        ) or (not directory and not stat.S_ISREG(metadata.st_mode)):
+        if (
+            _is_link_or_reparse_point(metadata)
+            or (directory and not stat.S_ISDIR(metadata.st_mode))
+            or (not directory and not stat.S_ISREG(metadata.st_mode))
+        ):
             raise RasterOfflineBundleBootstrapError(code)
         resolved = _resolved_comparison_path(candidate)
         resolved.relative_to(root)
@@ -2763,9 +2761,8 @@ def _load_fast_verified_raster_text_release_reference(
             directory=False,
             code=code,
         )
-        if (
-            _regular_file_sha256(configuration_path, code=code)[0]
-            != intent.get("configuration_template_sha256")
+        if _regular_file_sha256(configuration_path, code=code)[0] != intent.get(
+            "configuration_template_sha256"
         ):
             raise RasterOfflineBundleBootstrapError(code)
 
@@ -2775,9 +2772,10 @@ def _load_fast_verified_raster_text_release_reference(
             relative_path=direct_models.model_inventory_relative_path,
             code=code,
         )
-        if _read_canonical_object(direct_inventory_path, code=code) != expected_receipt[
-            "raster_text_model_snapshot"
-        ]:
+        if (
+            _read_canonical_object(direct_inventory_path, code=code)
+            != expected_receipt["raster_text_model_snapshot"]
+        ):
             raise RasterOfflineBundleBootstrapError(code)
         return reference
     except RasterOfflineBundleBootstrapError:
@@ -2816,9 +2814,7 @@ def resolve_or_materialize_verified_raster_text_release_reference_v1(
             )
     # Do not hold the bootstrap lock across the existing materializer: it
     # owns the same non-reentrant OS lock and performs its own full checks.
-    return materialize_verified_unselected_raster_text_release_v1(
-        document_preview_root=root
-    )
+    return materialize_verified_unselected_raster_text_release_v1(document_preview_root=root)
 
 
 def _load_verified_raster_text_release_intent_reuse(
@@ -3013,12 +3009,12 @@ def materialize_verified_unselected_raster_text_release_v1(
                     "raster_bundle_raster_text_model_material_invalid"
                 )
             else:
-                raster_text_requires_derivation = not _raster_text_direct_model_material_matches_source(
-                    base, expected_snapshot=raster_text_model_snapshot
+                raster_text_requires_derivation = (
+                    not _raster_text_direct_model_material_matches_source(
+                        base, expected_snapshot=raster_text_model_snapshot
+                    )
                 )
-            requires_derivation = (
-                structural_requires_derivation or raster_text_requires_derivation
-            )
+            requires_derivation = structural_requires_derivation or raster_text_requires_derivation
             if not requires_derivation:
                 return base
             intent, intent_sha256 = _raster_text_release_derivation_intent(
@@ -3076,7 +3072,9 @@ def materialize_verified_unselected_raster_text_release_v1(
                 # A source/configuration change must be visible in the
                 # exhaustive manifest; a second comparison catches a source
                 # tree that changed while its private stage was built.
-                raise RasterOfflineBundleBootstrapError("raster_bundle_unselected_release_source_drift")
+                raise RasterOfflineBundleBootstrapError(
+                    "raster_bundle_unselected_release_source_drift"
+                )
             workspace_canonical.mkdir(mode=0o700)
             stage = _windows_operational_path(stage_canonical, force_short=True)
             workspace = _windows_operational_path(workspace_canonical, force_short=True)
@@ -3106,10 +3104,14 @@ def materialize_verified_unselected_raster_text_release_v1(
             verified = verify_staged_raster_offline_bundle(
                 document_preview_root=root, bundle_root=stage_canonical
             )
-            if _release_requires_derivation(verified) or not _raster_text_direct_model_material_matches_source(
+            if _release_requires_derivation(
+                verified
+            ) or not _raster_text_direct_model_material_matches_source(
                 verified, expected_snapshot=raster_text_model_snapshot
             ):
-                raise RasterOfflineBundleBootstrapError("raster_bundle_unselected_release_source_drift")
+                raise RasterOfflineBundleBootstrapError(
+                    "raster_bundle_unselected_release_source_drift"
+                )
             current_intent, current_intent_sha256 = _raster_text_release_derivation_intent(
                 base=base,
                 recognition_model_snapshot=_verify_release_reuse_compatibility(base),
@@ -3127,7 +3129,9 @@ def materialize_verified_unselected_raster_text_release_v1(
             )
             verify_parent_renderer_inventory(published)
             _verify_release_reuse_compatibility(published)
-            if _release_requires_derivation(published) or not _raster_text_direct_model_material_matches_source(
+            if _release_requires_derivation(
+                published
+            ) or not _raster_text_direct_model_material_matches_source(
                 published, expected_snapshot=raster_text_model_snapshot
             ):
                 raise RasterOfflineBundleBootstrapError(
@@ -3151,7 +3155,9 @@ def materialize_verified_unselected_raster_text_release_v1(
         except RasterOfflineBundleError as error:
             raise RasterOfflineBundleBootstrapError(error.code) from None
         except (OSError, ValueError):
-            raise RasterOfflineBundleBootstrapError("raster_bundle_unselected_release_failed") from None
+            raise RasterOfflineBundleBootstrapError(
+                "raster_bundle_unselected_release_failed"
+            ) from None
         finally:
             if stage_canonical.exists():
                 _remove_owned_tree(

@@ -69,9 +69,7 @@ def _utc_now() -> str:
 
 def _canonical_json(value: object) -> bytes:
     return (
-        json.dumps(value, ensure_ascii=True, separators=(",", ":"), sort_keys=True).encode(
-            "utf-8"
-        )
+        json.dumps(value, ensure_ascii=True, separators=(",", ":"), sort_keys=True).encode("utf-8")
         + b"\n"
     )
 
@@ -109,9 +107,7 @@ def _document_preview_root(path: Path) -> Path:
             raise OSError
         return root
     except OSError:
-        raise RasterTextBackgroundActivationError(
-            "raster_text_background_root_invalid"
-        ) from None
+        raise RasterTextBackgroundActivationError("raster_text_background_root_invalid") from None
 
 
 def _repository_root() -> Path:
@@ -158,9 +154,7 @@ def _command_binding(document_preview_root: Path) -> dict[str, str]:
         "workdir_binding_sha256": workdir_binding_sha256,
     }
     return {
-        "command_fingerprint_sha256": hashlib.sha256(
-            _canonical_json(descriptor)
-        ).hexdigest(),
+        "command_fingerprint_sha256": hashlib.sha256(_canonical_json(descriptor)).hexdigest(),
         "document_preview_root_binding_sha256": document_preview_root_binding_sha256,
         "interpreter_sha256": interpreter_sha256,
         "target_script_sha256": target_script_sha256,
@@ -172,9 +166,7 @@ def _state_directory(document_preview_root: Path, *, create: bool) -> Path:
     try:
         local_root = document_preview_root.parents[1]
     except IndexError:
-        raise RasterTextBackgroundActivationError(
-            "raster_text_background_state_invalid"
-        ) from None
+        raise RasterTextBackgroundActivationError("raster_text_background_state_invalid") from None
     directory = local_root / "state" / _STATE_DIRECTORY_NAME
     try:
         if local_root.name.casefold() != "_local" or local_root.is_symlink():
@@ -189,9 +181,7 @@ def _state_directory(document_preview_root: Path, *, create: bool) -> Path:
             raise OSError
         return directory
     except OSError:
-        raise RasterTextBackgroundActivationError(
-            "raster_text_background_state_invalid"
-        ) from None
+        raise RasterTextBackgroundActivationError("raster_text_background_state_invalid") from None
 
 
 def _atomic_write(path: Path, value: object) -> bytes:
@@ -222,9 +212,7 @@ def _write_immutable(path: Path, value: object) -> tuple[str, bytes]:
     if path.exists():
         raw = _read_bytes(path)
         if raw != expected:
-            raise RasterTextBackgroundActivationError(
-                "raster_text_background_receipt_conflict"
-            )
+            raise RasterTextBackgroundActivationError("raster_text_background_receipt_conflict")
         return hashlib.sha256(raw).hexdigest(), raw
     raw = _atomic_write(path, value)
     return hashlib.sha256(raw).hexdigest(), raw
@@ -292,8 +280,7 @@ def _validate_status(value: object) -> dict[str, Any]:
     )
     if (
         not (active or terminal)
-        or value.get("artifact_kind")
-        != "synthetic_raster_text_background_activation_status"
+        or value.get("artifact_kind") != "synthetic_raster_text_background_activation_status"
         or value.get("schema_version") != "1.0"
         or value.get("dataset_id") != _DATASET_ID
         or not isinstance(value.get("run_id"), str)
@@ -309,9 +296,7 @@ def _validate_status(value: object) -> dict[str, Any]:
     ):
         raise RasterTextBackgroundActivationError("raster_text_background_receipt_invalid")
     activation_pid = value.get("activation_pid")
-    if activation_pid is not None and (
-        type(activation_pid) is not int or activation_pid <= 0
-    ):
+    if activation_pid is not None and (type(activation_pid) is not int or activation_pid <= 0):
         raise RasterTextBackgroundActivationError("raster_text_background_receipt_invalid")
     if active and any(
         value.get(key) is not None
@@ -393,9 +378,7 @@ def _status_payload(
         "child_status": None,
         "command_fingerprint_sha256": binding["command_fingerprint_sha256"],
         "dataset_id": _DATASET_ID,
-        "document_preview_root_binding_sha256": binding[
-            "document_preview_root_binding_sha256"
-        ],
+        "document_preview_root_binding_sha256": binding["document_preview_root_binding_sha256"],
         "exit_code": None,
         "exit_receipt_relative_path": None,
         "exit_receipt_sha256": None,
@@ -431,9 +414,7 @@ def _exit_payload(
         "child_status": child_status,
         "command_fingerprint_sha256": status["command_fingerprint_sha256"],
         "dataset_id": _DATASET_ID,
-        "document_preview_root_binding_sha256": status[
-            "document_preview_root_binding_sha256"
-        ],
+        "document_preview_root_binding_sha256": status["document_preview_root_binding_sha256"],
         "exit_code": exit_code,
         "finished_at_utc": finished_at_utc,
         "interpreter_sha256": status["interpreter_sha256"],
@@ -740,12 +721,8 @@ def start_background_activation(document_preview_root: Path) -> dict[str, object
             if status_path.exists():
                 previous = _read_status(status_path)
                 if previous["status"] in {"starting", "running"}:
-                    if _pid_alive(previous["worker_pid"]) or _pid_alive(
-                        previous["activation_pid"]
-                    ):
-                        raise RasterTextBackgroundActivationError(
-                            "raster_text_background_busy"
-                        )
+                    if _pid_alive(previous["worker_pid"]) or _pid_alive(previous["activation_pid"]):
+                        raise RasterTextBackgroundActivationError("raster_text_background_busy")
                     _finish(
                         document_preview_root=root,
                         state_directory=state_directory,
@@ -782,9 +759,7 @@ def start_background_activation(document_preview_root: Path) -> dict[str, object
     except LocalProcessLockBusy:
         raise RasterTextBackgroundActivationError("raster_text_background_busy") from None
     except LocalProcessLockInvalid:
-        raise RasterTextBackgroundActivationError(
-            "raster_text_background_lock_invalid"
-        ) from None
+        raise RasterTextBackgroundActivationError("raster_text_background_lock_invalid") from None
     return {
         "command_fingerprint_sha256": binding["command_fingerprint_sha256"],
         "run_id": run_id,
@@ -962,9 +937,7 @@ def run_background_worker(
     deadline = time.monotonic() + _WORKER_LOCK_RETRY_SECONDS
     while True:
         try:
-            with cast(
-                AbstractContextManager[None], exclusive_local_process_lock(lock_path)
-            ):
+            with cast(AbstractContextManager[None], exclusive_local_process_lock(lock_path)):
                 return _run_worker_locked(
                     document_preview_root=root,
                     run_id=run_id,

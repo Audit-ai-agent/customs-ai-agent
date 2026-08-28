@@ -37,9 +37,7 @@ def _parse(*, family_index: int, fixture_kind: str):
 
 def test_new_bl_source_is_deterministic_distinct_and_source_parsed(monkeypatch) -> None:
     first_pdf, clean = _parse(family_index=0, fixture_kind="clean")
-    repeated_pdf = audit.build_bl_repair_audit_source_pdf(
-        family_index=0, fixture_kind="clean"
-    )
+    repeated_pdf = audit.build_bl_repair_audit_source_pdf(family_index=0, fixture_kind="clean")
     error_pdf, error = _parse(family_index=0, fixture_kind="error")
 
     assert first_pdf == repeated_pdf
@@ -228,9 +226,7 @@ def test_receipt_requires_exact_100_family_clean_error_four_profile_scope() -> N
                 )
             )
             for profile_id in RASTER_PROFILES:
-                image_sha = hashlib.sha256(
-                    f"{asset_id}:{profile_id}".encode("ascii")
-                ).hexdigest()
+                image_sha = hashlib.sha256(f"{asset_id}:{profile_id}".encode("ascii")).hexdigest()
                 gold_sha = hashlib.sha256(
                     f"gold:{asset_id}:{profile_id}".encode("ascii")
                 ).hexdigest()
@@ -251,8 +247,7 @@ def test_receipt_requires_exact_100_family_clean_error_four_profile_scope() -> N
                             f"{asset_id}-{profile_id}{suffix[profile_id]}"
                         ),
                         gold_relative_path=(
-                            f"{audit.BL_REPAIR_AUDIT_DATASET_ID}/gold/"
-                            f"{asset_id}-{profile_id}.json"
+                            f"{audit.BL_REPAIR_AUDIT_DATASET_ID}/gold/{asset_id}-{profile_id}.json"
                         ),
                         gold_sha256=gold_sha,
                     )

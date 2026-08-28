@@ -232,13 +232,14 @@ def _verified_document_preview_root(path: Path) -> Path:
         if (
             root.is_symlink()
             or not root.is_dir()
-            or tuple(part.casefold() for part in root.parts[-3:])
-            != _DOCUMENT_PREVIEW_ROOT_SUFFIX
+            or tuple(part.casefold() for part in root.parts[-3:]) != _DOCUMENT_PREVIEW_ROOT_SUFFIX
         ):
             raise OSError
         return root
     except OSError:
-        raise SourceAttestedRecognizerTrainingError("training_document_preview_root_invalid") from None
+        raise SourceAttestedRecognizerTrainingError(
+            "training_document_preview_root_invalid"
+        ) from None
 
 
 def _relative_parts(value: object) -> tuple[str, ...]:
@@ -422,9 +423,7 @@ def _bbox(value: object) -> tuple[float, float, float, float]:
     return result  # type: ignore[return-value]
 
 
-def _sample_id(
-    *, asset_id: str, kind: str, span_ids: Sequence[str], bbox: Sequence[float]
-) -> str:
+def _sample_id(*, asset_id: str, kind: str, span_ids: Sequence[str], bbox: Sequence[float]) -> str:
     return sha256_bytes(
         canonical_json_bytes(
             {
@@ -482,13 +481,11 @@ def _merged_line_groups(spans: Sequence[_GoldSpan]) -> tuple[tuple[_GoldSpan, ..
         chosen: list[_GoldSpan] | None = None
         for row in rows:
             anchor = row[0]
-            centers = abs(
-                (span.bbox[1] + span.bbox[3] / 2)
-                - (anchor.bbox[1] + anchor.bbox[3] / 2)
-            )
-            if _vertical_overlap(span, anchor) >= 0.45 and centers <= max(
-                span.bbox[3], anchor.bbox[3]
-            ) * 0.65:
+            centers = abs((span.bbox[1] + span.bbox[3] / 2) - (anchor.bbox[1] + anchor.bbox[3] / 2))
+            if (
+                _vertical_overlap(span, anchor) >= 0.45
+                and centers <= max(span.bbox[3], anchor.bbox[3]) * 0.65
+            ):
                 chosen = row
                 break
         if chosen is None:
@@ -544,7 +541,11 @@ def _build_asset_crops(
             raise SourceAttestedRecognizerTrainingError("training_gold_spans_invalid")
         seen.add(span_id)
         reading_order = value.get("reading_order")
-        if isinstance(reading_order, bool) or not isinstance(reading_order, int) or reading_order < 0:
+        if (
+            isinstance(reading_order, bool)
+            or not isinstance(reading_order, int)
+            or reading_order < 0
+        ):
             raise SourceAttestedRecognizerTrainingError("training_gold_spans_invalid")
         spans.append(
             _GoldSpan(
@@ -576,9 +577,7 @@ def _build_asset_crops(
             tuple[float, float, float, float],
             str,
         ]
-    ] = [
-        ("span", (span,), span.bbox, span.label) for span in spans
-    ]
+    ] = [("span", (span,), span.bbox, span.label) for span in spans]
     if include_merged_lines:
         for group in _merged_line_groups(spans):
             candidates.append(
@@ -586,9 +585,7 @@ def _build_asset_crops(
             )
     for kind, members, bbox, label in candidates:
         span_ids = tuple(member.span_id for member in members)
-        sample_id = _sample_id(
-            asset_id=asset_id, kind=kind, span_ids=span_ids, bbox=bbox
-        )
+        sample_id = _sample_id(asset_id=asset_id, kind=kind, span_ids=span_ids, bbox=bbox)
         crop = TrainingCropV1(
             sample_id=sample_id,
             asset_id=asset_id,
@@ -627,7 +624,9 @@ def _stage_select(
                 key=lambda value: sha256_bytes(f"{seed}:pilot:{value}".encode("utf-8")),
             )[:count]
         )
-        return tuple(sorted((crop for crop in crops if crop.family_id in chosen), key=lambda x: x.sample_id))
+        return tuple(
+            sorted((crop for crop in crops if crop.family_id in chosen), key=lambda x: x.sample_id)
+        )
     return tuple(
         sorted(
             crops,
@@ -748,15 +747,23 @@ def build_verified_gold_crop_corpus(
     development_families = {crop.family_id for crop in all_crops["development"]}
     if not train_families or not development_families or train_families & development_families:
         raise SourceAttestedRecognizerTrainingError("training_family_leakage")
-    characters = tuple(sorted({character for crop in all_crops["train"] for character in labels[crop.sample_id]}))
+    characters = tuple(
+        sorted({character for crop in all_crops["train"] for character in labels[crop.sample_id]})
+    )
     if not characters or len(characters) > 511:
         raise SourceAttestedRecognizerTrainingError("training_character_dictionary_invalid")
-    if any(character not in characters for crop in all_crops["development"] for character in labels[crop.sample_id]):
+    if any(
+        character not in characters
+        for crop in all_crops["development"]
+        for character in labels[crop.sample_id]
+    ):
         raise SourceAttestedRecognizerTrainingError("training_development_character_unseen")
     train = _stage_select(all_crops["train"], stage=stage, seed=seed)
     development = _stage_select(all_crops["development"], stage=stage, seed=seed + 1)
     selected_ids = {crop.sample_id for crop in (*train, *development)}
-    selected_labels = {sample_id: label for sample_id, label in labels.items() if sample_id in selected_ids}
+    selected_labels = {
+        sample_id: label for sample_id, label in labels.items() if sample_id in selected_ids
+    }
     return VerifiedCropCorpus(
         train_manifest=_manifest(
             crops=train,
@@ -835,7 +842,9 @@ def deterministic_width_batches(
     for boundary in boundaries:
         values = sorted(buckets[boundary], key=lambda item: item.sample_id)
         random.Random(f"{seed}:{epoch}:{boundary}").shuffle(values)
-        batches.extend(tuple(values[index : index + batch_size]) for index in range(0, len(values), batch_size))
+        batches.extend(
+            tuple(values[index : index + batch_size]) for index in range(0, len(values), batch_size)
+        )
     random.Random(f"{seed}:{epoch}:batch-order").shuffle(batches)
     return tuple(batches)
 
@@ -963,9 +972,7 @@ def _native_export_prefix(text_rec_directory: Path) -> Path:
             raise OSError
         return Path(short) / "inference"
     except Exception:
-        raise SourceAttestedRecognizerTrainingError(
-            "training_export_path_unsupported"
-        ) from None
+        raise SourceAttestedRecognizerTrainingError("training_export_path_unsupported") from None
 
 
 def export_tiny_paddle_static_recognizer(
@@ -1122,9 +1129,7 @@ def find_verified_recognizer_release_by_intent(
     for candidate in sorted(releases.iterdir(), key=lambda path: path.name):
         if re.fullmatch(_SHA256, candidate.name) is None:
             raise SourceAttestedRecognizerTrainingError("recognizer_release_collection_invalid")
-        release = load_verified_source_attested_raster_text_recognizer_release(
-            root, candidate.name
-        )
+        release = load_verified_source_attested_raster_text_recognizer_release(root, candidate.name)
         if release.receipt.training_intent_sha256 == training_intent_sha256:
             return release
     return None
@@ -1143,8 +1148,10 @@ def verify_paddle_training_package_inventory(path: Path) -> str:
         raise SourceAttestedRecognizerTrainingError("training_package_inventory_invalid")
     expected: dict[str, str] = {}
     for item in packages:
-        if not isinstance(item, dict) or not isinstance(item.get("name"), str) or not isinstance(
-            item.get("version"), str
+        if (
+            not isinstance(item, dict)
+            or not isinstance(item.get("name"), str)
+            or not isinstance(item.get("version"), str)
         ):
             raise SourceAttestedRecognizerTrainingError("training_package_inventory_invalid")
         expected[item["name"].casefold()] = item["version"]
@@ -1202,6 +1209,7 @@ def _prepare_paddle_batch(
     widths: list[int] = []
     encoded: list[list[int]] = []
     for crop in crops:
+
         def load_page(current_crop: TrainingCropV1 = crop) -> Any:
             return _load_verified_png_page(document_preview_root, current_crop)
 
@@ -1219,9 +1227,7 @@ def _prepare_paddle_batch(
         if right - left < 2 or bottom - top < 2:
             raise SourceAttestedRecognizerTrainingError("training_crop_invalid")
         image = page.crop((left, top, right, bottom))
-        resized_width = min(
-            3200, max(8, int(math.ceil(48.0 * image.width / max(1, image.height))))
-        )
+        resized_width = min(3200, max(8, int(math.ceil(48.0 * image.width / max(1, image.height)))))
         image = image.resize((resized_width, 48), Image.Resampling.BILINEAR)
         array = np.asarray(image, dtype="float32") / np.float32(255.0)
         # The deployed direct sidecar passes perspective crops to recognition
@@ -1236,7 +1242,9 @@ def _prepare_paddle_batch(
         try:
             encoded.append([character_to_index[character] for character in label])
         except KeyError:
-            raise SourceAttestedRecognizerTrainingError("training_label_dictionary_invalid") from None
+            raise SourceAttestedRecognizerTrainingError(
+                "training_label_dictionary_invalid"
+            ) from None
     maximum_width = max(widths)
     # Match the existing sidecar's bounded dynamic-width batch contract:
     # unused normalized columns are exactly zero, and width buckets minimize

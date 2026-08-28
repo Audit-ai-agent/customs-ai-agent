@@ -98,9 +98,7 @@ def _install_candidate_harness(
             runtime_configuration_sha256=state["runtime_configuration_sha256"],
         )
 
-    def verified_asset(
-        _root: Path, asset: Any, *, pdfium_version: str
-    ) -> bytes:
+    def verified_asset(_root: Path, asset: Any, *, pdfium_version: str) -> bytes:
         assert pdfium_version == "4.30.0"
         verified_assets.append(asset.asset_id)
         return b"x"
@@ -188,9 +186,7 @@ def _run(harness: _CandidateHarness) -> activation.RasterTextCandidateRunV1:
 
 def _checkpoints(harness: _CandidateHarness) -> list[Path]:
     return sorted(
-        harness.root.glob(
-            "synthetic-raster-text-v1/candidate-checkpoints/calibration/*/*.json"
-        )
+        harness.root.glob("synthetic-raster-text-v1/candidate-checkpoints/calibration/*/*.json")
     )
 
 
@@ -279,18 +275,14 @@ def test_candidate_runner_ocr_executes_once_for_byte_identical_assets(
     bundle = json.loads(
         harness.root.joinpath(*execution["candidate_bundle_relative_path"].split("/")).read_bytes()
     )
-    observations = {
-        item["asset_id"]: item for item in bundle["candidates"]
-    }
+    observations = {item["asset_id"]: item for item in bundle["candidates"]}
     assert observations["asset-1"]["candidate"]["canonical_text"] == "TEXT-asset-1"
     assert observations["asset-2"]["candidate"]["canonical_text"] == "TEXT-asset-1"
     assert observations["asset-2"]["candidate"]["document_asset_id"] == "asset-2"
     assert observations["asset-2"]["candidate"]["extraction_request_id"] == (
         activation._raster_text_request_id(harness.assets[1])  # noqa: SLF001
     )
-    assert observations["asset-2"]["elapsed_seconds"] == observations["asset-1"][
-        "elapsed_seconds"
-    ]
+    assert observations["asset-2"]["elapsed_seconds"] == observations["asset-1"]["elapsed_seconds"]
 
     harness.extraction_calls.clear()
     harness.verified_assets.clear()
@@ -520,8 +512,11 @@ def test_candidate_checkpoint_observation_hash_is_canonical() -> None:
         candidate=candidate,
     )
 
-    assert activation._digest_model(observation) == hashlib.sha256(  # noqa: SLF001
-        activation._canonical_json(  # noqa: SLF001
-            observation.model_dump(mode="json", warnings=False)
-        )
-    ).hexdigest()
+    assert (
+        activation._digest_model(observation)
+        == hashlib.sha256(  # noqa: SLF001
+            activation._canonical_json(  # noqa: SLF001
+                observation.model_dump(mode="json", warnings=False)
+            )
+        ).hexdigest()
+    )

@@ -98,9 +98,7 @@ def _observation() -> RasterCandidateObservationV1:
     )
 
 
-def test_runner_reuses_only_a_valid_completed_shard(
-    tmp_path: Path, monkeypatch
-) -> None:
+def test_runner_reuses_only_a_valid_completed_shard(tmp_path: Path, monkeypatch) -> None:
     root = tmp_path / "_local" / "data" / "document-preview"
     root.mkdir(parents=True)
     receipt = _receipt()

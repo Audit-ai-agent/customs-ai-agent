@@ -262,7 +262,12 @@ def _run_raster_preview_auto_importer_check(
 
     importer = workspace / "customs-ai-agent" / "tools" / "Import-AgentProfile.ps1"
     pointer = (
-        workspace / "_local" / "data" / "document-preview" / "approvals" / "raster-preview-active.json"
+        workspace
+        / "_local"
+        / "data"
+        / "document-preview"
+        / "approvals"
+        / "raster-preview-active.json"
     )
     switch = " -EnableSourceAttestedRasterPreviewAutoActivation" if enable else ""
     if preserve_and_clear:
@@ -315,7 +320,12 @@ def test_raster_auto_importer_can_bind_an_explicit_shared_workspace_root(
         importer,
     )
     pointer = (
-        workspace / "_local" / "data" / "document-preview" / "approvals" / "raster-preview-active.json"
+        workspace
+        / "_local"
+        / "data"
+        / "document-preview"
+        / "approvals"
+        / "raster-preview-active.json"
     )
     command = (
         "& { $ErrorActionPreference = 'Stop'; "
@@ -462,7 +472,9 @@ def test_importer_preserves_static_raster_pair_but_clears_stale_raster_auto_mode
     tmp_path: Path,
 ) -> None:
     workspace = _write_workspace(tmp_path, profile="dev-fixture", secret_contents=None)
-    result = _run_raster_preview_auto_importer_check(workspace, enable=False, preserve_and_clear=True)
+    result = _run_raster_preview_auto_importer_check(
+        workspace, enable=False, preserve_and_clear=True
+    )
 
     assert result.returncode == 0
     assert result.stdout == "RASTER_ENV_OK"
@@ -478,12 +490,7 @@ def test_importer_explicitly_enables_fixed_source_attested_raster_text_discovery
     workspace = _write_workspace(tmp_path, profile="dev-fixture", secret_contents=None)
     importer = workspace / "customs-ai-agent" / "tools" / "Import-AgentProfile.ps1"
     pointer = (
-        workspace
-        / "_local"
-        / "data"
-        / "document-preview"
-        / "approvals"
-        / "raster-text-active.json"
+        workspace / "_local" / "data" / "document-preview" / "approvals" / "raster-text-active.json"
     )
     command = (
         "& { $ErrorActionPreference = 'Stop'; "
@@ -519,12 +526,7 @@ def test_importer_preserves_static_raster_text_pair_but_clears_stale_auto_mode(
     workspace = _write_workspace(tmp_path, profile="dev-fixture", secret_contents=None)
     importer = workspace / "customs-ai-agent" / "tools" / "Import-AgentProfile.ps1"
     pointer = (
-        workspace
-        / "_local"
-        / "data"
-        / "document-preview"
-        / "approvals"
-        / "raster-text-active.json"
+        workspace / "_local" / "data" / "document-preview" / "approvals" / "raster-text-active.json"
     )
     command = (
         "& { $ErrorActionPreference = 'Stop'; "

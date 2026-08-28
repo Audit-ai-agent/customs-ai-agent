@@ -170,9 +170,7 @@ def test_balanced_split_has_1k_profile_quota_and_excludes_verified_scan_duplicat
     material.write_bytes(b"material")
     gold_sha = hashlib.sha256(material.read_bytes()).hexdigest()
     candidates = tuple(
-        corpus._Candidate(
-            "span", (f"span-{index}",), (0.1, 0.1, 0.2, 0.1), "A"
-        )
+        corpus._Candidate("span", (f"span-{index}",), (0.1, 0.1, 0.2, 0.1), "A")
         for index in range(334)
     )
     by_profile: dict[str, dict[str, object]] = {}
@@ -269,9 +267,7 @@ def test_v2_family_first_compiler_uses_two_gold_fields_per_family(
             )
             for index in range(5)
         )
-        return candidates, {
-            profile: by_profile[profile] for profile in selected_profiles
-        }
+        return candidates, {profile: by_profile[profile] for profile in selected_profiles}
 
     monkeypatch.setattr(corpus, "_verified_candidates_for_asset_v2", verified)
     (
@@ -318,8 +314,7 @@ def test_v2_manifest_binds_selection_fields_and_balanced_critical_counts() -> No
         source_receipt_sha256="c" * 64,
         raster_receipt_sha256="d" * 64,
         selection_receipt_relative_path=(
-            "synthetic-raster-text-v1/fresh-scope-selections/"
-            f"{selection_sha}.json"
+            f"synthetic-raster-text-v1/fresh-scope-selections/{selection_sha}.json"
         ),
         selection_receipt_sha256=selection_sha,
         parent_selection_receipt_sha256="e" * 64,
@@ -384,9 +379,7 @@ def test_public_page_loader_accepts_png_and_jpeg_but_rejects_rotated_exif(
                 "raster_sha256": fine_tune.sha256_file(path),
             }
         )
-        loaded = fine_tune._load_verified_training_page(
-            root, crop=crop_value, profile_id=profile
-        )
+        loaded = fine_tune._load_verified_training_page(root, crop=crop_value, profile_id=profile)
         assert loaded.size == (100, 40)
 
     rotated_path = assets / "rotated.jpg"
@@ -402,9 +395,7 @@ def test_public_page_loader_accepts_png_and_jpeg_but_rejects_rotated_exif(
         }
     )
     with pytest.raises(fine_tune.SourceAttestedPublicRecognizerFineTuneError) as raised:
-        fine_tune._load_verified_training_page(
-            root, crop=rotated, profile_id="jpeg-216-q75"
-        )
+        fine_tune._load_verified_training_page(root, crop=rotated, profile_id="jpeg-216-q75")
     assert raised.value.code == "public_finetune_raster_decode_invalid"
 
 
@@ -419,12 +410,9 @@ def _metric(crop_count: int, cer: float, exact: float) -> dict[str, object]:
 
 def _receipt_payload(stage: Path) -> dict[str, object]:
     artifacts = {
-        relative: fine_tune.sha256_file(stage / relative)
-        for relative in fine_tune._MODEL_FILES
+        relative: fine_tune.sha256_file(stage / relative) for relative in fine_tune._MODEL_FILES
     }
-    profile_metrics = {
-        profile: _metric(10, 0.09, 0.81) for profile in fine_tune._TRAINING_PROFILES
-    }
+    profile_metrics = {profile: _metric(10, 0.09, 0.81) for profile in fine_tune._TRAINING_PROFILES}
     baseline_metrics = {
         profile: _metric(10, 0.10, 0.80) for profile in fine_tune._TRAINING_PROFILES
     }
@@ -441,12 +429,8 @@ def _receipt_payload(stage: Path) -> dict[str, object]:
             semantic_crop_list_sha256="f" * 64,
             skipped_sample_list_sha256="1" * 64,
             base_dictionary_sha256="7" * 64,
-            source_profile_crop_counts={
-                profile: 10 for profile in fine_tune._TRAINING_PROFILES
-            },
-            usable_profile_crop_counts={
-                profile: 10 for profile in fine_tune._TRAINING_PROFILES
-            },
+            source_profile_crop_counts={profile: 10 for profile in fine_tune._TRAINING_PROFILES},
+            usable_profile_crop_counts={profile: 10 for profile in fine_tune._TRAINING_PROFILES},
             scan_duplicate_pair_count=1,
             scan_duplicate_pixel_list_sha256="2" * 64,
         )
@@ -461,13 +445,9 @@ def _receipt_payload(stage: Path) -> dict[str, object]:
         "tuning_scope": "head",
         "training_intent_sha256": "a" * 64,
         "train_manifest_sha256": fine_tune._manifest_sha256(crop_manifests["train"]),
-        "development_manifest_sha256": fine_tune._manifest_sha256(
-            crop_manifests["development"]
-        ),
+        "development_manifest_sha256": fine_tune._manifest_sha256(crop_manifests["development"]),
         "train_crop_manifest": crop_manifests["train"].model_dump(mode="json"),
-        "development_crop_manifest": crop_manifests["development"].model_dump(
-            mode="json"
-        ),
+        "development_crop_manifest": crop_manifests["development"].model_dump(mode="json"),
         "direct_runtime_bundle_manifest_sha256": "d" * 64,
         "direct_runtime_package_inventory_sha256": "e" * 64,
         "public_mobile_model_bundle_manifest_sha256": "f" * 64,
@@ -484,9 +464,7 @@ def _receipt_payload(stage: Path) -> dict[str, object]:
         "dictionary_first_class_index": 1,
         "implicit_space_class_index": 437,
         "form_marker_policy": "remove-black-square-checkbox-and-underscore-run-ge-2-v1",
-        "whitespace_policy": (
-            "nfc-map-control-whitespace-one-for-one-preserve-ascii-spaces-v1"
-        ),
+        "whitespace_policy": ("nfc-map-control-whitespace-one-for-one-preserve-ascii-spaces-v1"),
         "training_module_sha256": "8" * 64,
         "balanced_corpus_module_sha256": "9" * 64,
         "source_crop_base_module_sha256": "0" * 64,
@@ -557,8 +535,7 @@ def _v2_crop_manifest(split: str) -> fine_tune.PublicFineTuneCropManifestV2:
         source_receipt_sha256="d" * 64,
         raster_receipt_sha256="e" * 64,
         selection_receipt_relative_path=(
-            "synthetic-raster-text-v1/fresh-scope-selections/"
-            f"{selection_sha}.json"
+            f"synthetic-raster-text-v1/fresh-scope-selections/{selection_sha}.json"
         ),
         selection_receipt_sha256=selection_sha,
         parent_selection_receipt_sha256="f" * 64,
@@ -585,8 +562,7 @@ def _v2_crop_manifest(split: str) -> fine_tune.PublicFineTuneCropManifestV2:
 
 def _receipt_payload_v2(stage: Path) -> dict[str, object]:
     artifacts = {
-        relative: fine_tune.sha256_file(stage / relative)
-        for relative in fine_tune._MODEL_FILES
+        relative: fine_tune.sha256_file(stage / relative) for relative in fine_tune._MODEL_FILES
     }
     train = _v2_crop_manifest("train")
     development = _v2_crop_manifest("development")
@@ -631,9 +607,7 @@ def _receipt_payload_v2(stage: Path) -> dict[str, object]:
         "dictionary_first_class_index": 1,
         "implicit_space_class_index": 437,
         "form_marker_policy": "remove-black-square-checkbox-and-underscore-run-ge-2-v1",
-        "whitespace_policy": (
-            "nfc-map-control-whitespace-one-for-one-preserve-ascii-spaces-v1"
-        ),
+        "whitespace_policy": ("nfc-map-control-whitespace-one-for-one-preserve-ascii-spaces-v1"),
         "training_module_sha256": "8" * 64,
         "balanced_corpus_module_sha256": "9" * 64,
         "source_crop_base_module_sha256": "0" * 64,
@@ -668,9 +642,7 @@ def _receipt_payload_v2(stage: Path) -> dict[str, object]:
         "static_roundtrip_verified": True,
         "model_artifact_sha256s": artifacts,
     }
-    profile_metrics = {
-        profile: _metric(10, 0.09, 0.81) for profile in fine_tune._TRAINING_PROFILES
-    }
+    profile_metrics = {profile: _metric(10, 0.09, 0.81) for profile in fine_tune._TRAINING_PROFILES}
     baseline_metrics = {
         profile: _metric(10, 0.10, 0.80) for profile in fine_tune._TRAINING_PROFILES
     }
@@ -703,9 +675,7 @@ def _receipt_payload_v2(stage: Path) -> dict[str, object]:
         "tuning_scope": "head",
         "training_intent_sha256": "a" * 64,
         "train_manifest_sha256": fine_tune._manifest_sha256(crop_manifests["train"]),
-        "development_manifest_sha256": fine_tune._manifest_sha256(
-            crop_manifests["development"]
-        ),
+        "development_manifest_sha256": fine_tune._manifest_sha256(crop_manifests["development"]),
         "train_crop_manifest": crop_manifests["train"].model_dump(mode="json"),
         "development_crop_manifest": crop_manifests["development"].model_dump(mode="json"),
         "direct_runtime_bundle_manifest_sha256": "d" * 64,
@@ -724,9 +694,7 @@ def _receipt_payload_v2(stage: Path) -> dict[str, object]:
         "dictionary_first_class_index": 1,
         "implicit_space_class_index": 437,
         "form_marker_policy": "remove-black-square-checkbox-and-underscore-run-ge-2-v1",
-        "whitespace_policy": (
-            "nfc-map-control-whitespace-one-for-one-preserve-ascii-spaces-v1"
-        ),
+        "whitespace_policy": ("nfc-map-control-whitespace-one-for-one-preserve-ascii-spaces-v1"),
         "training_module_sha256": "8" * 64,
         "balanced_corpus_module_sha256": "9" * 64,
         "source_crop_base_module_sha256": "0" * 64,
@@ -786,9 +754,7 @@ def test_release_is_content_addressed_and_exact_tree_is_reverified(tmp_path: Pat
     assert "artifact-" not in receipt_text
     (loaded.release_path / "unexpected.txt").write_bytes(b"drift")
     with pytest.raises(fine_tune.SourceAttestedPublicRecognizerFineTuneError) as raised:
-        fine_tune.load_verified_public_finetuned_recognizer_release_v1(
-            root, release.release_sha256
-        )
+        fine_tune.load_verified_public_finetuned_recognizer_release_v1(root, release.release_sha256)
     assert raised.value.code == "public_finetune_release_invalid"
 
 
@@ -874,6 +840,7 @@ def test_runtime_is_locked_offline_and_uses_both_verified_bundles(
         return expected
 
     monkeypatch.setattr(runtime, "train_source_attested_public_recognizer_overfit_v1", train)
+
     def provenance(_root: Path, result: object) -> object:
         events.append("provenance")
         return result
@@ -945,6 +912,7 @@ def test_v2_runtime_is_offline_head_only_and_does_not_expose_epoch_override(
         "train_source_attested_public_recognizer_leakage_safe_v2",
         train,
     )
+
     def provenance(_root: Path, result: object) -> object:
         events.append("provenance")
         return result
@@ -962,7 +930,8 @@ def test_v2_runtime_is_offline_head_only_and_does_not_expose_epoch_override(
     ]
     with pytest.raises(fine_tune.SourceAttestedPublicRecognizerFineTuneError) as raised:
         runtime.ensure_source_attested_public_recognizer_leakage_safe_v2(
-            root, tuning_scope="connected_tail"  # type: ignore[arg-type]
+            root,
+            tuning_scope="connected_tail",  # type: ignore[arg-type]
         )
     assert raised.value.code == "public_finetune_scope_invalid"
 
@@ -1010,9 +979,7 @@ def test_training_bundle_preflight_reports_the_exact_failed_boundary(
     def load_mobile(**_kwargs: object) -> object:
         if failure == "mobile":
             raise OSError
-        return SimpleNamespace(
-            document_preview_root=other_root if failure == "root" else root
-        )
+        return SimpleNamespace(document_preview_root=other_root if failure == "root" else root)
 
     monkeypatch.setattr(
         fine_tune,
@@ -1042,9 +1009,11 @@ def test_cli_exposes_only_fixed_head_leakage_safe_v2_and_content_free_output(
     monkeypatch.setattr(
         cli,
         "ensure_source_attested_public_recognizer_leakage_safe_v2",
-        lambda path, **kwargs: result
-        if path == root and kwargs == {"tuning_scope": "head"}
-        else pytest.fail("CLI changed the fixed training contract"),
+        lambda path, **kwargs: (
+            result
+            if path == root and kwargs == {"tuning_scope": "head"}
+            else pytest.fail("CLI changed the fixed training contract")
+        ),
     )
 
     summary = cli._run(root)

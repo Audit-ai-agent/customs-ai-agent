@@ -1190,7 +1190,9 @@ def _parse_pdf_content_stream_v1(
                 raise SourceAttestedSyntheticPdfTruthError("source_layout_pdf_text_invalid")
             if text_run_decoder is not None:
                 if active_font_name is None:
-                    raise SourceAttestedSyntheticPdfTruthError("source_layout_pdf_text_state_invalid")
+                    raise SourceAttestedSyntheticPdfTruthError(
+                        "source_layout_pdf_text_state_invalid"
+                    )
                 try:
                     text = text_run_decoder(active_font_name, text)
                 except (TypeError, UnicodeError, ValueError):

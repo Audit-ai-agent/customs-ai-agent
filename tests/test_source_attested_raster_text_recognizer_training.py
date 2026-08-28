@@ -351,9 +351,7 @@ def test_verified_gold_crop_corpus_is_deterministic_and_keeps_labels_in_memory(
             "train_manifest": first.train_manifest.model_dump(mode="json"),
             "development_manifest": first.development_manifest.model_dump(mode="json"),
             "train_crops": [crop.model_dump(mode="json") for crop in first.train_crops],
-            "development_crops": [
-                crop.model_dump(mode="json") for crop in first.development_crops
-            ],
+            "development_crops": [crop.model_dump(mode="json") for crop in first.development_crops],
         }
     )
     assert b'"text"' not in public_material
@@ -441,9 +439,7 @@ def test_static_export_uses_dynamic_width_without_importing_paddle(tmp_path: Pat
         def eval(self) -> None:
             captures["evaluated"] = True
 
-    def to_static(
-        model: object, *, input_spec: list[object], full_graph: bool
-    ) -> object:
+    def to_static(model: object, *, input_spec: list[object], full_graph: bool) -> object:
         captures["input_spec_count"] = len(input_spec)
         captures["full_graph"] = full_graph
         return model
@@ -507,9 +503,7 @@ def test_training_runtime_replays_current_intent_before_reusing_a_release(
         "materialize_verified_raster_text_direct_paddle_bundle_v1",
         lambda **_kwargs: bundle,
     )
-    monkeypatch.setattr(
-        training_runtime, "verified_direct_training_imports", verified_imports
-    )
+    monkeypatch.setattr(training_runtime, "verified_direct_training_imports", verified_imports)
     monkeypatch.setattr(
         training_runtime,
         "train_source_attested_raster_text_recognizer_overfit",

@@ -166,19 +166,20 @@ def test_parent_inventory_ignores_a_sidecar_shadowed_distribution_lookup(
             }
         ),
     )
-    record = direct_bundle.DirectPaddleBundleFileV1.model_validate(
-        _record(tmp_path, inventory)
-    )
+    record = direct_bundle.DirectPaddleBundleFileV1.model_validate(_record(tmp_path, inventory))
     monkeypatch.setattr(
         direct_bundle.importlib.metadata,
         "version",
         lambda _name: "sidecar-shadowed-version",
     )
 
-    assert direct_bundle._verify_parent_inventory(
-        inventory,
-        expected_record=record,
-    ) == record.sha256
+    assert (
+        direct_bundle._verify_parent_inventory(
+            inventory,
+            expected_record=record,
+        )
+        == record.sha256
+    )
 
 
 def _source_root(root: Path) -> Path:
@@ -318,8 +319,7 @@ def test_post_smoke_rehash_rejects_an_undeclared_bytecode_cache(
 
     def contaminate_smoke(bundle: direct_bundle.VerifiedRasterTextDirectPaddleBundleV1) -> None:
         _write(
-            bundle.bundle_root
-            / "sidecar/module-root/paddle/__pycache__/generated.cpython-311.pyc",
+            bundle.bundle_root / "sidecar/module-root/paddle/__pycache__/generated.cpython-311.pyc",
             b"unexpected-bytecode-cache",
         )
 

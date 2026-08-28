@@ -33,9 +33,9 @@ from customs_ai_agent.evaluation.source_attested_raster_text_recognizer_training
 
 
 _SHA256 = r"^[a-f0-9]{64}$"
-_COMPILER_REVISION: Final[
-    Literal["source-attested-voyage-replay-family-lanes-v1"]
-] = "source-attested-voyage-replay-family-lanes-v1"
+_COMPILER_REVISION: Final[Literal["source-attested-voyage-replay-family-lanes-v1"]] = (
+    "source-attested-voyage-replay-family-lanes-v1"
+)
 _DEFAULT_SEED = 1_937_429
 _VOYAGE_PATTERN_TEXT = r"^[0-9]{4}[EWNS]$"
 _VOYAGE_PATTERN = re.compile(_VOYAGE_PATTERN_TEXT)
@@ -187,8 +187,7 @@ class VoyageReplayCropV1(TrainingCropV1):
             or self.source_profile_id != recipe.source_profile_id
             or self.label_length != 5
             or self.sample_kind != "span"
-            or self.field_id_sha256
-            != sha256_bytes(b"bill_of_lading:voyage")
+            or self.field_id_sha256 != sha256_bytes(b"bill_of_lading:voyage")
         ):
             raise ValueError("voyage replay crop binding is invalid")
         return self
@@ -201,9 +200,7 @@ class VoyageReplayCorpusManifestV1(_WireModel):
     artifact_kind: Literal["source_attested_public_voyage_replay_crop_manifest"] = (
         "source_attested_public_voyage_replay_crop_manifest"
     )
-    compiler_revision: Literal[
-        "source-attested-voyage-replay-family-lanes-v1"
-    ] = _COMPILER_REVISION
+    compiler_revision: Literal["source-attested-voyage-replay-family-lanes-v1"] = _COMPILER_REVISION
     dataset_id: Literal["synthetic-raster-v1"] = "synthetic-raster-v1"
     split: Literal["train", "development"]
     purpose: Literal["optimizer", "validation-only"]
@@ -250,8 +247,7 @@ class VoyageReplayCorpusManifestV1(_WireModel):
         lane_counts = self.voyage_recipe_lane_counts
         expected_lane_values = {62, 63} if self.split == "train" else {25}
         expected_selection_path = (
-            "synthetic-raster-text-v1/fresh-scope-selections/"
-            f"{self.selection_receipt_sha256}.json"
+            f"synthetic-raster-text-v1/fresh-scope-selections/{self.selection_receipt_sha256}.json"
         )
         if (
             (
@@ -273,14 +269,12 @@ class VoyageReplayCorpusManifestV1(_WireModel):
             or any(value < 1 for value in self.general_field_crop_counts.values())
             or sum(self.all_field_key_crop_counts.values()) != self.total_crop_count
             or any(value < 1 for value in self.all_field_key_crop_counts.values())
-            or self.all_field_key_ids_sha256
-            != _hash_list(sorted(self.all_field_key_crop_counts))
+            or self.all_field_key_ids_sha256 != _hash_list(sorted(self.all_field_key_crop_counts))
             or self.all_field_key_crop_counts.get("bill_of_lading:voyage", 0)
             < self.voyage_crop_count
             or set(self.general_document_type_crop_counts)
             != {"bill_of_lading", "commercial_invoice", "packing_list"}
-            or sum(self.general_document_type_crop_counts.values())
-            != self.general_crop_count
+            or sum(self.general_document_type_crop_counts.values()) != self.general_crop_count
             or any(value < 1 for value in self.general_document_type_crop_counts.values())
             or set(self.general_profile_crop_counts) != set(_PROFILES)
             or sum(self.general_profile_crop_counts.values()) != self.general_crop_count
@@ -349,8 +343,7 @@ def _audit_exclusions() -> tuple[tuple[str, ...], tuple[str, ...]]:
 
     try:
         family_ids = tuple(
-            f"blra-family-{index:03d}"
-            for index in range(bl_audit.BL_REPAIR_AUDIT_FAMILY_COUNT)
+            f"blra-family-{index:03d}" for index in range(bl_audit.BL_REPAIR_AUDIT_FAMILY_COUNT)
         )
         source_sha256s = tuple(
             sorted(
@@ -482,21 +475,18 @@ def _verified_voyage_assets(
                         )
                         if item.field_id == "voyage"
                     ]
-                    if len(voyage) != 1 or _VOYAGE_PATTERN.fullmatch(
-                        voyage[0].candidate.label
-                    ) is None:
+                    if (
+                        len(voyage) != 1
+                        or _VOYAGE_PATTERN.fullmatch(voyage[0].candidate.label) is None
+                    ):
                         raise ValueError
                     candidates[profile_id] = voyage[0]
                     if profile_id in _PROFILES:
                         v2._decode_rgb(
                             raster_path,
                             profile_id=profile_id,
-                            width=v2._integer(
-                                asset.get("width"), minimum=1, maximum=20_000
-                            ),
-                            height=v2._integer(
-                                asset.get("height"), minimum=1, maximum=20_000
-                            ),
+                            width=v2._integer(asset.get("width"), minimum=1, maximum=20_000),
+                            height=v2._integer(asset.get("height"), minimum=1, maximum=20_000),
                         )
                 canonical = candidates["png-216"]
                 if any(candidates[profile] != canonical for profile in _ALL_PROFILES[1:]):
@@ -518,9 +508,7 @@ def _verified_voyage_assets(
     except SourceAttestedVoyageReplayCorpusError:
         raise
     except Exception:
-        raise SourceAttestedVoyageReplayCorpusError(
-            "voyage_replay_source_gold_invalid"
-        ) from None
+        raise SourceAttestedVoyageReplayCorpusError("voyage_replay_source_gold_invalid") from None
 
 
 def _voyage_crop(
@@ -586,9 +574,7 @@ def _compile_voyage_split(
 ]:
     expected_families = 500 if split == "train" else 100
     if len(assets) != expected_families:
-        raise SourceAttestedVoyageReplayCorpusError(
-            "voyage_replay_family_coverage_invalid"
-        )
+        raise SourceAttestedVoyageReplayCorpusError("voyage_replay_family_coverage_invalid")
     crops: list[VoyageReplayCropV1] = []
     labels: dict[str, str] = {}
     profiles: dict[str, str] = {}
@@ -604,9 +590,9 @@ def _compile_voyage_split(
                     item.asset_id,
                 ),
             )
-            selected: tuple[
-                tuple[_VerifiedVoyageAsset, VoyageReplayCropRecipeV1], ...
-            ] = ((source, VOYAGE_REPLAY_RECIPES_V1[ordinal % 8]),)
+            selected: tuple[tuple[_VerifiedVoyageAsset, VoyageReplayCropRecipeV1], ...] = (
+                (source, VOYAGE_REPLAY_RECIPES_V1[ordinal % 8]),
+            )
         else:
             by_kind = {item.fixture_kind: item for item in siblings}
             first = (ordinal * 2) % 8
@@ -617,32 +603,25 @@ def _compile_voyage_split(
         for source, recipe in selected:
             crop, label = _voyage_crop(source=source, split=split, recipe=recipe)
             if crop.sample_id in labels:
-                raise SourceAttestedVoyageReplayCorpusError(
-                    "voyage_replay_sample_collision"
-                )
+                raise SourceAttestedVoyageReplayCorpusError("voyage_replay_sample_collision")
             crops.append(crop)
             labels[crop.sample_id] = label
             profiles[crop.sample_id] = recipe.source_profile_id
             recipes[crop.sample_id] = recipe
     expected = 500 if split == "train" else 200
     lane_counts = {
-        recipe_id: sum(crop.recipe_id == recipe_id for crop in crops)
-        for recipe_id in _RECIPE_BY_ID
+        recipe_id: sum(crop.recipe_id == recipe_id for crop in crops) for recipe_id in _RECIPE_BY_ID
     }
     if (
         len(crops) != expected
         or len(labels) != expected
-        or set(lane_counts.values())
-        != ({62, 63} if split == "train" else {25})
+        or set(lane_counts.values()) != ({62, 63} if split == "train" else {25})
         or any(
-            sha256_bytes(labels[crop.sample_id].encode("utf-8"))
-            != crop.label_sha256
+            sha256_bytes(labels[crop.sample_id].encode("utf-8")) != crop.label_sha256
             for crop in crops
         )
     ):
-        raise SourceAttestedVoyageReplayCorpusError(
-            "voyage_replay_lane_coverage_invalid"
-        )
+        raise SourceAttestedVoyageReplayCorpusError("voyage_replay_lane_coverage_invalid")
     return tuple(sorted(crops, key=lambda item: item.sample_id)), labels, profiles, recipes
 
 
@@ -654,8 +633,7 @@ def _select_general_train_anchors(
     candidates = [
         crop
         for crop in corpus.train_crops
-        if corpus.field_key_by_sample_id.get(crop.sample_id)
-        != "bill_of_lading:voyage"
+        if corpus.field_key_by_sample_id.get(crop.sample_id) != "bill_of_lading:voyage"
     ]
     ranked = sorted(
         candidates,
@@ -678,29 +656,21 @@ def _select_general_train_anchors(
             return True
         return False
 
-    field_keys = sorted(
-        {
-            corpus.field_key_by_sample_id[crop.sample_id]
-            for crop in candidates
-        }
-    )
+    field_keys = sorted({corpus.field_key_by_sample_id[crop.sample_id] for crop in candidates})
     for field_key in field_keys:
         if not take(
-            lambda crop, key=field_key: corpus.field_key_by_sample_id[crop.sample_id]
-            == key
+            lambda crop, key=field_key: corpus.field_key_by_sample_id[crop.sample_id] == key
         ):
             raise SourceAttestedVoyageReplayCorpusError(
                 "voyage_replay_general_anchor_coverage_invalid"
             )
     for document_type in ("bill_of_lading", "commercial_invoice", "packing_list"):
         if not any(
-            corpus.document_type_by_sample_id[crop.sample_id] == document_type
-            for crop in selected
+            corpus.document_type_by_sample_id[crop.sample_id] == document_type for crop in selected
         ) and not take(
-            lambda crop, value=document_type: corpus.document_type_by_sample_id[
-                crop.sample_id
-            ]
-            == value
+            lambda crop, value=document_type: (
+                corpus.document_type_by_sample_id[crop.sample_id] == value
+            )
         ):
             raise SourceAttestedVoyageReplayCorpusError(
                 "voyage_replay_general_anchor_coverage_invalid"
@@ -708,8 +678,7 @@ def _select_general_train_anchors(
     for profile in _PROFILES:
         if not any(corpus.profile_by_sample_id[crop.sample_id] == profile for crop in selected):
             if not take(
-                lambda crop, value=profile: corpus.profile_by_sample_id[crop.sample_id]
-                == value
+                lambda crop, value=profile: corpus.profile_by_sample_id[crop.sample_id] == value
             ):
                 raise SourceAttestedVoyageReplayCorpusError(
                     "voyage_replay_general_anchor_coverage_invalid"
@@ -727,18 +696,13 @@ def _select_general_train_anchors(
         or len(selected_families) != 250
         or len(selected_ids) != 250
         or any(
-            corpus.field_key_by_sample_id[crop.sample_id]
-            == "bill_of_lading:voyage"
+            corpus.field_key_by_sample_id[crop.sample_id] == "bill_of_lading:voyage"
             for crop in selected
         )
-        or set(field_keys)
-        != {corpus.field_key_by_sample_id[crop.sample_id] for crop in selected}
-        or set(_PROFILES)
-        != {corpus.profile_by_sample_id[crop.sample_id] for crop in selected}
+        or set(field_keys) != {corpus.field_key_by_sample_id[crop.sample_id] for crop in selected}
+        or set(_PROFILES) != {corpus.profile_by_sample_id[crop.sample_id] for crop in selected}
     ):
-        raise SourceAttestedVoyageReplayCorpusError(
-            "voyage_replay_general_anchor_coverage_invalid"
-        )
+        raise SourceAttestedVoyageReplayCorpusError("voyage_replay_general_anchor_coverage_invalid")
     return tuple(selected)
 
 
@@ -773,13 +737,11 @@ def _manifest(
 ) -> VoyageReplayCorpusManifestV1:
     fields, documents, profiles = _general_statistics(general_crops, v2_corpus)
     all_fields = dict(fields)
-    all_fields["bill_of_lading:voyage"] = (
-        all_fields.get("bill_of_lading:voyage", 0) + len(voyage_crops)
+    all_fields["bill_of_lading:voyage"] = all_fields.get("bill_of_lading:voyage", 0) + len(
+        voyage_crops
     )
     family_ids = (
-        v2_corpus.train_family_ids
-        if split == "train"
-        else v2_corpus.development_family_ids
+        v2_corpus.train_family_ids if split == "train" else v2_corpus.development_family_ids
     )
     return VoyageReplayCorpusManifestV1(
         split=split,
@@ -794,9 +756,7 @@ def _manifest(
         excluded_family_ids_sha256=v2_corpus.excluded_family_ids_sha256,
         independent_audit_recipe_sha256=bl_audit.BL_REPAIR_AUDIT_RECIPE_SHA256,
         independent_audit_family_ids_sha256=_hash_list(sorted(audit_family_ids)),
-        independent_audit_source_sha256s_sha256=_hash_list(
-            sorted(audit_source_sha256s)
-        ),
+        independent_audit_source_sha256s_sha256=_hash_list(sorted(audit_source_sha256s)),
         voyage_crop_count=len(voyage_crops),
         general_crop_count=len(general_crops),
         total_crop_count=len(voyage_crops) + len(general_crops),
@@ -806,16 +766,10 @@ def _manifest(
             recipe_id: sum(crop.recipe_id == recipe_id for crop in voyage_crops)
             for recipe_id in _RECIPE_BY_ID
         },
-        voyage_sample_ids_sha256=_hash_list(
-            sorted(crop.sample_id for crop in voyage_crops)
-        ),
-        voyage_label_sha256s_sha256=_hash_list(
-            sorted(crop.label_sha256 for crop in voyage_crops)
-        ),
+        voyage_sample_ids_sha256=_hash_list(sorted(crop.sample_id for crop in voyage_crops)),
+        voyage_label_sha256s_sha256=_hash_list(sorted(crop.label_sha256 for crop in voyage_crops)),
         voyage_label_pattern_sha256=_VOYAGE_PATTERN_SHA256,
-        general_sample_ids_sha256=_hash_list(
-            sorted(crop.sample_id for crop in general_crops)
-        ),
+        general_sample_ids_sha256=_hash_list(sorted(crop.sample_id for crop in general_crops)),
         general_field_ids_sha256=_hash_list(sorted(fields)),
         general_field_crop_counts=fields,
         all_field_key_ids_sha256=_hash_list(sorted(all_fields)),
@@ -833,14 +787,10 @@ def build_verified_public_raster_text_voyage_replay_corpus_v1(
     """Build the fixed 750 optimizer and 400 validation crop identities."""
 
     if seed != _DEFAULT_SEED:
-        raise SourceAttestedVoyageReplayCorpusError(
-            "voyage_replay_seed_invalid"
-        )
+        raise SourceAttestedVoyageReplayCorpusError("voyage_replay_seed_invalid")
     try:
         root = v2._root(document_preview_root)
-        parent = v2.build_verified_leakage_safe_public_crop_corpus_v2(
-            root, seed=seed
-        )
+        parent = v2.build_verified_leakage_safe_public_crop_corpus_v2(root, seed=seed)
         raster_receipt, source_receipt, raster_raw, source_raw = _read_dataset(root)
         if (
             parent.source_receipt_sha256 != sha256_bytes(source_raw)
@@ -850,27 +800,19 @@ def build_verified_public_raster_text_voyage_replay_corpus_v1(
             or len(parent.excluded_family_ids) != 500
             or set(parent.train_family_ids) & set(parent.excluded_family_ids)
             or set(parent.train_family_ids) & set(parent.development_family_ids)
-            or not set(parent.development_family_ids).issubset(
-                set(parent.excluded_family_ids)
-            )
+            or not set(parent.development_family_ids).issubset(set(parent.excluded_family_ids))
             or parent.holdout_overlap_count != 0
         ):
-            raise SourceAttestedVoyageReplayCorpusError(
-                "voyage_replay_family_leakage"
-            )
+            raise SourceAttestedVoyageReplayCorpusError("voyage_replay_family_leakage")
         audit_families, audit_sources = _audit_exclusions()
-        selected_families = set(parent.train_family_ids) | set(
-            parent.development_family_ids
-        )
+        selected_families = set(parent.train_family_ids) | set(parent.development_family_ids)
         selected_source_sha256s = {
             str(item.get("source_pdf_sha256"))
             for item in source_receipt["assets"]
             if isinstance(item, dict) and item.get("family_id") in selected_families
         }
         if set(audit_families) & selected_families or set(audit_sources) & selected_source_sha256s:
-            raise SourceAttestedVoyageReplayCorpusError(
-                "voyage_replay_independent_audit_leakage"
-            )
+            raise SourceAttestedVoyageReplayCorpusError("voyage_replay_independent_audit_leakage")
         train_assets = _verified_voyage_assets(
             root=root,
             source_receipt=source_receipt,
@@ -905,11 +847,9 @@ def build_verified_public_raster_text_voyage_replay_corpus_v1(
         development_general = tuple(
             sorted(parent.development_crops, key=lambda item: item.sample_id)
         )
-        if (
-            len(development_general) != 200
-            or {crop.family_id for crop in train_general}
-            & {crop.family_id for crop in development_general}
-        ):
+        if len(development_general) != 200 or {crop.family_id for crop in train_general} & {
+            crop.family_id for crop in development_general
+        }:
             raise SourceAttestedVoyageReplayCorpusError(
                 "voyage_replay_general_anchor_coverage_invalid"
             )
@@ -952,14 +892,11 @@ def build_verified_public_raster_text_voyage_replay_corpus_v1(
             or set(profiles) != set(labels)
             or set(field_keys) != set(labels)
             or any(
-                sha256_bytes(labels[crop.sample_id].encode("utf-8"))
-                != crop.label_sha256
+                sha256_bytes(labels[crop.sample_id].encode("utf-8")) != crop.label_sha256
                 for crop in all_crops
             )
         ):
-            raise SourceAttestedVoyageReplayCorpusError(
-                "voyage_replay_sample_collision"
-            )
+            raise SourceAttestedVoyageReplayCorpusError("voyage_replay_sample_collision")
         train_manifest = _manifest(
             split="train",
             v2_corpus=parent,
@@ -991,9 +928,7 @@ def build_verified_public_raster_text_voyage_replay_corpus_v1(
     except SourceAttestedVoyageReplayCorpusError:
         raise
     except Exception:
-        raise SourceAttestedVoyageReplayCorpusError(
-            "voyage_replay_corpus_invalid"
-        ) from None
+        raise SourceAttestedVoyageReplayCorpusError("voyage_replay_corpus_invalid") from None
 
 
 def prepare_voyage_replay_crop_image_v1(
@@ -1063,15 +998,11 @@ def prepare_voyage_replay_crop_image_v1(
             recipe.maximum_output_width,
             max(8, int(math.ceil(recipe.output_height * image.width / image.height))),
         )
-        return image.resize(
-            (resized_width, recipe.output_height), Image.Resampling.BILINEAR
-        )
+        return image.resize((resized_width, recipe.output_height), Image.Resampling.BILINEAR)
     except SourceAttestedVoyageReplayCorpusError:
         raise
     except Exception:
-        raise SourceAttestedVoyageReplayCorpusError(
-            "voyage_replay_crop_material_invalid"
-        ) from None
+        raise SourceAttestedVoyageReplayCorpusError("voyage_replay_crop_material_invalid") from None
 
 
 __all__ = [

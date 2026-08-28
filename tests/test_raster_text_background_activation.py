@@ -262,9 +262,7 @@ def test_worker_claims_actual_interpreter_pid_from_windows_venv_launcher(
     monkeypatch.setattr(
         background,
         "_spawn_activation",
-        lambda *_args, **_kwargs: _Process(
-            pid=2468, exit_code=0, stdout=_activated_stdout()
-        ),
+        lambda *_args, **_kwargs: _Process(pid=2468, exit_code=0, stdout=_activated_stdout()),
     )
 
     result = background._run_worker_locked(  # noqa: SLF001

@@ -127,15 +127,9 @@ def test_fresh_v2_selection_is_parent_bound_exact_and_leak_free(
         receipt_sha256="a" * 64,
         source_receipt_sha256="c" * 64,
     )
-    split_by_family = {
-        asset.family_id: asset.split for asset in complete_receipt.assets
-    }
-    parent_families = set(parent.fresh_calibration_family_ids) | set(
-        parent.fresh_sealed_family_ids
-    )
-    non_train = {
-        family_id for family_id, split in split_by_family.items() if split != "train"
-    }
+    split_by_family = {asset.family_id: asset.split for asset in complete_receipt.assets}
+    parent_families = set(parent.fresh_calibration_family_ids) | set(parent.fresh_sealed_family_ids)
+    non_train = {family_id for family_id, split in split_by_family.items() if split != "train"}
     excluded = sorted(non_train | parent_families)
     eligible = sorted(set(split_by_family) - set(excluded))
 
@@ -160,20 +154,14 @@ def test_fresh_v2_selection_is_parent_bound_exact_and_leak_free(
     )
     assert hashlib.sha256(
         activation._canonical_json(first.fresh_sealed_family_ids)  # noqa: SLF001
-    ).hexdigest() == (
-        "d65095d4c55883d3195aef3aca076e192faaab819173da8fe18cb1a0964d1816"
-    )
+    ).hexdigest() == ("d65095d4c55883d3195aef3aca076e192faaab819173da8fe18cb1a0964d1816")
     assert activation._digest_model(first) == (  # noqa: SLF001
         "3a32c1dd92d84d43127c6cd186df85bff3aa80e0a98bc7108806d11986c3e145"
     )
     assert set(first.fresh_sealed_family_ids).issubset(eligible)
     assert not set(first.fresh_sealed_family_ids) & set(excluded)
-    assert not set(first.fresh_sealed_family_ids) & set(
-        first.fresh_calibration_family_ids
-    )
-    assert changed_source.parent_selection_receipt_sha256 != (
-        first.parent_selection_receipt_sha256
-    )
+    assert not set(first.fresh_sealed_family_ids) & set(first.fresh_calibration_family_ids)
+    assert changed_source.parent_selection_receipt_sha256 != (first.parent_selection_receipt_sha256)
     assert changed_source.fresh_sealed_family_ids != first.fresh_sealed_family_ids
 
 
@@ -304,8 +292,7 @@ def test_fresh_projection_keeps_complete_families_and_full_gold_identity(
         source_receipt_sha256="b" * 64,
         selection=selection,
         selection_relative_path=(
-            "synthetic-raster-text-v1/fresh-scope-selections/"
-            f"{selection_sha}.json"
+            f"synthetic-raster-text-v1/fresh-scope-selections/{selection_sha}.json"
         ),
         selection_sha256=selection_sha,
         assets=activation._fresh_scope_assets(  # noqa: SLF001
@@ -318,8 +305,7 @@ def test_fresh_projection_keeps_complete_families_and_full_gold_identity(
         root=root,
         context=context,
         source_gold_receipt_relative_path=(
-            f"synthetic-raster-text-v1/fresh-source-gold-receipts/{scope}/"
-            f"{'c' * 64}.json"
+            f"synthetic-raster-text-v1/fresh-source-gold-receipts/{scope}/{'c' * 64}.json"
         ),
         source_gold_receipt_sha256="c" * 64,
         projection_kind=projection_kind,
@@ -394,9 +380,7 @@ def test_fresh_v2_projection_binds_only_the_v2_selection(
         source_receipt=SimpleNamespace(),
         source_receipt_sha256="b" * 64,
         selection=v2,
-        selection_relative_path=(
-            f"synthetic-raster-text-v1/fresh-scope-selections/{v2_sha}.json"
-        ),
+        selection_relative_path=(f"synthetic-raster-text-v1/fresh-scope-selections/{v2_sha}.json"),
         selection_sha256=v2_sha,
         assets=activation._fresh_scope_assets(  # noqa: SLF001
             receipt=complete_receipt,
@@ -408,22 +392,22 @@ def test_fresh_v2_projection_binds_only_the_v2_selection(
         root=root,
         context=v2_context,
         source_gold_receipt_relative_path=(
-            "synthetic-raster-text-v1/fresh-source-gold-receipts/fresh-sealed/"
-            f"{'c' * 64}.json"
+            f"synthetic-raster-text-v1/fresh-source-gold-receipts/fresh-sealed/{'c' * 64}.json"
         ),
         source_gold_receipt_sha256="c" * 64,
         projection_kind="sealed-stage1-50-family-v1",
     )
 
     assert projection.selection_receipt_sha256 == v2_sha
-    assert projection.selection_receipt_relative_path == (
-        v2_context.selection_relative_path
-    )
-    assert len(
-        activation._fresh_projection_assets(  # noqa: SLF001
-            context=v2_context, projection=projection
+    assert projection.selection_receipt_relative_path == (v2_context.selection_relative_path)
+    assert (
+        len(
+            activation._fresh_projection_assets(  # noqa: SLF001
+                context=v2_context, projection=projection
+            )
         )
-    ) == 1_200
+        == 1_200
+    )
 
     v1_sha = activation._digest_model(v1)  # noqa: SLF001
     v1_context = activation._FreshScopeContext(  # noqa: SLF001
@@ -432,9 +416,7 @@ def test_fresh_v2_projection_binds_only_the_v2_selection(
         source_receipt=SimpleNamespace(),
         source_receipt_sha256="b" * 64,
         selection=v1,
-        selection_relative_path=(
-            f"synthetic-raster-text-v1/fresh-scope-selections/{v1_sha}.json"
-        ),
+        selection_relative_path=(f"synthetic-raster-text-v1/fresh-scope-selections/{v1_sha}.json"),
         selection_sha256=v1_sha,
         assets=activation._fresh_scope_assets(  # noqa: SLF001
             receipt=complete_receipt,
@@ -503,9 +485,7 @@ def test_fresh_v2_scope_rejects_parent_family_and_pool_hash_tampering(
             )
         }
     )
-    drifted_pool = selection.model_copy(
-        update={"eligible_family_ids_sha256": "0" * 64}
-    )
+    drifted_pool = selection.model_copy(update={"eligible_family_ids_sha256": "0" * 64})
 
     for invalid in (leaked, drifted_pool):
         with pytest.raises(
@@ -627,21 +607,20 @@ def test_public_fresh_v2_selection_writer_creates_and_binds_the_v1_parent(
         selection_revision="source-receipt-train-holdout-v2",
     )
     raw = root.joinpath(*first[0].split("/")).read_bytes()
-    selection = activation.RasterTextFreshScopeSelectionReceiptV2.model_validate_json(
-        raw
-    )
+    selection = activation.RasterTextFreshScopeSelectionReceiptV2.model_validate_json(raw)
     parent_raw = root.joinpath(
         *selection.parent_selection_receipt_relative_path.split("/")
     ).read_bytes()
 
     assert first == second
     assert hashlib.sha256(raw).hexdigest() == first[1]
-    assert hashlib.sha256(parent_raw).hexdigest() == (
-        selection.parent_selection_receipt_sha256
+    assert hashlib.sha256(parent_raw).hexdigest() == (selection.parent_selection_receipt_sha256)
+    assert (
+        activation._fresh_scope_selection_revision_from_path(  # noqa: SLF001
+            root=root, relative_path=first[0]
+        )
+        == "source-receipt-train-holdout-v2"
     )
-    assert activation._fresh_scope_selection_revision_from_path(  # noqa: SLF001
-        root=root, relative_path=first[0]
-    ) == "source-receipt-train-holdout-v2"
 
 
 def test_existing_fresh_v2_selection_requires_its_exact_v1_parent(
@@ -727,12 +706,8 @@ def test_candidate_runner_supports_fresh_scope_and_immutable_lineage(
         synthetic_raster_receipt_sha256="a" * 64,
         source_receipt_sha256="b" * 64,
         selection_seed_sha256=activation._FRESH_HOLDOUT_SELECTION_SEED_SHA256,  # noqa: SLF001
-        fresh_calibration_family_ids=sorted(
-            f"family-{index}" for index in range(1, 51)
-        ),
-        fresh_sealed_family_ids=sorted(
-            f"family-{index}" for index in range(51, 151)
-        ),
+        fresh_calibration_family_ids=sorted(f"family-{index}" for index in range(1, 51)),
+        fresh_sealed_family_ids=sorted(f"family-{index}" for index in range(51, 151)),
     )
     selection: (
         activation.RasterTextFreshScopeSelectionReceiptV1
@@ -746,8 +721,7 @@ def test_candidate_runner_supports_fresh_scope_and_immutable_lineage(
             synthetic_raster_receipt_sha256="a" * 64,
             source_receipt_sha256="b" * 64,
             parent_selection_receipt_relative_path=(
-                "synthetic-raster-text-v1/fresh-scope-selections/"
-                f"{parent_sha256}.json"
+                f"synthetic-raster-text-v1/fresh-scope-selections/{parent_sha256}.json"
             ),
             parent_selection_receipt_sha256=parent_sha256,
             selection_seed_sha256=(
@@ -755,18 +729,11 @@ def test_candidate_runner_supports_fresh_scope_and_immutable_lineage(
             ),
             excluded_family_ids_sha256="e" * 64,
             eligible_family_ids_sha256="f" * 64,
-            fresh_calibration_family_ids=list(
-                parent_selection.fresh_calibration_family_ids
-            ),
-            fresh_sealed_family_ids=sorted(
-                f"family-{index}" for index in range(151, 251)
-            ),
+            fresh_calibration_family_ids=list(parent_selection.fresh_calibration_family_ids),
+            fresh_sealed_family_ids=sorted(f"family-{index}" for index in range(151, 251)),
         )
     selection_sha256 = activation._digest_model(selection)  # noqa: SLF001
-    selection_relative = (
-        "synthetic-raster-text-v1/fresh-scope-selections/"
-        f"{selection_sha256}.json"
-    )
+    selection_relative = f"synthetic-raster-text-v1/fresh-scope-selections/{selection_sha256}.json"
     activation._write_fresh_scope_selection(  # noqa: SLF001
         root=root, selection=parent_selection
     )
@@ -857,9 +824,7 @@ def test_candidate_runner_supports_fresh_scope_and_immutable_lineage(
         lambda **_kwargs: resolution,
     )
     monkeypatch.setattr(activation, "_gold_for_asset", lambda *_args: gold)
-    monkeypatch.setattr(
-        activation, "_verified_asset", lambda *_args, **_kwargs: b"x"
-    )
+    monkeypatch.setattr(activation, "_verified_asset", lambda *_args, **_kwargs: b"x")
     monkeypatch.setattr(
         activation,
         "inspect_raster_document_structure",
@@ -872,9 +837,7 @@ def test_candidate_runner_supports_fresh_scope_and_immutable_lineage(
     first = activation.run_paddleocr3_synthetic_raster_text_candidates(
         document_preview_root=root,
         runtime_configuration_relative_path="profiles/runtime.json",
-        synthetic_raster_receipt_relative_path=(
-            "synthetic-raster-v1/receipt.json"
-        ),
+        synthetic_raster_receipt_relative_path=("synthetic-raster-v1/receipt.json"),
         scope=scope,
         fresh_selection_revision=selection_revision,
     )
@@ -899,12 +862,7 @@ def test_candidate_runner_supports_fresh_scope_and_immutable_lineage(
     assert bundle.selection_receipt_relative_path == selection_relative
     assert execution.source_gold_receipt_sha256 == first.source_gold_receipt_sha256
     checkpoint_paths = list(
-        (
-            root
-            / "synthetic-raster-text-v1"
-            / "candidate-checkpoints"
-            / scope
-        ).glob("*/*.json")
+        (root / "synthetic-raster-text-v1" / "candidate-checkpoints" / scope).glob("*/*.json")
     )
     assert len(checkpoint_paths) == 1
     checkpoint = activation.RasterTextFreshCandidateCheckpointV1.model_validate_json(
@@ -917,9 +875,7 @@ def test_candidate_runner_supports_fresh_scope_and_immutable_lineage(
     second = activation.run_paddleocr3_synthetic_raster_text_candidates(
         document_preview_root=root,
         runtime_configuration_relative_path="profiles/runtime.json",
-        synthetic_raster_receipt_relative_path=(
-            "synthetic-raster-v1/receipt.json"
-        ),
+        synthetic_raster_receipt_relative_path=("synthetic-raster-v1/receipt.json"),
         scope=scope,
         fresh_selection_revision=selection_revision,
     )
@@ -931,12 +887,8 @@ def test_candidate_runner_supports_fresh_scope_and_immutable_lineage(
     _source, _execution, _bundle, cases = (
         activation.verify_source_attested_fresh_raster_text_evidence(
             document_preview_root=root,
-            source_gold_receipt_relative_path=(
-                first.source_gold_receipt_relative_path
-            ),
-            candidate_execution_relative_path=(
-                first.candidate_execution_relative_path
-            ),
+            source_gold_receipt_relative_path=(first.source_gold_receipt_relative_path),
+            candidate_execution_relative_path=(first.candidate_execution_relative_path),
             scope=scope,
             required_selection_revision=selection_revision,
         )
@@ -957,12 +909,8 @@ def test_candidate_runner_supports_fresh_scope_and_immutable_lineage(
     ):
         activation.verify_source_attested_fresh_raster_text_evidence(
             document_preview_root=root,
-            source_gold_receipt_relative_path=(
-                first.source_gold_receipt_relative_path
-            ),
-            candidate_execution_relative_path=(
-                first.candidate_execution_relative_path
-            ),
+            source_gold_receipt_relative_path=(first.source_gold_receipt_relative_path),
+            candidate_execution_relative_path=(first.candidate_execution_relative_path),
             scope=scope,
             required_selection_revision=wrong_revision,
         )
@@ -987,9 +935,7 @@ def test_fresh_scope_rejects_smoke_build_shortcuts(
         activation.run_paddleocr3_synthetic_raster_text_candidates(
             document_preview_root=root,
             runtime_configuration_relative_path="profiles/runtime.json",
-            synthetic_raster_receipt_relative_path=(
-                "synthetic-raster-v1/receipt.json"
-            ),
+            synthetic_raster_receipt_relative_path=("synthetic-raster-v1/receipt.json"),
             scope="fresh-sealed",
             preflight_smoke_only=True,
         )

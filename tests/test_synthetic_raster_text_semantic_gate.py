@@ -127,9 +127,7 @@ def _passing_matrix_cases() -> list[RasterTextEvaluationCaseV1]:
 
 def test_semantic_canonicalizer_is_strict_and_candidate_independent() -> None:
     value = "  Cafe\u0301\r\n■ \u25a1 \u25aa \u25ab \u2610 \u2611 \u2612\tA■B _ AB__CD x_y ! /  "
-    assert canonicalize_synthetic_raster_semantic_text_v2(value) == (
-        "Café A■B _ ABCD x_y ! /"
-    )
+    assert canonicalize_synthetic_raster_semantic_text_v2(value) == ("Café A■B _ ABCD x_y ! /")
 
 
 @pytest.mark.parametrize("joined", ["■X", "X■", "[■]"])
@@ -146,9 +144,7 @@ def test_v3_removes_only_standalone_attested_circled_digits() -> None:
     circled_digits = " ".join(chr(codepoint) for codepoint in range(0x2460, 0x246A))
     value = f"START\n{circled_digits}\nEND"
 
-    assert canonicalize_synthetic_raster_semantic_text_v2(value) == (
-        f"START {circled_digits} END"
-    )
+    assert canonicalize_synthetic_raster_semantic_text_v2(value) == (f"START {circled_digits} END")
     assert canonicalize_synthetic_raster_semantic_text_v3(value) == "START END"
 
 

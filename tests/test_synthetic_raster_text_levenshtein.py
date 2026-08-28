@@ -20,8 +20,7 @@ def _reference_levenshtein(reference: str, candidate: str) -> int:
                 min(
                     current[-1] + 1,
                     previous[candidate_index] + 1,
-                    previous[candidate_index - 1]
-                    + (reference_character != candidate_character),
+                    previous[candidate_index - 1] + (reference_character != candidate_character),
                 )
             )
         previous = current
@@ -47,9 +46,7 @@ def _reference_levenshtein(reference: str, candidate: str) -> int:
 def test_bit_parallel_levenshtein_matches_reference_for_edge_cases(
     reference: str, candidate: str
 ) -> None:
-    assert _levenshtein(reference, candidate) == _reference_levenshtein(
-        reference, candidate
-    )
+    assert _levenshtein(reference, candidate) == _reference_levenshtein(reference, candidate)
 
 
 def test_bit_parallel_levenshtein_matches_deterministic_randomized_unicode() -> None:
@@ -57,12 +54,8 @@ def test_bit_parallel_levenshtein_matches_deterministic_randomized_unicode() -> 
     alphabet = tuple("abCZ09 _-/\n\u00e9\u0301\ud55c\u754c\U0001f642\U0001f469\u200d\U0001f4bb")
 
     for _ in range(500):
-        reference = "".join(
-            randomizer.choice(alphabet) for _ in range(randomizer.randrange(65))
-        )
-        candidate = "".join(
-            randomizer.choice(alphabet) for _ in range(randomizer.randrange(65))
-        )
+        reference = "".join(randomizer.choice(alphabet) for _ in range(randomizer.randrange(65)))
+        candidate = "".join(randomizer.choice(alphabet) for _ in range(randomizer.randrange(65)))
         expected = _reference_levenshtein(reference, candidate)
         assert _levenshtein(reference, candidate) == expected
         assert _levenshtein(candidate, reference) == expected

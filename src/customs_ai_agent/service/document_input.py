@@ -180,9 +180,7 @@ def _raster_text_request_metadata(
     """Read the text-only profile header without widening the v2 contract."""
 
     base = _request_metadata(request, media_type)
-    raster_text_profile_revision = _single_header(
-        request, "x-raster-text-profile-revision"
-    ).strip()
+    raster_text_profile_revision = _single_header(request, "x-raster-text-profile-revision").strip()
     if _IDENTIFIER.fullmatch(raster_text_profile_revision) is None:
         raise ServiceHttpError("document_request_invalid", 422)
     return RasterTextExtractionRequestMetadataV1(

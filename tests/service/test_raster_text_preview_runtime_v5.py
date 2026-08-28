@@ -235,7 +235,10 @@ def test_v5_receipts_enforce_the_ten_second_latency_gate() -> None:
 
 
 def _write_v5_verifier_materials(
-    *, root: Path, calibration: RasterTextCalibrationReceiptV5, evaluation: RasterTextSealedEvaluationV5
+    *,
+    root: Path,
+    calibration: RasterTextCalibrationReceiptV5,
+    evaluation: RasterTextSealedEvaluationV5,
 ) -> tuple[RasterTextCalibrationReceiptV5, RasterTextSealedEvaluationV5]:
     selection_raw = b"selection"
     selection_path = root / evaluation.selection_receipt_path
@@ -285,9 +288,7 @@ def _write_v5_verifier_materials(
     calibration_projection_raw = _canonical(
         calibration_projection.model_dump(mode="json", warnings=False)
     )
-    sealed_projection_raw = _canonical(
-        sealed_projection.model_dump(mode="json", warnings=False)
-    )
+    sealed_projection_raw = _canonical(sealed_projection.model_dump(mode="json", warnings=False))
     calibration_projection_path = root / calibration.projection_receipt_path
     sealed_projection_path = root / evaluation.projection_receipt_path
     calibration_projection_path.parent.mkdir(parents=True, exist_ok=True)
@@ -300,9 +301,7 @@ def _write_v5_verifier_materials(
                 "calibration_runtime_configuration_sha256": hashlib.sha256(
                     calibration_configuration_raw
                 ).hexdigest(),
-                "projection_receipt_sha256": hashlib.sha256(
-                    calibration_projection_raw
-                ).hexdigest(),
+                "projection_receipt_sha256": hashlib.sha256(calibration_projection_raw).hexdigest(),
             }
         ),
         evaluation.model_copy(
@@ -321,9 +320,7 @@ def _write_v5_verifier_materials(
 def test_v5_verifier_recomputes_projection_quality_and_stage_decision(
     monkeypatch: pytest.MonkeyPatch,
     tmp_path: Path,
-    stage: Literal[
-        "sealed-stage1-50-family-v1", "sealed-stage2-100-family-v1"
-    ],
+    stage: Literal["sealed-stage1-50-family-v1", "sealed-stage2-100-family-v1"],
 ) -> None:
     root = tmp_path / "_local" / "data" / "document-preview"
     root.mkdir(parents=True)
@@ -438,7 +435,9 @@ def test_v5_verifier_recomputes_projection_quality_and_stage_decision(
             ),
         )
 
-    monkeypatch.setattr(runtime, "parse_raster_text_offline_profile", lambda _raw: calibration_profile)
+    monkeypatch.setattr(
+        runtime, "parse_raster_text_offline_profile", lambda _raw: calibration_profile
+    )
     monkeypatch.setattr(
         synthetic_raster_text_activation,
         "verify_source_attested_fresh_raster_text_evidence",
@@ -504,9 +503,7 @@ def test_v5_pointer_writer_derives_staged_and_latency_revisions(
     _pointer, _calibration, evaluation = _v5_models(
         runtime_configuration_sha256=configuration_sha256
     )
-    evaluation_path.write_bytes(
-        _canonical(evaluation.model_dump(mode="json", warnings=False))
-    )
+    evaluation_path.write_bytes(_canonical(evaluation.model_dump(mode="json", warnings=False)))
     profile = SimpleNamespace(
         raster_text_profile_revision=_FINAL_REVISION,
         extractor_revision=_EXTRACTOR_REVISION,

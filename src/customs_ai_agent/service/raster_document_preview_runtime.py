@@ -22,7 +22,17 @@ import tempfile
 import threading
 from dataclasses import dataclass, field, replace
 from pathlib import Path, PurePosixPath
-from typing import TYPE_CHECKING, Any, BinaryIO, Callable, Iterator, Literal, Protocol, Sequence, cast
+from typing import (
+    TYPE_CHECKING,
+    Any,
+    BinaryIO,
+    Callable,
+    Iterator,
+    Literal,
+    Protocol,
+    Sequence,
+    cast,
+)
 
 from pydantic import BaseModel, ConfigDict, Field, ValidationError, field_validator, model_validator
 
@@ -191,8 +201,7 @@ def _is_canonical_raster_bundle_release_binding(
     if _SHA256.fullmatch(bundle_manifest_sha256) is None:
         return False
     return bundle_root_relative_path == (
-        f"{_RASTER_OFFLINE_BUNDLE_RELEASE_COLLECTION_DIRECTORY}/releases/"
-        f"{bundle_manifest_sha256}"
+        f"{_RASTER_OFFLINE_BUNDLE_RELEASE_COLLECTION_DIRECTORY}/releases/{bundle_manifest_sha256}"
     )
 
 
@@ -218,6 +227,7 @@ class PpStructureV3OfflineProfileV1(_RasterWireModel):
     sidecar_configuration_path: str = Field(min_length=1, max_length=240)
     sidecar_configuration_sha256: str = Field(pattern=r"^[a-f0-9]{64}$")
     sidecar_timeout_seconds: int = Field(default=420, ge=1, le=420)
+
     def model_root_relative_path(self) -> PurePosixPath:
         path = PurePosixPath(self.local_model_root)
         if path.is_absolute() or ".." in path.parts or any("//" in part for part in path.parts):
@@ -347,12 +357,9 @@ class PpStructureV3OfflineProfileV2(_RasterWireModel):
             # original bundle root.
             if not _is_explicit_raster_bundle_root(bundle_root):
                 raise ValueError("raster v2 bundle binding is invalid")
-        elif (
-            self.bundle_manifest_sha256 is None
-            or not _is_canonical_raster_bundle_release_binding(
-                bundle_root_relative_path=self.bundle_root_relative_path,
-                bundle_manifest_sha256=self.bundle_manifest_sha256,
-            )
+        elif self.bundle_manifest_sha256 is None or not _is_canonical_raster_bundle_release_binding(
+            bundle_root_relative_path=self.bundle_root_relative_path,
+            bundle_manifest_sha256=self.bundle_manifest_sha256,
         ):
             raise ValueError("raster v2 bundle binding is invalid")
         module_root = PurePosixPath(self.sidecar_module_root)
@@ -1472,11 +1479,9 @@ class PpStructureV3CommandExecutorV2:
             result = PpStructureV3StructureProbeResultV1.model_validate_json(completed.stdout)
         except (ValidationError, UnicodeDecodeError, ValueError):
             raise RasterRuntimeError("raster_native_sidecar_output_invalid") from None
-        if (
-            len(result.pages) != len(pages)
-            or [item.page_number for item in result.pages]
-            != [page.page_number for page in pages]
-        ):
+        if len(result.pages) != len(pages) or [item.page_number for item in result.pages] != [
+            page.page_number for page in pages
+        ]:
             raise RasterRuntimeError("raster_native_sidecar_binding_invalid")
         return result
 
@@ -1594,8 +1599,7 @@ class PpStructureV3CommandExecutorV2:
             # Batch size is therefore evaluation-only provenance; rejecting a
             # verified batch-4 profile here would make a successfully
             # activated profile unavailable for an unrelated reason.
-            or profile.evaluation_batch_size
-            not in {1, _MAX_PPSTRUCTUREV3_EVALUATION_BATCH_ITEMS}
+            or profile.evaluation_batch_size not in {1, _MAX_PPSTRUCTUREV3_EVALUATION_BATCH_ITEMS}
         ):
             raise RasterRuntimeError("raster_service_session_invalid")
         self.verify_runtime_state()
@@ -1860,7 +1864,10 @@ class PpStructureV3ServiceSessionV1:
         raster_profile_revision: str,
         profile: PpStructureV3OfflineProfileV1 | PpStructureV3OfflineProfileV2,
     ) -> RasterOcrLayoutLedgerV2:
-        if profile != self.profile or raster_profile_revision != self.profile.raster_profile_revision:
+        if (
+            profile != self.profile
+            or raster_profile_revision != self.profile.raster_profile_revision
+        ):
             raise RasterRuntimeError("raster_native_sidecar_binding_invalid")
         payload = PpStructureV3CommandExecutor._payload(
             pages,
@@ -1882,9 +1889,7 @@ class PpStructureV3ServiceSessionV1:
                 stdin.write(struct.pack(">Q", len(payload)))
                 stdin.write(payload)
                 stdin.flush()
-                raw = self._read_response_with_timeout(
-                    timeout_seconds=self.request_timeout_seconds
-                )
+                raw = self._read_response_with_timeout(timeout_seconds=self.request_timeout_seconds)
             except RasterRuntimeError:
                 self._discard()
                 raise
@@ -1971,7 +1976,9 @@ class PpStructureV3CandidateBatchSessionV2:
         def _reader() -> None:
             try:
                 result.append(
-                    _read_batch_response_from_pipe(cast(BinaryIO, stdout), maximum_size=maximum_size)
+                    _read_batch_response_from_pipe(
+                        cast(BinaryIO, stdout), maximum_size=maximum_size
+                    )
                 )
             except BaseException as error:  # Kept private at the process boundary.
                 failure.append(error)
