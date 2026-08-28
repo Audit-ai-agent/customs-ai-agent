@@ -12,7 +12,6 @@ from contextlib import contextmanager
 import errno
 import os
 from pathlib import Path
-import sys
 from typing import Any, BinaryIO, Iterator, cast
 
 
@@ -55,17 +54,18 @@ def exclusive_local_process_lock(lock_path: Path) -> Iterator[None]:
         if lock_path.is_symlink():
             raise LocalProcessLockInvalid
         _ensure_one_lock_byte(stream)
-        if sys.platform == "win32":
+        if os.name == "nt":
             import msvcrt
 
+            msvcrt_module = cast(Any, msvcrt)
             try:
-                msvcrt.locking(stream.fileno(), msvcrt.LK_NBLCK, 1)
+                msvcrt_module.locking(stream.fileno(), msvcrt_module.LK_NBLCK, 1)
             except OSError:
                 raise LocalProcessLockBusy from None
 
             def unlock() -> None:
                 stream.seek(0)
-                msvcrt.locking(stream.fileno(), msvcrt.LK_UNLCK, 1)
+                msvcrt_module.locking(stream.fileno(), msvcrt_module.LK_UNLCK, 1)
 
         else:
             try:

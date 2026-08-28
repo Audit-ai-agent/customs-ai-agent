@@ -18,7 +18,6 @@ import os
 import re
 import struct
 import subprocess
-import sys
 import tempfile
 import threading
 from dataclasses import dataclass, field, replace
@@ -914,10 +913,21 @@ def _isolated_v2_sidecar_environment(
         raise RasterRuntimeError("raster_native_sidecar_home_invalid") from None
 
     home_value = str(resolved_home)
-    drive = resolved_home.drive
-    home_path = home_value[len(drive) :] if drive and home_value.startswith(drive) else home_value
-    if not home_value or not drive or not home_path.startswith("\\"):
-        raise RasterRuntimeError("raster_native_sidecar_home_invalid")
+    if os.name == "nt":
+        drive = resolved_home.drive
+        home_path = (
+            home_value[len(drive) :] if drive and home_value.startswith(drive) else home_value
+        )
+        if not home_value or not drive or not home_path.startswith("\\"):
+            raise RasterRuntimeError("raster_native_sidecar_home_invalid")
+    else:
+        # The pinned production sidecar is Windows-only, but the isolation
+        # contract is exercised on Linux CI with a mocked child.  POSIX has no
+        # drive component; the absolute home path itself is the home path.
+        drive = ""
+        home_path = home_value
+        if not home_value or not resolved_home.is_absolute() or not home_path.startswith("/"):
+            raise RasterRuntimeError("raster_native_sidecar_home_invalid")
     allowed = {
         key: value
         for key, value in os.environ.items()
@@ -2700,7 +2710,7 @@ def _document_preview_root(path: Path) -> Path:
 def _windows_operational_sidecar_path(path: Path) -> Path:
     """Return a validated short Windows alias for deep sidecar package paths."""
 
-    if sys.platform != "win32":
+    if os.name != "nt":
         return path
     try:
         import ctypes
@@ -2708,7 +2718,7 @@ def _windows_operational_sidecar_path(path: Path) -> Path:
         value = str(path)
         if value.isascii() and len(value) <= 220:
             return path
-        kernel32 = ctypes.windll.kernel32
+        kernel32 = getattr(ctypes, "windll").kernel32
         required = kernel32.GetShortPathNameW(value, None, 0)
         if required <= 0:
             raise OSError("short path unavailable")

@@ -6195,7 +6195,7 @@ def _run_fixed_v19_fine_tune_subprocess(
     repository, tool, tool_sha256 = _v19_fine_tune_repo_and_tool()
     try:
         interpreter = Path(sys.executable)
-        if interpreter.is_symlink():
+        if os.name == "nt" and interpreter.is_symlink():
             raise OSError
         interpreter = interpreter.resolve(strict=True)
         if not interpreter.is_file():
@@ -6491,7 +6491,7 @@ def _run_fixed_voyage_replay_subprocess(
     repository, tool, tool_sha256 = _voyage_replay_repo_and_tool()
     try:
         interpreter = Path(sys.executable)
-        if interpreter.is_symlink():
+        if os.name == "nt" and interpreter.is_symlink():
             raise OSError
         interpreter = interpreter.resolve(strict=True)
         if not interpreter.is_file():

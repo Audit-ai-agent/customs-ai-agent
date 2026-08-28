@@ -17,7 +17,6 @@ import os
 from dataclasses import dataclass
 from pathlib import Path, PurePosixPath
 import re
-import sys
 from typing import Any, Iterable, Mapping, Protocol
 
 from pydantic import BaseModel, ConfigDict, Field, ValidationError, field_validator, model_validator
@@ -431,7 +430,7 @@ def _windows_operational_path(path: Path, *, force_short: bool = False) -> Path:
     host this fixed native bundle and fails closed.
     """
 
-    if sys.platform != "win32":
+    if os.name != "nt":
         return path
     try:
         import ctypes
@@ -439,7 +438,7 @@ def _windows_operational_path(path: Path, *, force_short: bool = False) -> Path:
         value = str(path)
         if not force_short and value.isascii() and len(value) <= 220:
             return path
-        kernel32 = ctypes.windll.kernel32
+        kernel32 = getattr(ctypes, "windll").kernel32
         required = kernel32.GetShortPathNameW(value, None, 0)
         if required <= 0:
             raise OSError("short path unavailable")

@@ -768,13 +768,13 @@ def _windows_operational_model_path(path: Path) -> Path:
     keeps those two operations on the exact already-validated directory.
     """
 
-    if sys.platform != "win32":
+    if os.name != "nt":
         return path
     try:
         import ctypes
 
         value = str(path)
-        kernel32 = ctypes.windll.kernel32
+        kernel32 = getattr(ctypes, "windll").kernel32
         required = kernel32.GetShortPathNameW(value, None, 0)
         if required <= 0:
             raise OSError("short path unavailable")

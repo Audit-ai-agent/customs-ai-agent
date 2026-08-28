@@ -1611,11 +1611,11 @@ def _model_artifact_hashes(directory: Path) -> dict[str, str]:
 def _native_export_prefix(text_rec_directory: Path) -> Path:
     try:
         canonical = text_rec_directory.resolve(strict=True)
-        if sys.platform != "win32":
+        if os.name != "nt":
             return canonical / "inference"
         import ctypes
 
-        kernel32 = ctypes.windll.kernel32
+        kernel32 = getattr(ctypes, "windll").kernel32
         required = kernel32.GetShortPathNameW(str(canonical), None, 0)
         if not isinstance(required, int) or required < 1:
             raise OSError

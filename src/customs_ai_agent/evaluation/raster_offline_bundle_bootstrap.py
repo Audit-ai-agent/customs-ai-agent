@@ -34,6 +34,11 @@ import uuid
 
 from pydantic import ValidationError
 
+from customs_ai_agent.evaluation.local_process_lock import (
+    LocalProcessLockBusy,
+    LocalProcessLockInvalid,
+    exclusive_local_process_lock,
+)
 from customs_ai_agent.evaluation.raster_offline_bundle import (
     RasterOfflineBundleError,
     RasterOfflineBundleManifestV1,
@@ -386,7 +391,7 @@ def _document_preview_root(path: Path) -> Path:
 def _windows_operational_path(path: Path, *, force_short: bool = False) -> Path:
     """Return the existing short path used for deep Windows package trees."""
 
-    if sys.platform != "win32":
+    if os.name != "nt":
         return path
     try:
         import ctypes
@@ -394,7 +399,7 @@ def _windows_operational_path(path: Path, *, force_short: bool = False) -> Path:
         value = str(path)
         if not force_short and value.isascii() and len(value) <= 220:
             return path
-        kernel32 = ctypes.windll.kernel32
+        kernel32 = getattr(ctypes, "windll").kernel32
         required = kernel32.GetShortPathNameW(value, None, 0)
         if required <= 0:
             raise OSError("short path unavailable")
@@ -419,7 +424,7 @@ def _windows_extended_write_path(path: Path) -> Path:
     native execution continue to use canonical/short paths.
     """
 
-    if sys.platform != "win32":
+    if os.name != "nt":
         return path
     value = str(path)
     if value.startswith("\\\\?\\"):
@@ -455,7 +460,7 @@ def _project_root() -> Path:
 
 
 def _ensure_supported_platform() -> None:
-    if sys.platform != "win32" or sys.version_info[:2] != (3, 11) or sys.maxsize <= 2**32:
+    if os.name != "nt" or sys.version_info[:2] != (3, 11) or sys.maxsize <= 2**32:
         raise RasterOfflineBundleBootstrapError("raster_bundle_bootstrap_platform_unsupported")
 
 
@@ -473,52 +478,26 @@ def _required_parent_inventory() -> dict[str, object]:
 
 @contextmanager
 def _bootstrap_lock(root: Path) -> Iterator[None]:
-    """Serialize publishing with an OS-owned Windows lock, not a stale marker.
+    """Serialize publishing with an OS-owned lock, not a stale marker.
 
     The prior create-only file lock remained forever if a host interrupted the
     bootstrap process.  That made an otherwise non-human one-command flow
     require somebody to delete a random lock file.  A one-byte advisory lock
     is held by the process handle instead: a living concurrent bootstrap is
-    still rejected, while Windows releases the lock automatically if its owner
-    dies.  The file is intentionally retained as an inert lock target.
+    still rejected, while the operating system releases the lock automatically
+    if its owner dies.  The file is intentionally retained as an inert target.
+    The shared lock seam uses ``msvcrt`` in production and ``fcntl`` in Linux
+    CI so the same transaction boundary can be tested on both hosts.
     """
 
-    if sys.platform != "win32":
-        raise RasterOfflineBundleBootstrapError("raster_bundle_bootstrap_platform_unsupported")
-
     lock = root / _BOOTSTRAP_LOCK_NAME
-    stream = None
     try:
-        if lock.is_symlink():
-            raise RasterOfflineBundleBootstrapError("raster_bundle_bootstrap_lock_invalid")
-        import msvcrt
-
-        stream = lock.open("a+b")
-        if lock.is_symlink():
-            raise RasterOfflineBundleBootstrapError("raster_bundle_bootstrap_lock_invalid")
-        stream.seek(0, os.SEEK_END)
-        if stream.tell() == 0:
-            stream.write(b"\0")
-            stream.flush()
-            os.fsync(stream.fileno())
-        stream.seek(0)
-        msvcrt.locking(stream.fileno(), msvcrt.LK_NBLCK, 1)
-    except (ImportError, OSError):
-        if stream is not None:
-            stream.close()
+        with exclusive_local_process_lock(lock):
+            yield
+    except LocalProcessLockBusy:
         raise RasterOfflineBundleBootstrapError("raster_bundle_bootstrap_locked") from None
-    try:
-        yield
-    finally:
-        try:
-            if stream is not None:
-                stream.seek(0)
-                msvcrt.locking(stream.fileno(), msvcrt.LK_UNLCK, 1)
-        except (OSError, UnboundLocalError):
-            pass
-        finally:
-            if stream is not None:
-                stream.close()
+    except LocalProcessLockInvalid:
+        raise RasterOfflineBundleBootstrapError("raster_bundle_bootstrap_lock_invalid") from None
 
 
 def _remove_owned_tree(root: Path, path: Path, *, prefix: str) -> None:

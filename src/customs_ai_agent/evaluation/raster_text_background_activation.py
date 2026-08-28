@@ -127,7 +127,11 @@ def _command_binding(document_preview_root: Path) -> dict[str, str]:
     workdir = _repository_root()
     interpreter = Path(sys.executable)
     try:
-        if interpreter.is_symlink():
+        # The production bundle is Windows-only and keeps rejecting a
+        # redirectable interpreter path.  POSIX virtual environments normally
+        # expose ``sys.executable`` as a symlink, so CI may resolve and hash its
+        # exact target instead of making the security tests Windows-host-only.
+        if os.name == "nt" and interpreter.is_symlink():
             raise OSError
         interpreter = interpreter.resolve(strict=True)
         if not interpreter.is_file():
@@ -484,9 +488,7 @@ class _WindowsProcessApi(Protocol):
 
 class _CtypesWindowsProcessApi:
     def __init__(self) -> None:
-        if sys.platform != "win32":
-            raise OSError("windows process API unavailable")
-        kernel32 = ctypes.WinDLL("kernel32", use_last_error=True)
+        kernel32 = ctypes.WinDLL("kernel32", use_last_error=True)  # type: ignore[attr-defined]
         kernel32.OpenProcess.argtypes = [wintypes.DWORD, wintypes.BOOL, wintypes.DWORD]
         kernel32.OpenProcess.restype = wintypes.HANDLE
         kernel32.GetExitCodeProcess.argtypes = [wintypes.HANDLE, wintypes.LPDWORD]
@@ -513,9 +515,7 @@ class _CtypesWindowsProcessApi:
         self._kernel32.CloseHandle(handle)
 
     def last_error(self) -> int:
-        if sys.platform != "win32":
-            raise OSError("windows process API unavailable")
-        return int(ctypes.get_last_error())
+        return int(getattr(ctypes, "get_last_error")())
 
 
 def _windows_pid_alive(pid: int, *, api: _WindowsProcessApi | None = None) -> bool:
