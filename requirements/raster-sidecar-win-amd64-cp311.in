@@ -1,0 +1,5 @@
+# This closure is installed only into raster-offline-bundle-v1/sidecar/module-root.
+# It is intentionally separate from the lightweight parent Agent environment.
+paddleocr==3.7.0
+paddlex[ocr]==3.7.2
+paddlepaddle==3.3.1

@@ -36,6 +36,7 @@ def build_metadata(settings: ServiceSettings) -> dict[str, Any]:
             "official_trade_guidance",
             "profile_mode_handshake",
             "human_review_document_preview",
+            "human_review_raster_document_preview",
         ],
         "limits": {
             "max_body_bytes": settings.max_body_bytes,
@@ -66,6 +67,12 @@ def build_metadata(settings: ServiceSettings) -> dict[str, Any]:
             ),
             "document_extraction_result_v1_sha256": schema_sha256(
                 "backend", "v3", "document-extraction-result"
+            ),
+            "raster_document_extraction_request_v2_sha256": schema_sha256(
+                "backend", "v3", "raster-document-extraction-request"
+            ),
+            "raster_document_extraction_result_v2_sha256": schema_sha256(
+                "backend", "v3", "raster-document-extraction-result"
             ),
             "evidence_retrieval_v3_sha256": schema_sha256("evidence", "v3", "rag-retrieval"),
             "evidence_guidance_query_v3_sha256": schema_sha256("evidence", "v3", "guidance-query"),

@@ -35,7 +35,23 @@ param(
     # Explicitly opt this one Agent process into local synthetic PDF pointer
     # discovery.  It never enables a preview by itself: a separate sealed
     # source-attested evaluator must first atomically write the fixed pointer.
-    [switch]$EnableSourceAttestedPdfPreviewAutoActivation
+    [switch]$EnableSourceAttestedPdfPreviewAutoActivation,
+
+    # Enables only fixed-path discovery of a previously auto-built raster
+    # activation pointer.  This never installs OCR packages, selects a model,
+    # or bypasses the sealed synthetic-raster Gate.
+    [switch]$EnableSourceAttestedRasterPreviewAutoActivation,
+
+    # Enables only fixed-path discovery of the independent text-only raster
+    # OCR pointer.  It is deliberately separate from the structured
+    # OCR/Layout profile, which has different evidence and quality Gates.
+    [switch]$EnableSourceAttestedRasterTextPreviewAutoActivation,
+
+    # A Task worktree can contain the Agent source while the deliberately
+    # shared local profiles, pointers, and Backend importer remain below the
+    # real workspace root.  Keep the historical inferred root as the default,
+    # but let an explicit local root bind all of those inputs consistently.
+    [string]$WorkspaceRoot
 )
 
 Set-StrictMode -Version Latest
@@ -122,7 +138,16 @@ if ($MyInvocation.InvocationName -ne ".") {
     throw "agent_profile_dot_source_required"
 }
 
-$workspaceRoot = (Resolve-Path -LiteralPath (Join-Path $PSScriptRoot "..\..")).Path
+$inferredWorkspaceRoot = (Resolve-Path -LiteralPath (Join-Path $PSScriptRoot "..\..")).Path
+if ([string]::IsNullOrWhiteSpace($WorkspaceRoot)) {
+    $workspaceRoot = $inferredWorkspaceRoot
+} else {
+    $workspaceItem = Get-Item -LiteralPath $WorkspaceRoot -Force -ErrorAction SilentlyContinue
+    if ($null -eq $workspaceItem -or -not $workspaceItem.PSIsContainer) {
+        throw "agent_profile_workspace_root_invalid"
+    }
+    $workspaceRoot = $workspaceItem.FullName
+}
 $localProfilesRoot = Join-Path $workspaceRoot "_local\profiles"
 
 switch ($Profile) {
@@ -271,6 +296,38 @@ if ($EnableSourceAttestedPdfPreviewAutoActivation) {
     Remove-Item -LiteralPath "Env:CUSTOMS_AGENT_DOCUMENT_PREVIEW_AUTO_ACTIVATION" -ErrorAction SilentlyContinue
     Remove-Item -LiteralPath "Env:CUSTOMS_AGENT_DOCUMENT_PREVIEW_APPROVAL_PATH" -ErrorAction SilentlyContinue
     Remove-Item -LiteralPath "Env:CUSTOMS_AGENT_DOCUMENT_PREVIEW_APPROVAL_SHA256" -ErrorAction SilentlyContinue
+}
+
+if ($EnableSourceAttestedRasterPreviewAutoActivation) {
+    $rasterPreviewRoot = Join-Path $workspaceRoot "_local\data\document-preview"
+    $rasterApprovalDirectory = Join-Path $rasterPreviewRoot "approvals"
+    $env:CUSTOMS_AGENT_RASTER_PREVIEW_AUTO_ACTIVATION = "source-attested-synthetic-raster-v1"
+    $env:CUSTOMS_AGENT_RASTER_PREVIEW_APPROVAL_PATH = Join-Path $rasterApprovalDirectory "raster-preview-active.json"
+    # Dynamic source-attested activation always re-reads the current atomic
+    # pointer.  A shell SHA would turn it back into a stale static mode.
+    Remove-Item -LiteralPath "Env:CUSTOMS_AGENT_RASTER_PREVIEW_APPROVAL_SHA256" -ErrorAction SilentlyContinue
+} elseif (Test-Path -LiteralPath "Env:CUSTOMS_AGENT_RASTER_PREVIEW_AUTO_ACTIVATION") {
+    # Preserve a deliberately configured static raster pair, but clean up
+    # only an automatic mode that this importer previously selected.
+    Remove-Item -LiteralPath "Env:CUSTOMS_AGENT_RASTER_PREVIEW_AUTO_ACTIVATION" -ErrorAction SilentlyContinue
+    Remove-Item -LiteralPath "Env:CUSTOMS_AGENT_RASTER_PREVIEW_APPROVAL_PATH" -ErrorAction SilentlyContinue
+    Remove-Item -LiteralPath "Env:CUSTOMS_AGENT_RASTER_PREVIEW_APPROVAL_SHA256" -ErrorAction SilentlyContinue
+}
+
+if ($EnableSourceAttestedRasterTextPreviewAutoActivation) {
+    $rasterTextPreviewRoot = Join-Path $workspaceRoot "_local\data\document-preview"
+    $rasterTextApprovalDirectory = Join-Path $rasterTextPreviewRoot "approvals"
+    $env:CUSTOMS_AGENT_RASTER_TEXT_PREVIEW_AUTO_ACTIVATION = "source-attested-synthetic-raster-text-v1"
+    $env:CUSTOMS_AGENT_RASTER_TEXT_PREVIEW_APPROVAL_PATH = Join-Path $rasterTextApprovalDirectory "raster-text-active.json"
+    # Like the structured raster mode, auto discovery and a static SHA pin
+    # are mutually exclusive.
+    Remove-Item -LiteralPath "Env:CUSTOMS_AGENT_RASTER_TEXT_PREVIEW_APPROVAL_SHA256" -ErrorAction SilentlyContinue
+} elseif (Test-Path -LiteralPath "Env:CUSTOMS_AGENT_RASTER_TEXT_PREVIEW_AUTO_ACTIVATION") {
+    # Preserve a deliberately configured static text pair, but remove only a
+    # previous automatic selection when returning to a normal profile.
+    Remove-Item -LiteralPath "Env:CUSTOMS_AGENT_RASTER_TEXT_PREVIEW_AUTO_ACTIVATION" -ErrorAction SilentlyContinue
+    Remove-Item -LiteralPath "Env:CUSTOMS_AGENT_RASTER_TEXT_PREVIEW_APPROVAL_PATH" -ErrorAction SilentlyContinue
+    Remove-Item -LiteralPath "Env:CUSTOMS_AGENT_RASTER_TEXT_PREVIEW_APPROVAL_SHA256" -ErrorAction SilentlyContinue
 }
 
 if ($null -eq $guidanceProfile) {

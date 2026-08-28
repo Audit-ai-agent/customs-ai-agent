@@ -16,9 +16,10 @@ from typing import Any, AsyncIterator, Callable
 from uuid import uuid4
 
 from fastapi import FastAPI, Request
-from fastapi.responses import JSONResponse
+from fastapi.responses import JSONResponse, Response
 
 from customs_ai_agent.contracts import get_schema
+from customs_ai_agent.schemas.raster_text_extraction import RasterTextExtractionResultV1
 from customs_ai_agent.service.auth import bearer_authorized
 from customs_ai_agent.service.controller import AgentServiceController, ServiceRuntime
 from customs_ai_agent.service.document_extraction import (
@@ -28,8 +29,39 @@ from customs_ai_agent.service.document_extraction import (
     LocalDocumentPreviewEngine,
     extract_document_preview,
 )
-from customs_ai_agent.service.document_input import read_bounded_document_body
+from customs_ai_agent.service.document_input import (
+    read_bounded_document_body,
+    read_bounded_raster_document_body,
+    read_bounded_raster_text_document_body,
+)
 from customs_ai_agent.service.document_preview_runtime import resolve_document_preview_engine
+from customs_ai_agent.service.raster_document_extraction import (
+    DisabledRasterDocumentPreviewEngine,
+    LocalRasterDocumentPreviewEngine,
+    RasterDocumentPreviewExecutionError,
+    RasterDocumentPreviewInputError,
+    RasterDocumentPreviewUnavailable,
+    extract_raster_document_preview,
+)
+from customs_ai_agent.service.raster_document_preview_runtime import (
+    AutoActivatingSourceAttestedRasterPreviewRuntime,
+    RasterDocumentPreviewRuntime,
+    StaticRasterDocumentPreviewRuntime,
+    resolve_raster_document_preview_engine,
+)
+from customs_ai_agent.service.raster_text_extraction import (
+    DisabledRasterTextPreviewEngine,
+    LocalRasterTextPreviewEngine,
+    RasterTextPreviewExecutionError,
+    RasterTextPreviewInputError,
+    extract_raster_text_preview,
+)
+from customs_ai_agent.service.raster_text_preview_runtime import (
+    AutoActivatingSourceAttestedRasterTextPreviewRuntime,
+    RasterTextPreviewRuntime,
+    StaticRasterTextPreviewRuntime,
+    resolve_raster_text_preview_engine,
+)
 from customs_ai_agent.service.errors import ServiceHttpError
 from customs_ai_agent.service.progress import PROGRESS
 from customs_ai_agent.service.input import (
@@ -67,6 +99,8 @@ _PRE_EXECUTION_503_RESPONSE: dict[str, Any] = {
         }
     },
 }
+_RASTER_TEXT_AUTO_ACTIVATION_MODE = "source-attested-synthetic-raster-text-v1"
+_RASTER_TEXT_PREWARM_POLL_SECONDS = 1.0
 
 
 class _UnavailableRuntime:
@@ -145,12 +179,57 @@ def _profile_readiness_probe(settings: ServiceSettings) -> Callable[[], object]:
     return profile_readiness_probe(settings)
 
 
+def _raster_text_prewarm_callable(
+    *,
+    settings: ServiceSettings,
+    runtime: RasterTextPreviewRuntime,
+    injected_engine: LocalRasterTextPreviewEngine | None,
+) -> Callable[[], object] | None:
+    """Return the one supported automatic warmup hook, if this process owns it.
+
+    Static and test-injected preview paths must remain inert.  The automatic
+    pointer mode can start with no pointer at all, so the hook is deliberately
+    selected without calling ``status()`` or loading any material on the event
+    loop.  Runtime implementations own the fail-closed pointer validation.
+    """
+
+    if (
+        settings.raster_text_preview_auto_activation_mode
+        != _RASTER_TEXT_AUTO_ACTIVATION_MODE
+        or injected_engine is not None
+    ):
+        return None
+    candidate = getattr(runtime, "prewarm", None)
+    return candidate if callable(candidate) else None
+
+
+async def _run_raster_text_prewarm_loop(prewarm: Callable[[], object]) -> None:
+    """Prewarm at most one automatic text binding, then poll for replacements."""
+
+    while True:
+        try:
+            # Native sidecar startup is blocking by design.  Keeping it in a
+            # single worker thread leaves FastAPI startup/readiness and the
+            # status endpoint responsive while no warm binding exists yet.
+            await asyncio.to_thread(prewarm)
+        except asyncio.CancelledError:
+            raise
+        except Exception:
+            # Pointer absence/drift normally returns an unavailable status.
+            # This narrow guard covers an implementation fault without
+            # exposing raw model/package errors or stopping future polls.
+            safe_log(LOGGER, logging.WARNING, "raster_text_prewarm_failed")
+        await asyncio.sleep(_RASTER_TEXT_PREWARM_POLL_SECONDS)
+
+
 def create_app(
     settings: ServiceSettings | None = None,
     *,
     runtime_factory: Callable[[ServiceSettings], ServiceRuntime] | None = None,
     readiness_probe_factory: Callable[[ServiceSettings], Callable[[], object]] | None = None,
     document_preview_engine: LocalDocumentPreviewEngine | None = None,
+    raster_document_preview_engine: LocalRasterDocumentPreviewEngine | None = None,
+    raster_text_preview_engine: LocalRasterTextPreviewEngine | None = None,
 ) -> FastAPI:
     """Create the text-review service plus its isolated preview boundary."""
 
@@ -163,6 +242,18 @@ def create_app(
     knowledge_response_schema = get_schema("backend", "v3", "knowledge-answer-response")
     document_extraction_request_schema = get_schema("backend", "v3", "document-extraction-request")
     document_extraction_result_schema = get_schema("backend", "v3", "document-extraction-result")
+    raster_document_extraction_request_schema = get_schema(
+        "backend", "v3", "raster-document-extraction-request"
+    )
+    raster_document_extraction_result_schema = get_schema(
+        "backend", "v3", "raster-document-extraction-result"
+    )
+    raster_text_extraction_request_schema = get_schema(
+        "backend", "v3", "raster-text-extraction-request"
+    )
+    raster_text_extraction_result_schema = get_schema(
+        "backend", "v3", "raster-text-extraction-result"
+    )
     make_runtime = runtime_factory or _profile_runtime
     make_readiness_probe = readiness_probe_factory or _profile_readiness_probe
     # Direct injection remains a test-only seam.  Normal startup may resolve
@@ -187,6 +278,94 @@ def create_app(
         else preview_resolution.engine
         if preview_resolution is not None
         else DisabledDocumentPreviewEngine()
+    )
+    # Raster retains the hash-pinned static pointer.  Its explicit automatic
+    # source-attested mode is a separate immutable binding facade: the same
+    # pointer snapshot selects both OCR and reviewer-page rendering on each
+    # request, and a bad replacement clears the prior binding.
+    raster_preview_resolution = (
+        None
+        if (
+            raster_document_preview_engine is not None
+            or active_settings.raster_document_preview_auto_activation_mode
+            == "source-attested-synthetic-raster-v1"
+        )
+        else resolve_raster_document_preview_engine(
+            approval_path=active_settings.raster_document_preview_approval_path,
+            approval_sha256=active_settings.raster_document_preview_approval_sha256,
+        )
+    )
+    active_raster_document_preview_runtime: RasterDocumentPreviewRuntime = (
+        StaticRasterDocumentPreviewRuntime(
+            engine=raster_document_preview_engine,
+            available=False,
+        )
+        if raster_document_preview_engine is not None
+        else AutoActivatingSourceAttestedRasterPreviewRuntime(
+            approval_path=active_settings.raster_document_preview_approval_path
+        )
+        if active_settings.raster_document_preview_auto_activation_mode
+        == "source-attested-synthetic-raster-v1"
+        and active_settings.raster_document_preview_approval_path is not None
+        else StaticRasterDocumentPreviewRuntime(
+            engine=(
+                raster_preview_resolution.engine
+                if raster_preview_resolution is not None
+                else DisabledRasterDocumentPreviewEngine()
+            ),
+            page_renderer=(
+                None
+                if raster_preview_resolution is None
+                else raster_preview_resolution.page_renderer
+            ),
+            raster_profile_revision=(
+                None
+                if raster_preview_resolution is None
+                else raster_preview_resolution.raster_profile_revision
+            ),
+            available=(
+                raster_preview_resolution is not None
+                and raster_preview_resolution.status == "approved"
+            ),
+        )
+    )
+    raster_text_preview_resolution = (
+        None
+        if (
+            raster_text_preview_engine is not None
+            or active_settings.raster_text_preview_auto_activation_mode
+            == "source-attested-synthetic-raster-text-v1"
+        )
+        else resolve_raster_text_preview_engine(
+            approval_path=active_settings.raster_text_preview_approval_path,
+            approval_sha256=active_settings.raster_text_preview_approval_sha256,
+        )
+    )
+    active_raster_text_preview_runtime: RasterTextPreviewRuntime = (
+        StaticRasterTextPreviewRuntime(engine=raster_text_preview_engine, available=False)
+        if raster_text_preview_engine is not None
+        else AutoActivatingSourceAttestedRasterTextPreviewRuntime(
+            approval_path=active_settings.raster_text_preview_approval_path
+        )
+        if active_settings.raster_text_preview_auto_activation_mode
+        == "source-attested-synthetic-raster-text-v1"
+        and active_settings.raster_text_preview_approval_path is not None
+        else StaticRasterTextPreviewRuntime(
+            engine=(
+                raster_text_preview_resolution.engine
+                if raster_text_preview_resolution is not None
+                else DisabledRasterTextPreviewEngine()
+            ),
+            raster_text_profile_revision=(
+                None
+                if raster_text_preview_resolution is None
+                else raster_text_preview_resolution.raster_text_profile_revision
+            ),
+            available=(
+                raster_text_preview_resolution is not None
+                and raster_text_preview_resolution.status == "available"
+            ),
+        )
     )
 
     @asynccontextmanager
@@ -214,10 +393,48 @@ def create_app(
         app.state.controller = controller
         app.state.body_admission = asyncio.Semaphore(active_settings.max_concurrency)
         app.state.document_preview_admission = asyncio.Semaphore(active_settings.max_concurrency)
+        # The approved raster profile is CPU-thread-bound and owns exactly one
+        # warm native sidecar.  Keep OCR and reviewer-page rendering on the
+        # same admission lane so a viewer request cannot oversubscribe it or
+        # race a profile replacement with an unrelated native job.
+        app.state.raster_document_preview_admission = asyncio.Semaphore(
+            active_settings.raster_max_concurrency
+        )
+        raster_text_prewarm = _raster_text_prewarm_callable(
+            settings=active_settings,
+            runtime=active_raster_text_preview_runtime,
+            injected_engine=raster_text_preview_engine,
+        )
+        # Do not await native startup here.  In automatic pointer mode this
+        # one task also notices a pointer written after service startup and a
+        # later atomic pointer replacement.  It serially awaits each blocking
+        # call, so it never creates overlapping native warmups.
+        raster_text_prewarm_task: asyncio.Task[None] | None = (
+            asyncio.create_task(_run_raster_text_prewarm_loop(raster_text_prewarm))
+            if raster_text_prewarm is not None
+            else None
+        )
+        app.state.raster_text_prewarm_task = raster_text_prewarm_task
         safe_log(LOGGER, logging.INFO, "service_started")
         try:
             yield
         finally:
+            if raster_text_prewarm_task is not None:
+                raster_text_prewarm_task.cancel()
+                # ``to_thread`` cannot interrupt a native call itself, but
+                # waiting for the loop task to observe cancellation before
+                # ``close`` avoids scheduling another poll during shutdown.
+                await asyncio.gather(raster_text_prewarm_task, return_exceptions=True)
+                app.state.raster_text_prewarm_task = None
+            # The automatic runtime owns a long-lived child process.  Static
+            # and test runtimes provide the same no-op lifecycle method.
+            active_raster_document_preview_runtime.close()
+            shutdown_raster_text = getattr(active_raster_text_preview_runtime, "shutdown", None)
+            if callable(shutdown_raster_text):
+                shutdown_raster_text()
+            else:
+                # Compatibility for focused injected runtimes owned by tests.
+                active_raster_text_preview_runtime.close()
             await controller.shutdown()
             safe_log(LOGGER, logging.INFO, "service_stopped")
 
@@ -235,6 +452,7 @@ def create_app(
     )
     app.state.service_settings = active_settings
     app.state.build_metadata = build_metadata(active_settings)
+    app.state.raster_text_prewarm_task = None
     app.state.document_preview_activation_status = (
         "injected"
         if document_preview_engine is not None
@@ -245,6 +463,49 @@ def create_app(
     app.state.document_preview_activation_reason = (
         None if preview_resolution is None else preview_resolution.reason_code
     )
+    app.state.raster_document_preview_activation_status = (
+        "injected"
+        if raster_document_preview_engine is not None
+        else "auto-pending"
+        if active_settings.raster_document_preview_auto_activation_mode
+        == "source-attested-synthetic-raster-v1"
+        else raster_preview_resolution.status
+        if raster_preview_resolution is not None
+        else "disabled"
+    )
+    app.state.raster_document_preview_activation_reason = (
+        None if raster_preview_resolution is None else raster_preview_resolution.reason_code
+    )
+    if active_settings.raster_document_preview_auto_activation_mode == (
+        "source-attested-synthetic-raster-v1"
+    ):
+        app.state.raster_document_preview_activation_reason = (
+            "raster_source_attested_auto_pending"
+        )
+    # Kept for compatibility with existing local test seams.  Requests use
+    # the unified runtime facade below, never this mutable app-state object.
+    app.state.raster_document_page_renderer = (
+        None if raster_preview_resolution is None else raster_preview_resolution.page_renderer
+    )
+    app.state.raster_text_preview_activation_status = (
+        "injected"
+        if raster_text_preview_engine is not None
+        else "auto-pending"
+        if active_settings.raster_text_preview_auto_activation_mode
+        == "source-attested-synthetic-raster-text-v1"
+        else raster_text_preview_resolution.status
+        if raster_text_preview_resolution is not None
+        else "disabled"
+    )
+    app.state.raster_text_preview_activation_reason = (
+        None
+        if raster_text_preview_resolution is None
+        else raster_text_preview_resolution.reason_code
+    )
+    if active_settings.raster_text_preview_auto_activation_mode == (
+        "source-attested-synthetic-raster-text-v1"
+    ):
+        app.state.raster_text_preview_activation_reason = "raster_text_source_attested_auto_pending"
 
     async def admitted_body(request: Request) -> bytes:
         admission: asyncio.Semaphore = request.app.state.body_admission
@@ -277,6 +538,42 @@ def create_app(
             ) from None
         try:
             return await read_bounded_document_body(request, active_settings)
+        finally:
+            admission.release()
+
+    async def admitted_raster_document(request: Request) -> object:
+        """Read raw v2 OCR bytes only at the isolated raster boundary."""
+
+        admission: asyncio.Semaphore = request.app.state.body_admission
+        try:
+            await asyncio.wait_for(admission.acquire(), timeout=active_settings.queue_wait_seconds)
+        except TimeoutError:
+            raise ServiceHttpError(
+                "service_busy",
+                503,
+                retryable=True,
+                retry_after_seconds=max(1, round(active_settings.queue_wait_seconds)),
+            ) from None
+        try:
+            return await read_bounded_raster_document_body(request, active_settings)
+        finally:
+            admission.release()
+
+    async def admitted_raster_text_document(request: Request) -> object:
+        """Read raw text-OCR bytes only at the independent v1 boundary."""
+
+        admission: asyncio.Semaphore = request.app.state.body_admission
+        try:
+            await asyncio.wait_for(admission.acquire(), timeout=active_settings.queue_wait_seconds)
+        except TimeoutError:
+            raise ServiceHttpError(
+                "service_busy",
+                503,
+                retryable=True,
+                retry_after_seconds=max(1, round(active_settings.queue_wait_seconds)),
+            ) from None
+        try:
+            return await read_bounded_raster_text_document_body(request, active_settings)
         finally:
             admission.release()
 
@@ -320,6 +617,171 @@ def create_app(
             raise ServiceHttpError("document_preview_failed", 502, retryable=True) from None
         finally:
             capacity.release()
+        return result.model_dump(mode="json", warnings=False)
+
+    async def execute_raster_document_preview(admitted: object) -> dict[str, Any]:
+        """Run an explicitly injected raster adapter under the preview bound."""
+
+        from customs_ai_agent.service.document_input import InspectedRasterDocumentExtractionRequest
+
+        if not isinstance(admitted, InspectedRasterDocumentExtractionRequest):
+            raise ServiceHttpError("internal_error", 500)
+        capacity: asyncio.Semaphore = app.state.raster_document_preview_admission
+        try:
+            await asyncio.wait_for(capacity.acquire(), timeout=active_settings.queue_wait_seconds)
+        except TimeoutError:
+            raise ServiceHttpError(
+                "service_busy",
+                503,
+                retryable=True,
+                retry_after_seconds=max(1, round(active_settings.queue_wait_seconds)),
+            ) from None
+        try:
+            result = await asyncio.wait_for(
+                asyncio.to_thread(
+                    extract_raster_document_preview,
+                    active_raster_document_preview_runtime,
+                    raster_input=admitted.raster_input,
+                    structure=admitted.structure,
+                    settings=active_settings,
+                ),
+                timeout=active_settings.raster_run_timeout_seconds,
+            )
+        except TimeoutError:
+            # ``to_thread`` cannot forcibly stop Python work.  The production
+            # warm-session runtime reacts by terminating/reaping its child;
+            # closing here prevents a timed-out request from retaining that
+            # sidecar for a later caller.
+            active_raster_document_preview_runtime.close()
+            raise ServiceHttpError("raster_document_preview_timeout", 504, retryable=True) from None
+        except RasterDocumentPreviewInputError:
+            raise ServiceHttpError("document_decode_invalid", 422) from None
+        except RasterDocumentPreviewExecutionError:
+            raise ServiceHttpError("raster_document_preview_failed", 502, retryable=True) from None
+        except Exception:
+            raise ServiceHttpError("raster_document_preview_failed", 502, retryable=True) from None
+        finally:
+            capacity.release()
+        return result.model_dump(mode="json", warnings=False)
+
+    async def execute_raster_document_page(admitted: object, *, page_number: int) -> Response:
+        """Return one approved PDFium page only to the Backend proxy boundary."""
+
+        from customs_ai_agent.service.document_input import InspectedRasterDocumentExtractionRequest
+
+        if not isinstance(admitted, InspectedRasterDocumentExtractionRequest):
+            raise ServiceHttpError("internal_error", 500)
+        if admitted.raster_input.metadata.media_type != "application/pdf" or page_number < 1:
+            raise ServiceHttpError("document_decode_invalid", 422)
+        capacity: asyncio.Semaphore = app.state.raster_document_preview_admission
+        try:
+            await asyncio.wait_for(capacity.acquire(), timeout=active_settings.queue_wait_seconds)
+        except TimeoutError:
+            raise ServiceHttpError(
+                "service_busy",
+                503,
+                retryable=True,
+                retry_after_seconds=max(1, round(active_settings.queue_wait_seconds)),
+            ) from None
+        try:
+            rendered = await asyncio.wait_for(
+                asyncio.to_thread(
+                    active_raster_document_preview_runtime.render_pdf_page,
+                    admitted.raster_input,
+                    admitted.structure,
+                    page_number=page_number,
+                ),
+                timeout=active_settings.raster_page_render_timeout_seconds,
+            )
+        except TimeoutError:
+            active_raster_document_preview_runtime.close()
+            raise ServiceHttpError("raster_document_page_timeout", 504, retryable=True) from None
+        except RasterDocumentPreviewInputError:
+            raise ServiceHttpError("document_decode_invalid", 422) from None
+        except RasterDocumentPreviewUnavailable:
+            raise ServiceHttpError("raster_page_renderer_unavailable", 503, retryable=True) from None
+        except Exception:
+            raise ServiceHttpError("raster_document_page_failed", 502, retryable=True) from None
+        finally:
+            capacity.release()
+        return Response(
+            content=rendered.content,
+            status_code=200,
+            media_type=rendered.media_type,
+            headers={
+                **_NO_STORE_HEADERS,
+                "X-Document-SHA256": rendered.source_sha256,
+                "X-Raster-Profile-Revision": rendered.raster_profile_revision,
+                "X-Raster-Page-Number": str(rendered.page_number),
+                "X-Raster-Page-Width": str(rendered.width),
+                "X-Raster-Page-Height": str(rendered.height),
+                "X-Raster-Page-SHA256": rendered.content_sha256,
+                "X-Raster-Renderer-Revision": rendered.renderer_revision,
+            },
+        )
+
+    async def execute_raster_text_preview(admitted: object) -> dict[str, Any]:
+        """Run the independent text-only OCR profile under the shared CPU lane."""
+
+        from customs_ai_agent.service.document_input import InspectedRasterTextExtractionRequest
+
+        if not isinstance(admitted, InspectedRasterTextExtractionRequest):
+            raise ServiceHttpError("internal_error", 500)
+        # Text and structured OCR compete for the same bounded local CPU and
+        # sidecar budget.  One shared lane preserves their measured deadlines.
+        capacity: asyncio.Semaphore = app.state.raster_document_preview_admission
+        try:
+            await asyncio.wait_for(capacity.acquire(), timeout=active_settings.queue_wait_seconds)
+        except TimeoutError:
+            raise ServiceHttpError(
+                "service_busy",
+                503,
+                retryable=True,
+                retry_after_seconds=max(1, round(active_settings.queue_wait_seconds)),
+            ) from None
+        worker: asyncio.Task[RasterTextExtractionResultV1] | None = None
+        release_when_worker_finishes = False
+
+        def release_after_worker(done: asyncio.Task[RasterTextExtractionResultV1]) -> None:
+            # ``to_thread`` cannot be cancelled while native decode/OCR is
+            # executing.  Consume a late exception and keep the shared CPU
+            # lane occupied until the owned worker has actually returned;
+            # otherwise a timed-out request could oversubscribe OCR work.
+            try:
+                done.exception()
+            except (asyncio.CancelledError, Exception):
+                pass
+            capacity.release()
+
+        try:
+            worker = asyncio.create_task(
+                asyncio.to_thread(
+                    extract_raster_text_preview,
+                    active_raster_text_preview_runtime,
+                    raster_input=admitted.raster_text_input,
+                    structure=admitted.structure,
+                    settings=active_settings,
+                )
+            )
+            result = await asyncio.wait_for(
+                asyncio.shield(worker),
+                timeout=active_settings.raster_run_timeout_seconds,
+            )
+        except TimeoutError:
+            active_raster_text_preview_runtime.close()
+            if worker is not None:
+                worker.add_done_callback(release_after_worker)
+                release_when_worker_finishes = True
+            raise ServiceHttpError("raster_text_preview_timeout", 504, retryable=True) from None
+        except RasterTextPreviewInputError:
+            raise ServiceHttpError("document_decode_invalid", 422) from None
+        except RasterTextPreviewExecutionError:
+            raise ServiceHttpError("raster_text_preview_failed", 502, retryable=True) from None
+        except Exception:
+            raise ServiceHttpError("raster_text_preview_failed", 502, retryable=True) from None
+        finally:
+            if not release_when_worker_finishes:
+                capacity.release()
         return result.model_dump(mode="json", warnings=False)
 
     @app.middleware("http")
@@ -511,6 +973,339 @@ def create_app(
             headers=_NO_STORE_HEADERS,
             content=await execute_document_preview(admitted),
         )
+
+    @app.get(
+        "/internal/agent/v3/raster-document-preview-status",
+        summary="Return only the active raster profile identity for Backend job binding",
+        openapi_extra={"security": _BEARER_SECURITY},
+        responses={
+            200: {
+                "content": {
+                    "application/json": {
+                        "schema": {
+                            "type": "object",
+                            "additionalProperties": False,
+                            "required": [
+                                "schema_version",
+                                "availability",
+                                "raster_profile_revision",
+                            ],
+                            "properties": {
+                                "schema_version": {"type": "string", "const": "1.0"},
+                                "availability": {
+                                    "type": "string",
+                                    "enum": ["available", "unavailable"],
+                                },
+                                "raster_profile_revision": {
+                                    "type": ["string", "null"],
+                                    "maxLength": 128,
+                                },
+                            },
+                        }
+                    }
+                }
+            },
+            401: {"content": {"application/json": {"schema": ERROR_RESPONSE_SCHEMA}}},
+            403: {"content": {"application/json": {"schema": ERROR_RESPONSE_SCHEMA}}},
+        },
+    )
+    async def raster_document_preview_status(request: Request) -> JSONResponse:
+        _authorize(request, active_settings)
+        status = active_raster_document_preview_runtime.status()
+        return JSONResponse(
+            status_code=200,
+            headers=_NO_STORE_HEADERS,
+            content={
+                "schema_version": "1.0",
+                "availability": status.availability,
+                "raster_profile_revision": status.raster_profile_revision,
+            },
+        )
+
+    @app.get(
+        "/internal/agent/v3/raster-text-preview-status",
+        summary="Return only the active text-only raster profile identity for Backend job binding",
+        openapi_extra={"security": _BEARER_SECURITY},
+        responses={
+            200: {
+                "content": {
+                    "application/json": {
+                        "schema": {
+                            "type": "object",
+                            "additionalProperties": False,
+                            "required": [
+                                "schema_version",
+                                "availability",
+                                "raster_text_profile_revision",
+                            ],
+                            "properties": {
+                                "schema_version": {"type": "string", "const": "1.0"},
+                                "availability": {
+                                    "type": "string",
+                                    "enum": ["available", "unavailable"],
+                                },
+                                "raster_text_profile_revision": {
+                                    "type": ["string", "null"],
+                                    "maxLength": 128,
+                                },
+                            },
+                        }
+                    }
+                }
+            },
+            401: {"content": {"application/json": {"schema": ERROR_RESPONSE_SCHEMA}}},
+            403: {"content": {"application/json": {"schema": ERROR_RESPONSE_SCHEMA}}},
+        },
+    )
+    async def raster_text_preview_status(request: Request) -> JSONResponse:
+        _authorize(request, active_settings)
+        status = active_raster_text_preview_runtime.status()
+        return JSONResponse(
+            status_code=200,
+            headers=_NO_STORE_HEADERS,
+            content={
+                "schema_version": "1.0",
+                "availability": status.availability,
+                "raster_text_profile_revision": status.raster_text_profile_revision,
+            },
+        )
+
+    @app.post(
+        "/internal/agent/v3/raster-text-extractions",
+        summary="Create one human-review-only local OCR text draft without layout/table claims",
+        openapi_extra={
+            "security": _BEARER_SECURITY,
+            "parameters": [
+                {
+                    "in": "header",
+                    "name": "X-Document-Asset-ID",
+                    "required": True,
+                    "schema": raster_text_extraction_request_schema["properties"][
+                        "document_asset_id"
+                    ],
+                },
+                {
+                    "in": "header",
+                    "name": "X-Extraction-Request-ID",
+                    "required": True,
+                    "schema": raster_text_extraction_request_schema["properties"][
+                        "extraction_request_id"
+                    ],
+                },
+                {
+                    "in": "header",
+                    "name": "X-Document-SHA256",
+                    "required": True,
+                    "schema": raster_text_extraction_request_schema["properties"]["source_sha256"],
+                },
+                {
+                    "in": "header",
+                    "name": "X-Raster-Text-Profile-Revision",
+                    "required": True,
+                    "schema": raster_text_extraction_request_schema["properties"][
+                        "raster_text_profile_revision"
+                    ],
+                },
+            ],
+            "requestBody": {
+                "required": True,
+                "description": (
+                    "Identity-encoded raw bytes only. Content-Type must be application/pdf, "
+                    "image/jpeg, or image/png; multipart, JSON, and base64 are rejected."
+                ),
+                "content": {
+                    "application/pdf": {"schema": {"type": "string", "format": "binary"}},
+                    "image/jpeg": {"schema": {"type": "string", "format": "binary"}},
+                    "image/png": {"schema": {"type": "string", "format": "binary"}},
+                },
+            },
+            "x-customs-request-metadata-schema": raster_text_extraction_request_schema,
+        },
+        responses={
+            200: {
+                "content": {"application/json": {"schema": raster_text_extraction_result_schema}}
+            },
+            400: {"content": {"application/json": {"schema": ERROR_RESPONSE_SCHEMA}}},
+            401: {"content": {"application/json": {"schema": ERROR_RESPONSE_SCHEMA}}},
+            403: {"content": {"application/json": {"schema": ERROR_RESPONSE_SCHEMA}}},
+            408: {"content": {"application/json": {"schema": ERROR_RESPONSE_SCHEMA}}},
+            413: {"content": {"application/json": {"schema": ERROR_RESPONSE_SCHEMA}}},
+            415: {"content": {"application/json": {"schema": ERROR_RESPONSE_SCHEMA}}},
+            422: {"content": {"application/json": {"schema": ERROR_RESPONSE_SCHEMA}}},
+            502: {"content": {"application/json": {"schema": ERROR_RESPONSE_SCHEMA}}},
+            503: {"content": {"application/json": {"schema": ERROR_RESPONSE_SCHEMA}}},
+            504: {"content": {"application/json": {"schema": ERROR_RESPONSE_SCHEMA}}},
+        },
+    )
+    async def raster_text_extraction(request: Request) -> JSONResponse:
+        _authorize(request, active_settings)
+        admitted = await admitted_raster_text_document(request)
+        return JSONResponse(
+            status_code=200,
+            headers=_NO_STORE_HEADERS,
+            content=await execute_raster_text_preview(admitted),
+        )
+
+    @app.post(
+        "/internal/agent/v3/raster-document-extractions",
+        summary="Create one human-review-only local raster OCR/layout candidate",
+        openapi_extra={
+            "security": _BEARER_SECURITY,
+            "parameters": [
+                {
+                    "in": "header",
+                    "name": "X-Document-Asset-ID",
+                    "required": True,
+                    "schema": raster_document_extraction_request_schema["properties"][
+                        "document_asset_id"
+                    ],
+                },
+                {
+                    "in": "header",
+                    "name": "X-Extraction-Request-ID",
+                    "required": True,
+                    "schema": raster_document_extraction_request_schema["properties"][
+                        "extraction_request_id"
+                    ],
+                },
+                {
+                    "in": "header",
+                    "name": "X-Document-SHA256",
+                    "required": True,
+                    "schema": raster_document_extraction_request_schema["properties"][
+                        "source_sha256"
+                    ],
+                },
+                {
+                    "in": "header",
+                    "name": "X-Raster-Profile-Revision",
+                    "required": True,
+                    "schema": raster_document_extraction_request_schema["properties"][
+                        "raster_profile_revision"
+                    ],
+                },
+            ],
+            "requestBody": {
+                "required": True,
+                "description": (
+                    "Identity-encoded raw bytes only. Content-Type must be application/pdf, "
+                    "image/jpeg, or image/png; multipart, JSON, and base64 are rejected."
+                ),
+                "content": {
+                    "application/pdf": {"schema": {"type": "string", "format": "binary"}},
+                    "image/jpeg": {"schema": {"type": "string", "format": "binary"}},
+                    "image/png": {"schema": {"type": "string", "format": "binary"}},
+                },
+            },
+            "x-customs-request-metadata-schema": raster_document_extraction_request_schema,
+        },
+        responses={
+            200: {
+                "content": {"application/json": {"schema": raster_document_extraction_result_schema}}
+            },
+            400: {"content": {"application/json": {"schema": ERROR_RESPONSE_SCHEMA}}},
+            401: {"content": {"application/json": {"schema": ERROR_RESPONSE_SCHEMA}}},
+            403: {"content": {"application/json": {"schema": ERROR_RESPONSE_SCHEMA}}},
+            408: {"content": {"application/json": {"schema": ERROR_RESPONSE_SCHEMA}}},
+            413: {"content": {"application/json": {"schema": ERROR_RESPONSE_SCHEMA}}},
+            415: {"content": {"application/json": {"schema": ERROR_RESPONSE_SCHEMA}}},
+            422: {"content": {"application/json": {"schema": ERROR_RESPONSE_SCHEMA}}},
+            502: {"content": {"application/json": {"schema": ERROR_RESPONSE_SCHEMA}}},
+            503: {"content": {"application/json": {"schema": ERROR_RESPONSE_SCHEMA}}},
+            504: {"content": {"application/json": {"schema": ERROR_RESPONSE_SCHEMA}}},
+        },
+    )
+    async def raster_document_extraction(request: Request) -> JSONResponse:
+        _authorize(request, active_settings)
+        admitted = await admitted_raster_document(request)
+        return JSONResponse(
+            status_code=200,
+            headers=_NO_STORE_HEADERS,
+            content=await execute_raster_document_preview(admitted),
+        )
+
+    @app.post(
+        "/internal/agent/v3/raster-document-pages/{page_number}",
+        summary="Render one approved PDFium raster page for the Backend reviewer proxy",
+        response_class=Response,
+        openapi_extra={
+            "security": _BEARER_SECURITY,
+            "parameters": [
+                {
+                    "in": "path",
+                    "name": "page_number",
+                    "required": True,
+                    "schema": {"type": "integer", "minimum": 1, "maximum": 20},
+                },
+                {
+                    "in": "header",
+                    "name": "X-Document-Asset-ID",
+                    "required": True,
+                    "schema": raster_document_extraction_request_schema["properties"][
+                        "document_asset_id"
+                    ],
+                },
+                {
+                    "in": "header",
+                    "name": "X-Extraction-Request-ID",
+                    "required": True,
+                    "schema": raster_document_extraction_request_schema["properties"][
+                        "extraction_request_id"
+                    ],
+                },
+                {
+                    "in": "header",
+                    "name": "X-Document-SHA256",
+                    "required": True,
+                    "schema": raster_document_extraction_request_schema["properties"][
+                        "source_sha256"
+                    ],
+                },
+                {
+                    "in": "header",
+                    "name": "X-Raster-Profile-Revision",
+                    "required": True,
+                    "schema": raster_document_extraction_request_schema["properties"][
+                        "raster_profile_revision"
+                    ],
+                },
+            ],
+            "requestBody": {
+                "required": True,
+                "description": (
+                    "Identity-encoded raw PDF bytes only. This internal endpoint is for an "
+                    "authenticated Backend no-store reviewer proxy, never a browser client."
+                ),
+                "content": {"application/pdf": {"schema": {"type": "string", "format": "binary"}}},
+            },
+            "x-customs-raster-page-response-headers": {
+                "X-Document-SHA256": "input/source binding",
+                "X-Raster-Profile-Revision": "approved raster profile binding",
+                "X-Raster-Page-Number": "rendered page number",
+                "X-Raster-Page-Width": "PNG pixel width",
+                "X-Raster-Page-Height": "PNG pixel height",
+                "X-Raster-Page-SHA256": "returned PNG SHA-256",
+                "X-Raster-Renderer-Revision": "PDFium/DPI renderer binding",
+            },
+        },
+        responses={
+            200: {"content": {"image/png": {"schema": {"type": "string", "format": "binary"}}}},
+            400: {"content": {"application/json": {"schema": ERROR_RESPONSE_SCHEMA}}},
+            401: {"content": {"application/json": {"schema": ERROR_RESPONSE_SCHEMA}}},
+            403: {"content": {"application/json": {"schema": ERROR_RESPONSE_SCHEMA}}},
+            408: {"content": {"application/json": {"schema": ERROR_RESPONSE_SCHEMA}}},
+            413: {"content": {"application/json": {"schema": ERROR_RESPONSE_SCHEMA}}},
+            415: {"content": {"application/json": {"schema": ERROR_RESPONSE_SCHEMA}}},
+            422: {"content": {"application/json": {"schema": ERROR_RESPONSE_SCHEMA}}},
+            502: {"content": {"application/json": {"schema": ERROR_RESPONSE_SCHEMA}}},
+            503: {"content": {"application/json": {"schema": ERROR_RESPONSE_SCHEMA}}},
+            504: {"content": {"application/json": {"schema": ERROR_RESPONSE_SCHEMA}}},
+        },
+    )
+    async def raster_document_page(request: Request, page_number: int) -> Response:
+        _authorize(request, active_settings)
+        admitted = await admitted_raster_document(request)
+        return await execute_raster_document_page(admitted, page_number=page_number)
 
     @app.post(
         "/internal/agent/v2/assistant/answers",

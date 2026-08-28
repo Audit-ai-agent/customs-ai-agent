@@ -20,6 +20,10 @@ SchemaKind = Literal[
     "knowledge-answer-response",
     "document-extraction-request",
     "document-extraction-result",
+    "raster-document-extraction-request",
+    "raster-document-extraction-result",
+    "raster-text-extraction-request",
+    "raster-text-extraction-result",
     "rag-retrieval",
     "guidance-query",
     "readiness",
@@ -46,6 +50,18 @@ _RESOURCE_PATHS: dict[SchemaKey, str] = {
     ),
     ("backend", "v3", "document-extraction-result"): (
         "schemas/backend/v3/document-extraction-result.schema.json"
+    ),
+    ("backend", "v3", "raster-document-extraction-request"): (
+        "schemas/backend/v3/raster-document-extraction-request.schema.json"
+    ),
+    ("backend", "v3", "raster-document-extraction-result"): (
+        "schemas/backend/v3/raster-document-extraction-result.schema.json"
+    ),
+    ("backend", "v3", "raster-text-extraction-request"): (
+        "schemas/backend/v3/raster-text-extraction-request.schema.json"
+    ),
+    ("backend", "v3", "raster-text-extraction-result"): (
+        "schemas/backend/v3/raster-text-extraction-result.schema.json"
     ),
     ("evidence", "v3", "rag-retrieval"): "evidence/v3/rag_retrieval_v3.schema.json",
     ("evidence", "v3", "guidance-query"): "evidence/v3/guidance_query_v3.schema.json",
