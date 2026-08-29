@@ -247,6 +247,13 @@ text-only OCR의 사람 없는 build·평가·활성화는 아래 한 명령으�
 
 자동 명령은 fresh 24-asset 실제 실행과 기존 2,400-asset source-only Gold/evidence 결속을 전부 확인한 뒤에만 schema 11 `approvals/raster-text-active.json`을 원자 교체합니다. 활성화 시에는 전체 package/model/source/Gold/candidate 증거를 검증하지만, 평상시 서비스 시작은 schema 11의 compact runtime binding만 확인하고 HTTP를 먼저 시작한 뒤 OCR child를 백그라운드에서 warm-up합니다. 준비 중에는 status가 `unavailable`, 준비가 끝난 뒤에만 고정 profile revision으로 `available`이 되며 서비스 시작마다 2,400건 평가를 반복하지 않습니다.
 
+Linux 배포에서는 Windows에서 만든 schema 11 pointer나 interpreter hash를 이식하지 않습니다. Linux/amd64/CPython 3.11로 결속된 schema 2 base/direct bundle과 고정 public fine-tuned recognizer가 준비된 뒤 아래 전용 명령을 실행합니다. 이 명령은 현재 Linux runner로 24건 smoke, 독립 calibration 240건, sealed stage 1 1,200건과 필요한 경우 남은 stage 2 1,200건을 다시 평가해 97%/CER/10초 Gate를 모두 통과한 경우에만 schema 12 pointer를 만듭니다. 서비스 시작 시에는 schema 12 compact binding만 검사하므로 sealed 최대 2,400건 평가를 반복하지 않습니다. 기존 Windows 명령과 schema 11은 읽기·실행 호환용으로 그대로 유지됩니다.
+
+```bash
+uv run --locked --no-sync --group dev python tools/auto_activate_synthetic_raster_text_linux_v1.py \
+  --document-preview-root <workspace>/_local/data/document-preview
+```
+
 현재 CPU 설정은 6 thread, recognizer batch 8, OpenCV 1 thread이고 oneDNN은 검증된 recognizer에만 적용합니다. detector의 oneDNN은 결과 안정성 때문에 끈 상태입니다. pointer 변경·material drift·dead child는 fail-closed로 재검증·재기동하며, 처리 중인 OCR과 1초 주기 prewarm이 겹쳐도 status가 일시적으로 작업을 영구 종료하지 않도록 Agent와 Backend가 함께 보호합니다.
 
 ```powershell

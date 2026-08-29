@@ -2649,6 +2649,32 @@ class RasterTextActivationPointerV11(RasterTextActivationPointerV10):
     )
 
 
+class RasterTextActivationPointerV12(RasterTextActivationPointerV7):
+    """Native full-current V19 preview-97 evidence with compact runtime checks."""
+
+    schema_version: Literal["12.0"] = "12.0"  # type: ignore[assignment]
+    engine_kind: Literal[
+        "direct_paddle_mobile_det_public_finetuned_rec_harmonic_recall_native960_"
+        "lowbox_strip2_semantic_repair_v2_onednn"
+    ] = cast(Any, _V19_ENGINE_KIND)
+    quality_gate_revision: Literal["preview-draft-critical97-cer2-v1"] = (
+        "preview-draft-critical97-cer2-v1"
+    )
+    evidence_generation_revision: Literal["current-runner-native-full-gate-v1"] = (
+        "current-runner-native-full-gate-v1"
+    )
+    current_runner_implementation_sha256: str = Field(pattern=r"^[a-f0-9]{64}$")
+    runtime_validation_revision: Literal["activation-full-runtime-compact-v1"] = (
+        "activation-full-runtime-compact-v1"
+    )
+
+    @model_validator(mode="after")
+    def _v19_current_engine_is_exact(self) -> "RasterTextActivationPointerV12":
+        if self.engine_kind != _V19_ENGINE_KIND:
+            raise ValueError("raster text V12 activation engine is invalid")
+        return self
+
+
 RasterTextActivationPointer = (
     RasterTextActivationPointerV1
     | RasterTextActivationPointerV2
@@ -2661,6 +2687,7 @@ RasterTextActivationPointer = (
     | RasterTextActivationPointerV9
     | RasterTextActivationPointerV10
     | RasterTextActivationPointerV11
+    | RasterTextActivationPointerV12
 )
 
 
@@ -3486,6 +3513,20 @@ class RasterTextSealedEvaluationV8(RasterTextSealedEvaluationV7):
         return self
 
 
+class RasterTextSealedEvaluationV9(RasterTextSealedEvaluationV7):
+    """Native full-current V19 evaluation under the explicit preview-97 Gate."""
+
+    schema_version: Literal["9.0"] = "9.0"  # type: ignore[assignment]
+    quality_gate_revision: Literal["preview-draft-critical97-cer2-v1"] = (
+        "preview-draft-critical97-cer2-v1"
+    )
+    evidence_generation_revision: Literal["current-runner-native-full-gate-v1"] = (
+        "current-runner-native-full-gate-v1"
+    )
+    current_runner_implementation_sha256: str = Field(pattern=r"^[a-f0-9]{64}$")
+    scores: list[RasterTextSealedProfileScoreV8] = Field(min_length=12, max_length=12)  # type: ignore[assignment]
+
+
 RasterTextCalibrationReceipt = (
     RasterTextCalibrationReceiptV1
     | RasterTextCalibrationReceiptV2
@@ -3504,6 +3545,7 @@ RasterTextSealedEvaluation = (
     | RasterTextSealedEvaluationV6
     | RasterTextSealedEvaluationV7
     | RasterTextSealedEvaluationV8
+    | RasterTextSealedEvaluationV9
 )
 
 
@@ -3646,6 +3688,8 @@ def parse_raster_text_activation_pointer(raw: bytes) -> RasterTextActivationPoin
             pointer = RasterTextActivationPointerV10.model_validate(value)
         elif discriminator == "11.0":
             pointer = RasterTextActivationPointerV11.model_validate(value)
+        elif discriminator == "12.0":
+            pointer = RasterTextActivationPointerV12.model_validate(value)
         else:
             raise ValueError("raster text activation schema is invalid")
     except ValidationError:
@@ -3712,6 +3756,8 @@ def _parse_raster_text_sealed_evaluation(raw: bytes) -> RasterTextSealedEvaluati
             evaluation = RasterTextSealedEvaluationV7.model_validate(value)
         elif discriminator == "8.0":
             evaluation = RasterTextSealedEvaluationV8.model_validate(value)
+        elif discriminator == "9.0":
+            evaluation = RasterTextSealedEvaluationV9.model_validate(value)
         else:
             raise ValueError("raster text sealed schema is invalid")
     except (ValidationError, ValueError):
@@ -3805,6 +3851,37 @@ def _bound_raster_text_metric_revision(
         == "warm-p95-10s-v1"
     ):
         return pointer.metric_revision
+    if (
+        type(pointer) is RasterTextActivationPointerV12
+        and type(evaluation) is RasterTextSealedEvaluationV9
+        and type(calibration) is RasterTextCalibrationReceiptV7
+    ):
+        pointer_v12 = cast(RasterTextActivationPointerV12, pointer)
+        evaluation_v9 = cast(RasterTextSealedEvaluationV9, evaluation)
+        calibration_v7 = cast(RasterTextCalibrationReceiptV7, calibration)
+        if (
+            pointer_v12.metric_revision
+            == evaluation_v9.metric_revision
+            == calibration_v7.metric_revision
+            == "source-attested-semantic-text-v3"
+            and pointer_v12.evidence_revision
+            == evaluation_v9.evidence_revision
+            == calibration_v7.evidence_revision
+            == "source-attested-public-finetuned-staged-train-holdout-v2"
+            and pointer_v12.latency_gate_revision
+            == evaluation_v9.latency_gate_revision
+            == calibration_v7.latency_gate_revision
+            == "warm-p95-10s-v1"
+            and pointer_v12.quality_gate_revision
+            == evaluation_v9.quality_gate_revision
+            == "preview-draft-critical97-cer2-v1"
+            and pointer_v12.evidence_generation_revision
+            == evaluation_v9.evidence_generation_revision
+            == "current-runner-native-full-gate-v1"
+            and pointer_v12.current_runner_implementation_sha256
+            == evaluation_v9.current_runner_implementation_sha256
+        ):
+            return pointer_v12.metric_revision
     if (
         type(pointer) in (RasterTextActivationPointerV10, RasterTextActivationPointerV11)
         and type(evaluation) is RasterTextSealedEvaluationV8
@@ -4825,6 +4902,45 @@ def _verify_direct_profile_runtime_platform(
         raise RasterTextRuntimeError("raster_text_runtime_platform_mismatch") from None
 
 
+def _verify_v12_linux_profile_runtime_platform(
+    *, root: Path, profile: RasterTextOfflineProfileV19
+) -> None:
+    """Require the explicit native Linux identity used by new V12 evidence.
+
+    The general verifier intentionally keeps schema-1 readable for the
+    already-published Windows/schema-11 pointer.  V12 is a new activation
+    contract, so it must never infer portability from that legacy manifest.
+    """
+
+    try:
+        _verify_direct_profile_runtime_platform(root=root, profile=profile)
+        manifest_path = _v2_bundle_sidecar_path(
+            root=root,
+            profile=profile,
+            value=f"{profile.bundle_root_relative_path}/manifest.json",
+        )
+        raw = _read_local_file(manifest_path, limit=_MAX_CONFIGURATION_BYTES)
+        value = json.loads(raw.decode("utf-8"))
+        if (
+            not isinstance(value, dict)
+            or raw != _canonical_evaluation_json_bytes(value)
+            or hashlib.sha256(raw).hexdigest() != profile.bundle_manifest_sha256
+            or value.get("schema_version") != "2.0"
+            or (
+                value.get("runtime_operating_system"),
+                value.get("runtime_architecture"),
+                value.get("runtime_python_abi"),
+            )
+            != ("linux", "amd64", "cp311")
+            or current_raster_runtime_platform_binding() != ("linux", "amd64", "cp311")
+        ):
+            raise ValueError
+    except RasterTextRuntimeError:
+        raise
+    except Exception:
+        raise RasterTextRuntimeError("raster_text_runtime_platform_mismatch") from None
+
+
 def _load_profile_materials(
     *,
     root: Path,
@@ -5034,13 +5150,13 @@ def _validate_cached_raster_text_binding_materials(
     if profile.raster_text_profile_revision != pointer.raster_text_profile_revision:
         raise RasterTextRuntimeError("raster_text_profile_mismatch")
     try:
-        # V11 activation has already byte-verified the complete content-
+        # V11/V12 activation has already byte-verified the complete content-
         # addressed bundle, and its persistent child independently verifies
         # package/model material.  Repeating the ~900 MiB bundle walk on the
         # one-second pointer poll is neither a useful runtime guard nor a
         # lightweight operation.  Legacy generations retain their original
         # exhaustive cached-binding check.
-        if type(pointer) is not RasterTextActivationPointerV11:
+        if type(pointer) not in (RasterTextActivationPointerV11, RasterTextActivationPointerV12):
             _verify_profile_model_bundle(root=root, profile=profile)
         if isinstance(
             profile,
@@ -6420,6 +6536,34 @@ def _verify_runtime_attested_v11_evidence(
         raise RasterTextRuntimeError("raster_text_evaluation_invalid")
 
 
+def _verify_runtime_attested_v12_evidence(
+    *,
+    root: Path,
+    pointer: RasterTextActivationPointerV12,
+    evaluation: RasterTextSealedEvaluationV9,
+    profile: RasterTextOfflineProfileV19,
+    evidence_by_path: Mapping[str, bytes],
+) -> None:
+    """Check the current-native V12 binding without replaying 2,400 assets."""
+
+    current_runner_sha256 = _current_raster_text_runner_implementation_sha256()
+    if (
+        pointer.current_runner_implementation_sha256 != current_runner_sha256
+        or evaluation.current_runner_implementation_sha256 != current_runner_sha256
+    ):
+        raise RasterTextRuntimeError("raster_text_runner_implementation_invalid")
+    current = _verify_runtime_attested_warm_service_smoke(
+        root=root,
+        raw=evidence_by_path[evaluation.warm_service_smoke_receipt_path],
+        profile=profile,
+        runtime_configuration_sha256=pointer.runtime_configuration_sha256,
+        expected_runner_implementation_sha256=current_runner_sha256,
+        latency_p95_limit_seconds=10.0,
+    )
+    if evaluation.service_warm_latency_p95_seconds != current.warm_latency_p95_seconds:
+        raise RasterTextRuntimeError("raster_text_evaluation_invalid")
+
+
 def _verify_warm_service_smoke_evidence(
     *,
     root: Path,
@@ -6723,8 +6867,11 @@ def _verify_v19_finetune_evidence_provenance(
         RasterTextActivationPointerV7
         | RasterTextActivationPointerV10
         | RasterTextActivationPointerV11
+        | RasterTextActivationPointerV12
     ),
-    evaluation: RasterTextSealedEvaluationV7 | RasterTextSealedEvaluationV8,
+    evaluation: (
+        RasterTextSealedEvaluationV7 | RasterTextSealedEvaluationV8 | RasterTextSealedEvaluationV9
+    ),
     calibration: RasterTextCalibrationReceiptV7,
     profile: RasterTextOfflineProfileV19,
     calibration_profile: RasterTextOfflineProfileV19,
@@ -6867,12 +7014,14 @@ def _verify_fresh_staged_evidence_chain(
         | RasterTextActivationPointerV9
         | RasterTextActivationPointerV10
         | RasterTextActivationPointerV11
+        | RasterTextActivationPointerV12
     ),
     evaluation: (
         RasterTextSealedEvaluationV5
         | RasterTextSealedEvaluationV6
         | RasterTextSealedEvaluationV7
         | RasterTextSealedEvaluationV8
+        | RasterTextSealedEvaluationV9
     ),
     calibration: (
         RasterTextCalibrationReceiptV5
@@ -6905,10 +7054,17 @@ def _verify_fresh_staged_evidence_chain(
             RasterTextActivationPointerV10,
             RasterTextActivationPointerV11,
         )
+        is_v12 = type(pointer) is RasterTextActivationPointerV12
         is_v9 = type(pointer) is RasterTextActivationPointerV9
         is_v6 = type(pointer) is RasterTextActivationPointerV6
         is_v7 = isinstance(pointer, RasterTextActivationPointerV7)
-        if is_v10:
+        if is_v12:
+            if (
+                type(evaluation) is not RasterTextSealedEvaluationV9
+                or type(calibration) is not RasterTextCalibrationReceiptV7
+            ):
+                raise RasterTextRuntimeError("raster_text_evaluation_invalid")
+        elif is_v10:
             if (
                 type(evaluation) is not RasterTextSealedEvaluationV8
                 or type(calibration) is not RasterTextCalibrationReceiptV7
@@ -6917,13 +7073,13 @@ def _verify_fresh_staged_evidence_chain(
         elif (
             is_v6 != (type(evaluation) is RasterTextSealedEvaluationV6)
             or is_v6 != (type(calibration) is RasterTextCalibrationReceiptV6)
-            or is_v7 != (type(evaluation) is RasterTextSealedEvaluationV7)
+            or (is_v7 and not is_v12) != (type(evaluation) is RasterTextSealedEvaluationV7)
             or is_v7 != (type(calibration) is RasterTextCalibrationReceiptV7)
         ):
             raise RasterTextRuntimeError("raster_text_evaluation_invalid")
         if (
             (
-                is_v10
+                (is_v10 or is_v12)
                 and (
                     type(profile) is not RasterTextOfflineProfileV19
                     or profile.engine_kind != _V19_ENGINE_KIND
@@ -6934,6 +7090,7 @@ def _verify_fresh_staged_evidence_chain(
                 is_v7
                 and not is_v9
                 and not is_v10
+                and not is_v12
                 and not isinstance(profile, RasterTextOfflineProfileV19)
             )
             or (is_v6 and not isinstance(profile, RasterTextOfflineProfileV18))
@@ -6984,7 +7141,7 @@ def _verify_fresh_staged_evidence_chain(
         calibration_profile = parse_raster_text_offline_profile(calibration_configuration_raw)
         if (
             (
-                is_v10
+                (is_v10 or is_v12)
                 and (
                     type(calibration_profile) is not RasterTextOfflineProfileV19
                     or calibration_profile.engine_kind != _V19_ENGINE_KIND
@@ -6995,6 +7152,7 @@ def _verify_fresh_staged_evidence_chain(
                 is_v7
                 and not is_v9
                 and not is_v10
+                and not is_v12
                 and not isinstance(calibration_profile, RasterTextOfflineProfileV19)
             )
             or (is_v6 and not isinstance(calibration_profile, RasterTextOfflineProfileV18))
@@ -7031,12 +7189,16 @@ def _verify_fresh_staged_evidence_chain(
             assert isinstance(pointer, RasterTextActivationPointerV7)
             assert isinstance(evaluation, RasterTextSealedEvaluationV7)
             assert isinstance(calibration, RasterTextCalibrationReceiptV7)
-            if is_v10:
+            if is_v10 or is_v12:
                 assert type(pointer) in (
                     RasterTextActivationPointerV10,
                     RasterTextActivationPointerV11,
+                    RasterTextActivationPointerV12,
                 )
-                assert type(evaluation) is RasterTextSealedEvaluationV8
+                assert type(evaluation) in (
+                    RasterTextSealedEvaluationV8,
+                    RasterTextSealedEvaluationV9,
+                )
                 assert type(profile) is RasterTextOfflineProfileV19
                 assert type(calibration_profile) is RasterTextOfflineProfileV19
                 _verify_v19_finetune_evidence_provenance(
@@ -7104,6 +7266,28 @@ def _verify_fresh_staged_evidence_chain(
                     ),
                 )
             )
+        elif is_v12:
+            assert type(evaluation) is RasterTextSealedEvaluationV9
+            current_runner_sha256 = evaluation.current_runner_implementation_sha256
+            sealed_source, sealed_execution, sealed_bundle, sealed_cases = (
+                verify_source_attested_fresh_raster_text_evidence_v6(
+                    document_preview_root=root,
+                    source_gold_receipt_relative_path=evaluation.source_gold_receipt_path,
+                    candidate_execution_relative_path=evaluation.candidate_execution_path,
+                    scope="fresh-sealed",
+                    expected_runner_implementation_sha256=current_runner_sha256,
+                    quality_gate_revision=evaluation.quality_gate_revision,
+                )
+            )
+            calibration_source, calibration_execution, calibration_bundle, calibration_cases = (
+                verify_source_attested_fresh_raster_text_evidence_v6(
+                    document_preview_root=root,
+                    source_gold_receipt_relative_path=calibration.source_gold_receipt_path,
+                    candidate_execution_relative_path=calibration.candidate_execution_path,
+                    scope="fresh-calibration",
+                    expected_runner_implementation_sha256=current_runner_sha256,
+                )
+            )
         elif is_v6 or is_v7:
             sealed_source, sealed_execution, sealed_bundle, sealed_cases = (
                 verify_source_attested_fresh_raster_text_evidence_v6(
@@ -7146,10 +7330,16 @@ def _verify_fresh_staged_evidence_chain(
         ):
             raise RasterTextRuntimeError("raster_text_evaluation_invalid")
         historical_runner_sha256: str | None = None
+        current_native_runner_sha256: str | None = None
         if is_v6 or is_v7:
             historical_runner_sha256 = (
                 evaluation.historical_runner_implementation_sha256
                 if type(evaluation) is RasterTextSealedEvaluationV8
+                else None
+            )
+            current_native_runner_sha256 = (
+                evaluation.current_runner_implementation_sha256
+                if type(evaluation) is RasterTextSealedEvaluationV9
                 else None
             )
             stage1_decision = verify_fresh_raster_text_sealed_stage1_decision(
@@ -7157,7 +7347,14 @@ def _verify_fresh_staged_evidence_chain(
                 decision_relative_path=evaluation.stage1_decision_receipt_path,
                 expected_sha256=evaluation.stage1_decision_receipt_sha256,
                 required_selection_revision="source-receipt-train-holdout-v2",
-                expected_runner_implementation_sha256=historical_runner_sha256,
+                expected_runner_implementation_sha256=(
+                    historical_runner_sha256 or current_native_runner_sha256
+                ),
+                quality_gate_revision=(
+                    evaluation.quality_gate_revision
+                    if type(evaluation) is RasterTextSealedEvaluationV9
+                    else None
+                ),
             )
         else:
             stage1_decision = verify_fresh_raster_text_sealed_stage1_decision(
@@ -7165,16 +7362,21 @@ def _verify_fresh_staged_evidence_chain(
                 decision_relative_path=evaluation.stage1_decision_receipt_path,
                 expected_sha256=evaluation.stage1_decision_receipt_sha256,
             )
+        quality_gate_revision = (
+            cast(RasterTextSealedEvaluationV8, evaluation).quality_gate_revision
+            if type(evaluation) is RasterTextSealedEvaluationV8
+            else (
+                cast(RasterTextSealedEvaluationV9, evaluation).quality_gate_revision
+                if type(evaluation) is RasterTextSealedEvaluationV9
+                else None
+            )
+        )
         sealed_scores, calibrated_floor, sealed_gate_passed = (
             _recalculate_source_attested_raster_text_quality(
                 sealed_cases=sealed_cases,
                 calibration_cases=calibration_cases,
                 metric_revision="source-attested-semantic-text-v3",
-                quality_gate_revision=(
-                    evaluation.quality_gate_revision
-                    if type(evaluation) is RasterTextSealedEvaluationV8
-                    else None
-                ),
+                quality_gate_revision=quality_gate_revision,
             )
         )
         sealed_stage_is_valid = (
@@ -7290,6 +7492,15 @@ def _verify_fresh_staged_evidence_chain(
                     historical_runner_sha256 is None
                     or sealed_bundle.runner_implementation_sha256 != historical_runner_sha256
                     or calibration_bundle.runner_implementation_sha256 != historical_runner_sha256
+                )
+            )
+            or (
+                is_v12
+                and (
+                    current_native_runner_sha256 is None
+                    or sealed_bundle.runner_implementation_sha256 != current_native_runner_sha256
+                    or calibration_bundle.runner_implementation_sha256
+                    != current_native_runner_sha256
                 )
             )
             or not sealed_stage_is_valid
@@ -7515,7 +7726,15 @@ def _verify_activation_pointer_engine_binding(
 ) -> None:
     """Keep V19, audited V19b and voyage-replay V20 lanes disjoint."""
 
-    if type(pointer) in (RasterTextActivationPointerV10, RasterTextActivationPointerV11):
+    if type(pointer) is RasterTextActivationPointerV12:
+        native_pointer = cast(RasterTextActivationPointerV12, pointer)
+        if (
+            type(profile) is not RasterTextOfflineProfileV19
+            or native_pointer.engine_kind != _V19_ENGINE_KIND
+            or profile.engine_kind != _V19_ENGINE_KIND
+        ):
+            raise RasterTextRuntimeError("raster_text_profile_mismatch")
+    elif type(pointer) in (RasterTextActivationPointerV10, RasterTextActivationPointerV11):
         preview_pointer = cast(RasterTextActivationPointerV10, pointer)
         if (
             type(profile) is not RasterTextOfflineProfileV19
@@ -7558,8 +7777,9 @@ def _load_binding_from_pointer(
     pointer = parse_raster_text_activation_pointer(approval_raw)
     if hashlib.sha256(approval_raw).hexdigest() != approval_sha256:
         raise RasterTextRuntimeError("raster_text_activation_invalid")
-    runtime_compact_v11 = (
-        verification_mode == "runtime" and type(pointer) is RasterTextActivationPointerV11
+    runtime_compact = verification_mode == "runtime" and type(pointer) in (
+        RasterTextActivationPointerV11,
+        RasterTextActivationPointerV12,
     )
     configuration_path = _sidecar_path(root, pointer.runtime_configuration_path)
     configuration_raw = _read_local_file(configuration_path, limit=_MAX_CONFIGURATION_BYTES)
@@ -7577,11 +7797,15 @@ def _load_binding_from_pointer(
         configuration_path=configuration_path,
         configuration_raw=configuration_raw,
         configuration_sha256=pointer.runtime_configuration_sha256,
-        verify_complete_materials=not runtime_compact_v11,
+        verify_complete_materials=not runtime_compact,
     )
     if profile.raster_text_profile_revision != pointer.raster_text_profile_revision:
         raise RasterTextRuntimeError("raster_text_profile_mismatch")
     _verify_activation_pointer_engine_binding(pointer=pointer, profile=profile)
+    if type(pointer) is RasterTextActivationPointerV12:
+        if type(profile) is not RasterTextOfflineProfileV19:
+            raise RasterTextRuntimeError("raster_text_profile_mismatch")
+        _verify_v12_linux_profile_runtime_platform(root=root, profile=profile)
     evaluation_path = _sidecar_path(root, pointer.sealed_evaluation_path)
     evaluation_raw = _read_local_file(evaluation_path, limit=_MAX_CONFIGURATION_BYTES)
     if hashlib.sha256(evaluation_raw).hexdigest() != pointer.sealed_evaluation_sha256:
@@ -7600,6 +7824,15 @@ def _load_binding_from_pointer(
             or preview_pointer.current_runner_implementation_sha256
             != evaluation.current_runner_implementation_sha256
             or preview_pointer.current_runner_implementation_sha256
+            != _current_raster_text_runner_implementation_sha256()
+        ):
+            raise RasterTextRuntimeError("raster_text_runner_implementation_invalid")
+    elif type(pointer) is RasterTextActivationPointerV12:
+        if (
+            type(evaluation) is not RasterTextSealedEvaluationV9
+            or pointer.current_runner_implementation_sha256
+            != evaluation.current_runner_implementation_sha256
+            or pointer.current_runner_implementation_sha256
             != _current_raster_text_runner_implementation_sha256()
         ):
             raise RasterTextRuntimeError("raster_text_runner_implementation_invalid")
@@ -7705,21 +7938,35 @@ def _load_binding_from_pointer(
         evidence = _read_local_file(_sidecar_path(root, relative_path), limit=_MAX_EVIDENCE_BYTES)
         if hashlib.sha256(evidence).hexdigest() != expected_sha256:
             raise RasterTextRuntimeError("raster_text_evaluation_invalid")
-    if runtime_compact_v11:
+    if runtime_compact:
         if (
-            type(pointer) is not RasterTextActivationPointerV11
-            or type(evaluation) is not RasterTextSealedEvaluationV8
-            or type(calibration) is not RasterTextCalibrationReceiptV7
-            or type(profile) is not RasterTextOfflineProfileV19
+            type(pointer) is RasterTextActivationPointerV11
+            and type(evaluation) is RasterTextSealedEvaluationV8
+            and type(calibration) is RasterTextCalibrationReceiptV7
+            and type(profile) is RasterTextOfflineProfileV19
         ):
+            _verify_runtime_attested_v11_evidence(
+                root=root,
+                pointer=pointer,
+                evaluation=evaluation,
+                profile=profile,
+                evidence_by_path=evidence_by_path,
+            )
+        elif (
+            type(pointer) is RasterTextActivationPointerV12
+            and type(evaluation) is RasterTextSealedEvaluationV9
+            and type(calibration) is RasterTextCalibrationReceiptV7
+            and type(profile) is RasterTextOfflineProfileV19
+        ):
+            _verify_runtime_attested_v12_evidence(
+                root=root,
+                pointer=pointer,
+                evaluation=evaluation,
+                profile=profile,
+                evidence_by_path=evidence_by_path,
+            )
+        else:
             raise RasterTextRuntimeError("raster_text_evaluation_invalid")
-        _verify_runtime_attested_v11_evidence(
-            root=root,
-            pointer=pointer,
-            evaluation=evaluation,
-            profile=profile,
-            evidence_by_path=evidence_by_path,
-        )
     elif (
         isinstance(pointer, RasterTextActivationPointerV4)
         and isinstance(evaluation, RasterTextSealedEvaluationV4)
@@ -7773,6 +8020,19 @@ def _load_binding_from_pointer(
             warm_service_smoke_raw=evidence_by_path[evaluation.warm_service_smoke_receipt_path],
         )
     elif (
+        type(pointer) is RasterTextActivationPointerV12
+        and type(evaluation) is RasterTextSealedEvaluationV9
+        and type(calibration) is RasterTextCalibrationReceiptV7
+    ):
+        _verify_fresh_staged_evidence_chain(
+            root=root,
+            pointer=pointer,
+            evaluation=evaluation,
+            calibration=calibration,
+            profile=profile,
+            warm_service_smoke_raw=evidence_by_path[evaluation.warm_service_smoke_receipt_path],
+        )
+    elif (
         type(pointer)
         in (
             RasterTextActivationPointerV7,
@@ -7799,11 +8059,15 @@ def _load_binding_from_pointer(
             profile=profile,
             metric_revision=metric_revision,
         )
-    if not runtime_compact_v11:
+    if not runtime_compact:
         historical_runner_sha256 = (
             evaluation.historical_runner_implementation_sha256
             if type(evaluation) is RasterTextSealedEvaluationV8
-            else None
+            else (
+                evaluation.current_runner_implementation_sha256
+                if type(evaluation) is RasterTextSealedEvaluationV9
+                else None
+            )
         )
         _verify_warm_service_smoke_evidence(
             root=root,
@@ -7857,7 +8121,7 @@ def _load_binding_from_pointer(
     runtime_nonblocking_verifier: Callable[[], None] | None = None
     runtime_closer: Callable[[], None] | None = None
     if start_service_session:
-        if runtime_compact_v11:
+        if runtime_compact:
             session = provider.start_activation_attested_service_session()
         else:
             # Full activation/legacy loading just verified the parent import
@@ -8218,15 +8482,16 @@ class AutoActivatingSourceAttestedRasterTextPreviewRuntime:
             self._active_binding = loaded
             return loaded
 
-    def _try_cached_v11_prewarm_binding(self) -> _RasterTextRuntimeBinding | None:
-        """Return one unchanged V11 binding using a nonblocking child probe.
+    def _try_cached_compact_prewarm_binding(self) -> _RasterTextRuntimeBinding | None:
+        """Return one unchanged V11/V12 binding using a nonblocking child probe.
 
         The one-second lifecycle poll must notice a dead idle child, but it
         must not wait on the session lock owned by a healthy in-flight OCR.
         Snapshot and child checks run outside the facade lock so the public
         status endpoint does not observe a false unavailable state.  Exact
-        V11 is the only pointer whose activation contract permits this compact
-        cached path; all legacy pointers retain the strict validator below.
+        V11 and V12 are the only pointers whose activation contracts permit
+        this compact cached path; all legacy pointers retain the strict
+        validator below.
         """
 
         with self._lock:
@@ -8242,7 +8507,8 @@ class AutoActivatingSourceAttestedRasterTextPreviewRuntime:
             binding = self._active_binding
             if not (
                 isinstance(binding, SourceAttestedRasterTextPreviewBindingV1)
-                and type(binding.pointer) is RasterTextActivationPointerV11
+                and type(binding.pointer)
+                in (RasterTextActivationPointerV11, RasterTextActivationPointerV12)
                 and self._active_pointer_sha256 == digest
                 and binding.approval_sha256 == digest
             ):
@@ -8332,7 +8598,7 @@ class AutoActivatingSourceAttestedRasterTextPreviewRuntime:
         """
 
         try:
-            binding = self._try_cached_v11_prewarm_binding()
+            binding = self._try_cached_compact_prewarm_binding()
             if binding is None:
                 binding = self._current_binding(allow_cold_start=True)
             return RasterTextPreviewStatusV1("available", binding.raster_text_profile_revision)
@@ -8358,7 +8624,8 @@ class AutoActivatingSourceAttestedRasterTextPreviewRuntime:
             if (
                 not self._shutdown
                 and isinstance(binding, SourceAttestedRasterTextPreviewBindingV1)
-                and type(binding.pointer) is RasterTextActivationPointerV11
+                and type(binding.pointer)
+                in (RasterTextActivationPointerV11, RasterTextActivationPointerV12)
                 and digest is not None
                 and binding.approval_sha256 == digest
             ):
@@ -8511,7 +8778,15 @@ def write_source_attested_synthetic_raster_text_pointer(
     ):
         raise RasterTextRuntimeError("raster_text_activation_arguments_invalid")
     repair_audit_requested = repair_audit_dataset_receipt_relative_path is not None
-    if type(evaluation) is RasterTextSealedEvaluationV8:
+    if type(evaluation) is RasterTextSealedEvaluationV9:
+        if (
+            type(profile) is not RasterTextOfflineProfileV19
+            or profile.engine_kind != _V19_ENGINE_KIND
+            or repair_audit_requested
+        ):
+            raise RasterTextRuntimeError("raster_text_activation_arguments_invalid")
+        _verify_v12_linux_profile_runtime_platform(root=root, profile=profile)
+    elif type(evaluation) is RasterTextSealedEvaluationV8:
         if (
             type(profile) is not RasterTextOfflineProfileV19
             or profile.engine_kind != _V19_ENGINE_KIND
@@ -8601,7 +8876,39 @@ def write_source_attested_synthetic_raster_text_pointer(
         "sealed_evaluation_path": sealed_evaluation_relative_path,
         "sealed_evaluation_sha256": evaluation_sha256,
     }
-    if type(evaluation) is RasterTextSealedEvaluationV8:
+    if type(evaluation) is RasterTextSealedEvaluationV9:
+        if (
+            type(profile) is not RasterTextOfflineProfileV19
+            or profile.engine_kind != _V19_ENGINE_KIND
+            or repair_audit_pointer_material is not None
+        ):
+            raise RasterTextRuntimeError("raster_text_activation_arguments_invalid")
+        pointer_payload.update(
+            schema_version="12.0",
+            runtime_validation_revision="activation-full-runtime-compact-v1",
+            engine_kind=profile.engine_kind,
+            metric_revision=evaluation.metric_revision,
+            evidence_revision=evaluation.evidence_revision,
+            latency_gate_revision=evaluation.latency_gate_revision,
+            quality_gate_revision=evaluation.quality_gate_revision,
+            evidence_generation_revision=evaluation.evidence_generation_revision,
+            current_runner_implementation_sha256=(evaluation.current_runner_implementation_sha256),
+            source_recognizer_release_sha256=profile.source_recognizer_release_sha256,
+            source_recognizer_receipt_sha256=profile.source_recognizer_receipt_sha256,
+            source_recognizer_training_intent_sha256=(
+                profile.source_recognizer_training_intent_sha256
+            ),
+            source_recognizer_selection_receipt_path=(
+                profile.source_recognizer_selection_receipt_relative_path
+            ),
+            source_recognizer_selection_receipt_sha256=(
+                profile.source_recognizer_selection_receipt_sha256
+            ),
+            source_recognizer_parent_selection_receipt_sha256=(
+                profile.source_recognizer_parent_selection_receipt_sha256
+            ),
+        )
+    elif type(evaluation) is RasterTextSealedEvaluationV8:
         if (
             type(profile) is not RasterTextOfflineProfileV19
             or profile.engine_kind != _V19_ENGINE_KIND
@@ -8760,6 +9067,7 @@ __all__ = [
     "RasterTextActivationPointerV9",
     "RasterTextActivationPointerV10",
     "RasterTextActivationPointerV11",
+    "RasterTextActivationPointerV12",
     "RasterTextOfflineProfile",
     "RasterTextOfflineProfileV1",
     "RasterTextOfflineProfileV2",
@@ -8802,6 +9110,7 @@ __all__ = [
     "RasterTextSealedEvaluationV6",
     "RasterTextSealedEvaluationV7",
     "RasterTextSealedEvaluationV8",
+    "RasterTextSealedEvaluationV9",
     "RasterTextSealedProfileScoreV1",
     "RasterTextSealedProfileScoreV2",
     "RasterTextSealedProfileScoreV3",

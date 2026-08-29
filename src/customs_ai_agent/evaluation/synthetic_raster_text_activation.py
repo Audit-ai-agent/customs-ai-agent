@@ -35,6 +35,7 @@ from customs_ai_agent.evaluation.local_process_lock import (
 )
 from customs_ai_agent.evaluation.raster_offline_bundle import (
     RasterOfflineBundleError,
+    current_raster_runtime_platform_binding,
     load_verified_raster_offline_bundle,
     load_verified_raster_offline_bundle_release,
     write_or_verify_canonical_local_json,
@@ -55,6 +56,7 @@ from customs_ai_agent.evaluation.raster_text_public_finetuned_paddle_bundle impo
     VerifiedRasterTextPublicFineTunedPaddleBundleV1,
     load_verified_raster_text_public_finetuned_paddle_bundle_v1,
     materialize_verified_raster_text_public_finetuned_paddle_bundle_v1,
+    prepare_raster_text_public_finetuned_one_pass_runtime_profile_v19,
     prepare_raster_text_public_finetuned_runtime_profile_v19,
 )
 from customs_ai_agent.evaluation.raster_text_public_voyage_replay_paddle_bundle import (
@@ -159,6 +161,7 @@ from customs_ai_agent.service.raster_text_preview_runtime import (
     RasterTextActivationPointerV8,
     RasterTextActivationPointerV9,
     RasterTextActivationPointerV11,
+    RasterTextActivationPointerV12,
     RasterTextOfflineProfile,
     RasterTextOfflineProfileV14,
     RasterTextOfflineProfileV15,
@@ -171,6 +174,7 @@ from customs_ai_agent.service.raster_text_preview_runtime import (
     RasterTextSealedEvaluationV6,
     RasterTextSealedEvaluationV7,
     RasterTextSealedEvaluationV8,
+    RasterTextSealedEvaluationV9,
     RasterTextSealedProfileScoreV1,
     RasterTextSealedProfileScoreV4,
     RasterTextSealedProfileScoreV5,
@@ -199,6 +203,7 @@ _FreshProjectionKind = Literal[
     "sealed-stage2-100-family-v1",
 ]
 _FreshSealedStageDecision = Literal["early_pass", "early_fail", "continue"]
+_Preview97QualityGateRevision = Literal["preview-draft-critical97-cer2-v1"]
 _CandidateScope = Literal["smoke", "calibration", "sealed", "fresh-calibration", "fresh-sealed"]
 _SemanticMetricRevision = Literal[
     "source-attested-semantic-text-v2",
@@ -235,6 +240,18 @@ _V19_PREVIEW97_HISTORICAL_RUNNER_IMPLEMENTATION_SHA256: Final = (
 )
 _V19_PREVIEW97_QUALITY_GATE_REVISION: Final = "preview-draft-critical97-cer2-v1"
 _V19_PREVIEW97_EVIDENCE_REVALIDATION_REVISION: Final = "historical-runner-current-runtime-smoke-v1"
+_V19_CURRENT_NATIVE_EVIDENCE_GENERATION_REVISION: Final = "current-runner-native-full-gate-v1"
+# These are the one audited public recognizer/model release retained by the
+# best V19 one-pass profile.  The Linux activation command accepts neither a
+# model selector nor a hash input: deployment must provide these exact,
+# content-addressed, platform-independent model materials alongside a new
+# schema-2 Linux direct runtime bundle.
+_V19_PUBLIC_FINETUNED_RECOGNIZER_RELEASE_SHA256: Final = (
+    "51f4324be43c1840a574cdb4b9febb58ec175df80de79cd95a0ef9ff33e0bea5"
+)
+_V19_PUBLIC_FINETUNED_MODEL_BUNDLE_SHA256: Final = (
+    "3b276c1a83740f73949d319095034bfdba01285aed3318d1f4cdcb7190e18185"
+)
 _V19_PREVIEW97_PROFILE_RELATIVE_PATH: Final = (
     "raster-text-runtime-profiles-v1/9eb7f34b40da6ba6c7316e8b/profile.json"
 )
@@ -642,6 +659,73 @@ class RasterTextFreshSealedStageDecisionReceiptV1(_WireModel):
         ):
             _relative_path(value)
         return self
+
+
+class RasterTextFreshSealedStageDecisionReceiptV2(_WireModel):
+    """Stage-1 decision with CER 2% and critical exact 97% made explicit."""
+
+    schema_version: Literal["2.0"] = "2.0"
+    artifact_kind: Literal["synthetic_raster_text_fresh_sealed_stage_decision"] = (
+        "synthetic_raster_text_fresh_sealed_stage_decision"
+    )
+    dataset_id: Literal["synthetic-raster-text-v1"] = "synthetic-raster-text-v1"
+    metric_revision: Literal["source-attested-semantic-text-v3"]
+    quality_gate_revision: _Preview97QualityGateRevision
+    stage: Literal["stage1-50-family"] = "stage1-50-family"
+    source_gold_receipt_relative_path: str = Field(min_length=1, max_length=240)
+    source_gold_receipt_sha256: str = Field(pattern=_SHA256)
+    candidate_execution_relative_path: str = Field(min_length=1, max_length=240)
+    candidate_execution_sha256: str = Field(pattern=_SHA256)
+    projection_receipt_relative_path: str = Field(min_length=1, max_length=240)
+    projection_receipt_sha256: str = Field(pattern=_SHA256)
+    simultaneous_method: Literal["bonferroni-wilson-one-sided-v1"] = (
+        "bonferroni-wilson-one-sided-v1"
+    )
+    family_wise_confidence: float = Field(default=0.95, ge=0.95, le=0.95)
+    simultaneous_claim_count: Literal[24] = 24
+    decision: _FreshSealedStageDecision
+    strata: list[RasterTextFreshSealedStageStratumV1] = Field(min_length=12, max_length=12)
+
+    @model_validator(mode="after")
+    def _decision_matches_preview97_strata(
+        self,
+    ) -> "RasterTextFreshSealedStageDecisionReceiptV2":
+        expected = {
+            (document_type, profile_id)
+            for document_type in ("bill_of_lading", "commercial_invoice", "packing_list")
+            for profile_id in RASTER_PROFILES
+        }
+        keys = [(item.document_type, item.profile_id) for item in self.strata]
+        early_pass = all(
+            item.point_gate_passed
+            and item.character_accuracy_lower_bound >= 0.98
+            and item.critical_accuracy_lower_bound >= 0.97
+            for item in self.strata
+        )
+        early_fail = any(not item.full_gate_recoverable for item in self.strata)
+        expected_decision: _FreshSealedStageDecision = (
+            "early_pass" if early_pass else "early_fail" if early_fail else "continue"
+        )
+        if (
+            set(keys) != expected
+            or keys != sorted(keys)
+            or self.decision != expected_decision
+            or self.simultaneous_claim_count != _FRESH_SEALED_SIMULTANEOUS_CLAIM_COUNT
+            or self.family_wise_confidence != 0.95
+        ):
+            raise ValueError("fresh raster text preview-97 staged decision is invalid")
+        for value in (
+            self.source_gold_receipt_relative_path,
+            self.candidate_execution_relative_path,
+            self.projection_receipt_relative_path,
+        ):
+            _relative_path(value)
+        return self
+
+
+RasterTextFreshSealedStageDecisionReceipt = (
+    RasterTextFreshSealedStageDecisionReceiptV1 | RasterTextFreshSealedStageDecisionReceiptV2
+)
 
 
 class RasterTextSourceGoldBindingV1(_WireModel):
@@ -1166,6 +1250,43 @@ class RasterTextSmokeQualityScreenV3(_WireModel):
             raise ValueError("raster semantic text smoke quality coverage is invalid")
         if self.gate_passed != synthetic_raster_semantic_text_gate_passes_v3(self.scores):
             raise ValueError("raster semantic text smoke quality result is invalid")
+        return self
+
+
+class RasterTextSmokeQualityScreenV4(_WireModel):
+    """Preview-97 early rejection screen; never sufficient for activation."""
+
+    schema_version: Literal["4.0"] = "4.0"
+    artifact_kind: Literal["synthetic_raster_semantic_text_smoke_quality_screen"] = (
+        "synthetic_raster_semantic_text_smoke_quality_screen"
+    )
+    dataset_id: Literal["synthetic-raster-text-v1"] = "synthetic-raster-text-v1"
+    metric_revision: Literal["source-attested-semantic-text-v3"]
+    quality_gate_revision: _Preview97QualityGateRevision
+    scope: Literal["smoke"] = "smoke"
+    source_gold_receipt_path: str = Field(min_length=1, max_length=240)
+    source_gold_receipt_sha256: str = Field(pattern=_SHA256)
+    candidate_execution_path: str = Field(min_length=1, max_length=240)
+    candidate_execution_sha256: str = Field(pattern=_SHA256)
+    raster_text_profile_revision: str = Field(pattern=r"^synthetic-raster-text-v1:[a-f0-9]{24}$")
+    runtime_configuration_sha256: str = Field(pattern=_SHA256)
+    extractor_revision: str = Field(min_length=1, max_length=256)
+    scores: list[RasterTextGateScoreV1] = Field(min_length=12, max_length=12)
+    gate_passed: bool
+
+    @model_validator(mode="after")
+    def _exact_preview97_screen_matrix(self) -> "RasterTextSmokeQualityScreenV4":
+        expected = {
+            (document_type, profile_id)
+            for document_type in ("bill_of_lading", "commercial_invoice", "packing_list")
+            for profile_id in ("png-216", "jpeg-216-q75", "jpeg-150-q75", "scan-pdf-216-q75")
+        }
+        if {(item.document_type, item.profile_id) for item in self.scores} != expected:
+            raise ValueError("raster preview-97 smoke quality coverage is invalid")
+        if self.gate_passed != synthetic_raster_semantic_text_preview_draft_gate_passes_v1(
+            self.scores
+        ):
+            raise ValueError("raster preview-97 smoke quality result is invalid")
         return self
 
 
@@ -2138,7 +2259,7 @@ def _fresh_stage_decision_expected_path(digest: str) -> str:
 
 def _read_fresh_sealed_stage_decision(
     *, root: Path, relative_path: str, expected_sha256: str | None = None
-) -> tuple[RasterTextFreshSealedStageDecisionReceiptV1, str]:
+) -> tuple[RasterTextFreshSealedStageDecisionReceipt, str]:
     raw = _read(
         root,
         relative_path,
@@ -2147,8 +2268,18 @@ def _read_fresh_sealed_stage_decision(
     )
     digest = hashlib.sha256(raw).hexdigest()
     try:
-        decision = RasterTextFreshSealedStageDecisionReceiptV1.model_validate_json(raw)
-    except ValidationError:
+        value = json.loads(raw)
+        if not isinstance(value, dict):
+            raise ValueError
+        if value.get("schema_version") == "1.0":
+            decision: RasterTextFreshSealedStageDecisionReceipt = (
+                RasterTextFreshSealedStageDecisionReceiptV1.model_validate(value)
+            )
+        elif value.get("schema_version") == "2.0":
+            decision = RasterTextFreshSealedStageDecisionReceiptV2.model_validate(value)
+        else:
+            raise ValueError
+    except (json.JSONDecodeError, ValidationError, ValueError):
         raise SyntheticRasterTextActivationError(
             "raster_text_fresh_stage_decision_invalid"
         ) from None
@@ -4577,7 +4708,11 @@ def _fresh_sealed_stage1_strata(
     *,
     stage_counts: dict[tuple[str, str], RasterTextMetricCountsV1],
     full_counts: dict[tuple[str, str], RasterTextMetricCountsV1],
+    quality_gate_revision: _Preview97QualityGateRevision | None = None,
 ) -> list[RasterTextFreshSealedStageStratumV1]:
+    if quality_gate_revision not in (None, _V19_PREVIEW97_QUALITY_GATE_REVISION):
+        raise SyntheticRasterTextActivationError("raster_text_fresh_stage_decision_invalid")
+    preview97 = quality_gate_revision == _V19_PREVIEW97_QUALITY_GATE_REVISION
     if set(stage_counts) != set(full_counts) or len(stage_counts) != 12:
         raise SyntheticRasterTextActivationError("raster_text_fresh_stage_decision_invalid")
     result: list[RasterTextFreshSealedStageStratumV1] = []
@@ -4601,9 +4736,15 @@ def _fresh_sealed_stage1_strata(
             total=current.critical_total,
         )
         character_gate_passed = current.character_errors / current.character_reference <= 0.02
-        critical_gate_passed = current.critical_matches / current.critical_total >= 0.98
+        critical_gate_passed = current.critical_matches / current.critical_total >= (
+            0.97 if preview97 else 0.98
+        )
         character_error_limit = math.floor(full.character_reference * 0.02)
-        critical_error_limit = math.floor(full.critical_total * 0.02)
+        critical_error_limit = (
+            full.critical_total - ((97 * full.critical_total + 99) // 100)
+            if preview97
+            else math.floor(full.critical_total * 0.02)
+        )
         result.append(
             RasterTextFreshSealedStageStratumV1(
                 document_type=cast(
@@ -4639,13 +4780,20 @@ def _fresh_sealed_stage1_strata(
 
 def _fresh_stage1_decision_from_strata(
     strata: Sequence[RasterTextFreshSealedStageStratumV1],
+    *,
+    quality_gate_revision: _Preview97QualityGateRevision | None = None,
 ) -> _FreshSealedStageDecision:
+    if quality_gate_revision not in (None, _V19_PREVIEW97_QUALITY_GATE_REVISION):
+        raise SyntheticRasterTextActivationError("raster_text_fresh_stage_decision_invalid")
+    critical_threshold = (
+        0.97 if quality_gate_revision == _V19_PREVIEW97_QUALITY_GATE_REVISION else 0.98
+    )
     if len(strata) != 12:
         raise SyntheticRasterTextActivationError("raster_text_fresh_stage_decision_invalid")
     if all(
         item.point_gate_passed
         and item.character_accuracy_lower_bound >= 0.98
-        and item.critical_accuracy_lower_bound >= 0.98
+        and item.critical_accuracy_lower_bound >= critical_threshold
         for item in strata
     ):
         return "early_pass"
@@ -4663,6 +4811,7 @@ def verify_source_attested_fresh_raster_text_evidence(
     allow_inconclusive_stage1: bool = False,
     required_selection_revision: _FreshSelectionRevision = (_FRESH_HOLDOUT_SELECTION_REVISION),
     expected_runner_implementation_sha256: str | None = None,
+    quality_gate_revision: _Preview97QualityGateRevision | None = None,
 ) -> tuple[
     RasterTextFreshSourceGoldReceiptV1,
     RasterTextFreshCandidateExecutionV1 | RasterTextFreshProjectedCandidateExecutionV1,
@@ -4874,10 +5023,14 @@ def verify_source_attested_fresh_raster_text_evidence(
         strata = _fresh_sealed_stage1_strata(
             stage_counts=_semantic_v3_counts_by_stratum(cases),
             full_counts=full_counts,
+            quality_gate_revision=quality_gate_revision,
         )
         if (
             not allow_inconclusive_stage1
-            and _fresh_stage1_decision_from_strata(strata) != "early_pass"
+            and _fresh_stage1_decision_from_strata(
+                strata, quality_gate_revision=quality_gate_revision
+            )
+            != "early_pass"
         ):
             raise SyntheticRasterTextActivationError(
                 "raster_text_fresh_stage1_not_approval_eligible"
@@ -4888,6 +5041,7 @@ def verify_source_attested_fresh_raster_text_evidence(
             projection=projection,
             required_selection_revision=required_selection_revision,
             expected_runner_implementation_sha256=runner_implementation_sha256,
+            quality_gate_revision=quality_gate_revision,
         )
     return source, execution, bundle, cases
 
@@ -4981,6 +5135,7 @@ def verify_source_attested_fresh_raster_text_evidence_v6(
     scope: _FreshScope,
     allow_inconclusive_stage1: bool = False,
     expected_runner_implementation_sha256: str | None = None,
+    quality_gate_revision: _Preview97QualityGateRevision | None = None,
 ) -> tuple[
     RasterTextFreshSourceGoldReceiptV1,
     RasterTextFreshProjectedCandidateExecutionV1,
@@ -5002,6 +5157,7 @@ def verify_source_attested_fresh_raster_text_evidence_v6(
         allow_inconclusive_stage1=allow_inconclusive_stage1,
         required_selection_revision=_FRESH_HOLDOUT_SELECTION_REVISION_V2,
         expected_runner_implementation_sha256=expected_runner_implementation_sha256,
+        quality_gate_revision=quality_gate_revision,
     )
     if not isinstance(execution, RasterTextFreshProjectedCandidateExecutionV1) or not isinstance(
         bundle, RasterTextFreshProjectedCandidateBundleV1
@@ -5072,7 +5228,8 @@ def _build_fresh_stage1_decision_artifact(
     source: RasterTextFreshSourceGoldReceiptV1,
     execution: RasterTextFreshCandidateExecutionV1 | RasterTextFreshProjectedCandidateExecutionV1,
     cases: Sequence[RasterTextEvaluationCaseV1],
-) -> RasterTextFreshSealedStageDecisionReceiptV1:
+    quality_gate_revision: _Preview97QualityGateRevision | None = None,
+) -> RasterTextFreshSealedStageDecisionReceipt:
     if not isinstance(execution, RasterTextFreshProjectedCandidateExecutionV1):
         raise SyntheticRasterTextActivationError("raster_text_fresh_stage_decision_invalid")
     source_raw = _read(
@@ -5111,18 +5268,26 @@ def _build_fresh_stage1_decision_artifact(
     strata = _fresh_sealed_stage1_strata(
         stage_counts=_semantic_v3_counts_by_stratum(cases),
         full_counts=_full_semantic_v3_reference_counts(root=root, context=context, source=source),
+        quality_gate_revision=quality_gate_revision,
     )
-    return RasterTextFreshSealedStageDecisionReceiptV1(
-        metric_revision=RASTER_TEXT_SEMANTIC_METRIC_REVISION_V3,
-        source_gold_receipt_relative_path=source_gold_receipt_relative_path,
-        source_gold_receipt_sha256=hashlib.sha256(source_raw).hexdigest(),
-        candidate_execution_relative_path=candidate_execution_relative_path,
-        candidate_execution_sha256=hashlib.sha256(execution_raw).hexdigest(),
-        projection_receipt_relative_path=(execution.projection_receipt_relative_path),
-        projection_receipt_sha256=execution.projection_receipt_sha256,
-        decision=_fresh_stage1_decision_from_strata(strata),
-        strata=strata,
-    )
+    common: dict[str, object] = {
+        "metric_revision": RASTER_TEXT_SEMANTIC_METRIC_REVISION_V3,
+        "source_gold_receipt_relative_path": source_gold_receipt_relative_path,
+        "source_gold_receipt_sha256": hashlib.sha256(source_raw).hexdigest(),
+        "candidate_execution_relative_path": candidate_execution_relative_path,
+        "candidate_execution_sha256": hashlib.sha256(execution_raw).hexdigest(),
+        "projection_receipt_relative_path": execution.projection_receipt_relative_path,
+        "projection_receipt_sha256": execution.projection_receipt_sha256,
+        "decision": _fresh_stage1_decision_from_strata(
+            strata, quality_gate_revision=quality_gate_revision
+        ),
+        "strata": strata,
+    }
+    if quality_gate_revision is not None:
+        return RasterTextFreshSealedStageDecisionReceiptV2.model_validate(
+            common | {"quality_gate_revision": quality_gate_revision}
+        )
+    return RasterTextFreshSealedStageDecisionReceiptV1.model_validate(common)
 
 
 def write_fresh_raster_text_sealed_stage1_decision(
@@ -5131,6 +5296,7 @@ def write_fresh_raster_text_sealed_stage1_decision(
     source_gold_receipt_relative_path: str,
     candidate_execution_relative_path: str,
     selection_revision: _FreshSelectionRevision = _FRESH_HOLDOUT_SELECTION_REVISION,
+    quality_gate_revision: _Preview97QualityGateRevision | None = None,
 ) -> tuple[str, str, _FreshSealedStageDecision]:
     """Recompute and immutably record the result-blind stage-1 decision."""
 
@@ -5142,6 +5308,7 @@ def write_fresh_raster_text_sealed_stage1_decision(
         scope="fresh-sealed",
         allow_inconclusive_stage1=True,
         required_selection_revision=selection_revision,
+        quality_gate_revision=quality_gate_revision,
     )
     artifact = _build_fresh_stage1_decision_artifact(
         root=root,
@@ -5150,6 +5317,7 @@ def write_fresh_raster_text_sealed_stage1_decision(
         source=source,
         execution=execution,
         cases=cases,
+        quality_gate_revision=quality_gate_revision,
     )
     digest = _digest_model(artifact)
     relative = _fresh_stage_decision_expected_path(digest)
@@ -5175,7 +5343,8 @@ def verify_fresh_raster_text_sealed_stage1_decision(
     expected_sha256: str | None = None,
     required_selection_revision: _FreshSelectionRevision = (_FRESH_HOLDOUT_SELECTION_REVISION),
     expected_runner_implementation_sha256: str | None = None,
-) -> RasterTextFreshSealedStageDecisionReceiptV1:
+    quality_gate_revision: _Preview97QualityGateRevision | None = None,
+) -> RasterTextFreshSealedStageDecisionReceipt:
     """Recompute every count, bound, flag and decision from source/candidates."""
 
     root = _root(document_preview_root)
@@ -5184,6 +5353,14 @@ def verify_fresh_raster_text_sealed_stage1_decision(
         relative_path=decision_relative_path,
         expected_sha256=expected_sha256,
     )
+    if quality_gate_revision is None:
+        if type(observed) is not RasterTextFreshSealedStageDecisionReceiptV1:
+            raise SyntheticRasterTextActivationError("raster_text_fresh_stage_decision_invalid")
+    elif (
+        type(observed) is not RasterTextFreshSealedStageDecisionReceiptV2
+        or observed.quality_gate_revision != quality_gate_revision
+    ):
+        raise SyntheticRasterTextActivationError("raster_text_fresh_stage_decision_invalid")
     source, execution, _bundle, cases = verify_source_attested_fresh_raster_text_evidence(
         document_preview_root=root,
         source_gold_receipt_relative_path=(observed.source_gold_receipt_relative_path),
@@ -5192,6 +5369,7 @@ def verify_fresh_raster_text_sealed_stage1_decision(
         allow_inconclusive_stage1=True,
         required_selection_revision=required_selection_revision,
         expected_runner_implementation_sha256=expected_runner_implementation_sha256,
+        quality_gate_revision=quality_gate_revision,
     )
     expected = _build_fresh_stage1_decision_artifact(
         root=root,
@@ -5200,6 +5378,7 @@ def verify_fresh_raster_text_sealed_stage1_decision(
         source=source,
         execution=execution,
         cases=cases,
+        quality_gate_revision=quality_gate_revision,
     )
     if expected != observed:
         raise SyntheticRasterTextActivationError("raster_text_fresh_stage_decision_invalid")
@@ -5212,7 +5391,8 @@ def verify_fresh_raster_text_sealed_stage1_decision_v6(
     decision_relative_path: str,
     expected_sha256: str | None = None,
     expected_runner_implementation_sha256: str | None = None,
-) -> RasterTextFreshSealedStageDecisionReceiptV1:
+    quality_gate_revision: _Preview97QualityGateRevision | None = None,
+) -> RasterTextFreshSealedStageDecisionReceipt:
     """Recompute a stage-1 decision from exactly selection generation V2."""
 
     return verify_fresh_raster_text_sealed_stage1_decision(
@@ -5221,6 +5401,7 @@ def verify_fresh_raster_text_sealed_stage1_decision_v6(
         expected_sha256=expected_sha256,
         required_selection_revision=_FRESH_HOLDOUT_SELECTION_REVISION_V2,
         expected_runner_implementation_sha256=expected_runner_implementation_sha256,
+        quality_gate_revision=quality_gate_revision,
     )
 
 
@@ -5230,6 +5411,7 @@ def _verify_fresh_stage2_parent_decision(
     projection: RasterTextFreshEvaluationProjectionReceiptV1,
     required_selection_revision: _FreshSelectionRevision = (_FRESH_HOLDOUT_SELECTION_REVISION),
     expected_runner_implementation_sha256: str | None = None,
+    quality_gate_revision: _Preview97QualityGateRevision | None = None,
 ) -> None:
     relative_path = projection.parent_stage1_decision_relative_path
     expected_sha256 = projection.parent_stage1_decision_sha256
@@ -5241,6 +5423,7 @@ def _verify_fresh_stage2_parent_decision(
         expected_sha256=expected_sha256,
         required_selection_revision=required_selection_revision,
         expected_runner_implementation_sha256=expected_runner_implementation_sha256,
+        quality_gate_revision=quality_gate_revision,
     )
     if observed.decision != "continue":
         raise SyntheticRasterTextActivationError("raster_text_fresh_stage_decision_invalid")
@@ -5258,6 +5441,7 @@ def write_raster_text_smoke_quality_screen(
     source_gold_receipt_relative_path: str,
     candidate_execution_relative_path: str,
     metric_revision: _SemanticMetricRevision | None = None,
+    quality_gate_revision: _Preview97QualityGateRevision | None = None,
 ) -> tuple[str, str, bool]:
     """Record a conservative 24-asset quality screen before full splits.
 
@@ -5268,6 +5452,10 @@ def write_raster_text_smoke_quality_screen(
     """
 
     semantic_generation = _semantic_metric_generation(metric_revision)
+    if quality_gate_revision is not None and (
+        semantic_generation != "v3" or quality_gate_revision != _V19_PREVIEW97_QUALITY_GATE_REVISION
+    ):
+        raise SyntheticRasterTextActivationError("raster_text_smoke_quality_screen_invalid")
     root = _root(document_preview_root)
     source, execution, _bundle, cases = _load_source_gold_cases(
         root=root,
@@ -5300,7 +5488,11 @@ def write_raster_text_smoke_quality_screen(
         code="raster_text_smoke_quality_screen_invalid",
     )
     if semantic_generation == "v3":
-        gate_passed = synthetic_raster_semantic_text_gate_passes_v3(scores)
+        gate_passed = (
+            synthetic_raster_semantic_text_preview_draft_gate_passes_v1(scores)
+            if quality_gate_revision is not None
+            else synthetic_raster_semantic_text_gate_passes_v3(scores)
+        )
     elif semantic_generation == "v2":
         gate_passed = synthetic_raster_semantic_text_gate_passes_v2(scores)
     else:
@@ -5309,8 +5501,23 @@ def write_raster_text_smoke_quality_screen(
         RasterTextSmokeQualityScreenV1
         | RasterTextSmokeQualityScreenV2
         | RasterTextSmokeQualityScreenV3
+        | RasterTextSmokeQualityScreenV4
     )
-    if semantic_generation == "v3":
+    if semantic_generation == "v3" and quality_gate_revision is not None:
+        artifact = RasterTextSmokeQualityScreenV4(
+            metric_revision=RASTER_TEXT_SEMANTIC_METRIC_REVISION_V3,
+            quality_gate_revision=quality_gate_revision,
+            source_gold_receipt_path=source_gold_receipt_relative_path,
+            source_gold_receipt_sha256=hashlib.sha256(source_raw).hexdigest(),
+            candidate_execution_path=candidate_execution_relative_path,
+            candidate_execution_sha256=hashlib.sha256(execution_raw).hexdigest(),
+            raster_text_profile_revision=execution.raster_text_profile_revision,
+            runtime_configuration_sha256=execution.runtime_configuration_sha256,
+            extractor_revision=execution.extractor_revision,
+            scores=scores,
+            gate_passed=gate_passed,
+        )
+    elif semantic_generation == "v3":
         artifact = RasterTextSmokeQualityScreenV3(
             metric_revision=RASTER_TEXT_SEMANTIC_METRIC_REVISION_V3,
             source_gold_receipt_path=source_gold_receipt_relative_path,
@@ -5354,6 +5561,8 @@ def write_raster_text_smoke_quality_screen(
         "v3": "semantic-smoke-quality-screens-v3",
         None: "smoke-quality-screens",
     }[semantic_generation]
+    if quality_gate_revision is not None:
+        evidence_directory = "semantic-smoke-quality-screens-v4"
     relative = (
         f"synthetic-raster-text-v1/{evidence_directory}/"
         f"{artifact.raster_text_profile_revision.rsplit(':', 1)[1]}/{digest}.json"
@@ -5849,6 +6058,23 @@ def write_raster_semantic_text_smoke_quality_screen_v3(
         source_gold_receipt_relative_path=source_gold_receipt_relative_path,
         candidate_execution_relative_path=candidate_execution_relative_path,
         metric_revision=RASTER_TEXT_SEMANTIC_METRIC_REVISION_V3,
+    )
+
+
+def write_raster_semantic_text_smoke_quality_screen_preview97_v1(
+    *,
+    document_preview_root: Path,
+    source_gold_receipt_relative_path: str,
+    candidate_execution_relative_path: str,
+) -> tuple[str, str, bool]:
+    """Write a V3 smoke screen under the explicit preview-draft 97% Gate."""
+
+    return write_raster_text_smoke_quality_screen(
+        document_preview_root=document_preview_root,
+        source_gold_receipt_relative_path=source_gold_receipt_relative_path,
+        candidate_execution_relative_path=candidate_execution_relative_path,
+        metric_revision=RASTER_TEXT_SEMANTIC_METRIC_REVISION_V3,
+        quality_gate_revision=_V19_PREVIEW97_QUALITY_GATE_REVISION,
     )
 
 
@@ -7998,21 +8224,25 @@ def _write_raster_semantic_text_fresh_sealed_evaluation_v7_or_v8(
     profile: RasterTextOfflineProfileV19,
     runtime_configuration_sha256: str,
     preview97_revalidation: _Preview97RevalidationV1 | None = None,
+    current_native_preview97: bool = False,
 ) -> tuple[str, str]:
     """Validate one V19 chain under its explicit immutable Gate policy."""
 
-    preview97 = preview97_revalidation is not None
-    invalid = (
-        "raster_text_v8_fresh_sealed_evaluation_invalid"
-        if preview97
-        else "raster_text_v7_fresh_sealed_evaluation_invalid"
-    )
+    historical_preview97 = preview97_revalidation is not None
+    if historical_preview97 and current_native_preview97:
+        raise SyntheticRasterTextActivationError("raster_text_v9_fresh_sealed_evaluation_invalid")
+    preview97 = historical_preview97 or current_native_preview97
+    invalid = {
+        (False, False): "raster_text_v7_fresh_sealed_evaluation_invalid",
+        (True, False): "raster_text_v8_fresh_sealed_evaluation_invalid",
+        (False, True): "raster_text_v9_fresh_sealed_evaluation_invalid",
+    }[(historical_preview97, current_native_preview97)]
     root = _root(document_preview_root)
     historical_runner_sha256 = (
-        _V19_PREVIEW97_HISTORICAL_RUNNER_IMPLEMENTATION_SHA256 if preview97 else None
+        _V19_PREVIEW97_HISTORICAL_RUNNER_IMPLEMENTATION_SHA256 if historical_preview97 else None
     )
     current_runner_sha256 = _runner_implementation_sha256()
-    if preview97:
+    if historical_preview97:
         source, execution, bundle, sealed_cases = (
             verify_source_attested_fresh_raster_text_evidence_v8(
                 document_preview_root=root,
@@ -8030,6 +8260,12 @@ def _write_raster_semantic_text_fresh_sealed_evaluation_v7_or_v8(
                 source_gold_receipt_relative_path=source_gold_receipt_relative_path,
                 candidate_execution_relative_path=candidate_execution_relative_path,
                 scope="fresh-sealed",
+                expected_runner_implementation_sha256=(
+                    current_runner_sha256 if current_native_preview97 else None
+                ),
+                quality_gate_revision=(
+                    _V19_PREVIEW97_QUALITY_GATE_REVISION if current_native_preview97 else None
+                ),
             )
         )
     if (
@@ -8056,7 +8292,16 @@ def _write_raster_semantic_text_fresh_sealed_evaluation_v7_or_v8(
             document_preview_root=root,
             decision_relative_path=stage1_decision_receipt_relative_path,
             expected_sha256=decision_sha256,
-            expected_runner_implementation_sha256=historical_runner_sha256,
+            expected_runner_implementation_sha256=(
+                historical_runner_sha256
+                if historical_preview97
+                else current_runner_sha256
+                if current_native_preview97
+                else None
+            ),
+            quality_gate_revision=(
+                _V19_PREVIEW97_QUALITY_GATE_REVISION if current_native_preview97 else None
+            ),
         )
     except SyntheticRasterTextActivationError:
         raise SyntheticRasterTextActivationError(invalid) from None
@@ -8132,7 +8377,7 @@ def _write_raster_semantic_text_fresh_sealed_evaluation_v7_or_v8(
         raise SyntheticRasterTextActivationError(invalid) from None
     if calibration_raw != _canonical_json(calibration.model_dump(mode="json", warnings=False)):
         raise SyntheticRasterTextActivationError(invalid)
-    if preview97:
+    if historical_preview97:
         (
             calibration_source,
             calibration_execution,
@@ -8157,6 +8402,9 @@ def _write_raster_semantic_text_fresh_sealed_evaluation_v7_or_v8(
             source_gold_receipt_relative_path=calibration.source_gold_receipt_path,
             candidate_execution_relative_path=calibration.candidate_execution_path,
             scope="fresh-calibration",
+            expected_runner_implementation_sha256=(
+                current_runner_sha256 if current_native_preview97 else None
+            ),
         )
     if calibration_execution.candidate_count != 240 or len(calibration_bundle.candidates) != 240:
         raise SyntheticRasterTextActivationError(invalid)
@@ -8169,7 +8417,13 @@ def _write_raster_semantic_text_fresh_sealed_evaluation_v7_or_v8(
         relative_path=warm_service_smoke_receipt_relative_path,
         profile=profile,
         runtime_configuration_sha256=runtime_configuration_sha256,
-        expected_runner_implementation_sha256=historical_runner_sha256,
+        expected_runner_implementation_sha256=(
+            historical_runner_sha256
+            if historical_preview97
+            else current_runner_sha256
+            if current_native_preview97
+            else None
+        ),
     )
     selection_context = _fresh_scope_context(
         root=root,
@@ -8193,7 +8447,7 @@ def _write_raster_semantic_text_fresh_sealed_evaluation_v7_or_v8(
         raise SyntheticRasterTextActivationError("sealed_raster_text_gate_failed")
     revalidation_smoke_raw: bytes | None = None
     revalidation_execution_raw: bytes | None = None
-    if preview97:
+    if historical_preview97:
         assert preview97_revalidation is not None
         revalidation_smoke, revalidation_smoke_raw = _load_verified_final_warm_smoke(
             root=root,
@@ -8334,8 +8588,20 @@ def _write_raster_semantic_text_fresh_sealed_evaluation_v7_or_v8(
             profile.source_recognizer_parent_selection_receipt_sha256
         ),
     }
-    artifact: RasterTextSealedEvaluationV7 | RasterTextSealedEvaluationV8
-    if preview97:
+    artifact: (
+        RasterTextSealedEvaluationV7 | RasterTextSealedEvaluationV8 | RasterTextSealedEvaluationV9
+    )
+    if current_native_preview97:
+        artifact = RasterTextSealedEvaluationV9.model_validate(
+            artifact_kwargs
+            | {
+                "quality_gate_revision": _V19_PREVIEW97_QUALITY_GATE_REVISION,
+                "evidence_generation_revision": (_V19_CURRENT_NATIVE_EVIDENCE_GENERATION_REVISION),
+                "current_runner_implementation_sha256": current_runner_sha256,
+                "scores": [RasterTextSealedProfileScoreV8(**item.model_dump()) for item in scores],
+            }
+        )
+    elif historical_preview97:
         assert preview97_revalidation is not None
         assert revalidation_smoke_raw is not None
         assert revalidation_execution_raw is not None
@@ -8367,11 +8633,11 @@ def _write_raster_semantic_text_fresh_sealed_evaluation_v7_or_v8(
             | {"scores": [RasterTextSealedProfileScoreV7(**item.model_dump()) for item in scores]}
         )
     digest = _digest_model(artifact)
-    relative = (
-        f"synthetic-raster-text-v1/sealed-v8/{digest}.json"
-        if preview97
-        else f"synthetic-raster-text-v1/sealed-v7/{digest}.json"
-    )
+    relative = {
+        (False, False): f"synthetic-raster-text-v1/sealed-v7/{digest}.json",
+        (True, False): f"synthetic-raster-text-v1/sealed-v8/{digest}.json",
+        (False, True): f"synthetic-raster-text-v1/sealed-v9/{digest}.json",
+    }[(historical_preview97, current_native_preview97)]
     try:
         written, result_digest = write_or_verify_canonical_local_json(
             document_preview_root=root,
@@ -8379,18 +8645,18 @@ def _write_raster_semantic_text_fresh_sealed_evaluation_v7_or_v8(
             value=artifact.model_dump(mode="json", warnings=False),
         )
     except (OSError, ValueError, RuntimeError):
-        code = (
-            "raster_text_v8_fresh_sealed_evaluation_write_failed"
-            if preview97
-            else "raster_text_v7_fresh_sealed_evaluation_write_failed"
-        )
+        code = {
+            (False, False): "raster_text_v7_fresh_sealed_evaluation_write_failed",
+            (True, False): "raster_text_v8_fresh_sealed_evaluation_write_failed",
+            (False, True): "raster_text_v9_fresh_sealed_evaluation_write_failed",
+        }[(historical_preview97, current_native_preview97)]
         raise SyntheticRasterTextActivationError(code) from None
     if written != relative or result_digest != digest:
-        code = (
-            "raster_text_v8_fresh_sealed_evaluation_write_failed"
-            if preview97
-            else "raster_text_v7_fresh_sealed_evaluation_write_failed"
-        )
+        code = {
+            (False, False): "raster_text_v7_fresh_sealed_evaluation_write_failed",
+            (True, False): "raster_text_v8_fresh_sealed_evaluation_write_failed",
+            (False, True): "raster_text_v9_fresh_sealed_evaluation_write_failed",
+        }[(historical_preview97, current_native_preview97)]
         raise SyntheticRasterTextActivationError(code)
     return relative, digest
 
@@ -8450,6 +8716,32 @@ def write_raster_semantic_text_fresh_sealed_evaluation_v8(
                 revalidation_candidate_execution_relative_path
             ),
         ),
+    )
+
+
+def write_raster_semantic_text_fresh_sealed_evaluation_v9(
+    *,
+    document_preview_root: Path,
+    source_gold_receipt_relative_path: str,
+    candidate_execution_relative_path: str,
+    calibration_receipt_relative_path: str,
+    stage1_decision_receipt_relative_path: str,
+    warm_service_smoke_receipt_relative_path: str,
+    profile: RasterTextOfflineProfileV19,
+    runtime_configuration_sha256: str,
+) -> tuple[str, str]:
+    """Write a fully current native V19 evaluation under the preview-97 Gate."""
+
+    return _write_raster_semantic_text_fresh_sealed_evaluation_v7_or_v8(
+        document_preview_root=document_preview_root,
+        source_gold_receipt_relative_path=source_gold_receipt_relative_path,
+        candidate_execution_relative_path=candidate_execution_relative_path,
+        calibration_receipt_relative_path=calibration_receipt_relative_path,
+        stage1_decision_receipt_relative_path=stage1_decision_receipt_relative_path,
+        warm_service_smoke_receipt_relative_path=warm_service_smoke_receipt_relative_path,
+        profile=profile,
+        runtime_configuration_sha256=runtime_configuration_sha256,
+        current_native_preview97=True,
     )
 
 
@@ -8577,11 +8869,13 @@ def _run_v2_staged_candidate_activation(
         | type[RasterTextActivationPointerV7]
         | type[RasterTextActivationPointerV8]
         | type[RasterTextActivationPointerV9]
+        | type[RasterTextActivationPointerV12]
     ),
     write_calibration: Callable[..., tuple[str, str]],
     write_sealed: Callable[..., tuple[str, str]],
     recheck_materials: Callable[[], None],
     drift_code: str,
+    quality_gate_revision: _Preview97QualityGateRevision | None = None,
     pre_sealed_activation_check: (
         Callable[
             [
@@ -8605,6 +8899,12 @@ def _run_v2_staged_candidate_activation(
     """
 
     selection_revision = _FRESH_HOLDOUT_SELECTION_REVISION_V2
+    if quality_gate_revision is None:
+        write_smoke = write_raster_semantic_text_smoke_quality_screen_v3
+    elif quality_gate_revision == _V19_PREVIEW97_QUALITY_GATE_REVISION:
+        write_smoke = write_raster_semantic_text_smoke_quality_screen_preview97_v1
+    else:
+        raise SyntheticRasterTextActivationError("raster_text_smoke_quality_screen_invalid")
     preflight_smoke = run_paddleocr3_synthetic_raster_text_candidates(
         document_preview_root=root,
         runtime_configuration_relative_path=(
@@ -8616,12 +8916,10 @@ def _run_v2_staged_candidate_activation(
         build_inputs=build_inputs if existing_dataset else None,
     )
     _require_auto_activation_candidate_latency(preflight_smoke)
-    _preflight_path, _preflight_digest, preflight_passed = (
-        write_raster_semantic_text_smoke_quality_screen_v3(
-            document_preview_root=root,
-            source_gold_receipt_relative_path=(preflight_smoke.source_gold_receipt_relative_path),
-            candidate_execution_relative_path=(preflight_smoke.candidate_execution_relative_path),
-        )
+    _preflight_path, _preflight_digest, preflight_passed = write_smoke(
+        document_preview_root=root,
+        source_gold_receipt_relative_path=(preflight_smoke.source_gold_receipt_relative_path),
+        candidate_execution_relative_path=(preflight_smoke.candidate_execution_relative_path),
     )
     if not preflight_passed:
         raise SyntheticRasterTextActivationError("raster_text_smoke_gate_failed")
@@ -8677,12 +8975,10 @@ def _run_v2_staged_candidate_activation(
         scope="smoke",
     )
     _require_auto_activation_candidate_latency(final_smoke)
-    _final_path, _final_digest, final_smoke_passed = (
-        write_raster_semantic_text_smoke_quality_screen_v3(
-            document_preview_root=root,
-            source_gold_receipt_relative_path=(final_smoke.source_gold_receipt_relative_path),
-            candidate_execution_relative_path=(final_smoke.candidate_execution_relative_path),
-        )
+    _final_path, _final_digest, final_smoke_passed = write_smoke(
+        document_preview_root=root,
+        source_gold_receipt_relative_path=(final_smoke.source_gold_receipt_relative_path),
+        candidate_execution_relative_path=(final_smoke.candidate_execution_relative_path),
     )
     if not final_smoke_passed:
         raise SyntheticRasterTextActivationError("raster_text_smoke_gate_failed")
@@ -8737,6 +9033,7 @@ def _run_v2_staged_candidate_activation(
             source_gold_receipt_relative_path=(sealed_stage1.source_gold_receipt_relative_path),
             candidate_execution_relative_path=(sealed_stage1.candidate_execution_relative_path),
             selection_revision=selection_revision,
+            quality_gate_revision=quality_gate_revision,
         )
     )
     if stage1_decision == "early_fail":
@@ -9670,6 +9967,202 @@ def auto_activate_synthetic_raster_text_v6(
                 ) from None
 
 
+def auto_activate_synthetic_raster_text_linux_preview97_v1(
+    *, document_preview_root: Path
+) -> SyntheticRasterTextAutoActivationResultV1:
+    """Fully evaluate and activate the fixed one-pass V19 lane on Linux.
+
+    Unlike the schema-11 compatibility command, this path consumes no
+    historical Windows OCR evidence.  It requires a native schema-2
+    Linux/AMD64/CPython-3.11 direct bundle, reuses only the fixed public model
+    bytes, and produces the complete current-runner 24/240/1,200(+1,200)
+    evidence chain before the schema-12 pointer can be replaced.
+    """
+
+    with _deny_network():
+        try:
+            root = _root(document_preview_root)
+            if current_raster_runtime_platform_binding() != ("linux", "amd64", "cp311"):
+                raise SyntheticRasterTextActivationError(
+                    "raster_text_linux_activation_platform_invalid"
+                )
+            offline_bundle = load_verified_raster_offline_bundle(root)
+            if offline_bundle.manifest.schema_version != "2.0" or (
+                offline_bundle.manifest.runtime_operating_system,
+                offline_bundle.manifest.runtime_architecture,
+                offline_bundle.manifest.runtime_python_abi,
+            ) != ("linux", "amd64", "cp311"):
+                raise SyntheticRasterTextActivationError("raster_text_linux_bundle_invalid")
+            sidecar_bundle = materialize_verified_raster_text_direct_paddle_bundle_v1(
+                document_preview_root=root,
+                source_manifest_sha256=offline_bundle.manifest_sha256,
+            )
+            if (
+                sidecar_bundle.manifest.schema_version != "2.0"
+                or sidecar_bundle.manifest.source_bundle_manifest_sha256
+                != offline_bundle.manifest_sha256
+                or (
+                    sidecar_bundle.manifest.runtime_operating_system,
+                    sidecar_bundle.manifest.runtime_architecture,
+                    sidecar_bundle.manifest.runtime_python_abi,
+                )
+                != ("linux", "amd64", "cp311")
+            ):
+                raise SyntheticRasterTextActivationError("raster_text_linux_bundle_invalid")
+        except SyntheticRasterTextActivationError:
+            raise
+        except (RasterOfflineBundleError, RasterTextDirectPaddleBundleError) as error:
+            if error.code in {
+                "offline_bundle_unavailable",
+                "offline_bundle_release_selector_invalid",
+                "direct_paddle_bundle_path_invalid",
+            }:
+                raise SyntheticRasterTextActivationError("offline_bundle_unavailable") from None
+            raise SyntheticRasterTextActivationError(error.code) from None
+
+        with _lock(root):
+            try:
+                build_inputs = ensure_fixed_synthetic_raster_build_inputs(
+                    document_preview_root=root
+                )
+                existing_dataset = _existing_synthetic_raster_dataset(root)
+                # The public model is fixed and already trained.  Linux still
+                # performs a complete source/raster/Gold replay before any
+                # current-runner score is accepted.
+                compile_synthetic_raster_dataset(
+                    document_preview_root=root,
+                    build_inputs_relative_path=build_inputs.build_inputs_relative_path,
+                )
+                write_fresh_raster_text_scope_selection_receipt(
+                    document_preview_root=root,
+                    synthetic_raster_receipt_relative_path=(SYNTHETIC_RASTER_RECEIPT_RELATIVE_PATH),
+                    selection_revision=_FRESH_HOLDOUT_SELECTION_REVISION_V2,
+                )
+                recognizer_release = load_verified_public_finetuned_recognizer_release_v1(
+                    root, _V19_PUBLIC_FINETUNED_RECOGNIZER_RELEASE_SHA256
+                )
+                model_bundle = load_verified_raster_text_public_finetuned_paddle_bundle_v1(
+                    root, _V19_PUBLIC_FINETUNED_MODEL_BUNDLE_SHA256
+                )
+                recognizer_release = _verify_v19_public_finetune_contract(
+                    root=root,
+                    recognizer_release=recognizer_release,
+                    model_bundle=model_bundle,
+                )
+
+                def prepare_profile(
+                    minimum_page_confidence: float,
+                ) -> _PreparedRasterTextRuntimeProfile:
+                    return prepare_raster_text_public_finetuned_one_pass_runtime_profile_v19(
+                        sidecar_bundle,
+                        model_bundle,
+                        pdfium_version=build_inputs.renderer_configuration.pdfium_version,
+                        minimum_page_confidence=minimum_page_confidence,
+                        cpu_threads=_AUTO_ACTIVATION_V15_CPU_THREADS,
+                    )
+
+                calibration_profile_info = prepare_profile(0.0)
+                calibration_profile_raw = _read(
+                    root,
+                    calibration_profile_info.runtime_configuration_relative_path,
+                    limit=_MAX_RECEIPT_BYTES,
+                    code="raster_text_profile_invalid",
+                )
+                calibration_profile = parse_raster_text_offline_profile(calibration_profile_raw)
+                if (
+                    type(calibration_profile) is not RasterTextOfflineProfileV19
+                    or calibration_profile.engine_kind != _V19_ENGINE_KIND
+                ):
+                    raise SyntheticRasterTextActivationError("raster_text_profile_invalid")
+                _verify_v19_public_finetune_contract(
+                    root=root,
+                    recognizer_release=recognizer_release,
+                    model_bundle=model_bundle,
+                    profile=calibration_profile,
+                )
+
+                def recheck_materials() -> None:
+                    rechecked_offline = load_verified_raster_offline_bundle(root)
+                    rechecked_sidecar = load_verified_raster_text_direct_paddle_bundle_v1(
+                        document_preview_root=root,
+                        manifest_sha256=sidecar_bundle.manifest_sha256,
+                    )
+                    rechecked_release = load_verified_public_finetuned_recognizer_release_v1(
+                        root, _V19_PUBLIC_FINETUNED_RECOGNIZER_RELEASE_SHA256
+                    )
+                    rechecked_model = load_verified_raster_text_public_finetuned_paddle_bundle_v1(
+                        root, _V19_PUBLIC_FINETUNED_MODEL_BUNDLE_SHA256
+                    )
+                    _verify_v19_public_finetune_contract(
+                        root=root,
+                        recognizer_release=rechecked_release,
+                        model_bundle=rechecked_model,
+                    )
+                    if (
+                        rechecked_offline.manifest_sha256 != offline_bundle.manifest_sha256
+                        or rechecked_offline.bundle_root_relative_path
+                        != offline_bundle.bundle_root_relative_path
+                        or rechecked_offline.manifest.schema_version != "2.0"
+                        or rechecked_sidecar.manifest_sha256 != sidecar_bundle.manifest_sha256
+                        or rechecked_sidecar.bundle_root_relative_path
+                        != sidecar_bundle.bundle_root_relative_path
+                        or rechecked_sidecar.manifest.schema_version != "2.0"
+                        or rechecked_sidecar.manifest.source_bundle_manifest_sha256
+                        != offline_bundle.manifest_sha256
+                        or (
+                            rechecked_sidecar.manifest.runtime_operating_system,
+                            rechecked_sidecar.manifest.runtime_architecture,
+                            rechecked_sidecar.manifest.runtime_python_abi,
+                        )
+                        != ("linux", "amd64", "cp311")
+                        or rechecked_release.release_sha256
+                        != _V19_PUBLIC_FINETUNED_RECOGNIZER_RELEASE_SHA256
+                        or rechecked_model.manifest_sha256
+                        != _V19_PUBLIC_FINETUNED_MODEL_BUNDLE_SHA256
+                    ):
+                        raise SyntheticRasterTextActivationError("raster_text_linux_bundle_drift")
+
+                return _run_v2_staged_candidate_activation(
+                    root=root,
+                    build_inputs=build_inputs,
+                    existing_dataset=existing_dataset,
+                    dataset_materials_preverified=True,
+                    calibration_profile_info=calibration_profile_info,
+                    prepare_final_profile=prepare_profile,
+                    expected_profile_type=RasterTextOfflineProfileV19,
+                    expected_pointer_type=RasterTextActivationPointerV12,
+                    write_calibration=(write_raster_semantic_text_fresh_calibration_receipt_v7),
+                    write_sealed=write_raster_semantic_text_fresh_sealed_evaluation_v9,
+                    recheck_materials=recheck_materials,
+                    drift_code="raster_text_linux_bundle_drift",
+                    quality_gate_revision=_V19_PREVIEW97_QUALITY_GATE_REVISION,
+                )
+            except SyntheticRasterTextActivationError:
+                raise
+            except (
+                RasterOfflineBundleError,
+                RasterTextDirectPaddleBundleError,
+                RasterTextPublicFineTunedPaddleBundleError,
+                SourceAttestedPublicRecognizerFineTuneError,
+            ) as error:
+                if error.code in {
+                    "public_finetune_bundle_unavailable",
+                    "public_finetuned_paddle_bundle_source_unavailable",
+                }:
+                    raise SyntheticRasterTextActivationError("offline_bundle_unavailable") from None
+                raise SyntheticRasterTextActivationError(error.code) from None
+            except (
+                SyntheticRasterCompilerUnavailable,
+                OSError,
+                ValidationError,
+                ValueError,
+                RuntimeError,
+            ):
+                raise SyntheticRasterTextActivationError(
+                    "raster_text_linux_auto_activation_failed"
+                ) from None
+
+
 def auto_activate_synthetic_raster_text_v7(
     *, document_preview_root: Path
 ) -> SyntheticRasterTextAutoActivationResultV1:
@@ -10099,6 +10592,7 @@ __all__ = [
     "RasterTextFreshProjectedCandidateBundleV1",
     "RasterTextFreshProjectedCandidateExecutionV1",
     "RasterTextFreshSealedStageDecisionReceiptV1",
+    "RasterTextFreshSealedStageDecisionReceiptV2",
     "RasterTextFreshSealedStageStratumV1",
     "RasterTextFreshScopeSelectionReceiptV1",
     "RasterTextFreshScopeSelectionReceiptV2",
@@ -10110,6 +10604,7 @@ __all__ = [
     "RasterTextSealedEvaluationV6",
     "RasterTextSealedEvaluationV7",
     "RasterTextSealedEvaluationV8",
+    "RasterTextSealedEvaluationV9",
     "RasterTextSealedProfileScoreV2",
     "RasterTextSealedProfileScoreV3",
     "RasterTextSealedProfileScoreV4",
@@ -10120,6 +10615,7 @@ __all__ = [
     "RasterTextSmokeQualityScreenV1",
     "RasterTextSmokeQualityScreenV2",
     "RasterTextSmokeQualityScreenV3",
+    "RasterTextSmokeQualityScreenV4",
     "RasterTextSourceGoldReceiptV1",
     "SyntheticRasterTextActivationError",
     "SyntheticRasterTextAutoActivationResultV1",
@@ -10127,6 +10623,7 @@ __all__ = [
     "auto_activate_synthetic_raster_text_v6",
     "auto_activate_synthetic_raster_text_v7",
     "auto_activate_synthetic_raster_text_v8",
+    "auto_activate_synthetic_raster_text_linux_preview97_v1",
     "auto_activate_synthetic_raster_text_preview97_v1",
     "run_warm_service_raster_text_smoke",
     "run_paddleocr3_synthetic_raster_text_candidates",
@@ -10151,10 +10648,12 @@ __all__ = [
     "write_raster_semantic_text_fresh_sealed_evaluation_v6",
     "write_raster_semantic_text_fresh_sealed_evaluation_v7",
     "write_raster_semantic_text_fresh_sealed_evaluation_v8",
+    "write_raster_semantic_text_fresh_sealed_evaluation_v9",
     "write_raster_semantic_text_sealed_evaluation_v2",
     "write_raster_semantic_text_sealed_evaluation_v3",
     "write_raster_semantic_text_smoke_quality_screen_v2",
     "write_raster_semantic_text_smoke_quality_screen_v3",
+    "write_raster_semantic_text_smoke_quality_screen_preview97_v1",
     "write_fresh_raster_text_scope_selection_receipt",
     "write_fresh_raster_text_sealed_stage1_decision",
     "write_source_attested_fresh_raster_text_gold_receipt",

@@ -79,6 +79,20 @@ _PROVENANCE_PATHS = (
 )
 _DETECTOR_NAME = "PP-OCRv5_mobile_det"
 _RECOGNIZER_NAME = "source_attested_en_PP-OCRv5_mobile_rec_head_v2"
+_V19EngineKind = Literal[
+    "direct_paddle_mobile_det_public_finetuned_rec_harmonic_recall_native960_"
+    "lowbox_strip2_semantic_repair_v2_onednn",
+    "direct_paddle_mobile_det_public_finetuned_rec_harmonic_recall_native960_"
+    "lowbox_strip2_semantic_repair_v2_voyage_retry_onednn",
+]
+_V19_ONE_PASS_ENGINE_KIND: _V19EngineKind = (
+    "direct_paddle_mobile_det_public_finetuned_rec_harmonic_recall_native960_"
+    "lowbox_strip2_semantic_repair_v2_onednn"
+)
+_V19_VOYAGE_RETRY_ENGINE_KIND: _V19EngineKind = (
+    "direct_paddle_mobile_det_public_finetuned_rec_harmonic_recall_native960_"
+    "lowbox_strip2_semantic_repair_v2_voyage_retry_onednn"
+)
 _FILENAMES = ("config.json", "inference.json", "inference.pdiparams", "inference.yml")
 _MODEL_PATHS = tuple(
     f"{directory}/{filename}" for directory in ("text-det", "text-rec") for filename in _FILENAMES
@@ -996,15 +1010,16 @@ def _ensure_directory(root: Path, relative: str) -> Path:
         ) from None
 
 
-def prepare_raster_text_public_finetuned_runtime_profile_v19(
+def _prepare_raster_text_public_finetuned_runtime_profile_v19(
     sidecar_bundle: VerifiedRasterTextDirectPaddleBundleV1,
     model_bundle: VerifiedRasterTextPublicFineTunedPaddleBundleV1,
     *,
     pdfium_version: str,
     minimum_page_confidence: float,
     cpu_threads: int = 6,
+    engine_kind: _V19EngineKind,
 ) -> PreparedRasterTextPublicFineTunedRuntimeProfileV19:
-    """Create or verify one V19 profile without selecting an approval pointer."""
+    """Create one of the two closed V19 runtime variants."""
 
     if (
         not isinstance(pdfium_version, str)
@@ -1015,6 +1030,7 @@ def prepare_raster_text_public_finetuned_runtime_profile_v19(
         or not 0 <= float(minimum_page_confidence) <= 1
         or isinstance(cpu_threads, bool)
         or cpu_threads not in {4, 6}
+        or engine_kind not in {_V19_ONE_PASS_ENGINE_KIND, _V19_VOYAGE_RETRY_ENGINE_KIND}
     ):
         raise RasterTextPublicFineTunedPaddleBundleError(
             "public_finetuned_paddle_bundle_runtime_profile_invalid"
@@ -1041,17 +1057,19 @@ def prepare_raster_text_public_finetuned_runtime_profile_v19(
             raise ValueError
         sidecar_manifest = sidecar.manifest
         manifest = combined.manifest
+        voyage_retry = engine_kind == _V19_VOYAGE_RETRY_ENGINE_KIND
+        extractor_variant = (
+            "mobile-det-v19b-public-finetuned-rec-native960-lowbox-strip2-semantic-repair-"
+            "v2-voyage-retry-onednn"
+            if voyage_retry
+            else "mobile-det-v19-public-finetuned-rec-native960-lowbox-strip2-semantic-repair-"
+            "v2-onednn"
+        )
         payload: dict[str, object] = {
             "schema_version": "19.0",
-            "engine_kind": (
-                "direct_paddle_mobile_det_public_finetuned_rec_harmonic_recall_native960_"
-                "lowbox_strip2_semantic_repair_v2_voyage_retry_onednn"
-            ),
+            "engine_kind": engine_kind,
             "runtime_api": "paddle-inference-static-v1",
-            "extractor_revision": (
-                f"{sidecar_manifest.extractor_revision}:mobile-det-v19b-public-finetuned-rec-"
-                "native960-lowbox-strip2-semantic-repair-v2-voyage-retry-onednn"
-            ),
+            "extractor_revision": f"{sidecar_manifest.extractor_revision}:{extractor_variant}",
             "bundle_root_relative_path": sidecar.bundle_root_relative_path,
             "bundle_manifest_sha256": sidecar.manifest_sha256,
             "mobile_model_bundle_root_relative_path": combined.bundle_root_relative_path,
@@ -1191,6 +1209,46 @@ def prepare_raster_text_public_finetuned_runtime_profile_v19(
     )
 
 
+def prepare_raster_text_public_finetuned_runtime_profile_v19(
+    sidecar_bundle: VerifiedRasterTextDirectPaddleBundleV1,
+    model_bundle: VerifiedRasterTextPublicFineTunedPaddleBundleV1,
+    *,
+    pdfium_version: str,
+    minimum_page_confidence: float,
+    cpu_threads: int = 6,
+) -> PreparedRasterTextPublicFineTunedRuntimeProfileV19:
+    """Preserve the independently audited V19b voyage-retry profile."""
+
+    return _prepare_raster_text_public_finetuned_runtime_profile_v19(
+        sidecar_bundle,
+        model_bundle,
+        pdfium_version=pdfium_version,
+        minimum_page_confidence=minimum_page_confidence,
+        cpu_threads=cpu_threads,
+        engine_kind=_V19_VOYAGE_RETRY_ENGINE_KIND,
+    )
+
+
+def prepare_raster_text_public_finetuned_one_pass_runtime_profile_v19(
+    sidecar_bundle: VerifiedRasterTextDirectPaddleBundleV1,
+    model_bundle: VerifiedRasterTextPublicFineTunedPaddleBundleV1,
+    *,
+    pdfium_version: str,
+    minimum_page_confidence: float,
+    cpu_threads: int = 6,
+) -> PreparedRasterTextPublicFineTunedRuntimeProfileV19:
+    """Create the retained best one-pass V19 profile on this native sidecar."""
+
+    return _prepare_raster_text_public_finetuned_runtime_profile_v19(
+        sidecar_bundle,
+        model_bundle,
+        pdfium_version=pdfium_version,
+        minimum_page_confidence=minimum_page_confidence,
+        cpu_threads=cpu_threads,
+        engine_kind=_V19_ONE_PASS_ENGINE_KIND,
+    )
+
+
 __all__ = [
     "PreparedRasterTextPublicFineTunedRuntimeProfileV19",
     "RasterTextPublicFineTuneCorpusProvenanceV1",
@@ -1200,5 +1258,6 @@ __all__ = [
     "VerifiedRasterTextPublicFineTunedPaddleBundleV1",
     "load_verified_raster_text_public_finetuned_paddle_bundle_v1",
     "materialize_verified_raster_text_public_finetuned_paddle_bundle_v1",
+    "prepare_raster_text_public_finetuned_one_pass_runtime_profile_v19",
     "prepare_raster_text_public_finetuned_runtime_profile_v19",
 ]

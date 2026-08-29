@@ -184,6 +184,56 @@ def test_stage1_early_pass_requires_simultaneous_lower_bounds() -> None:
     assert activation._fresh_stage1_decision_from_strata(boundary) == "continue"  # noqa: SLF001
 
 
+def test_preview97_stage_policy_lowers_only_critical_accuracy() -> None:
+    full = _counts(
+        character_errors=0,
+        character_reference=20_000,
+        critical_errors=0,
+        critical_total=2_400,
+    )
+    stage = _counts(
+        character_errors=0,
+        character_reference=10_000,
+        critical_errors=14,
+        critical_total=1_200,
+    )
+    strict = activation._fresh_sealed_stage1_strata(  # noqa: SLF001
+        stage_counts=stage,
+        full_counts=full,
+    )
+    preview = activation._fresh_sealed_stage1_strata(  # noqa: SLF001
+        stage_counts=stage,
+        full_counts=full,
+        quality_gate_revision="preview-draft-critical97-cer2-v1",
+    )
+
+    assert activation._fresh_stage1_decision_from_strata(strict) == "continue"  # noqa: SLF001
+    assert (
+        activation._fresh_stage1_decision_from_strata(  # noqa: SLF001
+            preview,
+            quality_gate_revision="preview-draft-critical97-cer2-v1",
+        )
+        == "early_pass"
+    )
+    receipt = activation.RasterTextFreshSealedStageDecisionReceiptV2(
+        metric_revision="source-attested-semantic-text-v3",
+        quality_gate_revision="preview-draft-critical97-cer2-v1",
+        source_gold_receipt_relative_path="fresh/source.json",
+        source_gold_receipt_sha256="a" * 64,
+        candidate_execution_relative_path="fresh/execution.json",
+        candidate_execution_sha256="b" * 64,
+        projection_receipt_relative_path="fresh/projection.json",
+        projection_receipt_sha256="c" * 64,
+        decision="early_pass",
+        strata=preview,
+    )
+    assert receipt.schema_version == "2.0"
+    with pytest.raises(ValidationError):
+        activation.RasterTextFreshSealedStageDecisionReceiptV1(
+            **receipt.model_dump(mode="json", exclude={"schema_version", "quality_gate_revision"})
+        )
+
+
 def test_stage1_fails_early_only_when_full_gate_is_impossible() -> None:
     full = _counts(
         character_errors=0,
