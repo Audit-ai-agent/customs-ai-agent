@@ -1,0 +1,87 @@
+{
+  "$schema": "https://json-schema.org/draft/2020-12/schema",
+  "$id": "https://github.com/Audit-ai-agent/customs-ai-agent/deploy/ocr-oci/runtime-bundle-manifest.schema.json",
+  "title": "Raster Text OCR OCI runtime context v1",
+  "type": "object",
+  "additionalProperties": false,
+  "required": [
+    "schema_version",
+    "artifact_kind",
+    "platform",
+    "runtime_binding_sha256",
+    "active_pointer",
+    "sbom",
+    "license_manifest",
+    "files"
+  ],
+  "properties": {
+    "schema_version": {"const": "1.0"},
+    "artifact_kind": {"const": "customs-raster-text-runtime-oci"},
+    "platform": {
+      "const": {"architecture": "amd64", "os": "linux", "python_abi": "cp311"}
+    },
+    "runtime_binding_sha256": {"type": "string", "pattern": "^[a-f0-9]{64}$"},
+    "active_pointer": {"$ref": "#/$defs/pointerBinding"},
+    "sbom": {"$ref": "#/$defs/fileBinding"},
+    "license_manifest": {"$ref": "#/$defs/fileBinding"},
+    "files": {
+      "type": "array",
+      "minItems": 8,
+      "maxItems": 20000,
+      "items": {"$ref": "#/$defs/fileRecord"}
+    }
+  },
+  "$defs": {
+    "sha256": {"type": "string", "pattern": "^[a-f0-9]{64}$"},
+    "relativePath": {
+      "type": "string",
+      "minLength": 1,
+      "maxLength": 512,
+      "pattern": "^(?!/)(?!.*(?:^|/)\\.\\.(?:/|$))(?!.*\\\\).+$"
+    },
+    "fileBinding": {
+      "type": "object",
+      "additionalProperties": false,
+      "required": ["relative_path", "sha256"],
+      "properties": {
+        "relative_path": {"$ref": "#/$defs/relativePath"},
+        "sha256": {"$ref": "#/$defs/sha256"}
+      }
+    },
+    "pointerBinding": {
+      "type": "object",
+      "additionalProperties": false,
+      "required": ["relative_path", "sha256", "raster_text_profile_revision"],
+      "properties": {
+        "relative_path": {"const": "approvals/raster-text-active.json"},
+        "sha256": {"$ref": "#/$defs/sha256"},
+        "raster_text_profile_revision": {
+          "type": "string",
+          "pattern": "^synthetic-raster-text-v1:[a-f0-9]{24}$"
+        }
+      }
+    },
+    "fileRecord": {
+      "type": "object",
+      "additionalProperties": false,
+      "required": ["relative_path", "sha256", "byte_size", "role"],
+      "properties": {
+        "relative_path": {"$ref": "#/$defs/relativePath"},
+        "sha256": {"$ref": "#/$defs/sha256"},
+        "byte_size": {"type": "integer", "minimum": 0},
+        "role": {
+          "enum": [
+            "activation-evidence",
+            "active-pointer",
+            "inventory",
+            "licenses",
+            "model",
+            "runtime-profile",
+            "sbom",
+            "sidecar-runtime"
+          ]
+        }
+      }
+    }
+  }
+}

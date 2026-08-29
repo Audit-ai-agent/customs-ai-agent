@@ -3,26 +3,30 @@ name: ai-agent-ci
 on:
   pull_request:
     paths:
-      - ".github/workflows/ci.yml"
+      - ".dockerignore"
+      - ".github/workflows/**"
       - ".gitleaks.toml"
       - ".gitignore"
       - "pyproject.toml"
       - "uv.lock"
       - "README.md"
       - "docs/**"
+      - "deploy/**"
       - "src/**"
       - "tests/**"
       - "tools/**"
   push:
     branches: [main]
     paths:
-      - ".github/workflows/ci.yml"
+      - ".dockerignore"
+      - ".github/workflows/**"
       - ".gitleaks.toml"
       - ".gitignore"
       - "pyproject.toml"
       - "uv.lock"
       - "README.md"
       - "docs/**"
+      - "deploy/**"
       - "src/**"
       - "tests/**"
       - "tools/**"
@@ -58,6 +62,20 @@ jobs:
         run: uv run --locked --group dev mypy
       - name: Unit and contract tests
         run: uv run --locked --group dev pytest -q
+      - name: Verify asset-free OCR OCI deployment sources
+        run: |
+          python deploy/ocr-oci/verify_deployment_sources.py --repository-root .
+          python deploy/ocr-oci/selftest_ocr_readiness.py
+          python deploy/ocr-oci/selftest_runtime_contract.py
+          bash -n deploy/ocr-oci/publish_runtime_context.sh
+      - name: Build source-only OCI structure target
+        run: |
+          docker buildx build \
+            --file deploy/ocr-oci/Dockerfile \
+            --platform linux/amd64 \
+            --target app-structure \
+            --check \
+            .
       - name: Redacted secret scan
         shell: bash
         run: |

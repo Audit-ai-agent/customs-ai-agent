@@ -1,0 +1,15 @@
+# The application build context is deliberately allow-listed.  OCR weights,
+# synthetic documents, local activation material, credentials, caches and Git
+# history must enter a release only through the separately attested runtime
+# image digest accepted by deploy/ocr-oci/Dockerfile.
+**
+!pyproject.toml
+!uv.lock
+!README.md
+!src/
+!src/**
+!deploy/
+!deploy/ocr-oci/
+!deploy/ocr-oci/**
+!tools/
+!tools/verify_raster_text_oci_runtime.py
