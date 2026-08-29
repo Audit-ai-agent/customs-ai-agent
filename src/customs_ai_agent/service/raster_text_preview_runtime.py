@@ -25,6 +25,9 @@ from typing import Any, BinaryIO, Callable, Iterator, Literal, Mapping, Protocol
 
 from pydantic import BaseModel, ConfigDict, Field, ValidationError, model_validator
 
+from customs_ai_agent.evaluation.raster_offline_bundle import (
+    current_raster_runtime_platform_binding,
+)
 from customs_ai_agent.evaluation.raster_text_trained_paddle_bundle import (
     RasterTextTrainedPaddleBundleError,
     load_verified_raster_text_trained_paddle_bundle_v1,
@@ -4768,6 +4771,60 @@ def _validate_profile_controlled_child_file(
     _validate_controlled_child_file(root_path=root_path, file_path=file_path)
 
 
+def _verify_direct_profile_runtime_platform(
+    *, root: Path, profile: RasterTextOfflineProfile
+) -> None:
+    """Bind a schema-2 direct profile to its native bundle target.
+
+    The profile fingerprint already includes the complete manifest SHA and
+    content-addressed release path. Reading that one small manifest here makes
+    the OS/architecture/CPython ABI binding effective before any executable
+    is opened. Historical schema-1 Windows bundles remain readable so the
+    existing V19/schema-11 pointer contract is not rewritten.
+    """
+
+    if not isinstance(profile, RasterTextOfflineProfileV2):
+        return
+    try:
+        manifest_path = _v2_bundle_sidecar_path(
+            root=root,
+            profile=profile,
+            value=f"{profile.bundle_root_relative_path}/manifest.json",
+        )
+        raw = _read_local_file(manifest_path, limit=_MAX_CONFIGURATION_BYTES)
+        if hashlib.sha256(raw).hexdigest() != profile.bundle_manifest_sha256:
+            raise ValueError
+        value = json.loads(raw.decode("utf-8"))
+        if (
+            not isinstance(value, dict)
+            or raw != _canonical_evaluation_json_bytes(value)
+            or value.get("bundle_id") != "raster-text-direct-paddle-bundle-v1"
+        ):
+            raise ValueError
+        schema_version = value.get("schema_version")
+        if schema_version == "1.0":
+            return
+        if (
+            schema_version != "2.0"
+            or (
+                value.get("runtime_operating_system"),
+                value.get("runtime_architecture"),
+                value.get("runtime_python_abi"),
+            )
+            != current_raster_runtime_platform_binding()
+        ):
+            raise ValueError
+        if (
+            value.get("sidecar_interpreter_relative_path")
+            != PurePosixPath(profile.sidecar_interpreter_path)
+            .relative_to(PurePosixPath(profile.bundle_root_relative_path))
+            .as_posix()
+        ):
+            raise ValueError
+    except Exception:
+        raise RasterTextRuntimeError("raster_text_runtime_platform_mismatch") from None
+
+
 def _load_profile_materials(
     *,
     root: Path,
@@ -4790,6 +4847,7 @@ def _load_profile_materials(
     ):
         raise RasterTextRuntimeError("raster_text_configuration_invalid")
     try:
+        _verify_direct_profile_runtime_platform(root=root, profile=profile)
         # Activation owns the expensive byte-for-byte verification of the
         # complete model release and import roots.  A V11 service restart can
         # trust that content-addressed activation evidence and perform only

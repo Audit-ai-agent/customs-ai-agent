@@ -21,6 +21,7 @@ import json
 import os
 from pathlib import Path, PurePosixPath
 import shutil
+import stat
 import subprocess
 import sysconfig
 import tempfile
@@ -34,6 +35,9 @@ from customs_ai_agent.evaluation.local_process_lock import (
     LocalProcessLockBusy,
     LocalProcessLockInvalid,
     exclusive_local_process_lock,
+)
+from customs_ai_agent.evaluation.raster_offline_bundle import (
+    current_raster_runtime_platform_binding,
 )
 
 
@@ -77,6 +81,7 @@ _SOURCE_PARENT_INVENTORY = "inventories/parent-renderer.json"
 _SOURCE_DIRECT_MODEL_INVENTORY = "inventories/raster-text-models.json"
 _SOURCE_DIRECT_MODEL_ROOT = "models/raster-text"
 _SOURCE_INTERPRETER_ROOT = "sidecar/interpreter"
+# Historical schema-1/e3 alias retained for existing Windows evidence/tests.
 _SOURCE_INTERPRETER = f"{_SOURCE_INTERPRETER_ROOT}/python.exe"
 _SOURCE_MODULE_ROOT = "sidecar/module-root"
 
@@ -196,6 +201,9 @@ class DirectPaddleBundleManifestV1(_WireModel):
 
     schema_version: str
     bundle_id: str
+    runtime_operating_system: str | None = None
+    runtime_architecture: str | None = None
+    runtime_python_abi: str | None = None
     source_bundle_relative_path: str
     source_bundle_manifest_sha256: str = Field(pattern=_SHA256)
     derivation_intent_sha256: str = Field(pattern=_SHA256)
@@ -236,17 +244,38 @@ class DirectPaddleBundleManifestV1(_WireModel):
 
     @model_validator(mode="after")
     def _fixed_shape(self) -> "DirectPaddleBundleManifestV1":
+        if self.schema_version == "1.0":
+            platform_valid = (
+                self.source_bundle_manifest_sha256 == _E3_DIRECT_BASE_MANIFEST_SHA256
+                and self.runtime_operating_system is None
+                and self.runtime_architecture is None
+                and self.runtime_python_abi is None
+                and self.sidecar_interpreter_relative_path == "sidecar/interpreter/python.exe"
+            )
+        elif self.schema_version == "2.0":
+            expected_interpreter = (
+                "sidecar/interpreter/python.exe"
+                if self.runtime_operating_system == "windows"
+                else "sidecar/interpreter/bin/python3.11"
+            )
+            platform_valid = (
+                self.runtime_operating_system in {"windows", "linux"}
+                and self.runtime_architecture == "amd64"
+                and self.runtime_python_abi == "cp311"
+                and self.sidecar_interpreter_relative_path == expected_interpreter
+            )
+        else:
+            platform_valid = False
         if (
-            self.schema_version != "1.0"
+            not platform_valid
             or self.bundle_id != _DIRECT_BUNDLE_ID
-            or self.source_bundle_relative_path != _source_bundle_relative_path()
-            or self.source_bundle_manifest_sha256 != _E3_DIRECT_BASE_MANIFEST_SHA256
+            or self.source_bundle_relative_path
+            != _source_bundle_relative_path(self.source_bundle_manifest_sha256)
             or self.sidecar_timeout_seconds != _DIRECT_SIDECAR_TIMEOUT_SECONDS
             or self.parent_renderer_package_inventory_relative_path
             != "inventories/parent-renderer.json"
             or self.parent_renderer_required_packages != ["pypdfium2", "Pillow"]
             or self.sidecar_interpreter_root_relative_path != "sidecar/interpreter"
-            or self.sidecar_interpreter_relative_path != "sidecar/interpreter/python.exe"
             or self.sidecar_module_root_relative_path != "sidecar/module-root"
             or self.sidecar_module_relative_path
             != "sidecar/module-root/customs_ai_agent/service/raster_text_direct_paddle_sidecar.py"
@@ -289,8 +318,8 @@ class DirectPaddleBundleIntentV1(_WireModel):
         if (
             self.schema_version != "1.0"
             or self.artifact_kind != "raster_text_direct_paddle_bundle_intent"
-            or self.source_bundle_relative_path != _source_bundle_relative_path()
-            or self.source_bundle_manifest_sha256 != _E3_DIRECT_BASE_MANIFEST_SHA256
+            or self.source_bundle_relative_path
+            != _source_bundle_relative_path(self.source_bundle_manifest_sha256)
         ):
             raise ValueError("direct Paddle bundle intent is invalid")
         paths = [item.path for item in self.first_party_files]
@@ -333,6 +362,10 @@ class DirectPaddleBundleSourceV1:
     extractor_revision: str
     raster_dpi: int
     source_sidecar_timeout_seconds: int
+    runtime_operating_system: str
+    runtime_architecture: str
+    runtime_python_abi: str
+    source_interpreter_relative_path: str
     file_records: Mapping[str, DirectPaddleBundleFileV1]
     parent_renderer_inventory_sha256: str
     direct_model_inventory_sha256: str
@@ -394,8 +427,14 @@ def _model_sha256(model: BaseModel) -> str:
     return _sha256_bytes(_canonical_json(model.model_dump(mode="json", warnings=False)))
 
 
-def _source_bundle_relative_path() -> str:
-    return f"{_BASE_RELEASES}/{_E3_DIRECT_BASE_MANIFEST_SHA256}"
+def _source_bundle_relative_path(manifest_sha256: str | None = None) -> str:
+    if manifest_sha256 is None:
+        manifest_sha256 = _E3_DIRECT_BASE_MANIFEST_SHA256
+    if len(manifest_sha256) != 64 or any(
+        character not in "0123456789abcdef" for character in manifest_sha256
+    ):
+        raise ValueError("source bundle manifest hash is invalid")
+    return f"{_BASE_RELEASES}/{manifest_sha256}"
 
 
 def _release_relative_path(manifest_sha256: str) -> str:
@@ -510,15 +549,24 @@ def _read_canonical_object(path: Path, *, limit: int, code: str) -> tuple[dict[s
 
 def _sha256_regular_file(path: Path, *, code: str) -> tuple[str, int]:
     try:
-        if path.is_symlink() or not path.is_file():
+        before = path.lstat()
+        if stat.S_ISLNK(before.st_mode) or not stat.S_ISREG(before.st_mode):
             raise OSError
-        size = path.stat().st_size
+        size = before.st_size
         if size < 0 or size > _MAX_FILE_BYTES:
             raise OSError
         digest = hashlib.sha256()
         with path.open("rb") as stream:
             while block := stream.read(1024 * 1024):
                 digest.update(block)
+        after = path.lstat()
+        if (
+            stat.S_ISLNK(after.st_mode)
+            or not stat.S_ISREG(after.st_mode)
+            or after.st_size != size
+            or (before.st_dev, before.st_ino) != (after.st_dev, after.st_ino)
+        ):
+            raise OSError
         return digest.hexdigest(), size
     except OSError:
         raise RasterTextDirectPaddleBundleError(code) from None
@@ -528,13 +576,17 @@ def _regular_tree_files(root: Path, *, code: str) -> dict[str, Path]:
     """Walk one tree without allowing a link or special entry into a bundle."""
 
     try:
-        if root.is_symlink() or not root.is_dir():
+        root_metadata = root.lstat()
+        if stat.S_ISLNK(root_metadata.st_mode) or not stat.S_ISDIR(root_metadata.st_mode):
             raise OSError
         files: dict[str, Path] = {}
         for path in sorted(root.rglob("*"), key=lambda value: value.as_posix()):
-            if path.is_symlink() or not (path.is_dir() or path.is_file()):
+            metadata = path.lstat()
+            if stat.S_ISLNK(metadata.st_mode) or not (
+                stat.S_ISDIR(metadata.st_mode) or stat.S_ISREG(metadata.st_mode)
+            ):
                 raise OSError
-            if path.is_file():
+            if stat.S_ISREG(metadata.st_mode):
                 relative = path.relative_to(root).as_posix()
                 if not relative or relative in files or len(relative) > 480:
                     raise OSError
@@ -760,17 +812,23 @@ def _verify_source_direct_models(
 
 
 def verify_e3_raster_text_direct_paddle_base_v1(
-    *, document_preview_root: Path
+    *,
+    document_preview_root: Path,
+    source_manifest_sha256: str | None = None,
 ) -> DirectPaddleBundleSourceV1:
-    """Narrowly attest only the e3 parent inventory and direct seven models.
+    """Attest one explicit parent inventory, interpreter, and seven models.
 
-    No generic bundle loader appears on this path.  The e3 manifest is used as
-    a signed-by-hash file map for the copied interpreter/closure later, but
-    unrelated layout/table package/model bytes are deliberately never walked.
+    The historical e3 Windows release retains its narrow fixed-hash path.
+    A caller may explicitly select a schema-2 content-addressed release for
+    Linux; that path verifies the manifest hash, exact host identity, every
+    selected source record, and every copied byte. No selector discovery or
+    fallback is permitted.
     """
 
     root = _root(document_preview_root)
-    source_relative = _source_bundle_relative_path()
+    if source_manifest_sha256 is None:
+        source_manifest_sha256 = _E3_DIRECT_BASE_MANIFEST_SHA256
+    source_relative = _source_bundle_relative_path(source_manifest_sha256)
     source_root = _safe_path(root, source_relative, directory=True)
     manifest_path = _safe_path(source_root, _MANIFEST_FILE)
     manifest_raw, manifest_bytes = _read_canonical_object(
@@ -779,10 +837,38 @@ def verify_e3_raster_text_direct_paddle_base_v1(
         code="direct_paddle_bundle_source_manifest_invalid",
     )
     manifest_sha256 = _sha256_bytes(manifest_bytes)
-    if manifest_sha256 != _E3_DIRECT_BASE_MANIFEST_SHA256:
+    if manifest_sha256 != source_manifest_sha256:
         raise RasterTextDirectPaddleBundleError("direct_paddle_bundle_source_manifest_invalid")
+    legacy_source = source_manifest_sha256 == _E3_DIRECT_BASE_MANIFEST_SHA256
+    source_schema = manifest_raw.get("schema_version")
+    operating_system = manifest_raw.get("runtime_operating_system")
+    architecture = manifest_raw.get("runtime_architecture")
+    python_abi = manifest_raw.get("runtime_python_abi")
+    source_interpreter = manifest_raw.get("sidecar_interpreter_relative_path")
+    platform_valid = (
+        legacy_source
+        and source_schema == "1.0"
+        and operating_system is None
+        and architecture is None
+        and python_abi is None
+        and source_interpreter == "sidecar/interpreter/python.exe"
+    ) or (
+        not legacy_source
+        and source_schema == "2.0"
+        and operating_system in {"windows", "linux"}
+        and architecture == "amd64"
+        and python_abi == "cp311"
+        and source_interpreter
+        == (
+            "sidecar/interpreter/python.exe"
+            if operating_system == "windows"
+            else "sidecar/interpreter/bin/python3.11"
+        )
+        and (operating_system, architecture, python_abi)
+        == current_raster_runtime_platform_binding()
+    )
     if (
-        manifest_raw.get("schema_version") != "1.0"
+        not platform_valid
         or manifest_raw.get("bundle_id") != "raster-offline-bundle-v1"
         or manifest_raw.get("parent_renderer_package_inventory_relative_path")
         != _SOURCE_PARENT_INVENTORY
@@ -791,7 +877,6 @@ def verify_e3_raster_text_direct_paddle_base_v1(
         or manifest_raw.get("raster_text_local_model_root_relative_path")
         != _SOURCE_DIRECT_MODEL_ROOT
         or manifest_raw.get("sidecar_interpreter_root_relative_path") != _SOURCE_INTERPRETER_ROOT
-        or manifest_raw.get("sidecar_interpreter_relative_path") != _SOURCE_INTERPRETER
         or manifest_raw.get("sidecar_module_root_relative_path") != _SOURCE_MODULE_ROOT
         or not isinstance(manifest_raw.get("extractor_revision"), str)
         or not isinstance(manifest_raw.get("raster_dpi"), int)
@@ -806,7 +891,13 @@ def verify_e3_raster_text_direct_paddle_base_v1(
     )
     # The paths are declared but not fully rehashed here.  They are copied
     # only through the fixed allowlist below and rehashed in staging.
-    for required in (_SOURCE_INTERPRETER, _SOURCE_PARENT_INVENTORY, _SOURCE_DIRECT_MODEL_INVENTORY):
+    if not isinstance(source_interpreter, str):
+        raise RasterTextDirectPaddleBundleError("direct_paddle_bundle_source_manifest_invalid")
+    for required in (
+        source_interpreter,
+        _SOURCE_PARENT_INVENTORY,
+        _SOURCE_DIRECT_MODEL_INVENTORY,
+    ):
         _record_for(records, path=required, code="direct_paddle_bundle_source_manifest_invalid")
     parent_record = _record_for(
         records, path=_SOURCE_PARENT_INVENTORY, code="direct_paddle_bundle_source_manifest_invalid"
@@ -829,6 +920,10 @@ def verify_e3_raster_text_direct_paddle_base_v1(
         extractor_revision=manifest_raw["extractor_revision"],
         raster_dpi=manifest_raw["raster_dpi"],
         source_sidecar_timeout_seconds=manifest_raw["sidecar_timeout_seconds"],
+        runtime_operating_system=("windows" if legacy_source else str(operating_system)),
+        runtime_architecture=("amd64" if legacy_source else str(architecture)),
+        runtime_python_abi=("cp311" if legacy_source else str(python_abi)),
+        source_interpreter_relative_path=source_interpreter,
         file_records=records,
         parent_renderer_inventory_sha256=parent_sha,
         direct_model_inventory_sha256=model_inventory_sha,
@@ -1149,7 +1244,7 @@ def _verify_direct_model_inventory(
         or len(artifacts) != len(_DIRECT_MODEL_PATHS)
         or value.get("schema_version") != "1.0"
         or value.get("inventory_kind") != "raster_text_direct_paddle_models"
-        or value.get("source_bundle_manifest_sha256") != _E3_DIRECT_BASE_MANIFEST_SHA256
+        or value.get("source_bundle_manifest_sha256") != manifest.source_bundle_manifest_sha256
         or not isinstance(value.get("source_direct_model_snapshot_sha256"), str)
     ):
         raise RasterTextDirectPaddleBundleError("direct_paddle_bundle_manifest_invalid")
@@ -1262,6 +1357,19 @@ def _load_verified_bundle_from_root(
     except ValidationError:
         raise RasterTextDirectPaddleBundleError("direct_paddle_bundle_manifest_invalid") from None
     manifest_sha256 = _sha256_bytes(manifest_bytes)
+    if manifest.schema_version == "2.0":
+        try:
+            current_platform = current_raster_runtime_platform_binding()
+        except Exception:
+            raise RasterTextDirectPaddleBundleError(
+                "direct_paddle_bundle_platform_mismatch"
+            ) from None
+        if (
+            manifest.runtime_operating_system,
+            manifest.runtime_architecture,
+            manifest.runtime_python_abi,
+        ) != current_platform:
+            raise RasterTextDirectPaddleBundleError("direct_paddle_bundle_platform_mismatch")
     if expected_manifest_sha256 is not None and manifest_sha256 != expected_manifest_sha256:
         raise RasterTextDirectPaddleBundleError("direct_paddle_bundle_manifest_invalid")
     if relative.startswith(f"{_DIRECT_RELEASES}/") and relative != _release_relative_path(
@@ -1366,13 +1474,14 @@ def _direct_sidecar_environment(
     """Construct a non-inheriting, local-only direct sidecar environment."""
 
     try:
-        if temporary_home.is_symlink() or not temporary_home.is_dir():
+        metadata = temporary_home.lstat()
+        if not stat.S_ISDIR(metadata.st_mode) or stat.S_ISLNK(metadata.st_mode):
             raise OSError
         resolved = temporary_home.resolve(strict=True)
         drive = resolved.drive
         home = str(resolved)
         home_path = home[len(drive) :] if drive and home.startswith(drive) else ""
-        if not drive or not home_path.startswith("\\"):
+        if os.name == "nt" and (not drive or not home_path.startswith("\\")):
             raise OSError
     except OSError:
         raise RasterTextDirectPaddleBundleError("direct_paddle_bundle_smoke_failed") from None
@@ -1386,8 +1495,6 @@ def _direct_sidecar_environment(
             "PATH": str(interpreter.parent),
             "HOME": home,
             "USERPROFILE": home,
-            "HOMEDRIVE": drive,
-            "HOMEPATH": home_path,
             "APPDATA": home,
             "LOCALAPPDATA": home,
             "TMP": home,
@@ -1416,6 +1523,8 @@ def _direct_sidecar_environment(
             "CUSTOMS_AGENT_RASTER_TEXT_DIRECT_PADDLE_MODULE_SHA256": sidecar_sha256,
         }
     )
+    if os.name == "nt":
+        environment.update({"HOMEDRIVE": drive, "HOMEPATH": home_path})
     return environment
 
 
@@ -1737,9 +1846,13 @@ def _build_stage(
         code="direct_paddle_bundle_stage_write_failed",
     )
     files = _stage_files(stage)
+    legacy_source = source.source_manifest_sha256 == _E3_DIRECT_BASE_MANIFEST_SHA256
     manifest = DirectPaddleBundleManifestV1(
-        schema_version="1.0",
+        schema_version="1.0" if legacy_source else "2.0",
         bundle_id=_DIRECT_BUNDLE_ID,
+        runtime_operating_system=None if legacy_source else source.runtime_operating_system,
+        runtime_architecture=None if legacy_source else source.runtime_architecture,
+        runtime_python_abi=None if legacy_source else source.runtime_python_abi,
         source_bundle_relative_path=source.source_bundle_relative_path,
         source_bundle_manifest_sha256=source.source_manifest_sha256,
         derivation_intent_sha256=intent_sha256,
@@ -1749,7 +1862,7 @@ def _build_stage(
         parent_renderer_package_inventory_relative_path="inventories/parent-renderer.json",
         parent_renderer_required_packages=["pypdfium2", "Pillow"],
         sidecar_interpreter_root_relative_path="sidecar/interpreter",
-        sidecar_interpreter_relative_path="sidecar/interpreter/python.exe",
+        sidecar_interpreter_relative_path=source.source_interpreter_relative_path,
         sidecar_interpreter_root_tree_sha256=_tree_manifest_sha256(
             [
                 DirectPaddleBundleFileV1(
@@ -1817,7 +1930,9 @@ def _build_stage(
 
 
 def materialize_verified_raster_text_direct_paddle_bundle_v1(
-    *, document_preview_root: Path
+    *,
+    document_preview_root: Path,
+    source_manifest_sha256: str | None = None,
 ) -> VerifiedRasterTextDirectPaddleBundleV1:
     """Create/reuse a local direct Paddle microbundle without network access.
 
@@ -1829,7 +1944,10 @@ def materialize_verified_raster_text_direct_paddle_bundle_v1(
 
     root = _root(document_preview_root)
     with _lock(root):
-        source = verify_e3_raster_text_direct_paddle_base_v1(document_preview_root=root)
+        source = verify_e3_raster_text_direct_paddle_base_v1(
+            document_preview_root=root,
+            source_manifest_sha256=source_manifest_sha256,
+        )
         interpreter_records, module_records = _selected_source_records(source)
         first_party_records = _snapshot_first_party_sidecar()
         intent = _intent_from_source(

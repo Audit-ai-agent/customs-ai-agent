@@ -1,0 +1,5 @@
+# This closure is installed only into the content-addressed Linux raster sidecar bundle.
+# Keep the direct OCR runtime aligned with the already-evaluated Windows package line.
+paddleocr==3.7.0
+paddlex[ocr]==3.7.2
+paddlepaddle==3.3.1

@@ -5,8 +5,10 @@ import importlib.metadata
 import json
 import os
 from pathlib import Path
+import subprocess
 import pytest
 
+import customs_ai_agent.evaluation.raster_offline_bundle_bootstrap as bundle_bootstrap
 import customs_ai_agent.evaluation.raster_text_direct_paddle_bundle as direct_bundle
 
 
@@ -53,7 +55,12 @@ def _record(root: Path, path: Path) -> dict[str, object]:
     }
 
 
-def _make_e3_source(tmp_path: Path, monkeypatch: pytest.MonkeyPatch) -> Path:
+def _make_e3_source(
+    tmp_path: Path,
+    monkeypatch: pytest.MonkeyPatch,
+    *,
+    platform_v2: bool = False,
+) -> Path:
     root = tmp_path / "_local" / "data" / "document-preview"
     work = root / "source-work"
     module_root = work / "sidecar" / "module-root"
@@ -94,7 +101,18 @@ def _make_e3_source(tmp_path: Path, monkeypatch: pytest.MonkeyPatch) -> Path:
             }
         ),
     )
-    _write(work / direct_bundle._SOURCE_INTERPRETER, b"fake-python")
+    operating_system, architecture, python_abi = (
+        direct_bundle.current_raster_runtime_platform_binding()
+    )
+    source_interpreter = (
+        "sidecar/interpreter/python.exe"
+        if operating_system == "windows"
+        else "sidecar/interpreter/bin/python3.11"
+    )
+    _write(
+        work / (source_interpreter if platform_v2 else direct_bundle._SOURCE_INTERPRETER),
+        b"fake-python",
+    )
     for name in direct_bundle._DIRECT_MODULE_DIRECTORIES:
         _write(module_root / name / "__init__.py", f"# {name}\n".encode("ascii"))
     for name in direct_bundle._DIRECT_MODULE_FILES:
@@ -106,7 +124,7 @@ def _make_e3_source(tmp_path: Path, monkeypatch: pytest.MonkeyPatch) -> Path:
         )
     files = [_record(work, path) for path in sorted(work.rglob("*")) if path.is_file()]
     source_manifest = {
-        "schema_version": "1.0",
+        "schema_version": "2.0" if platform_v2 else "1.0",
         "bundle_id": "raster-offline-bundle-v1",
         "extractor_revision": "fake-e3",
         "raster_dpi": 216,
@@ -115,17 +133,28 @@ def _make_e3_source(tmp_path: Path, monkeypatch: pytest.MonkeyPatch) -> Path:
         "raster_text_model_inventory_relative_path": direct_bundle._SOURCE_DIRECT_MODEL_INVENTORY,
         "raster_text_local_model_root_relative_path": direct_bundle._SOURCE_DIRECT_MODEL_ROOT,
         "sidecar_interpreter_root_relative_path": direct_bundle._SOURCE_INTERPRETER_ROOT,
-        "sidecar_interpreter_relative_path": direct_bundle._SOURCE_INTERPRETER,
+        "sidecar_interpreter_relative_path": (
+            source_interpreter if platform_v2 else direct_bundle._SOURCE_INTERPRETER
+        ),
         "sidecar_module_root_relative_path": direct_bundle._SOURCE_MODULE_ROOT,
         "files": sorted(files, key=lambda item: str(item["path"])),
     }
+    if platform_v2:
+        source_manifest.update(
+            {
+                "runtime_operating_system": operating_system,
+                "runtime_architecture": architecture,
+                "runtime_python_abi": python_abi,
+            }
+        )
     raw = _canonical(source_manifest)
     source_sha = hashlib.sha256(raw).hexdigest()
     _write(work / "manifest.json", raw)
     release = root / direct_bundle._BASE_RELEASES / source_sha
     release.parent.mkdir(parents=True, exist_ok=True)
     work.rename(release)
-    monkeypatch.setattr(direct_bundle, "_E3_DIRECT_BASE_MANIFEST_SHA256", source_sha)
+    if not platform_v2:
+        monkeypatch.setattr(direct_bundle, "_E3_DIRECT_BASE_MANIFEST_SHA256", source_sha)
     return root
 
 
@@ -259,6 +288,129 @@ def test_prepares_hash_bound_v2_runtime_profile_from_verified_microbundle(
         "paddlepaddle",
         "pyclipper",
     ]
+
+
+def test_platform_v2_source_materializes_and_loads_a_distinct_runtime_profile(
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    root = _make_e3_source(tmp_path, monkeypatch, platform_v2=True)
+    _without_real_smoke(monkeypatch)
+    source_sha256 = next((root / direct_bundle._BASE_RELEASES).iterdir()).name
+
+    bundle = direct_bundle.materialize_verified_raster_text_direct_paddle_bundle_v1(
+        document_preview_root=root,
+        source_manifest_sha256=source_sha256,
+    )
+    loaded = direct_bundle.load_verified_raster_text_direct_paddle_bundle_v1(
+        document_preview_root=root,
+        manifest_sha256=bundle.manifest_sha256,
+    )
+    prepared = direct_bundle.prepare_raster_text_direct_paddle_runtime_profile_v2(
+        loaded,
+        pdfium_version="4.30.0",
+        minimum_page_confidence=0.42,
+    )
+    profile_raw = (root / prepared.runtime_configuration_relative_path).read_bytes()
+
+    assert loaded.manifest.schema_version == "2.0"
+    assert (
+        loaded.manifest.runtime_operating_system,
+        loaded.manifest.runtime_architecture,
+        loaded.manifest.runtime_python_abi,
+    ) == direct_bundle.current_raster_runtime_platform_binding()
+    expected_interpreter = (
+        "sidecar/interpreter/python.exe"
+        if os.name == "nt"
+        else "sidecar/interpreter/bin/python3.11"
+    )
+    assert loaded.manifest.sidecar_interpreter_relative_path == expected_interpreter
+    assert hashlib.sha256(profile_raw).hexdigest() == prepared.runtime_configuration_sha256
+
+
+def test_platform_v2_source_rejects_a_different_native_target(
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    root = _make_e3_source(tmp_path, monkeypatch, platform_v2=True)
+    source_root = next((root / direct_bundle._BASE_RELEASES).iterdir())
+    manifest_path = source_root / "manifest.json"
+    manifest = json.loads(manifest_path.read_text(encoding="utf-8"))
+    manifest["runtime_operating_system"] = "linux" if os.name == "nt" else "windows"
+    manifest["sidecar_interpreter_relative_path"] = (
+        "sidecar/interpreter/bin/python3.11"
+        if manifest["runtime_operating_system"] == "linux"
+        else "sidecar/interpreter/python.exe"
+    )
+    manifest_path.write_bytes(_canonical(manifest))
+    changed_sha256 = hashlib.sha256(manifest_path.read_bytes()).hexdigest()
+    changed_root = source_root.with_name(changed_sha256)
+    source_root.rename(changed_root)
+
+    with pytest.raises(
+        direct_bundle.RasterTextDirectPaddleBundleError,
+        match="direct_paddle_bundle_source_manifest_invalid",
+    ):
+        direct_bundle.materialize_verified_raster_text_direct_paddle_bundle_v1(
+            document_preview_root=root,
+            source_manifest_sha256=changed_sha256,
+        )
+
+
+@pytest.mark.skipif(os.name == "nt", reason="POSIX special files are platform-specific")
+def test_posix_direct_bundle_walk_rejects_fifo(tmp_path: Path) -> None:
+    root = tmp_path / "tree"
+    root.mkdir()
+    os.mkfifo(root / "pipe")
+
+    with pytest.raises(
+        direct_bundle.RasterTextDirectPaddleBundleError,
+        match="direct_paddle_bundle_manifest_invalid",
+    ):
+        direct_bundle._regular_tree_files(  # noqa: SLF001
+            root,
+            code="direct_paddle_bundle_manifest_invalid",
+        )
+
+
+@pytest.mark.skipif(os.name == "nt", reason="Linux CPython layout is platform-specific")
+def test_linux_base_prefix_passes_the_actual_isolated_child_preflight(tmp_path: Path) -> None:
+    platform_spec = bundle_bootstrap._select_runtime_platform(  # noqa: SLF001
+        os_name="posix",
+        sys_platform="linux",
+        machine="x86_64",
+        implementation="cpython",
+        python_version=(3, 11),
+        pointer_bits=64,
+    )
+    interpreter_root = tmp_path / "interpreter"
+    bundle_bootstrap._copy_interpreter(  # noqa: SLF001
+        destination=interpreter_root,
+        platform_spec=platform_spec,
+    )
+    interpreter = interpreter_root / "bin" / "python3.11"
+    module_root = tmp_path / "module-root"
+    command = module_root / "probe.py"
+    _write(command, b"print('linux-preflight-ok')\n")
+
+    completed = subprocess.run(
+        [
+            str(interpreter),
+            "-I",
+            "-S",
+            "-c",
+            direct_bundle._DIRECT_ISOLATED_BOOTSTRAP,  # noqa: SLF001
+            str(interpreter_root),
+            str(module_root),
+            str(command),
+        ],
+        stdout=subprocess.PIPE,
+        stderr=subprocess.PIPE,
+        check=False,
+        shell=False,
+        timeout=10,
+    )
+
+    assert completed.returncode == 0, completed.stderr.decode("utf-8", errors="replace")
+    assert completed.stdout == b"linux-preflight-ok\n"
 
 
 def test_base_rejects_direct_model_drift_before_stage_creation(
