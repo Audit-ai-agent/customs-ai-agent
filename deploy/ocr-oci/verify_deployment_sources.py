@@ -28,6 +28,7 @@ def verify(repository_root: Path) -> None:
         encoding="utf-8"
     )
     workflow = (root / ".github/workflows/ocr-oci-publish.yml").read_text(encoding="utf-8")
+    deployment_readme = (root / "deploy/ocr-oci/README.md").read_text(encoding="utf-8")
     dockerignore = (root / ".dockerignore").read_text(encoding="utf-8")
     schema_path = root / "deploy/ocr-oci/runtime-bundle-manifest.schema.json"
     schema = json.loads(schema_path.read_text(encoding="utf-8"))
@@ -186,6 +187,8 @@ def verify(repository_root: Path) -> None:
         or "ocr-oci-v" in workflow
     ):
         raise DeploymentSourceError("publish_non_manual_trigger_forbidden")
+    if "ocr-oci-v" in deployment_readme:
+        raise DeploymentSourceError("publish_documentation_tag_trigger_forbidden")
     # This build copies the private OCR/model runtime into intermediate layers.
     # An Actions cache is a weaker boundary than the private GHCR package and
     # mode=max would export those intermediate bytes. Keep every cache backend

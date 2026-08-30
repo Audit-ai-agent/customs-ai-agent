@@ -32,11 +32,12 @@ X11 패키지는 직접 추가하지 않는다. 이 OS 패키지는 최종 OCI S
 workflow의 fail-closed 구조를 검사하고 `app-structure` target까지만 확인한다.
 최종 publish는 다음 경우에만 가능하다.
 
-- `main`에서 명시적으로 `workflow_dispatch` 실행
-- `ocr-oci-v*` tag push
+- `main`의 현재 SHA에서 `workflow_dispatch` `operation=publish`를 명시적으로
+  실행
 
-두 경우 모두 이미 private GHCR에 올라간 runtime의 digest가 필요하다. tag나
-`latest`는 입력으로 거부한다.
+Tag나 branch push로는 publish가 시작되지 않는다. Publish 실행에는 이미
+private GHCR에 올라간 runtime의 `@sha256:...` digest가 필요하며,
+tag나 `latest`는 runtime 입력으로 거부한다.
 
 ## 1. Linux runtime closure 내보내기
 
