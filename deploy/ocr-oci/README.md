@@ -119,8 +119,9 @@ publish 결과의 `file_count`를 기록해 실제 closure가 확인되면 코�
 `org.opencontainers.image.source` label로 runtime과 최종 Agent package에
 filesystem layer가 없는 `FROM scratch` placeholder만 게시한다. 그 뒤 두
 package가 모두 `private`인지 API로 확인한다. 이 단계에는 모델이나
-runtime byte가 없으며, workflow 저장소가 package에 자동 연결되고
-쓰기 권한도 실제 placeholder push로 입증된다.
+runtime byte가 없으며, package API의 `repository.full_name`을 현재 저장소와
+대조해 연결을 확인한다. 현재 workflow의 `GITHUB_TOKEN`으로 실제
+placeholder push까지 성공해야 하므로 Actions 쓰기 접근도 함께 입증된다.
 
 게시 job은 `raster-ocr-production` environment에 고정된다. 이 environment는
 최초 실행 전에 required reviewer, self-review 금지, `main`만 허용하는 custom
@@ -140,10 +141,13 @@ package 이름이 public이면 자동 복구하지 않고 새 검토된 이름�
 ```bash
 bash deploy/ocr-oci/publish_runtime_context.sh \
   /srv/customs/release-output/raster-runtime-context \
-  ghcr.io/audit-ai-agent/customs-ai-agent-raster-runtime
+  ghcr.io/audit-ai-agent/customs-ai-agent-raster-runtime \
+  audit-ai-agent/customs-ai-agent
 ```
 
-스크립트는 runtime manifest를 다시 검증한 뒤 권위 있는 Agent loader로 bundled
+스크립트는 package의 `repository.full_name`이 명시한 소스 저장소와
+일치하는지까지 API로 확인한 뒤 runtime manifest를 다시 검증하고, 권위 있는
+Agent loader로 bundled
 interpreter를 실행해 package/model 검사, `cv2`·Paddle import와 sidecar warm ready를
 확인한다. Push 직전과 직후 GitHub Packages API에서 같은 target package가 계속
 `visibility=private`인지 확인한다. 그 다음 OCI provenance/SBOM attestation을 붙인

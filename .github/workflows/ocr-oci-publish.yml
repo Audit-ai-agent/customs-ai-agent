@@ -153,7 +153,8 @@ jobs:
             docker buildx imagetools inspect \
               "${image_repository}:${PLACEHOLDER_TAG}" >/dev/null
             python3 deploy/ocr-oci/verify_ghcr_private_package.py \
-              --image "${image_repository}"
+              --image "${image_repository}" \
+              --repository "${GITHUB_REPOSITORY}"
           done
 
       - name: Report package bootstrap only
@@ -180,9 +181,13 @@ jobs:
           RUNTIME_IMAGE: ${{ steps.release.outputs.runtime_image }}
         run: |
           set -euo pipefail
-          python3 deploy/ocr-oci/verify_ghcr_private_package.py --image "${RUNTIME_IMAGE}"
+          python3 deploy/ocr-oci/verify_ghcr_private_package.py \
+            --image "${RUNTIME_IMAGE}" \
+            --repository "${GITHUB_REPOSITORY}"
           docker buildx imagetools inspect "${RUNTIME_IMAGE}" >/dev/null
-          python3 deploy/ocr-oci/verify_ghcr_private_package.py --image "${OUTPUT_IMAGE}"
+          python3 deploy/ocr-oci/verify_ghcr_private_package.py \
+            --image "${OUTPUT_IMAGE}" \
+            --repository "${GITHUB_REPOSITORY}"
 
       - name: Build and publish immutable Agent plus OCR image
         if: steps.release.outputs.should_publish == 'true'
@@ -218,7 +223,9 @@ jobs:
           }
           immutable_ref="${IMAGE_REPOSITORY}@${DIGEST}"
           docker buildx imagetools inspect "${immutable_ref}" >/dev/null
-          python3 deploy/ocr-oci/verify_ghcr_private_package.py --image "${immutable_ref}"
+          python3 deploy/ocr-oci/verify_ghcr_private_package.py \
+            --image "${immutable_ref}" \
+            --repository "${GITHUB_REPOSITORY}"
           echo "immutable_ref=${immutable_ref}" >> "${GITHUB_OUTPUT}"
           {
             echo "### Raster OCR OCI publication"

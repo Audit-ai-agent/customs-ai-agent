@@ -171,12 +171,14 @@ def verify(repository_root: Path) -> None:
         "RASTER_RUNTIME_IMAGE=${{ steps.release.outputs.runtime_image }}",
         "SOURCE_REVISION=${{ github.sha }}",
         "^sha256:[a-f0-9]{64}$",
-        'verify_ghcr_private_package.py --image "${RUNTIME_IMAGE}"',
-        'verify_ghcr_private_package.py --image "${OUTPUT_IMAGE}"',
-        'verify_ghcr_private_package.py --image "${immutable_ref}"',
     ):
         if literal not in workflow:
             raise DeploymentSourceError("publish_workflow_boundary_incomplete")
+    if (
+        workflow.count("verify_ghcr_private_package.py") != 4
+        or workflow.count('--repository "${GITHUB_REPOSITORY}"') != 5
+    ):
+        raise DeploymentSourceError("publish_package_link_verification_incomplete")
     if (
         re.search(
             r"^  (?:push|pull_request|pull_request_target|schedule):\s*$",
@@ -233,7 +235,9 @@ def verify(repository_root: Path) -> None:
         or runtime_publisher.count("verify_ghcr_private_package.py") != 2
         or "api.github.com" not in privacy_verifier
         or 'metadata.get("visibility") != "private"' not in privacy_verifier
+        or 'linked_repository.get("full_name"' not in privacy_verifier
         or "/packages/container/" not in privacy_verifier
+        or runtime_publisher.count('--repository "${source_repository}"') != 2
         or "required_reviewers" not in environment_verifier
         or "prevent_self_review" not in environment_verifier
         or "deployment-branch-policies?per_page=100" not in environment_verifier

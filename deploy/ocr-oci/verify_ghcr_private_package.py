@@ -13,6 +13,7 @@ import urllib.request
 _OWNER = re.compile(r"[a-z0-9](?:[a-z0-9-]{0,38})")
 _PACKAGE_COMPONENT = re.compile(r"[a-z0-9](?:[a-z0-9._-]*[a-z0-9])?")
 _DIGEST = re.compile(r"sha256:[a-f0-9]{64}")
+_REPOSITORY = re.compile(r"[A-Za-z0-9](?:[A-Za-z0-9-]{0,38})/[A-Za-z0-9._-]{1,100}")
 
 
 class GhcrPrivacyError(RuntimeError):
@@ -60,9 +61,15 @@ def _github_json(path: str, token: str) -> object:
         return json.load(response)
 
 
-def verify_private_package(image: str, token: str) -> None:
+def verify_private_package(image: str, repository: str, token: str) -> None:
     owner, package = _package_identity(image)
-    if not token or len(token) > 4096 or any(character.isspace() for character in token):
+    if (
+        _REPOSITORY.fullmatch(repository) is None
+        or repository.split("/", 1)[0].casefold() != owner.casefold()
+        or not token
+        or len(token) > 4096
+        or any(character.isspace() for character in token)
+    ):
         raise GhcrPrivacyError
     quoted_owner = urllib.parse.quote(owner, safe="")
     identity = _github_json(f"/users/{quoted_owner}", token)
@@ -73,16 +80,28 @@ def verify_private_package(image: str, token: str) -> None:
         f"/{scope}/{quoted_owner}/packages/container/{urllib.parse.quote(package, safe='')}",
         token,
     )
-    if not isinstance(metadata, dict) or metadata.get("visibility") != "private":
+    linked_repository = metadata.get("repository") if isinstance(metadata, dict) else None
+    package_owner = metadata.get("owner") if isinstance(metadata, dict) else None
+    if (
+        not isinstance(metadata, dict)
+        or metadata.get("name") != package
+        or metadata.get("package_type") != "container"
+        or metadata.get("visibility") != "private"
+        or not isinstance(package_owner, dict)
+        or str(package_owner.get("login", "")).casefold() != owner.casefold()
+        or not isinstance(linked_repository, dict)
+        or str(linked_repository.get("full_name", "")).casefold() != repository.casefold()
+    ):
         raise GhcrPrivacyError
 
 
 def main() -> int:
     parser = argparse.ArgumentParser(description=__doc__)
     parser.add_argument("--image", required=True)
+    parser.add_argument("--repository", required=True)
     args = parser.parse_args()
     try:
-        verify_private_package(args.image, os.environ.get("GH_TOKEN", ""))
+        verify_private_package(args.image, args.repository, os.environ.get("GH_TOKEN", ""))
     except Exception:
         # Never echo a token, response body, owner, or package metadata.
         print("ghcr_package_privacy_check_failed", file=sys.stderr)

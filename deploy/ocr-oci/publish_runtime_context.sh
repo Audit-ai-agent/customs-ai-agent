@@ -6,13 +6,14 @@ set -euo pipefail
 # script never accepts or prints a registry token.
 
 usage() {
-  echo "usage: $0 <absolute-export-directory> <ghcr.io/owner/runtime-package>" >&2
+  echo "usage: $0 <absolute-export-directory> <ghcr.io/owner/runtime-package> <owner/repository>" >&2
   exit 2
 }
 
-[[ $# -eq 2 ]] || usage
+[[ $# -eq 3 ]] || usage
 context_root=$1
 image_repository=$2
+source_repository=$3
 script_dir=$(cd -- "$(dirname -- "${BASH_SOURCE[0]}")" && pwd -P)
 repository_root=$(cd -- "${script_dir}/../.." && pwd -P)
 
@@ -20,6 +21,10 @@ repository_root=$(cd -- "${script_dir}/../.." && pwd -P)
 [[ -d "${context_root}/document-preview" ]] || { echo "runtime_context_missing" >&2; exit 1; }
 [[ "${image_repository}" =~ ^ghcr\.io/[a-z0-9][a-z0-9._/-]*$ ]] || {
   echo "ghcr_runtime_repository_invalid" >&2
+  exit 1
+}
+[[ "${source_repository}" =~ ^[A-Za-z0-9][A-Za-z0-9-]{0,38}/[A-Za-z0-9._-]{1,100}$ ]] || {
+  echo "github_source_repository_invalid" >&2
   exit 1
 }
 command -v docker >/dev/null 2>&1 || { echo "docker_unavailable" >&2; exit 1; }
@@ -30,7 +35,8 @@ command -v uv >/dev/null 2>&1 || { echo "uv_unavailable" >&2; exit 1; }
 # asset-free placeholder; this script never risks model bytes on an unknown
 # package visibility default.
 python3 "${repository_root}/deploy/ocr-oci/verify_ghcr_private_package.py" \
-  --image "${image_repository}" >/dev/null
+  --image "${image_repository}" \
+  --repository "${source_repository}" >/dev/null
 
 verification_json=$(python3 "${repository_root}/tools/verify_raster_text_oci_runtime.py" \
   --document-preview-root "${context_root}/document-preview")
@@ -96,7 +102,8 @@ runtime_digest=$(python3 -c \
 digest_reference="${image_repository}@${runtime_digest}"
 docker buildx imagetools inspect "${digest_reference}" >/dev/null
 python3 "${repository_root}/deploy/ocr-oci/verify_ghcr_private_package.py" \
-  --image "${digest_reference}" >/dev/null
+  --image "${digest_reference}" \
+  --repository "${source_repository}" >/dev/null
 
 # This is the only value the final-image workflow accepts.  The mutable helper
 # tag is never consumed by a release build.
