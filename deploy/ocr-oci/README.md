@@ -166,11 +166,12 @@ filesystem layer가 없는 `FROM scratch` placeholder만 게시한다. 그 뒤 �
 package가 모두 `private`인지 API로 확인한다. 이 단계에는 모델이나
 runtime byte가 없다. GitHub의 Get-package 응답은 연결 저장소 필드를 보장하지
 않으므로 정확한 owner·package name·type·owner type·version count·private 상태를
-검증한다. 일반 runtime 게시 검사는 저장소 필드를 필수로 요구한다. 자산이 전혀 없는
-bootstrap에서만 공식 응답에 저장소 필드가 생략될 수 있음을 허용하며, 필드가 있으면
-현재 저장소와 반드시 일치해야 한다.
-저장소 연결은 같은 저장소의 `GITHUB_TOKEN` 최초 push와 정확한
-`org.opencontainers.image.source` label로 결속한다. 생성 직후 REST 반영 지연에는
+검증한다. Actions의 짧은 수명 `GITHUB_TOKEN` 응답에서는 저장소 필드 생략만 허용하되,
+필드가 있으면 `null`이나 다른 저장소를 허용하지 않고 현재 저장소와 반드시 일치시킨다.
+`org.opencontainers.image.source` label은 GitHub가 관리하는 package 연결 증명이 아니라
+게시자가 선언한 digest-bound provenance다. 따라서 이를 단독으로 신뢰하지 않고 같은
+저장소의 `GITHUB_TOKEN` push, 고정 package namespace, private API 판정, 인증된 digest
+config 조회와 함께 사용한다. 생성 직후 REST 반영 지연에는
 bootstrap 검사에서만 2초 간격 최대 6회의 같은 엄격한 판정을 반복하고, public·internal,
 잘못된 owner/name/type/저장소는 즉시 실패한다. 현재 workflow의 `GITHUB_TOKEN`으로 실제
 placeholder push까지 성공해야 하므로 Actions 쓰기 접근도 함께 입증된다.
@@ -205,7 +206,10 @@ bash deploy/ocr-oci/publish_runtime_context.sh \
 Agent loader로 bundled
 interpreter를 실행해 package/model 검사, `cv2`·Paddle import와 sidecar warm ready를
 확인한다. Push 직전과 직후 GitHub Packages API에서 같은 target package가 계속
-`visibility=private`인지 확인한다. 그 다음 OCI provenance/SBOM attestation을 붙인
+`visibility=private`이고 `repository.full_name`이 현재 저장소인지 strict하게 확인한다.
+Runtime OCI config에는 현재 저장소 source URL을 결속하고, push 뒤 인증된 digest의 실제
+`linux/amd64` config에서 source, artifact kind, manifest SHA, profile revision도 확인한다.
+그 다음 OCI provenance/SBOM attestation을 붙인
 아래의 변경 불가능한 참조만 출력한다.
 
 ```text
@@ -229,14 +233,16 @@ Tag나 branch push는 배포를 시작하지 않는다. Workflow는 다음 순�
    대상 package는 모두 `visibility=private`인지 즉시 확인한다.
 4. `publish` 모드에서 runtime 입력이 정확한
    `ghcr.io/<owner>/<repo>-raster-runtime@sha256:<64 hex>`이고 현재 token으로
-   private pull 가능한지 확인한다. `bootstrap` 모드는 자산 build 없이 요약만
-   남기고 종료한다.
+   private pull 가능한지 확인한다. 이어서 그 digest의 실제 `linux/amd64` config에서
+   source URL, runtime artifact kind, manifest SHA와 profile revision을 검증한다.
+   `bootstrap` 모드는 자산 build 없이 요약만 남기고 종료한다.
 5. `deploy/ocr-oci/Dockerfile`의 `release` target을 `linux/amd64`로 build한다.
 6. 네트워크가 차단된 build stage에서 모든 file hash·SBOM·license 운송 경계와 실제
    Agent V12/V19/V9 binding, bundled interpreter의 native import/warm ready를 재검증한다.
 7. 최종과 같은 UID 10001로 warm 검증한 non-root final image를 GHCR에 push하고 OCI
    provenance/SBOM을 첨부한다.
-8. push 뒤 output package가 여전히 private인지 다시 확인한다.
+8. push 뒤 최종 digest의 source URL, 현재 `main` revision, exact runtime digest와
+   contract label을 확인하고 output package가 여전히 private인지 다시 확인한다.
 9. workflow summary에 최종 `image@sha256:digest`를 남긴다.
 
 이 publish build는 private OCR 모델이 중간 layer에 포함되므로 GitHub Actions

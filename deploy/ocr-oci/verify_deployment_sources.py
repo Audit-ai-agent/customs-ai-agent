@@ -163,6 +163,8 @@ def verify(repository_root: Path) -> None:
         "CUSTOMS_AGENT_RASTER_TEXT_PREVIEW_APPROVAL_PATH=/opt/customs/_local/data/document-preview/approvals/raster-text-active.json",
         "USER 10001:10001",
         "HEALTHCHECK",
+        'org.opencontainers.image.source="https://github.com/audit-ai-agent/customs-ai-agent"',
+        'io.customs.artifact.kind="customs-ai-agent-raster-text-ocr-v1"',
         'ENTRYPOINT ["/opt/customs/app/.venv/bin/customs-ai-agent-serve"]',
     ):
         if literal not in dockerfile:
@@ -206,7 +208,9 @@ def verify(repository_root: Path) -> None:
 
     if (
         "FROM scratch" not in runtime_dockerfile
+        or "ARG SOURCE_REPOSITORY_URL" not in runtime_dockerfile
         or "COPY --chown=0:0 document-preview/" not in runtime_dockerfile
+        or 'org.opencontainers.image.source="${SOURCE_REPOSITORY_URL}"' not in runtime_dockerfile
     ):
         raise DeploymentSourceError("runtime_context_dockerfile_invalid")
     if re.search(r"^\s*(?:RUN|ADD)\s", runtime_dockerfile, flags=re.MULTILINE):
@@ -244,9 +248,13 @@ def verify(repository_root: Path) -> None:
         "asset-free-bootstrap-v1",
         "--provenance=false",
         "--sbom=false",
-        "--allow-missing-repository-for-source-attested-bootstrap",
+        "--allow-missing-repository-for-source-attested-workflow",
         "--max-attempts 6",
         "--retry-delay-seconds 2",
+        "verify_ghcr_source_attestation.py",
+        "{{json .Image}}",
+        "--kind runtime",
+        "--kind agent",
         "provenance: mode=max",
         "sbom: true",
         "RASTER_RUNTIME_IMAGE=${{ steps.release.outputs.runtime_image }}",
@@ -257,8 +265,9 @@ def verify(repository_root: Path) -> None:
             raise DeploymentSourceError("publish_workflow_boundary_incomplete")
     if (
         workflow.count("verify_ghcr_private_package.py") != 4
-        or workflow.count('--repository "${GITHUB_REPOSITORY}"') != 5
-        or workflow.count("--allow-missing-repository-for-source-attested-bootstrap") != 1
+        or workflow.count("verify_ghcr_source_attestation.py") != 2
+        or workflow.count('--repository "${GITHUB_REPOSITORY}"') != 7
+        or workflow.count("--allow-missing-repository-for-source-attested-workflow") != 4
         or workflow.count("--max-attempts 6") != 1
         or workflow.count("--retry-delay-seconds 2") != 1
     ):
@@ -299,6 +308,9 @@ def verify(repository_root: Path) -> None:
     privacy_verifier = (root / "deploy/ocr-oci/verify_ghcr_private_package.py").read_text(
         encoding="utf-8"
     )
+    source_verifier = (root / "deploy/ocr-oci/verify_ghcr_source_attestation.py").read_text(
+        encoding="utf-8"
+    )
     actor_verifier = (root / "deploy/ocr-oci/verify_github_release_actor.py").read_text(
         encoding="utf-8"
     )
@@ -326,6 +338,10 @@ def verify(repository_root: Path) -> None:
         or "verify_v9_direct_evidence_closure(" not in agent_verifier
         or "deploy/ocr-oci/verify_agent_runtime_binding.py" not in runtime_publisher
         or runtime_publisher.count("verify_ghcr_private_package.py") != 2
+        or runtime_publisher.count("verify_ghcr_source_attestation.py") != 1
+        or "SOURCE_REPOSITORY_URL=https://github.com/${source_repository_lower}"
+        not in runtime_publisher
+        or "--allow-missing-repository-for-source-attested-workflow" in runtime_publisher
         or "api.github.com" not in privacy_verifier
         or 'metadata["visibility"] != "private"' not in privacy_verifier
         or 'metadata["version_count"]' not in privacy_verifier
@@ -336,7 +352,17 @@ def verify(repository_root: Path) -> None:
         or "time.sleep(retry_delay_seconds)" not in privacy_verifier
         or "_MAX_ATTEMPTS = 6" not in privacy_verifier
         or "/packages/container/" not in privacy_verifier
-        or runtime_publisher.count('--repository "${source_repository}"') != 2
+        or '_DIGEST = re.compile(r"sha256:[a-f0-9]{64}")' not in source_verifier
+        or 'reference.split("@")' not in source_verifier
+        or source_verifier.count("_matches_digest_reference(") != 3
+        or 'config.get("architecture") != "amd64"' not in source_verifier
+        or '!= "linux"' not in source_verifier
+        or 'labels.get("org.opencontainers.image.source")' not in source_verifier
+        or '"raster-text-runtime-context-v1"' not in source_verifier
+        or '"customs-ai-agent-raster-text-ocr-v1"' not in source_verifier
+        or 'labels.get("io.customs.raster-runtime.image")' not in source_verifier
+        or 'labels.get("org.opencontainers.image.revision")' not in source_verifier
+        or runtime_publisher.count('--repository "${source_repository}"') != 3
         or 'metadata.get("private") is not True' not in actor_verifier
         or 'metadata.get("visibility") != "private"' not in actor_verifier
         or 'metadata.get("default_branch") != "main"' not in actor_verifier
@@ -347,9 +373,33 @@ def verify(repository_root: Path) -> None:
 
     actor_check = workflow.find("verify_github_release_actor.py")
     placeholder_push = workflow.find("deploy/ocr-oci/placeholder/Dockerfile")
+    runtime_block = workflow.find("Verify runtime digest is private and readable")
+    runtime_private = workflow.find("verify_ghcr_private_package.py", runtime_block)
+    runtime_source = workflow.find("verify_ghcr_source_attestation.py", runtime_private)
+    output_private = workflow.find("verify_ghcr_private_package.py", runtime_source)
     final_build = workflow.find("Build and publish immutable Agent plus OCR image")
-    if not 0 <= actor_check < placeholder_push < final_build:
+    final_source = workflow.find("verify_ghcr_source_attestation.py", final_build)
+    final_private = workflow.find("verify_ghcr_private_package.py", final_source)
+    if not (
+        0
+        <= actor_check
+        < placeholder_push
+        < runtime_block
+        < runtime_private
+        < runtime_source
+        < output_private
+        < final_build
+        < final_source
+        < final_private
+    ):
         raise DeploymentSourceError("publish_verification_order_invalid")
+
+    local_private_pre = runtime_publisher.find("verify_ghcr_private_package.py")
+    local_build = runtime_publisher.find("docker buildx build")
+    local_source = runtime_publisher.find("verify_ghcr_source_attestation.py")
+    local_private_post = runtime_publisher.rfind("verify_ghcr_private_package.py")
+    if not 0 <= local_private_pre < local_build < local_source < local_private_post:
+        raise DeploymentSourceError("runtime_publish_verification_order_invalid")
 
     for relative in (
         "deploy/ocr-oci/create_app_license_manifest.py",
@@ -357,8 +407,10 @@ def verify(repository_root: Path) -> None:
         "deploy/ocr-oci/selftest_github_release_actor.py",
         "deploy/ocr-oci/selftest_ocr_readiness.py",
         "deploy/ocr-oci/selftest_ghcr_private_package.py",
+        "deploy/ocr-oci/selftest_ghcr_source_attestation.py",
         "deploy/ocr-oci/selftest_runtime_contract.py",
         "deploy/ocr-oci/verify_ghcr_private_package.py",
+        "deploy/ocr-oci/verify_ghcr_source_attestation.py",
         "deploy/ocr-oci/verify_github_release_actor.py",
         "deploy/ocr-oci/verify_agent_runtime_binding.py",
         "deploy/ocr-oci/verify_deployment_sources.py",

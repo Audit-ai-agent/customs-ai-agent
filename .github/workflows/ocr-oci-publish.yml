@@ -177,7 +177,7 @@ jobs:
             python3 deploy/ocr-oci/verify_ghcr_private_package.py \
               --image "${image_repository}" \
               --repository "${GITHUB_REPOSITORY}" \
-              --allow-missing-repository-for-source-attested-bootstrap \
+              --allow-missing-repository-for-source-attested-workflow \
               --max-attempts 6 \
               --retry-delay-seconds 2
           done
@@ -208,11 +208,17 @@ jobs:
           set -euo pipefail
           python3 deploy/ocr-oci/verify_ghcr_private_package.py \
             --image "${RUNTIME_IMAGE}" \
-            --repository "${GITHUB_REPOSITORY}"
-          docker buildx imagetools inspect "${RUNTIME_IMAGE}" >/dev/null
+            --repository "${GITHUB_REPOSITORY}" \
+            --allow-missing-repository-for-source-attested-workflow
+          docker buildx imagetools inspect --format '{{json .Image}}' "${RUNTIME_IMAGE}" | \
+            python3 deploy/ocr-oci/verify_ghcr_source_attestation.py \
+              --image "${RUNTIME_IMAGE}" \
+              --kind runtime \
+              --repository "${GITHUB_REPOSITORY}"
           python3 deploy/ocr-oci/verify_ghcr_private_package.py \
             --image "${OUTPUT_IMAGE}" \
-            --repository "${GITHUB_REPOSITORY}"
+            --repository "${GITHUB_REPOSITORY}" \
+            --allow-missing-repository-for-source-attested-workflow
 
       - name: Build and publish immutable Agent plus OCR image
         if: steps.release.outputs.should_publish == 'true'
@@ -247,10 +253,17 @@ jobs:
             exit 1
           }
           immutable_ref="${IMAGE_REPOSITORY}@${DIGEST}"
-          docker buildx imagetools inspect "${immutable_ref}" >/dev/null
+          docker buildx imagetools inspect --format '{{json .Image}}' "${immutable_ref}" | \
+            python3 deploy/ocr-oci/verify_ghcr_source_attestation.py \
+              --image "${immutable_ref}" \
+              --kind agent \
+              --repository "${GITHUB_REPOSITORY}" \
+              --runtime-image "${RUNTIME_IMAGE}" \
+              --source-revision "${GITHUB_SHA}"
           python3 deploy/ocr-oci/verify_ghcr_private_package.py \
             --image "${immutable_ref}" \
-            --repository "${GITHUB_REPOSITORY}"
+            --repository "${GITHUB_REPOSITORY}" \
+            --allow-missing-repository-for-source-attested-workflow
           echo "immutable_ref=${immutable_ref}" >> "${GITHUB_OUTPUT}"
           {
             echo "### Raster OCR OCI publication"
