@@ -164,8 +164,15 @@ publish 결과의 `file_count`를 기록해 실제 closure가 확인되면 코�
 `org.opencontainers.image.source` label로 runtime과 최종 Agent package에
 filesystem layer가 없는 `FROM scratch` placeholder만 게시한다. 그 뒤 두
 package가 모두 `private`인지 API로 확인한다. 이 단계에는 모델이나
-runtime byte가 없으며, package API의 `repository.full_name`을 현재 저장소와
-대조해 연결을 확인한다. 현재 workflow의 `GITHUB_TOKEN`으로 실제
+runtime byte가 없다. GitHub의 Get-package 응답은 연결 저장소 필드를 보장하지
+않으므로 정확한 owner·package name·type·owner type·version count·private 상태를
+검증한다. 일반 runtime 게시 검사는 저장소 필드를 필수로 요구한다. 자산이 전혀 없는
+bootstrap에서만 공식 응답에 저장소 필드가 생략될 수 있음을 허용하며, 필드가 있으면
+현재 저장소와 반드시 일치해야 한다.
+저장소 연결은 같은 저장소의 `GITHUB_TOKEN` 최초 push와 정확한
+`org.opencontainers.image.source` label로 결속한다. 생성 직후 REST 반영 지연에는
+bootstrap 검사에서만 2초 간격 최대 6회의 같은 엄격한 판정을 반복하고, public·internal,
+잘못된 owner/name/type/저장소는 즉시 실패한다. 현재 workflow의 `GITHUB_TOKEN`으로 실제
 placeholder push까지 성공해야 하므로 Actions 쓰기 접근도 함께 입증된다.
 
 Private GitHub Free 저장소에서는 required-reviewer environment가 지원되지 않으므로

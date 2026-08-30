@@ -176,7 +176,10 @@ jobs:
               "${image_repository}:${PLACEHOLDER_TAG}" >/dev/null
             python3 deploy/ocr-oci/verify_ghcr_private_package.py \
               --image "${image_repository}" \
-              --repository "${GITHUB_REPOSITORY}"
+              --repository "${GITHUB_REPOSITORY}" \
+              --allow-missing-repository-for-source-attested-bootstrap \
+              --max-attempts 6 \
+              --retry-delay-seconds 2
           done
 
       - name: Report package bootstrap only
