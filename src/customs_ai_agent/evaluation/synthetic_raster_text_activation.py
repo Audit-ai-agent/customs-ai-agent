@@ -43,7 +43,7 @@ from customs_ai_agent.evaluation.raster_offline_bundle import (
 from customs_ai_agent.evaluation.raster_offline_bundle_bootstrap import (
     RasterOfflineBundleBootstrapError,
     ensure_raster_offline_bundle_release_v1,
-    materialize_verified_unselected_raster_text_release_v1,
+    resolve_or_materialize_verified_raster_text_release_reference_v1,
 )
 from customs_ai_agent.evaluation.raster_text_direct_paddle_bundle import (
     RasterTextDirectPaddleBundleError,
@@ -9993,12 +9993,14 @@ def auto_activate_synthetic_raster_text_linux_preview97_v1(
                 )
             # The online bootstrap first publishes into the fixed legacy
             # location.  Promote/reuse its selected structural release, then
-            # derive the unselected text-only release that carries the exact
-            # direct detector/recognizer inventory.  Both steps remain under
-            # network denial and fully smoke their private stage before the
-            # direct OCR microbundle is allowed to consume it.
+            # resolve the source-bound text-only release that carries the exact
+            # direct detector/recognizer inventory.  An already verified intent
+            # is reused without letting the structural selector replace it;
+            # otherwise the resolver remains the sole materialization path.
+            # Both steps stay under network denial before the direct OCR
+            # microbundle is allowed to consume the text release.
             ensure_raster_offline_bundle_release_v1(document_preview_root=root)
-            offline_bundle = materialize_verified_unselected_raster_text_release_v1(
+            offline_bundle = resolve_or_materialize_verified_raster_text_release_reference_v1(
                 document_preview_root=root
             )
             if offline_bundle.manifest.schema_version != "2.0" or (
