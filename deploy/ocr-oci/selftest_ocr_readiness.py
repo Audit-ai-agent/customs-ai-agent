@@ -48,16 +48,23 @@ def main() -> int:
     revision = f"synthetic-raster-text-v1:{'c' * 24}"
     with tempfile.TemporaryDirectory(prefix="ocr-readiness-") as temporary:
         pointer = Path(temporary) / "raster-text-active.json"
-        pointer.write_text(
-            json.dumps(
-                {
-                    "raster_text_profile_revision": revision,
-                    "schema_version": "11.0",
-                    "status": "activated",
-                },
-                separators=(",", ":"),
+        pointer_value = {
+            "activation_kind": "source_attested_synthetic_raster_text",
+            "current_runner_implementation_sha256": "a" * 64,
+            "dataset_id": "synthetic-raster-text-v1",
+            "engine_kind": (
+                "direct_paddle_mobile_det_public_finetuned_rec_harmonic_recall_native960_"
+                "lowbox_strip2_semantic_repair_v2_onednn"
             ),
-            encoding="utf-8",
+            "evidence_generation_revision": "current-runner-native-full-gate-v1",
+            "quality_gate_revision": "preview-draft-critical97-cer2-v1",
+            "raster_text_profile_revision": revision,
+            "runtime_validation_revision": "activation-full-runtime-compact-v1",
+            "schema_version": "12.0",
+            "status": "activated",
+        }
+        pointer.write_bytes(
+            json.dumps(pointer_value, separators=(",", ":"), sort_keys=True).encode("ascii") + b"\n"
         )
         environment = {
             "CUSTOMS_AGENT_PORT": "18090",
@@ -65,7 +72,7 @@ def main() -> int:
             "CUSTOMS_AGENT_SERVICE_BEARER_TOKEN": "A" * 43 + "bcd123456789",
             "CUSTOMS_AGENT_SERVICE_MODE": "local-development",
         }
-        ready_payload = {
+        ready_payload: dict[str, object] = {
             "availability": "available",
             "raster_text_profile_revision": revision,
             "schema_version": "1.0",
@@ -99,6 +106,24 @@ def main() -> int:
         ):
             if READINESS.main() == 0:
                 raise AssertionError("superseded OCR binding was accepted")
+
+        pointer_value["schema_version"] = "11.0"
+        pointer.write_bytes(
+            json.dumps(pointer_value, separators=(",", ":"), sort_keys=True).encode("ascii") + b"\n"
+        )
+        with (
+            patch.dict(os.environ, environment, clear=True),
+            patch.object(READINESS, "_DEFAULT_POINTER", pointer),
+            patch.object(
+                READINESS.urllib.request,
+                "build_opener",
+                return_value=_Opener(ready_payload),
+            ),
+            redirect_stdout(io.StringIO()),
+            redirect_stderr(io.StringIO()),
+        ):
+            if READINESS.main() == 0:
+                raise AssertionError("legacy V11 OCR pointer was accepted")
 
     print("ocr_readiness_selftest_passed")
     return 0

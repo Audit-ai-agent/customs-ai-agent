@@ -27,6 +27,14 @@ FROM ${PYTHON_IMAGE} AS app-base
 ARG TARGETARCH
 ARG TARGETOS
 RUN test "${TARGETOS}" = "linux" && test "${TARGETARCH}" = "amd64" && \
+    apt-get update && \
+    apt-get install --yes --no-install-recommends \
+      libgl1=1.6.0-1 \
+      libglib2.0-0=2.74.6-2+deb12u9 \
+      libgomp1=12.2.0-14+deb12u1 && \
+    rm -rf /var/lib/apt/lists/* && \
+    python -c \
+      "import ctypes; [ctypes.CDLL(name) for name in ('libgomp.so.1', 'libGL.so.1', 'libgthread-2.0.so.0')]" && \
     groupadd --gid 10001 customs && \
     useradd --uid 10001 --gid 10001 --no-create-home \
       --home-dir /opt/customs --shell /usr/sbin/nologin customs && \
@@ -63,9 +71,13 @@ FROM runtime-material AS runtime-verified
 COPY --from=app-build --chown=0:0 /build/.venv/ /opt/customs/app/.venv/
 COPY --chown=0:0 tools/verify_raster_text_oci_runtime.py \
     /opt/customs/deploy/verify_raster_text_oci_runtime.py
+COPY --chown=0:0 tools/raster_text_oci_evidence.py \
+    /opt/customs/deploy/raster_text_oci_evidence.py
 COPY --chown=0:0 deploy/ocr-oci/verify_agent_runtime_binding.py \
     /opt/customs/deploy/verify_agent_runtime_binding.py
-RUN install -d -o root -g root -m 0755 /opt/customs/deploy/verified && \
+RUN install -d -o 10001 -g 10001 -m 0755 /opt/customs/deploy/verified
+USER 10001:10001
+RUN --network=none \
     python /opt/customs/deploy/verify_raster_text_oci_runtime.py \
       --document-preview-root /opt/customs/_local/data/document-preview \
       > /opt/customs/deploy/verified/runtime-verification.json && \

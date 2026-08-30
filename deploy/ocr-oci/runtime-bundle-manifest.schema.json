@@ -27,7 +27,7 @@
     "files": {
       "type": "array",
       "minItems": 8,
-      "maxItems": 20000,
+      "maxItems": 24999,
       "items": {"$ref": "#/$defs/fileRecord"}
     }
   },

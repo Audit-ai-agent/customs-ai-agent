@@ -64,9 +64,20 @@ jobs:
         run: uv run --locked --group dev pytest -q
       - name: Verify asset-free OCR OCI deployment sources
         run: |
+          uv run --locked --group dev ruff check \
+            deploy/ocr-oci \
+            tools/export_raster_text_oci_runtime.py \
+            tools/raster_text_oci_evidence.py \
+            tools/verify_raster_text_oci_runtime.py
+          uv run --locked --group dev ruff format --check \
+            deploy/ocr-oci \
+            tools/export_raster_text_oci_runtime.py \
+            tools/raster_text_oci_evidence.py \
+            tools/verify_raster_text_oci_runtime.py
           python deploy/ocr-oci/verify_deployment_sources.py --repository-root .
           python deploy/ocr-oci/selftest_ocr_readiness.py
-          python deploy/ocr-oci/selftest_runtime_contract.py
+          python deploy/ocr-oci/selftest_ghcr_private_package.py
+          uv run --locked --group dev python deploy/ocr-oci/selftest_runtime_contract.py
           bash -n deploy/ocr-oci/publish_runtime_context.sh
       - name: Build source-only OCI structure target
         run: |

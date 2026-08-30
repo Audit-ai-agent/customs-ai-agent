@@ -30,6 +30,12 @@ def verify(repository_root: Path) -> None:
     schema = json.loads(schema_path.read_text(encoding="utf-8"))
     if schema.get("$schema") != "https://json-schema.org/draft/2020-12/schema":
         raise DeploymentSourceError("runtime_manifest_schema_invalid")
+    try:
+        maximum_files = schema["properties"]["files"]["maxItems"]
+    except (KeyError, TypeError):
+        raise DeploymentSourceError("runtime_manifest_schema_invalid") from None
+    if maximum_files != 24_999:
+        raise DeploymentSourceError("runtime_manifest_file_limit_invalid")
 
     first_rule = next(
         (
@@ -46,6 +52,7 @@ def verify(repository_root: Path) -> None:
         "!uv.lock",
         "!src/**",
         "!deploy/ocr-oci/**",
+        "!tools/raster_text_oci_evidence.py",
         "!tools/verify_raster_text_oci_runtime.py",
     ):
         if required not in dockerignore.splitlines():
@@ -72,6 +79,9 @@ def verify(repository_root: Path) -> None:
         "COPY --from=raster-runtime --link --chown=0:0",
         "tools/verify_raster_text_oci_runtime.py",
         "verify_agent_runtime_binding.py",
+        "raster_text_oci_evidence.py",
+        "RUN --network=none",
+        "install -d -o 10001 -g 10001 -m 0755 /opt/customs/deploy/verified",
         "CUSTOMS_AGENT_RASTER_TEXT_PREVIEW_AUTO_ACTIVATION=source-attested-synthetic-raster-text-v1",
         "CUSTOMS_AGENT_RASTER_TEXT_PREVIEW_APPROVAL_PATH=/opt/customs/_local/data/document-preview/approvals/raster-text-active.json",
         "USER 10001:10001",
@@ -84,6 +94,38 @@ def verify(repository_root: Path) -> None:
         raise DeploymentSourceError("unbounded_docker_copy_or_remote_add")
     if "CUSTOMS_AGENT_RASTER_TEXT_PREVIEW_APPROVAL_SHA256" in dockerfile:
         raise DeploymentSourceError("auto_activation_sha_environment_forbidden")
+    if (
+        re.search(
+            r"FROM runtime-material AS runtime-verified.*?USER 10001:10001\s+"
+            r"RUN --network=none",
+            dockerfile,
+            flags=re.DOTALL,
+        )
+        is None
+    ):
+        raise DeploymentSourceError("ocr_warm_verification_not_nonroot")
+    package_block = re.search(
+        r"apt-get install --yes --no-install-recommends\s+(.*?)\s+&&",
+        dockerfile,
+        flags=re.DOTALL,
+    )
+    if package_block is None:
+        raise DeploymentSourceError("ocr_native_runtime_packages_missing")
+    packages = set(package_block.group(1).replace("\\", " ").split())
+    if packages != {
+        "libgl1=1.6.0-1",
+        "libglib2.0-0=2.74.6-2+deb12u9",
+        "libgomp1=12.2.0-14+deb12u1",
+    }:
+        raise DeploymentSourceError("ocr_native_runtime_packages_invalid")
+    for literal in (
+        "rm -rf /var/lib/apt/lists/*",
+        "libgomp.so.1",
+        "libGL.so.1",
+        "libgthread-2.0.so.0",
+    ):
+        if literal not in dockerfile:
+            raise DeploymentSourceError("ocr_native_runtime_link_check_missing")
 
     if (
         "FROM scratch" not in runtime_dockerfile
@@ -104,6 +146,9 @@ def verify(repository_root: Path) -> None:
         "RASTER_RUNTIME_IMAGE=${{ steps.release.outputs.runtime_image }}",
         "SOURCE_REVISION=${{ github.sha }}",
         "@sha256:[a-f0-9]{64}",
+        'verify_ghcr_private_package.py --image "${RUNTIME_IMAGE}"',
+        'verify_ghcr_private_package.py --image "${OUTPUT_IMAGE}"',
+        'verify_ghcr_private_package.py --image "${immutable_ref}"',
     ):
         if literal not in workflow:
             raise DeploymentSourceError("publish_workflow_boundary_incomplete")
@@ -112,14 +157,53 @@ def verify(repository_root: Path) -> None:
     if re.search(r"^\s+branches:\s*", workflow, flags=re.MULTILINE):
         raise DeploymentSourceError("publish_on_branch_push_forbidden")
 
+    exporter = (root / "tools/export_raster_text_oci_runtime.py").read_text(encoding="utf-8")
+    runtime_verifier = (root / "tools/verify_raster_text_oci_runtime.py").read_text(
+        encoding="utf-8"
+    )
+    agent_verifier = (root / "deploy/ocr-oci/verify_agent_runtime_binding.py").read_text(
+        encoding="utf-8"
+    )
+    runtime_publisher = (root / "deploy/ocr-oci/publish_runtime_context.sh").read_text(
+        encoding="utf-8"
+    )
+    privacy_verifier = (root / "deploy/ocr-oci/verify_ghcr_private_package.py").read_text(
+        encoding="utf-8"
+    )
+    readiness = (root / "deploy/ocr-oci/ocr_readiness.py").read_text(encoding="utf-8")
+    if (
+        "RasterTextActivationPointerV12" not in exporter
+        or "RasterTextActivationPointerV11" in exporter
+        or 'RuntimeExportError("schema12_active_pointer_required")' not in exporter
+        or "_MAX_FILE_COUNT = 25_000" not in runtime_verifier
+        or 'value.get("schema_version") != "12.0"' not in runtime_verifier
+        or 'value.get("schema_version") != "9.0"' not in runtime_verifier
+        or 'pointer.get("schema_version") != "12.0"' not in readiness
+        or "_release_manifest_records(" not in runtime_verifier
+        or 'elf_header[:7] != b"\\x7fELF\\x02\\x01\\x01"' not in runtime_verifier
+        or "start_service_session=True" not in agent_verifier
+        or "binding.verify_runtime_state()" not in agent_verifier
+        or "verify_v9_direct_evidence_closure(" not in exporter
+        or "verify_v9_direct_evidence_closure(" not in agent_verifier
+        or "deploy/ocr-oci/verify_agent_runtime_binding.py" not in runtime_publisher
+        or runtime_publisher.count("verify_ghcr_private_package.py") != 2
+        or "api.github.com" not in privacy_verifier
+        or 'metadata.get("visibility") != "private"' not in privacy_verifier
+        or "/packages/container/" not in privacy_verifier
+    ):
+        raise DeploymentSourceError("current_native_ocr_oci_boundary_incomplete")
+
     for relative in (
         "deploy/ocr-oci/create_app_license_manifest.py",
         "deploy/ocr-oci/ocr_readiness.py",
         "deploy/ocr-oci/selftest_ocr_readiness.py",
+        "deploy/ocr-oci/selftest_ghcr_private_package.py",
         "deploy/ocr-oci/selftest_runtime_contract.py",
+        "deploy/ocr-oci/verify_ghcr_private_package.py",
         "deploy/ocr-oci/verify_agent_runtime_binding.py",
         "deploy/ocr-oci/verify_deployment_sources.py",
         "tools/export_raster_text_oci_runtime.py",
+        "tools/raster_text_oci_evidence.py",
         "tools/verify_raster_text_oci_runtime.py",
     ):
         source = (root / relative).read_text(encoding="utf-8")

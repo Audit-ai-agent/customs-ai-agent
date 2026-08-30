@@ -1,7 +1,7 @@
 """Export the minimal verified Linux Raster Text OCR OCI build context.
 
 The command does not download, install, train, activate, or repair anything.
-It accepts only an already activated schema-11 Linux/amd64 profile, performs
+It accepts only an already activated schema-12 Linux/amd64 profile, performs
 the full activation verification, observes the compact runtime read closure,
 adds the two complete sidecar/model release roots, and publishes a new
 immutable directory only after the exported closure passes runtime validation.
@@ -22,13 +22,14 @@ from pathlib import Path, PurePosixPath
 from typing import Any, Iterable
 
 from customs_ai_agent.service.raster_text_preview_runtime import (
-    RasterTextActivationPointerV11,
+    RasterTextActivationPointerV12,
     RasterTextOfflineProfileV19,
     _load_binding_from_pointer,
     parse_raster_text_activation_pointer,
     parse_raster_text_offline_profile,
     validate_raster_text_approval_pointer_path,
 )
+from raster_text_oci_evidence import verify_v9_direct_evidence_closure
 from verify_raster_text_oci_runtime import (
     RuntimeContextError,
     verify_runtime_context,
@@ -38,6 +39,8 @@ _POINTER_RELATIVE_PATH = PurePosixPath("approvals/raster-text-active.json")
 _MANIFEST_RELATIVE_PATH = PurePosixPath("_deployment/raster-text-runtime-oci-v1.json")
 _SBOM_RELATIVE_PATH = PurePosixPath("_deployment/runtime.spdx.json")
 _LICENSE_RELATIVE_PATH = PurePosixPath("_deployment/third-party-licenses.json")
+_MAX_FILE_COUNT = 25_000
+_MAX_TREE_ENTRIES = 50_000
 
 
 class RuntimeExportError(RuntimeError):
@@ -106,14 +109,31 @@ def _directory_files(root: Path, relative: PurePosixPath) -> set[PurePosixPath]:
     except OSError:
         raise RuntimeExportError("runtime_source_directory_invalid") from None
     files: set[PurePosixPath] = set()
-    for candidate in resolved.rglob("*"):
-        if candidate.is_symlink():
-            raise RuntimeExportError("runtime_source_symlink_forbidden")
-        if candidate.is_dir():
-            continue
-        if not candidate.is_file():
-            raise RuntimeExportError("runtime_source_special_file_forbidden")
-        files.add(PurePosixPath(candidate.relative_to(root).as_posix()))
+    pending = [resolved]
+    entries_seen = 0
+    try:
+        while pending:
+            directory = pending.pop()
+            with os.scandir(directory) as entries:
+                for entry in entries:
+                    entries_seen += 1
+                    if entries_seen > _MAX_TREE_ENTRIES:
+                        raise RuntimeExportError("runtime_source_tree_limit_exceeded")
+                    candidate = Path(entry.path)
+                    if entry.is_symlink():
+                        raise RuntimeExportError("runtime_source_symlink_forbidden")
+                    if entry.is_dir(follow_symlinks=False):
+                        pending.append(candidate)
+                    elif entry.is_file(follow_symlinks=False):
+                        files.add(PurePosixPath(candidate.relative_to(root).as_posix()))
+                        if len(files) > _MAX_FILE_COUNT:
+                            raise RuntimeExportError("runtime_source_tree_limit_exceeded")
+                    else:
+                        raise RuntimeExportError("runtime_source_special_file_forbidden")
+    except RuntimeExportError:
+        raise
+    except (OSError, ValueError):
+        raise RuntimeExportError("runtime_source_directory_invalid") from None
     if not files:
         raise RuntimeExportError("runtime_source_directory_empty")
     return files
@@ -160,6 +180,7 @@ def _load_binding(
             start_service_session=False,
             verification_mode=verification_mode,
         )
+        verify_v9_direct_evidence_closure(root=root, pointer=binding.pointer)
         return binding
     except Exception:
         raise RuntimeExportError(
@@ -181,7 +202,7 @@ def _record_compact_runtime_reads(
         if event != "open" or not args or not isinstance(args[0], (str, bytes, os.PathLike)):
             return
         try:
-            candidate = Path(args[0]).resolve(strict=False)
+            candidate = Path(os.fsdecode(args[0])).resolve(strict=False)
             if candidate.is_relative_to(root) and candidate.is_file():
                 opened.add(PurePosixPath(candidate.relative_to(root).as_posix()))
         except (OSError, TypeError, ValueError):
@@ -241,9 +262,10 @@ def _copy_one(source_root: Path, output_root: Path, relative: PurePosixPath) -> 
     destination = output_root.joinpath(*relative.parts)
     destination.parent.mkdir(parents=True, exist_ok=True)
     try:
+        source_mode = source.stat().st_mode
         shutil.copy2(source, destination, follow_symlinks=False)
-        mode = destination.stat().st_mode
-        destination.chmod(mode & ~(stat.S_IWGRP | stat.S_IWOTH))
+        executable = source_mode & (stat.S_IXUSR | stat.S_IXGRP | stat.S_IXOTH)
+        destination.chmod(0o555 if executable else 0o444)
     except OSError:
         raise RuntimeExportError("runtime_copy_failed") from None
 
@@ -255,10 +277,20 @@ def _copy_metadata(source: Path, output_root: Path, relative: PurePosixPath) -> 
         destination = output_root.joinpath(*relative.parts)
         destination.parent.mkdir(parents=True, exist_ok=True)
         shutil.copy2(source, destination, follow_symlinks=False)
-        mode = destination.stat().st_mode
-        destination.chmod(mode & ~(stat.S_IWGRP | stat.S_IWOTH))
+        destination.chmod(0o444)
     except OSError:
         raise RuntimeExportError("deployment_metadata_copy_failed") from None
+
+
+def _make_runtime_tree_nonroot_readable(root: Path) -> None:
+    try:
+        directories = [root, *(path for path in root.rglob("*") if path.is_dir())]
+        for directory in directories:
+            if directory.is_symlink():
+                raise OSError
+            directory.chmod(0o555)
+    except OSError:
+        raise RuntimeExportError("runtime_permissions_normalization_failed") from None
 
 
 def _file_record(path: Path, relative: PurePosixPath, role: str) -> dict[str, object]:
@@ -278,7 +310,7 @@ def _manifest(
     runtime_profile: PurePosixPath,
     sidecar_root: PurePosixPath,
     model_bundle_root: PurePosixPath,
-    pointer: RasterTextActivationPointerV11,
+    pointer: RasterTextActivationPointerV12,
 ) -> dict[str, object]:
     records = [
         _file_record(
@@ -368,7 +400,7 @@ def export_runtime(
         approval_raw = approval_path.read_bytes()
         approval_sha256 = hashlib.sha256(approval_raw).hexdigest()
         pointer = parse_raster_text_activation_pointer(approval_raw)
-        if type(pointer) is not RasterTextActivationPointerV11:
+        if type(pointer) is not RasterTextActivationPointerV12:
             raise ValueError
         runtime_profile = _safe_relative(pointer.runtime_configuration_path)
         profile_raw = _safe_source_path(root, runtime_profile).read_bytes()
@@ -376,7 +408,7 @@ def export_runtime(
         if type(profile) is not RasterTextOfflineProfileV19:
             raise ValueError
     except Exception:
-        raise RuntimeExportError("schema11_active_pointer_required") from None
+        raise RuntimeExportError("schema12_active_pointer_required") from None
     _assert_linux_amd64_profile(root, profile)
 
     # The source must first pass the expensive, complete activation boundary.
@@ -400,6 +432,9 @@ def export_runtime(
     model_bundle_root = _safe_relative(profile.mobile_model_bundle_root_relative_path)
     source_relatives.update(_directory_files(root, sidecar_root))
     source_relatives.update(_directory_files(root, model_bundle_root))
+    # Account for SPDX, licenses, and the trust-root deployment manifest.
+    if len(source_relatives) > _MAX_FILE_COUNT - 3:
+        raise RuntimeExportError("runtime_source_tree_limit_exceeded")
 
     stage = destination_parent / f".{destination.name}.staging-{uuid.uuid4().hex}"
     output_root = stage / "document-preview"
@@ -434,7 +469,8 @@ def export_runtime(
         manifest_path = output_root.joinpath(*_MANIFEST_RELATIVE_PATH.parts)
         manifest_path.parent.mkdir(parents=True, exist_ok=True)
         manifest_path.write_bytes(_canonical_json_bytes(manifest))
-        manifest_path.chmod(0o644)
+        manifest_path.chmod(0o444)
+        _make_runtime_tree_nonroot_readable(output_root)
         result = verify_runtime_context(output_root)
         os.replace(stage, destination)
         return result

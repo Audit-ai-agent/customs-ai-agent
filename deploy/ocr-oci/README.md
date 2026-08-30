@@ -9,12 +9,24 @@ Linux 서버에서 동일하게 실행하기 위한 배포 경계다. 최종 결
 
 배포물은 다음 두 개의 OCI 이미지로 나뉜다.
 
-1. runtime context 이미지: Paddle sidecar, 모델, schema-11 pointer, runtime
-   profile, 실제 재시작에 필요한 compact evidence, runtime SPDX SBOM과 license
-   manifest만 보관한다.
+1. runtime context 이미지: Paddle sidecar, 모델, current-native schema-12
+   pointer, sealed V9, runtime profile, 실제 재시작에 필요한 compact evidence,
+   runtime SPDX SBOM과 license manifest만 보관한다.
 2. Agent release 이미지: 고정 Python base와 작은 Agent application layer를
    runtime context 위에 결합한다. 코드만 바뀌면 큰 runtime layer는 registry와
    배포 노드의 cache에서 재사용된다.
+
+Paddle와 OpenCV가 slim Debian에서 실제 import되려면 각각 `libgomp.so.1`,
+`libGL.so.1`, `libgthread-2.0.so.0`이 필요하다. 공통 runtime layer에는 확인된
+Debian Bookworm 패키지 `libgomp1`, `libgl1`, `libglib2.0-0`만 버전 고정하여
+설치하고, 빌드 중 세 shared library를 동적 로딩해 누락을 즉시 차단한다. 별도
+X11 패키지는 직접 추가하지 않는다. 이 OS 패키지는 최종 OCI SBOM/provenance와
+이미지 안의 Debian copyright 자료에 포함된다.
+
+현재 평가·고정된 sidecar가 `opencv-contrib-python`의 non-headless build를 쓰기
+때문에 `libgl1`의 전이 의존성까지 합치면 실제 증가는 43개 패키지, 약 221MB다.
+이를 줄이기 위해 임의로 headless wheel로 바꾸면 검증된 package/model closure가
+달라지므로, 별도 재평가 전에는 이 세 직접 의존성보다 더 줄였다고 주장하지 않는다.
 
 일반 PR에는 모델이나 registry secret이 필요하지 않다. CI는 Dockerfile과
 workflow의 fail-closed 구조를 검사하고 `app-structure` target까지만 확인한다.
@@ -35,14 +47,24 @@ builder에서 수행한다. Windows의 `python.exe` bundle을 Linux 이미지로
 
 입력 profile은 다음을 이미 만족해야 한다.
 
-- `approvals/raster-text-active.json` schema 11, `activated`
+- `approvals/raster-text-active.json` schema 12, `activated`
+- sealed evaluation schema 9 및 `current-runner-native-full-gate-v1`
 - Linux sidecar interpreter 경로 `sidecar/interpreter/bin/python3.11`
 - 전체 activation 검증과 현재 runner hash 일치
 - sidecar/model/package inventory 및 모델 byte 검증
 - 외부 다운로드나 fallback 없이 runtime compact 검증 가능
 
-runtime SBOM은 SPDX JSON(`SPDX-2.x`, `CC0-1.0`)이어야 한다. license manifest는
-다음 형태로 모든 Python package, runtime, model의 출처와 license를 명시한다.
+Linux export는 이 V12/V9 조합만 허용한다. 기존 Windows schema-11 pointer는 로컬
+서비스 호환을 위해 Agent에 남아 있지만 Linux OCI 입력으로는 명시적으로 거부된다.
+
+runtime SBOM 입력은 SPDX JSON(`SPDX-2.x`, `CC0-1.0`)이어야 한다. license manifest는
+다음 형태로 Python package, runtime, model 세 scope를 모두 선언해야 한다. 데이터
+전용 검사는 package inventory의 이름·버전이 license 선언에 포함됐는지 확인한다.
+모델/runtime 선언의 법적 완전성을 자동 판정한다고 주장하지 않으며, 최종 이미지의
+실제 OS·application 구성은 BuildKit의 OCI SBOM/provenance가 별도로 기록한다.
+이 두 metadata 파일은 현재 활성 pointer만으로 완전하게 재생성할 수 없으므로 Linux
+export 이전에 release input으로 준비해야 하는 명시적 선행조건이다. 누락되거나 scope,
+package identity가 불완전하면 exporter가 대신 추정하지 않고 실패한다.
 
 ```json
 {"components":[{"license_id":"Apache-2.0","name":"example","scope":"python-package","source_uri":"https://example.invalid/source","version":"1.0"}],"schema_version":"1.0"}
@@ -51,6 +73,10 @@ runtime SBOM은 SPDX JSON(`SPDX-2.x`, `CC0-1.0`)이어야 한다. license manife
 내보내기는 기존 디렉터리를 덮어쓰지 않는다. 전체 activation을 먼저 검증한
 후 compact runtime이 실제로 읽은 파일과 sidecar/model release root만 staging에
 복사하고, 최종 manifest 검증이 끝났을 때만 새 디렉터리로 원자적으로 바꾼다.
+sealed V9의 7개 직접 evidence(stage-1 판단 receipt 포함)와 calibration의 중첩
+closure를 포함하되, 2,400건 평가 corpus나 개별 결과는 포함하지 않는다. 배포 전용
+공통 검증기가 7개 직접 evidence의 SHA를 확인하고, 권위 있는 Agent verifier가
+선언된 activation-evidence를 전부 실제로 읽었는지 감사한다.
 
 ```bash
 uv run --locked --no-sync python tools/export_raster_text_oci_runtime.py \
@@ -64,20 +90,39 @@ python tools/verify_raster_text_oci_runtime.py \
   /srv/customs/release-output/raster-runtime-context/document-preview
 ```
 
-Exporter와 verifier는 다음을 거부한다.
+데이터 전용 verifier는 파일 운송 경계만 담당하고, 이어지는 Agent verifier는 실제
+V19 profile fingerprint와 V9 receipt 의미를 권위 있는 서비스 코드로 검증한다. 게시
+스크립트와 최종 Docker 빌드는 둘 중 하나라도 실패하면 중단한다. Exporter와 이
+결합 검증은 다음을 거부한다.
 
 - symlink, special file, 누락·추가·변경된 file
 - Windows interpreter 또는 Linux/amd64가 아닌 bundle
-- 원본 PDF/JPG/PNG, raster/Gold corpus, 2,400건 평가 결과 전체
-- cache, secret 디렉터리, group/other writable file
+- 원본 PDF/JPG/PNG, raster/Gold corpus, 2,400건 평가 결과 전체. Python package의
+  CSV/PNG resource는 content-addressed sidecar manifest의 정확한 path·size·SHA에
+  이미 포함된 경우만 허용한다.
+- cache, secret 디렉터리, group/other writable file 또는 directory
 - 128개 또는 64MiB를 넘는 compact activation evidence
+- trust-root deployment manifest까지 합쳐 25,000개를 넘거나 총 2GiB를 넘는 전체
+  runtime closure
 - SBOM/license manifest가 없거나 pointer/profile hash와 맞지 않는 bundle
+
+직접 Paddle Linux bundle은 패키지의 작은 파일이 많아 20,000개에 가까울 수 있다.
+현재 상한 25,000개는 그 실측 예상치에 25%의 제한된 여유만 둔 값이다. Export와
+publish 결과의 `file_count`를 기록해 실제 closure가 확인되면 코드를 검토해 더
+좁힐 수 있지만, 실행 인수로 임의 완화할 수는 없고 2GiB 상한도 유지된다.
 
 ## 2. runtime context를 private GHCR에 게시
 
-먼저 제한된 `packages:write` 권한으로 `docker login ghcr.io`를 수행한다. Token은
-스크립트 인수나 출력으로 전달하지 않는다. 그 다음 exporter 결과를 data-only
-OCI image로 게시한다.
+먼저 제한된 `packages:write` 권한으로 `docker login ghcr.io`를 수행하고, API 조회가
+가능한 token을 `GH_TOKEN` 환경변수로만 제공한다. Token은 스크립트 인수나 출력으로
+전달하지 않는다. 대상 package는 **실제 runtime을 처음 push하기 전에 이미 존재하고
+`private`여야 한다**. 최초 package가 없다면 모델이 없는 빈 placeholder image만 먼저
+게시하고 GitHub package 설정에서 private임을 확인한다. Public이거나 API가 404/권한
+오류를 반환하는 package에는 이 스크립트가 runtime byte를 push하지 않는다.
+CLI에서 만든 package는 저장소에 자동 연결되지 않을 수 있다. GitHub package의
+**Manage Actions access**에서 이 저장소를 추가하고 write 권한을 부여해야 최종
+workflow의 `GITHUB_TOKEN`이 private runtime을 읽고 output package를 갱신할 수 있다.
+이 연결이 없거나 token으로 metadata를 읽지 못하면 workflow는 build 전에 실패한다.
 
 ```bash
 bash deploy/ocr-oci/publish_runtime_context.sh \
@@ -85,8 +130,11 @@ bash deploy/ocr-oci/publish_runtime_context.sh \
   ghcr.io/audit-ai-agent/customs-ai-agent-raster-runtime
 ```
 
-스크립트는 runtime manifest를 다시 검증하고, OCI provenance/SBOM attestation을
-붙여 push한 다음 아래처럼 변경 불가능한 참조만 출력한다.
+스크립트는 runtime manifest를 다시 검증한 뒤 권위 있는 Agent loader로 bundled
+interpreter를 실행해 package/model 검사, `cv2`·Paddle import와 sidecar warm ready를
+확인한다. Push 직전과 직후 GitHub Packages API에서 같은 target package가 계속
+`visibility=private`인지 확인한다. 그 다음 OCI provenance/SBOM attestation을 붙인
+아래의 변경 불가능한 참조만 출력한다.
 
 ```text
 runtime_image=ghcr.io/audit-ai-agent/customs-ai-agent-raster-runtime@sha256:<digest>
@@ -102,11 +150,18 @@ GitHub의 **Raster OCR OCI publish** workflow를 `main`에서 수동 실행하�
 검증된 release에 `ocr-oci-v*` tag를 만든다. Workflow는 다음 순서를 지킨다.
 
 1. runtime 입력이 `ghcr.io/<현재 owner>/...@sha256:<64 hex>`인지 확인한다.
-2. private runtime digest가 실제로 pull 가능한지 확인한다.
+2. GitHub Packages API에서 입력 runtime package와 최종 output package가 모두 이미
+   `visibility=private`인지 확인하고 private runtime digest가 실제로 pull 가능한지
+   확인한다. 최종 output package도 모델 없는 placeholder로 미리 만들고 private으로
+   설정해야 한다. Workflow의 `GITHUB_TOKEN`이 어느 package metadata라도 읽지 못하면
+   추정하지 않고 실제 모델 build/push 전에 실패한다.
 3. `deploy/ocr-oci/Dockerfile`의 `release` target을 `linux/amd64`로 build한다.
-4. runtime manifest의 모든 file hash, pointer, profile, SBOM, license를 재검증한다.
-5. non-root final image를 GHCR에 push하고 OCI provenance/SBOM을 첨부한다.
-6. workflow summary에 최종 `image@sha256:digest`를 남긴다.
+4. 네트워크가 차단된 build stage에서 모든 file hash·SBOM·license 운송 경계와 실제
+   Agent V12/V19/V9 binding, bundled interpreter의 native import/warm ready를 재검증한다.
+5. 최종과 같은 UID 10001로 warm 검증한 non-root final image를 GHCR에 push하고 OCI
+   provenance/SBOM을 첨부한다.
+6. push 뒤 output package가 여전히 private인지 다시 확인한다.
+7. workflow summary에 최종 `image@sha256:digest`를 남긴다.
 
 로컬에서 같은 결합 build를 확인하려면 다음처럼 정확한 runtime digest와 현재
 40자리 Git commit을 전달한다.
@@ -155,7 +210,7 @@ Docker `healthy`는 일반 `/health/ready`가 아니다. 이미지의 healthchec
 
 - schema `1.0`
 - availability `available`
-- 응답의 `raster_text_profile_revision`이 이미지 속 schema-11 pointer와 정확히 일치
+- 응답의 `raster_text_profile_revision`이 이미지 속 schema-12 pointer와 정확히 일치
 
 서비스 시작 때 2,400건 평가를 다시 수행하지 않는다. compact byte 검증 후 OCR
 child를 warm-up하며, 완료 전에는 health가 `starting`/`unhealthy`이고 Raster OCR

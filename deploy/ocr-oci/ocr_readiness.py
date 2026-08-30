@@ -4,6 +4,7 @@ from __future__ import annotations
 
 import json
 import os
+import re
 import sys
 import urllib.error
 import urllib.request
@@ -13,6 +14,12 @@ _DEFAULT_POINTER = Path(
     "/opt/customs/_local/data/document-preview/approvals/raster-text-active.json"
 )
 _MAX_RESPONSE_BYTES = 4096
+_SHA256 = re.compile(r"^[a-f0-9]{64}$")
+_PROFILE_REVISION = re.compile(r"^synthetic-raster-text-v1:[a-f0-9]{24}$")
+_ENGINE_KIND = (
+    "direct_paddle_mobile_det_public_finetuned_rec_harmonic_recall_native960_"
+    "lowbox_strip2_semantic_repair_v2_onednn"
+)
 
 
 class _NoRedirect(urllib.request.HTTPRedirectHandler):
@@ -47,9 +54,29 @@ def main() -> int:
         pointer = json.loads(pointer_raw.decode("utf-8"))
         if (
             not isinstance(pointer, dict)
-            or pointer.get("schema_version") != "11.0"
+            or pointer_raw
+            != (
+                json.dumps(
+                    pointer,
+                    ensure_ascii=True,
+                    allow_nan=False,
+                    separators=(",", ":"),
+                    sort_keys=True,
+                ).encode("utf-8")
+                + b"\n"
+            )
+            or pointer.get("schema_version") != "12.0"
             or pointer.get("status") != "activated"
-            or not isinstance(pointer.get("raster_text_profile_revision"), str)
+            or pointer.get("activation_kind") != "source_attested_synthetic_raster_text"
+            or pointer.get("dataset_id") != "synthetic-raster-text-v1"
+            or pointer.get("engine_kind") != _ENGINE_KIND
+            or pointer.get("quality_gate_revision") != "preview-draft-critical97-cer2-v1"
+            or pointer.get("evidence_generation_revision") != "current-runner-native-full-gate-v1"
+            or pointer.get("runtime_validation_revision") != "activation-full-runtime-compact-v1"
+            or _SHA256.fullmatch(str(pointer.get("current_runner_implementation_sha256", "")))
+            is None
+            or _PROFILE_REVISION.fullmatch(str(pointer.get("raster_text_profile_revision", "")))
+            is None
         ):
             raise ValueError
         expected_revision = pointer["raster_text_profile_revision"]
