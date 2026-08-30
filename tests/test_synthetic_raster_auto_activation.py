@@ -1,5 +1,6 @@
 from __future__ import annotations
 
+from contextlib import nullcontext
 import hashlib
 import json
 import os
@@ -1170,6 +1171,99 @@ def test_only_the_explicit_server_to_local_english_recognition_upgrade_is_allowe
     assert not bootstrap._is_explicit_local_english_recognition_upgrade(
         base_configuration=extra_model_change, desired_configuration=desired
     )
+
+
+def test_fresh_bootstrap_material_and_smoke_bind_the_downloaded_server_recognizer(
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    import customs_ai_agent.evaluation.raster_offline_bundle_bootstrap as bootstrap
+    import customs_ai_agent.service.raster_document_preview_runtime as raster_runtime
+
+    stage = tmp_path / "stage"
+    workspace = tmp_path / "workspace"
+    workspace.mkdir()
+    text_rec = stage / "models" / "text-rec"
+    text_rec.mkdir(parents=True)
+    (text_rec / "inference.yml").write_bytes(b"server-recognizer")
+    monkeypatch.setattr(bootstrap, "_required_parent_inventory", lambda: {"packages": []})
+
+    bootstrap._write_bootstrap_material(
+        stage=stage,
+        model_receipts=[
+            {
+                "model_name": "PP-OCRv5_server_rec",
+                "target_directory": "text-rec",
+            }
+        ],
+        package_inventory={"packages": []},
+    )
+    configuration_path = stage / "sidecar" / "configuration-template.json"
+    configuration = json.loads(configuration_path.read_text(encoding="utf-8"))
+    downloaded_recognizer = next(
+        item.model_name for item in bootstrap._MODEL_SPECS if item.target_directory == "text-rec"
+    )
+
+    assert downloaded_recognizer == "PP-OCRv5_server_rec"
+    assert configuration["text_recognition_model_name"] == downloaded_recognizer
+    assert bootstrap._configuration_template()["text_recognition_model_name"] == (
+        "en_PP-OCRv5_mobile_rec"
+    )
+
+    interpreter = stage / "sidecar" / "interpreter" / "python.exe"
+    interpreter.parent.mkdir(parents=True)
+    interpreter.write_bytes(b"interpreter")
+    module_root = stage / "sidecar" / "module-root"
+    sidecar_path = module_root / "customs_ai_agent" / "service" / "ppstructurev3_sidecar.py"
+    sidecar_path.parent.mkdir(parents=True)
+    sidecar_path.write_bytes(b"sidecar")
+    captured_configuration: dict[str, object] = {}
+
+    monkeypatch.setattr(
+        raster_runtime,
+        "_isolated_v2_sidecar_home",
+        lambda: nullcontext(tmp_path / "sidecar-home"),
+    )
+
+    def capture_environment(**kwargs: object) -> dict[str, str]:
+        smoke_configuration_path = kwargs["configuration_path"]
+        assert isinstance(smoke_configuration_path, Path)
+        captured_configuration.update(
+            json.loads(smoke_configuration_path.read_text(encoding="utf-8"))
+        )
+        return {}
+
+    monkeypatch.setattr(
+        raster_runtime, "_isolated_v2_sidecar_environment", capture_environment
+    )
+
+    def successful_smoke(*_args: object, **kwargs: object) -> SimpleNamespace:
+        payload = kwargs["input"]
+        assert isinstance(payload, bytes)
+        header = json.loads(payload.split(b"\n", maxsplit=1)[0])
+        return SimpleNamespace(
+            returncode=0,
+            stdout=_canonical(
+                {
+                    "source_sha256": header["source_sha256"],
+                    "raster_profile_revision": "synthetic-raster-v1",
+                }
+            ),
+        )
+
+    monkeypatch.setattr(bootstrap.subprocess, "run", successful_smoke)
+
+    bootstrap._sidecar_smoke(
+        stage=stage,
+        workspace=workspace,
+        interpreter=interpreter,
+        module_root=module_root,
+        sidecar_path=sidecar_path,
+        package_inventory_path=stage / "inventories" / "sidecar-packages.json",
+        model_inventory_path=stage / "inventories" / "models.json",
+        models_root=stage / "models",
+    )
+
+    assert captured_configuration["text_recognition_model_name"] == downloaded_recognizer
 
 
 def test_release_stage_copies_only_the_attested_local_english_recognition_snapshot(

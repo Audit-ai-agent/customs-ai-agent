@@ -1103,7 +1103,7 @@ def _verify_raster_text_direct_model_material_matches_source(
         raise RasterOfflineBundleBootstrapError("raster_bundle_raster_text_model_material_invalid")
 
 
-def _configuration_template() -> dict[str, object]:
+def _configuration_template_for_recognizer(*, model_name: str) -> dict[str, object]:
     return {
         "schema_version": "1.0",
         "runtime_api": "paddleocr3-ppstructurev3",
@@ -1113,10 +1113,7 @@ def _configuration_template() -> dict[str, object]:
         "layout_detection_model_directory": "layout",
         "text_detection_model_name": "PP-OCRv5_server_det",
         "text_detection_model_directory": "text-det",
-        # The release builder admits this model only by copying the fixed
-        # local English snapshot into the release itself.  The runtime never
-        # points at the separate PaddleOCR 3 baseline directory.
-        "text_recognition_model_name": _LOCAL_ENGLISH_RECOGNITION_MODEL_NAME,
+        "text_recognition_model_name": model_name,
         "text_recognition_model_directory": "text-rec",
         "table_classification_model_name": "PP-LCNet_x1_0_table_cls",
         "table_classification_model_directory": "table-classifier",
@@ -1176,6 +1173,23 @@ def _configuration_template() -> dict[str, object]:
     }
 
 
+def _bootstrap_configuration_template() -> dict[str, object]:
+    """Bind a fresh base bundle to the server recognizer it downloads."""
+
+    return _configuration_template_for_recognizer(model_name=_SERVER_RECOGNITION_MODEL_NAME)
+
+
+def _configuration_template() -> dict[str, object]:
+    """Bind a derived release to its copied, fixed English recognizer."""
+
+    # The release builder admits this model only by copying the fixed local
+    # English snapshot into the release itself. The runtime never points at
+    # the separate PaddleOCR 3 baseline directory.
+    return _configuration_template_for_recognizer(
+        model_name=_LOCAL_ENGLISH_RECOGNITION_MODEL_NAME
+    )
+
+
 def _write_canonical(path: Path, value: object) -> bytes:
     payload = _canonical_json(value)
     try:
@@ -1216,8 +1230,15 @@ def _sidecar_smoke(
         RasterRuntimeError,
     )
 
+    # Smoke exactly the configuration that will be published with this
+    # stage. A fresh base contains the downloaded server recognizer, while a
+    # derived release contains the separately copied English recognizer.
+    staged_configuration_path = stage / "sidecar" / "configuration-template.json"
+    staged_configuration = _read_canonical_object(
+        staged_configuration_path, code="raster_bundle_sidecar_smoke_failed"
+    )
     configuration_path = workspace / "sidecar-smoke.json"
-    _write_canonical(configuration_path, _configuration_template())
+    _write_canonical(configuration_path, staged_configuration)
     pixels = b"\xff" * (256 * 256 * 3)
     source_sha256 = hashlib.sha256(pixels).hexdigest()
     header = {
@@ -1377,7 +1398,10 @@ def _write_bootstrap_material(
     _write_canonical(stage / "inventories" / "parent-renderer.json", _required_parent_inventory())
     _write_canonical(stage / "inventories" / "sidecar-packages.json", package_inventory)
     _write_canonical(stage / "inventories" / "models.json", _model_inventory(stage / "models"))
-    _write_canonical(stage / "sidecar" / "configuration-template.json", _configuration_template())
+    _write_canonical(
+        stage / "sidecar" / "configuration-template.json",
+        _bootstrap_configuration_template(),
+    )
     _write_canonical(
         stage / "provenance" / "bootstrap-receipt.json",
         {

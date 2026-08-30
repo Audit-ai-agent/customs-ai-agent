@@ -34,6 +34,25 @@ def test_linux_amd64_cp311_selects_a_distinct_lock_and_interpreter() -> None:
     assert selected.interpreter_relative_path == "sidecar/interpreter/bin/python3.11"
 
 
+def test_windows_amd64_cp311_keeps_its_existing_lock_and_interpreter() -> None:
+    selected = bootstrap._select_runtime_platform(  # noqa: SLF001
+        os_name="nt",
+        sys_platform="win32",
+        machine="AMD64",
+        implementation="cpython",
+        python_version=(3, 11),
+        pointer_bits=64,
+    )
+
+    assert selected.operating_system == "windows"
+    assert selected.architecture == "amd64"
+    assert selected.python_abi == "cp311"
+    assert selected.requirements_relative_path == (
+        "requirements/raster-sidecar-win-amd64-cp311.lock"
+    )
+    assert selected.interpreter_relative_path == "sidecar/interpreter/python.exe"
+
+
 @pytest.mark.parametrize(
     ("machine", "implementation", "version", "pointer_bits"),
     (
