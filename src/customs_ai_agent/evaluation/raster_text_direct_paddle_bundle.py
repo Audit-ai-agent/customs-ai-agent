@@ -130,12 +130,40 @@ _DIRECT_DISTRIBUTIONS: tuple[tuple[str, str, str], ...] = (
     ("tqdm", "4.70.0", "tqdm-4.70.0.dist-info"),
     ("typing_extensions", "4.16.0", "typing_extensions-4.16.0.dist-info"),
 )
+# The Linux lock resolves Click one patch newer and correctly omits Colorama,
+# whose wheel is selected only by Click's Windows environment marker.  Keep
+# both closures explicit: deriving a microbundle from whatever happens to be
+# installed would silently approve dependency upgrades.  Every selected file
+# is still bound to the signed source manifest and rehashed during staging.
+_DIRECT_LINUX_MODULE_DIRECTORIES = (
+    *(name for name in _DIRECT_MODULE_DIRECTORIES if name != "colorama"),
+    # Linux native wheels keep their vendored shared objects beside the
+    # import package.  Omitting either directory creates an incomplete wheel
+    # closure even though the corresponding Python package is present.
+    "opencv_contrib_python.libs",
+    "pillow.libs",
+)
+_DIRECT_LINUX_DISTRIBUTIONS: tuple[tuple[str, str, str], ...] = tuple(
+    ("click", "8.5.0", "click-8.5.0.dist-info") if package == "click" else item
+    for item in _DIRECT_DISTRIBUTIONS
+    if (package := item[0]) != "colorama"
+)
 _DIRECT_REQUIRED_PACKAGES = (
     "numpy",
     "opencv-contrib-python",
     "paddlepaddle",
     "pyclipper",
 )
+
+
+def _direct_runtime_closure(
+    operating_system: str,
+) -> tuple[tuple[str, ...], tuple[tuple[str, str, str], ...]]:
+    if operating_system == "windows":
+        return _DIRECT_MODULE_DIRECTORIES, _DIRECT_DISTRIBUTIONS
+    if operating_system == "linux":
+        return _DIRECT_LINUX_MODULE_DIRECTORIES, _DIRECT_LINUX_DISTRIBUTIONS
+    raise RasterTextDirectPaddleBundleError("direct_paddle_bundle_platform_mismatch")
 _DIRECT_MODEL_PATHS = (
     "text-det/inference.json",
     "text-det/inference.pdiparams",
@@ -971,10 +999,13 @@ def _selected_source_records(
         raise RasterTextDirectPaddleBundleError("direct_paddle_bundle_source_interpreter_invalid")
     selected: list[DirectPaddleBundleFileV1] = []
     module_root = _safe_path(source.source_bundle_root, _SOURCE_MODULE_ROOT, directory=True)
+    module_directories, distributions = _direct_runtime_closure(
+        source.runtime_operating_system
+    )
     roots: list[tuple[str, bool]] = [
-        *((name, True) for name in _DIRECT_MODULE_DIRECTORIES),
+        *((name, True) for name in module_directories),
         *((name, False) for name in _DIRECT_MODULE_FILES),
-        *((name, True) for _package, _version, name in _DIRECT_DISTRIBUTIONS),
+        *((name, True) for _package, _version, name in distributions),
     ]
     seen: set[str] = set()
     for name, directory in roots:
@@ -1012,10 +1043,11 @@ def _selected_source_records(
     return interpreter, sorted(selected, key=lambda item: item.path)
 
 
-def _verify_distribution_metadata(module_root: Path) -> None:
+def _verify_distribution_metadata(module_root: Path, *, operating_system: str) -> None:
     """Ensure every copied ``*.dist-info`` names the fixed allowed version."""
 
-    for package, version, directory in _DIRECT_DISTRIBUTIONS:
+    _module_directories, distributions = _direct_runtime_closure(operating_system)
+    for package, version, directory in distributions:
         metadata = _safe_path(module_root, f"{directory}/METADATA")
         try:
             raw = metadata.read_text(encoding="utf-8")
@@ -1137,13 +1169,14 @@ def _write_create_only(path: Path, value: object, *, code: str) -> bytes:
     return payload
 
 
-def _direct_package_inventory() -> dict[str, object]:
+def _direct_package_inventory(*, operating_system: str) -> dict[str, object]:
+    _module_directories, distributions = _direct_runtime_closure(operating_system)
     return {
         "inventory_kind": "raster_text_direct_paddle_packages",
         "schema_version": "1.0",
         "packages": [
             {"name": package, "version": version}
-            for package, version, _directory in _DIRECT_DISTRIBUTIONS
+            for package, version, _directory in distributions
         ],
     }
 
@@ -1221,11 +1254,15 @@ def _tree_digest_from_manifest(manifest: DirectPaddleBundleManifestV1, *, direct
     return _tree_manifest_sha256(files)
 
 
-def _verify_direct_package_inventory(path: Path, *, expected_sha256: str) -> None:
+def _verify_direct_package_inventory(
+    path: Path, *, expected_sha256: str, operating_system: str
+) -> None:
     value, raw = _read_canonical_object(
         path, limit=_MAX_JSON_BYTES, code="direct_paddle_bundle_manifest_invalid"
     )
-    if _sha256_bytes(raw) != expected_sha256 or value != _direct_package_inventory():
+    if _sha256_bytes(raw) != expected_sha256 or value != _direct_package_inventory(
+        operating_system=operating_system
+    ):
         raise RasterTextDirectPaddleBundleError("direct_paddle_bundle_manifest_invalid")
 
 
@@ -1420,6 +1457,7 @@ def _load_verified_bundle_from_root(
     _verify_direct_package_inventory(
         _safe_path(operational_root, manifest.sidecar_package_inventory_relative_path),
         expected_sha256=declared[manifest.sidecar_package_inventory_relative_path].sha256,
+        operating_system=manifest.runtime_operating_system or "windows",
     )
     _verify_direct_model_inventory(
         bundle_root=operational_root,
@@ -1829,10 +1867,12 @@ def _build_stage(
             code="direct_paddle_bundle_stage_copy_failed",
         )
     module_root = stage / "sidecar" / "module-root"
-    _verify_distribution_metadata(module_root)
+    _verify_distribution_metadata(
+        module_root, operating_system=source.runtime_operating_system
+    )
     _write_create_only(
         stage / "inventories" / "direct-paddle-packages.json",
-        _direct_package_inventory(),
+        _direct_package_inventory(operating_system=source.runtime_operating_system),
         code="direct_paddle_bundle_stage_write_failed",
     )
     _write_create_only(

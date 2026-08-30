@@ -109,15 +109,19 @@ def _make_e3_source(
         if operating_system == "windows"
         else "sidecar/interpreter/bin/python3.11"
     )
+    closure_operating_system = operating_system if platform_v2 else "windows"
+    module_directories, distributions = direct_bundle._direct_runtime_closure(  # noqa: SLF001
+        closure_operating_system
+    )
     _write(
         work / (source_interpreter if platform_v2 else direct_bundle._SOURCE_INTERPRETER),
         b"fake-python",
     )
-    for name in direct_bundle._DIRECT_MODULE_DIRECTORIES:
+    for name in module_directories:
         _write(module_root / name / "__init__.py", f"# {name}\n".encode("ascii"))
     for name in direct_bundle._DIRECT_MODULE_FILES:
         _write(module_root / name, f"# {name}\n".encode("ascii"))
-    for package, version, directory in direct_bundle._DIRECT_DISTRIBUTIONS:
+    for package, version, directory in distributions:
         _write(
             module_root / directory / "METADATA",
             f"Metadata-Version: 2.1\nName: {package}\nVersion: {version}\n".encode("utf-8"),
@@ -156,6 +160,27 @@ def _make_e3_source(
     if not platform_v2:
         monkeypatch.setattr(direct_bundle, "_E3_DIRECT_BASE_MANIFEST_SHA256", source_sha)
     return root
+
+
+def test_direct_package_closure_is_exact_for_each_supported_platform() -> None:
+    windows_modules, windows_distributions = direct_bundle._direct_runtime_closure(  # noqa: SLF001
+        "windows"
+    )
+    linux_modules, linux_distributions = direct_bundle._direct_runtime_closure(  # noqa: SLF001
+        "linux"
+    )
+
+    assert "colorama" in windows_modules
+    assert "colorama" not in linux_modules
+    assert "opencv_contrib_python.libs" not in windows_modules
+    assert "opencv_contrib_python.libs" in linux_modules
+    assert "pillow.libs" in linux_modules
+    assert ("click", "8.4.2", "click-8.4.2.dist-info") in windows_distributions
+    assert ("click", "8.5.0", "click-8.5.0.dist-info") in linux_distributions
+    assert all(package != "colorama" for package, _version, _path in linux_distributions)
+    assert {package for package, _version, _path in windows_distributions} - {"colorama"} == {
+        package for package, _version, _path in linux_distributions
+    }
 
 
 def _without_real_smoke(monkeypatch: pytest.MonkeyPatch) -> list[str]:
