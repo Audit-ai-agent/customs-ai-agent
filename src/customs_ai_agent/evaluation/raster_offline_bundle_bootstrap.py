@@ -1185,9 +1185,7 @@ def _configuration_template() -> dict[str, object]:
     # The release builder admits this model only by copying the fixed local
     # English snapshot into the release itself. The runtime never points at
     # the separate PaddleOCR 3 baseline directory.
-    return _configuration_template_for_recognizer(
-        model_name=_LOCAL_ENGLISH_RECOGNITION_MODEL_NAME
-    )
+    return _configuration_template_for_recognizer(model_name=_LOCAL_ENGLISH_RECOGNITION_MODEL_NAME)
 
 
 def _write_canonical(path: Path, value: object) -> bytes:

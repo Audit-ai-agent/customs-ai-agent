@@ -1001,9 +1001,7 @@ def _selected_source_records(
         raise RasterTextDirectPaddleBundleError("direct_paddle_bundle_source_interpreter_invalid")
     selected: list[DirectPaddleBundleFileV1] = []
     module_root = _safe_path(source.source_bundle_root, _SOURCE_MODULE_ROOT, directory=True)
-    module_directories, distributions = _direct_runtime_closure(
-        source.runtime_operating_system
-    )
+    module_directories, distributions = _direct_runtime_closure(source.runtime_operating_system)
     roots: list[tuple[str, bool]] = [
         *((name, True) for name in module_directories),
         *((name, False) for name in _DIRECT_MODULE_FILES),
@@ -1177,8 +1175,7 @@ def _direct_package_inventory(*, operating_system: str) -> dict[str, object]:
         "inventory_kind": "raster_text_direct_paddle_packages",
         "schema_version": "1.0",
         "packages": [
-            {"name": package, "version": version}
-            for package, version, _directory in distributions
+            {"name": package, "version": version} for package, version, _directory in distributions
         ],
     }
 
@@ -1869,9 +1866,7 @@ def _build_stage(
             code="direct_paddle_bundle_stage_copy_failed",
         )
     module_root = stage / "sidecar" / "module-root"
-    _verify_distribution_metadata(
-        module_root, operating_system=source.runtime_operating_system
-    )
+    _verify_distribution_metadata(module_root, operating_system=source.runtime_operating_system)
     _write_create_only(
         stage / "inventories" / "direct-paddle-packages.json",
         _direct_package_inventory(operating_system=source.runtime_operating_system),

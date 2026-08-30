@@ -143,6 +143,7 @@ def test_linux_activation_uses_fixed_materials_and_current_v12_transaction(
         "current_raster_runtime_platform_binding",
         lambda: ("linux", "amd64", "cp311"),
     )
+
     def ensure_release(*, document_preview_root: Path) -> SimpleNamespace:
         assert document_preview_root == root
         observed["ensure_release"] = int(observed["ensure_release"]) + 1

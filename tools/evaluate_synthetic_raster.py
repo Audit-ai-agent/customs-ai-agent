@@ -84,7 +84,13 @@ def _preview_root(path: Path) -> Path:
 
 def _relative_path(root: Path, value: str) -> Path:
     relative = PurePosixPath(value)
-    if not value or relative.is_absolute() or ".." in relative.parts or ":" in value or "\\" in value:
+    if (
+        not value
+        or relative.is_absolute()
+        or ".." in relative.parts
+        or ":" in value
+        or "\\" in value
+    ):
         raise ValueError("local artifact path is invalid")
     destination = root
     for part in relative.parts:
@@ -117,7 +123,9 @@ def _canonical_json(value: object) -> bytes:
     ).encode("utf-8")
 
 
-def _load_synthetic_receipt(root: Path, *, relative_path: str) -> tuple[SyntheticRasterReceiptV1, str]:
+def _load_synthetic_receipt(
+    root: Path, *, relative_path: str
+) -> tuple[SyntheticRasterReceiptV1, str]:
     raw = _read_raw(_relative_path(root, relative_path), limit=32 * 1024 * 1024)
     try:
         receipt = SyntheticRasterReceiptV1.model_validate_json(raw)
@@ -130,9 +138,11 @@ def _load_synthetic_receipt(root: Path, *, relative_path: str) -> tuple[Syntheti
         split: {asset.family_id for asset in receipt.assets if asset.split == split}
         for split in expected_families
     }
-    if len(receipt.assets) != 24_000 or {
-        split: len(families_by_split[split]) for split in expected_families
-    } != expected_families:
+    if (
+        len(receipt.assets) != 24_000
+        or {split: len(families_by_split[split]) for split in expected_families}
+        != expected_families
+    ):
         raise ValueError("synthetic raster receipt is incomplete")
     # A legacy receipt can be parsed for historical inspection, but cannot
     # become a new calibration/sealed evidence source because it lacks the
@@ -226,15 +236,23 @@ def _verify_cases_against_receipt(
             or case.document_type != asset.document_type
         ):
             raise ValueError("raster evaluation case does not bind the receipt asset")
-        _verify_raster_asset_against_receipt(root=root, asset=asset, pdfium_version=receipt.pdfium_version)
+        _verify_raster_asset_against_receipt(
+            root=root, asset=asset, pdfium_version=receipt.pdfium_version
+        )
         gold = _gold_for_asset(root=root, asset=asset)
         if (
-            _canonical_json([item.model_dump(mode="json", warnings=False) for item in case.gold_spans])
-            != _canonical_json([item.model_dump(mode="json", warnings=False) for item in gold.spans])
+            _canonical_json(
+                [item.model_dump(mode="json", warnings=False) for item in case.gold_spans]
+            )
+            != _canonical_json(
+                [item.model_dump(mode="json", warnings=False) for item in gold.spans]
+            )
             or _canonical_json(
                 [item.model_dump(mode="json", warnings=False) for item in case.gold_fields]
             )
-            != _canonical_json([item.model_dump(mode="json", warnings=False) for item in gold.fields])
+            != _canonical_json(
+                [item.model_dump(mode="json", warnings=False) for item in gold.fields]
+            )
             or _canonical_json(
                 [item.model_dump(mode="json", warnings=False) for item in case.gold_table_cells]
             )
@@ -273,7 +291,9 @@ def _rebuild_cases(
     observations = {(item.asset_id, item.profile_id): item for item in bundle.candidates}
     cases: list[RasterEvaluationCaseV1] = []
     for key, asset in sorted(expected_assets.items()):
-        _verify_raster_asset_against_receipt(root=root, asset=asset, pdfium_version=receipt.pdfium_version)
+        _verify_raster_asset_against_receipt(
+            root=root, asset=asset, pdfium_version=receipt.pdfium_version
+        )
         gold = _gold_for_asset(root=root, asset=asset)
         observation = observations[key]
         cases.append(
@@ -337,12 +357,17 @@ def _runtime_resolution(
         or resolution.runtime_configuration_sha256 is None
     ):
         raise ValueError("raster evaluation runtime profile is unavailable")
-    if re.fullmatch(_SYNTHETIC_RASTER_PROFILE_REVISION, resolution.profile.raster_profile_revision) is None:
+    if (
+        re.fullmatch(_SYNTHETIC_RASTER_PROFILE_REVISION, resolution.profile.raster_profile_revision)
+        is None
+    ):
         raise ValueError("raster evaluation runtime profile is invalid")
     return resolution
 
 
-def _runtime_artifact_schema_version(runtime: RasterCandidateEngineResolutionV1) -> Literal["1.0", "2.0"]:
+def _runtime_artifact_schema_version(
+    runtime: RasterCandidateEngineResolutionV1,
+) -> Literal["1.0", "2.0"]:
     """Select the receipt shape from the verified runtime profile, never CLI input."""
 
     if runtime.profile is None:
@@ -435,7 +460,9 @@ def _candidate_provenance(
     }
 
 
-def _calibration_artifact(arguments: argparse.Namespace, *, root: Path) -> tuple[dict[str, object], str]:
+def _calibration_artifact(
+    arguments: argparse.Namespace, *, root: Path
+) -> tuple[dict[str, object], str]:
     runtime = _runtime_resolution(
         root=root, runtime_configuration_relative_path=arguments.runtime_configuration_relative_path
     )

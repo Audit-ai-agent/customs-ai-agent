@@ -191,9 +191,7 @@ def _read_regular(path: Path, *, limit: int, code: str) -> bytes:
     return raw
 
 
-def _load_receipt(
-    *, root: Path, relative_path: str
-) -> tuple[SyntheticRasterReceiptV1, str]:
+def _load_receipt(*, root: Path, relative_path: str) -> tuple[SyntheticRasterReceiptV1, str]:
     raw = _read_regular(
         _relative_path(root, relative_path), limit=_MAX_RECEIPT_BYTES, code="raster_receipt_invalid"
     )
@@ -208,9 +206,11 @@ def _load_receipt(
         split: {asset.family_id for asset in receipt.assets if asset.split == split}
         for split in expected_families
     }
-    if len(receipt.assets) != 24_000 or {
-        split: len(families_by_split[split]) for split in expected_families
-    } != expected_families:
+    if (
+        len(receipt.assets) != 24_000
+        or {split: len(families_by_split[split]) for split in expected_families}
+        != expected_families
+    ):
         raise SyntheticRasterCandidateRunnerError("raster_receipt_incomplete")
     if (
         receipt.source_receipt_relative_path is None
@@ -221,9 +221,7 @@ def _load_receipt(
     return receipt, hashlib.sha256(raw).hexdigest()
 
 
-def _verified_asset_bytes(
-    *, root: Path, asset: RasterAssetReceiptV1, pdfium_version: str
-) -> bytes:
+def _verified_asset_bytes(*, root: Path, asset: RasterAssetReceiptV1, pdfium_version: str) -> bytes:
     raw = _read_regular(
         _relative_path(root, asset.asset_relative_path),
         limit=_MAX_ASSET_BYTES,
@@ -401,7 +399,9 @@ def _evaluate_assets(
             )
             try:
                 structure = inspect_raster_document_structure(
-                    raw, asset.media_type, limits  # type: ignore[arg-type]
+                    raw,
+                    asset.media_type,
+                    limits,  # type: ignore[arg-type]
                 )
                 candidate = extract_raster_document_preview(
                     evaluation_context.engine,
@@ -437,15 +437,17 @@ def _evaluate_assets(
                 if len(raw) > limits.max_document_bytes:
                     raise ValueError("evaluation asset exceeds service byte limit")
                 structure = inspect_raster_document_structure(
-                    raw, asset.media_type, limits  # type: ignore[arg-type]
+                    raw,
+                    asset.media_type,
+                    limits,  # type: ignore[arg-type]
                 )
                 # The synthetic corpus is created without an EXIF rotation. A
                 # rotated JPEG cannot enter a geometry batch, just as the
                 # service routes it to review.
-                if (
-                    asset.media_type == "image/jpeg"
-                    and structure.jpeg_exif_orientation not in {None, 1}
-                ):
+                if asset.media_type == "image/jpeg" and structure.jpeg_exif_orientation not in {
+                    None,
+                    1,
+                }:
                     raise ValueError("evaluation jpeg orientation is unsupported")
                 raster_input = _raster_preview_input(
                     asset=asset,
@@ -465,9 +467,7 @@ def _evaluate_assets(
                 )
                 for asset, raster_input, pages in prepared
             )
-            ledgers = evaluation_context.session.extract_layout_batch(
-                batch_items, profile=profile
-            )
+            ledgers = evaluation_context.session.extract_layout_batch(batch_items, profile=profile)
             if len(ledgers) != len(prepared):
                 raise ValueError("evaluation batch result count is invalid")
             for (asset, raster_input, pages), ledger in zip(prepared, ledgers, strict=True):
@@ -489,9 +489,7 @@ def _evaluate_assets(
             # A valid deterministic raster should be admitted just like the
             # service route. Do not convert a batch defect into cosmetic
             # all-zero candidate evidence.
-            raise SyntheticRasterCandidateRunnerError(
-                "raster_candidate_execution_failed"
-            ) from None
+            raise SyntheticRasterCandidateRunnerError("raster_candidate_execution_failed") from None
     return observations
 
 
@@ -557,12 +555,7 @@ def run_ppstructurev3_synthetic_raster_candidates(
     if not isinstance(resolution.profile, PpStructureV3OfflineProfileV2):
         raise SyntheticRasterCandidateRunnerError("raster_candidate_runtime_unavailable")
     profile = resolution.profile
-    if (
-        re.fullmatch(
-            _SYNTHETIC_RASTER_PROFILE_REVISION, profile.raster_profile_revision
-        )
-        is None
-    ):
+    if re.fullmatch(_SYNTHETIC_RASTER_PROFILE_REVISION, profile.raster_profile_revision) is None:
         raise SyntheticRasterCandidateRunnerError("raster_candidate_profile_revision_invalid")
     receipt, receipt_sha256 = _load_receipt(
         root=root, relative_path=synthetic_raster_receipt_relative_path
@@ -596,9 +589,7 @@ def run_ppstructurev3_synthetic_raster_candidates(
             shard_plan_relative_path,
             shard_plan_sha256,
             _shard_plan_byte_size,
-        ) = write_canonical_raster_candidate_shard_plan(
-            document_preview_root=root, plan=shard_plan
-        )
+        ) = write_canonical_raster_candidate_shard_plan(document_preview_root=root, plan=shard_plan)
         if shard_plan_sha256 != candidate_shard_plan_sha256(shard_plan):
             raise SyntheticRasterCandidateError("raster_candidate_shard_plan_invalid")
     except SyntheticRasterCandidateError:

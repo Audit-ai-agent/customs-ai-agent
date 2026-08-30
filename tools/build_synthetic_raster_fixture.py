@@ -90,7 +90,9 @@ def build_fixture(
     extension = {"image/png": "png", "image/jpeg": "jpg", "application/pdf": "pdf"}[
         RASTER_PROFILES[profile_id].media_type
     ]
-    output_path = root / "synthetic-raster-v1" / "assets" / f"{source.asset_id}-{profile_id}.{extension}"
+    output_path = (
+        root / "synthetic-raster-v1" / "assets" / f"{source.asset_id}-{profile_id}.{extension}"
+    )
     output = write_immutable_rendered_raster_output(
         rendered,
         output_path=output_path,
@@ -134,7 +136,12 @@ def main(argv: Sequence[str] | None = None) -> int:
             build_inputs_relative_path=arguments.build_inputs_relative_path,
         )
     except (OSError, ValueError, SyntheticRasterCompilerUnavailable):
-        print(json.dumps({"status": "failed", "code": "synthetic_raster_fixture_failed"}, separators=(",", ":")))
+        print(
+            json.dumps(
+                {"status": "failed", "code": "synthetic_raster_fixture_failed"},
+                separators=(",", ":"),
+            )
+        )
         return 2
     print(json.dumps(result, ensure_ascii=False, separators=(",", ":"), sort_keys=True))
     return 0

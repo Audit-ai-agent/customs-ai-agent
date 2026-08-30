@@ -18,16 +18,12 @@ from customs_ai_agent.evaluation.source_attested_public_raster_text_recognizer_v
 def _parser() -> argparse.ArgumentParser:
     parser = argparse.ArgumentParser(description=__doc__)
     parser.add_argument("--document-preview-root", type=Path, required=True)
-    parser.add_argument(
-        "--stage", choices=("voyage-replay-v3",), default="voyage-replay-v3"
-    )
+    parser.add_argument("--stage", choices=("voyage-replay-v3",), default="voyage-replay-v3")
     return parser
 
 
 def _run(document_preview_root: Path) -> dict[str, object]:
-    result = ensure_source_attested_public_recognizer_voyage_replay_v1(
-        document_preview_root
-    )
+    result = ensure_source_attested_public_recognizer_voyage_replay_v1(document_preview_root)
     root = document_preview_root.resolve(strict=True)
     return {
         "release_relative_path": (

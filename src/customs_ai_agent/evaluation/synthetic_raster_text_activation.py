@@ -9997,9 +9997,7 @@ def auto_activate_synthetic_raster_text_linux_preview97_v1(
             # direct detector/recognizer inventory.  Both steps remain under
             # network denial and fully smoke their private stage before the
             # direct OCR microbundle is allowed to consume it.
-            ensure_raster_offline_bundle_release_v1(
-                document_preview_root=root
-            )
+            ensure_raster_offline_bundle_release_v1(document_preview_root=root)
             offline_bundle = materialize_verified_unselected_raster_text_release_v1(
                 document_preview_root=root
             )

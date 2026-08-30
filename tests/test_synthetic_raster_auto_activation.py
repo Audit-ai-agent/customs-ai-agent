@@ -1232,9 +1232,7 @@ def test_fresh_bootstrap_material_and_smoke_bind_the_downloaded_server_recognize
         )
         return {}
 
-    monkeypatch.setattr(
-        raster_runtime, "_isolated_v2_sidecar_environment", capture_environment
-    )
+    monkeypatch.setattr(raster_runtime, "_isolated_v2_sidecar_environment", capture_environment)
 
     def successful_smoke(*_args: object, **kwargs: object) -> SimpleNamespace:
         payload = kwargs["input"]
