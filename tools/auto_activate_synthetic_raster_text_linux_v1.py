@@ -21,6 +21,13 @@ from customs_ai_agent.evaluation.synthetic_raster_text_activation import (
 
 
 _DOCUMENT_PREVIEW_ROOT_SUFFIX = ("_local", "data", "document-preview")
+_CANDIDATE_CHECKPOINT_DIRECTORY = (
+    "synthetic-raster-text-v1",
+    "candidate-checkpoints",
+)
+_MAX_ACTIVATION_ATTEMPTS = 3
+_RETRYABLE_ACTIVATION_CODES = frozenset({"raster_text_candidate_execution_failed"})
+_MAX_CHECKPOINT_PATHS = 20_000
 
 
 def _parser() -> argparse.ArgumentParser:
@@ -51,10 +58,60 @@ def _run(document_preview_root: Path) -> SyntheticRasterTextAutoActivationResult
     )
 
 
+def _candidate_checkpoint_snapshot(document_preview_root: Path) -> tuple[str, ...]:
+    """Return content-free progress state for bounded infrastructure retries."""
+
+    directory = document_preview_root.joinpath(*_CANDIDATE_CHECKPOINT_DIRECTORY)
+    try:
+        if not directory.exists():
+            return ()
+        if directory.is_symlink() or not directory.is_dir():
+            raise OSError
+        paths: list[str] = []
+        for path in directory.rglob("*.json"):
+            if path.is_symlink() or not path.is_file():
+                raise OSError
+            paths.append(path.relative_to(directory).as_posix())
+            if len(paths) > _MAX_CHECKPOINT_PATHS:
+                raise OSError
+        return tuple(sorted(paths))
+    except (OSError, ValueError):
+        raise SyntheticRasterTextActivationError(
+            "raster_text_activation_checkpoint_state_invalid"
+        ) from None
+
+
+def _run_with_bounded_retries(
+    document_preview_root: Path,
+) -> SyntheticRasterTextAutoActivationResultV1:
+    """Resume only content-free candidate infrastructure failures.
+
+    The activation implementation revalidates every existing checkpoint and
+    all immutable material on every call.  This supervisor never changes an
+    OCR result, threshold, score or Gate.  It retries the same invocation at
+    most three times, and stops early when two consecutive failures leave the
+    exact same checkpoint path set.
+    """
+
+    previous_failure_snapshot: tuple[str, ...] | None = None
+    for attempt in range(_MAX_ACTIVATION_ATTEMPTS):
+        try:
+            return _run(document_preview_root)
+        except SyntheticRasterTextActivationError as error:
+            if error.code not in _RETRYABLE_ACTIVATION_CODES:
+                raise
+            snapshot = _candidate_checkpoint_snapshot(document_preview_root)
+            no_progress_since_failure = snapshot == previous_failure_snapshot
+            if attempt + 1 >= _MAX_ACTIVATION_ATTEMPTS or no_progress_since_failure:
+                raise
+            previous_failure_snapshot = snapshot
+    raise AssertionError("bounded activation retry loop did not terminate")
+
+
 def main(argv: Sequence[str] | None = None) -> int:
     arguments = _parser().parse_args(argv)
     try:
-        result = _run(arguments.document_preview_root)
+        result = _run_with_bounded_retries(_root(arguments.document_preview_root))
     except SyntheticRasterTextActivationError as error:
         print(json.dumps({"status": "failed", "code": error.code}, separators=(",", ":")))
         return 2

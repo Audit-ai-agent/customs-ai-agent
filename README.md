@@ -254,6 +254,8 @@ uv run --locked --no-sync --group dev python tools/auto_activate_synthetic_raste
   --document-preview-root <workspace>/_local/data/document-preview
 ```
 
+장시간 평가 중 OCR child/pipe가 일시적으로 종료되면 이 명령은 같은 runner·profile·material로만 최대 3회 재개합니다. 성공 checkpoint는 매번 원본·Gold·해시를 다시 확인한 뒤 재사용하며, 두 번의 실패 사이에 checkpoint 진행이 전혀 없으면 결정적 입력 오류로 보고 즉시 중단합니다. 품질 Gate 실패, bundle·model drift, 잘못된 플랫폼과 pointer 오류는 재시도하지 않습니다. 따라서 재개가 점수·Gold·30초 요청 한도·p95 10초 Gate를 완화하지 않습니다.
+
 현재 CPU 설정은 6 thread, recognizer batch 8, OpenCV 1 thread이고 oneDNN은 검증된 recognizer에만 적용합니다. detector의 oneDNN은 결과 안정성 때문에 끈 상태입니다. pointer 변경·material drift·dead child는 fail-closed로 재검증·재기동하며, 처리 중인 OCR과 1초 주기 prewarm이 겹쳐도 status가 일시적으로 작업을 영구 종료하지 않도록 Agent와 Backend가 함께 보호합니다.
 
 ```powershell

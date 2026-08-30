@@ -66,6 +66,79 @@ def test_linux_command_returns_only_content_free_failure_code(
     }
 
 
+def test_linux_command_retries_one_candidate_infrastructure_failure(
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch, capsys: pytest.CaptureFixture[str]
+) -> None:
+    root = _root(tmp_path)
+    attempts = 0
+
+    def activate(*, document_preview_root: Path) -> SyntheticRasterTextAutoActivationResultV1:
+        nonlocal attempts
+        attempts += 1
+        assert document_preview_root == root.resolve()
+        if attempts == 1:
+            raise SyntheticRasterTextActivationError("raster_text_candidate_execution_failed")
+        return SyntheticRasterTextAutoActivationResultV1(
+            raster_text_profile_revision=f"synthetic-raster-text-v1:{'a' * 24}",
+            activation_pointer_sha256="b" * 64,
+            sealed_evaluation_relative_path="synthetic-raster-text-v1/sealed-v9/evidence.json",
+            sealed_evaluation_sha256="c" * 64,
+        )
+
+    monkeypatch.setattr(cli, "auto_activate_synthetic_raster_text_linux_preview97_v1", activate)
+    assert cli.main(["--document-preview-root", str(root)]) == 0
+    assert attempts == 2
+    assert json.loads(capsys.readouterr().out)["status"] == "activated"
+
+
+def test_linux_command_stops_after_repeated_failure_without_progress(
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch, capsys: pytest.CaptureFixture[str]
+) -> None:
+    root = _root(tmp_path)
+    attempts = 0
+
+    def fail(*, document_preview_root: Path) -> SyntheticRasterTextAutoActivationResultV1:
+        nonlocal attempts
+        attempts += 1
+        assert document_preview_root == root.resolve()
+        raise SyntheticRasterTextActivationError("raster_text_candidate_execution_failed")
+
+    monkeypatch.setattr(cli, "auto_activate_synthetic_raster_text_linux_preview97_v1", fail)
+    assert cli.main(["--document-preview-root", str(root)]) == 2
+    assert attempts == 2
+    assert json.loads(capsys.readouterr().out) == {
+        "status": "failed",
+        "code": "raster_text_candidate_execution_failed",
+    }
+
+
+def test_linux_command_allows_third_attempt_only_after_checkpoint_progress(
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    root = _root(tmp_path)
+    checkpoint_root = root.joinpath(*cli._CANDIDATE_CHECKPOINT_DIRECTORY)  # noqa: SLF001
+    attempts = 0
+
+    def activate(*, document_preview_root: Path) -> SyntheticRasterTextAutoActivationResultV1:
+        nonlocal attempts
+        attempts += 1
+        assert document_preview_root == root.resolve()
+        if attempts < 3:
+            checkpoint_root.mkdir(parents=True, exist_ok=True)
+            (checkpoint_root / f"attempt-{attempts}.json").write_text("{}", encoding="utf-8")
+            raise SyntheticRasterTextActivationError("raster_text_candidate_execution_failed")
+        return SyntheticRasterTextAutoActivationResultV1(
+            raster_text_profile_revision=f"synthetic-raster-text-v1:{'a' * 24}",
+            activation_pointer_sha256="b" * 64,
+            sealed_evaluation_relative_path="synthetic-raster-text-v1/sealed-v9/evidence.json",
+            sealed_evaluation_sha256="c" * 64,
+        )
+
+    monkeypatch.setattr(cli, "auto_activate_synthetic_raster_text_linux_preview97_v1", activate)
+    assert cli.main(["--document-preview-root", str(root)]) == 0
+    assert attempts == 3
+
+
 def test_linux_activation_rejects_another_native_target_before_bundle_use(
     tmp_path: Path, monkeypatch: pytest.MonkeyPatch
 ) -> None:
