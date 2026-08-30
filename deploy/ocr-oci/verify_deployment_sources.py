@@ -244,6 +244,9 @@ def verify(repository_root: Path) -> None:
         "asset-free-bootstrap-v1",
         "--provenance=false",
         "--sbom=false",
+        "--allow-missing-repository-for-source-attested-bootstrap",
+        "--max-attempts 6",
+        "--retry-delay-seconds 2",
         "provenance: mode=max",
         "sbom: true",
         "RASTER_RUNTIME_IMAGE=${{ steps.release.outputs.runtime_image }}",
@@ -255,6 +258,9 @@ def verify(repository_root: Path) -> None:
     if (
         workflow.count("verify_ghcr_private_package.py") != 4
         or workflow.count('--repository "${GITHUB_REPOSITORY}"') != 5
+        or workflow.count("--allow-missing-repository-for-source-attested-bootstrap") != 1
+        or workflow.count("--max-attempts 6") != 1
+        or workflow.count("--retry-delay-seconds 2") != 1
     ):
         raise DeploymentSourceError("publish_package_link_verification_incomplete")
     if (
@@ -321,8 +327,14 @@ def verify(repository_root: Path) -> None:
         or "deploy/ocr-oci/verify_agent_runtime_binding.py" not in runtime_publisher
         or runtime_publisher.count("verify_ghcr_private_package.py") != 2
         or "api.github.com" not in privacy_verifier
-        or 'metadata.get("visibility") != "private"' not in privacy_verifier
-        or 'linked_repository.get("full_name"' not in privacy_verifier
+        or 'metadata["visibility"] != "private"' not in privacy_verifier
+        or 'metadata["version_count"]' not in privacy_verifier
+        or "isinstance(version_count, bool)" not in privacy_verifier
+        or 'if "repository" not in metadata:' not in privacy_verifier
+        or "allow_missing_repository" not in privacy_verifier
+        or "_GhcrMetadataPending" not in privacy_verifier
+        or "time.sleep(retry_delay_seconds)" not in privacy_verifier
+        or "_MAX_ATTEMPTS = 6" not in privacy_verifier
         or "/packages/container/" not in privacy_verifier
         or runtime_publisher.count('--repository "${source_repository}"') != 2
         or 'metadata.get("private") is not True' not in actor_verifier
