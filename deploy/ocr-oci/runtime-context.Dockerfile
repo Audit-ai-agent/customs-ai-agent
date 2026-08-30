@@ -4,10 +4,12 @@
 # be the directory produced by tools/export_raster_text_oci_runtime.py and
 # therefore contains exactly document-preview/ plus its immutable manifest.
 FROM scratch
+ARG SOURCE_REPOSITORY_URL
 COPY --chown=0:0 document-preview/ /document-preview/
 
 LABEL org.opencontainers.image.title="Customs Raster Text OCR runtime context" \
       org.opencontainers.image.description="Verified Linux/amd64 OCR sidecar, models and compact activation closure" \
+      org.opencontainers.image.source="${SOURCE_REPOSITORY_URL}" \
       io.customs.artifact.kind="raster-text-runtime-context-v1"
 
 USER 65532:65532

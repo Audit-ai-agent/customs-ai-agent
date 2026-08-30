@@ -197,7 +197,7 @@ def main() -> int:
     parser.add_argument("--image", required=True)
     parser.add_argument("--repository", required=True)
     parser.add_argument(
-        "--allow-missing-repository-for-source-attested-bootstrap",
+        "--allow-missing-repository-for-source-attested-workflow",
         action="store_true",
     )
     parser.add_argument("--max-attempts", default=1, type=int)
@@ -208,7 +208,7 @@ def main() -> int:
             args.image,
             args.repository,
             os.environ.get("GH_TOKEN", ""),
-            allow_missing_repository=(args.allow_missing_repository_for_source_attested_bootstrap),
+            allow_missing_repository=(args.allow_missing_repository_for_source_attested_workflow),
             max_attempts=args.max_attempts,
             retry_delay_seconds=args.retry_delay_seconds,
         )

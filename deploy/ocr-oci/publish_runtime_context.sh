@@ -14,6 +14,7 @@ usage() {
 context_root=$1
 image_repository=$2
 source_repository=$3
+source_repository_lower=${source_repository,,}
 script_dir=$(cd -- "$(dirname -- "${BASH_SOURCE[0]}")" && pwd -P)
 repository_root=$(cd -- "${script_dir}/../.." && pwd -P)
 
@@ -90,6 +91,7 @@ docker buildx build \
   --sbom=true \
   --label "io.customs.runtime.manifest-sha256=${manifest_sha}" \
   --label "io.customs.raster-text.profile-revision=${profile_revision}" \
+  --build-arg "SOURCE_REPOSITORY_URL=https://github.com/${source_repository_lower}" \
   --metadata-file "${temporary_root}/metadata.json" \
   --tag "${image_repository}:${runtime_tag}" \
   --push \
@@ -103,7 +105,11 @@ runtime_digest=$(python3 -c \
   exit 1
 }
 digest_reference="${image_repository}@${runtime_digest}"
-docker buildx imagetools inspect "${digest_reference}" >/dev/null
+docker buildx imagetools inspect --format '{{json .Image}}' "${digest_reference}" | \
+  python3 "${repository_root}/deploy/ocr-oci/verify_ghcr_source_attestation.py" \
+    --image "${digest_reference}" \
+    --kind runtime \
+    --repository "${source_repository}" >/dev/null
 python3 "${repository_root}/deploy/ocr-oci/verify_ghcr_private_package.py" \
   --image "${digest_reference}" \
   --repository "${source_repository}" >/dev/null

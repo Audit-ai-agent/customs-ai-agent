@@ -80,6 +80,7 @@ jobs:
           python deploy/ocr-oci/selftest_github_release_actor.py
           python deploy/ocr-oci/selftest_ocr_readiness.py
           python deploy/ocr-oci/selftest_ghcr_private_package.py
+          python deploy/ocr-oci/selftest_ghcr_source_attestation.py
           uv run --locked --group dev python deploy/ocr-oci/selftest_runtime_contract.py
           bash -n deploy/ocr-oci/publish_runtime_context.sh
       - name: Build source-only OCI structure target

@@ -99,8 +99,9 @@ FROM runtime-material AS release
 ARG RASTER_RUNTIME_IMAGE
 ARG SOURCE_REVISION
 LABEL org.opencontainers.image.title="Customs AI Agent with Raster Text OCR" \
-      org.opencontainers.image.source="https://github.com/Audit-ai-agent/customs-ai-agent" \
+      org.opencontainers.image.source="https://github.com/audit-ai-agent/customs-ai-agent" \
       org.opencontainers.image.revision="${SOURCE_REVISION}" \
+      io.customs.artifact.kind="customs-ai-agent-raster-text-ocr-v1" \
       io.customs.raster-runtime.image="${RASTER_RUNTIME_IMAGE}" \
       io.customs.raster-runtime.contract="raster-text-runtime-oci-v1"
 COPY --from=app-structure --chown=0:0 /opt/customs/app/ /opt/customs/app/
