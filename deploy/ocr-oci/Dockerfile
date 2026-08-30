@@ -73,13 +73,19 @@ COPY --chown=0:0 tools/verify_raster_text_oci_runtime.py \
     /opt/customs/deploy/verify_raster_text_oci_runtime.py
 COPY --chown=0:0 tools/raster_text_oci_evidence.py \
     /opt/customs/deploy/raster_text_oci_evidence.py
+COPY --chown=0:0 tools/raster_text_oci_metadata.py \
+    /opt/customs/deploy/raster_text_oci_metadata.py
+COPY --chown=0:0 deploy/ocr-oci/runtime-license-policy.json \
+    /opt/customs/deploy/expected-runtime-license-policy.json
 COPY --chown=0:0 deploy/ocr-oci/verify_agent_runtime_binding.py \
     /opt/customs/deploy/verify_agent_runtime_binding.py
 RUN install -d -o 10001 -g 10001 -m 0755 /opt/customs/deploy/verified
 USER 10001:10001
 RUN --network=none \
-    python /opt/customs/deploy/verify_raster_text_oci_runtime.py \
+    /opt/customs/app/.venv/bin/python \
+      /opt/customs/deploy/verify_raster_text_oci_runtime.py \
       --document-preview-root /opt/customs/_local/data/document-preview \
+      --expected-license-policy /opt/customs/deploy/expected-runtime-license-policy.json \
       > /opt/customs/deploy/verified/runtime-verification.json && \
     /opt/customs/app/.venv/bin/python \
       /opt/customs/deploy/verify_agent_runtime_binding.py \
@@ -104,8 +110,13 @@ COPY --from=runtime-verified --chown=0:0 \
 COPY --from=runtime-verified --chown=0:0 \
     /opt/customs/deploy/verified/agent-binding-verification.json \
     /opt/customs/deploy/agent-binding-verification.json
+COPY --from=runtime-verified --chown=0:0 \
+    /opt/customs/deploy/expected-runtime-license-policy.json \
+    /opt/customs/deploy/runtime-license-policy.json
 COPY --chown=0:0 tools/verify_raster_text_oci_runtime.py \
     /opt/customs/deploy/verify_raster_text_oci_runtime.py
+COPY --chown=0:0 tools/raster_text_oci_metadata.py \
+    /opt/customs/deploy/raster_text_oci_metadata.py
 RUN SOURCE_REVISION_VALUE="${SOURCE_REVISION}" \
     RASTER_RUNTIME_IMAGE_VALUE="${RASTER_RUNTIME_IMAGE}" \
     python -c \

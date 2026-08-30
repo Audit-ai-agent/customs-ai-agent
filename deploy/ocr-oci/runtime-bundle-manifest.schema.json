@@ -73,6 +73,7 @@
           "enum": [
             "activation-evidence",
             "active-pointer",
+            "component-evidence",
             "inventory",
             "licenses",
             "model",

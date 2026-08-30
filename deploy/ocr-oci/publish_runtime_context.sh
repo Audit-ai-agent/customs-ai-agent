@@ -38,8 +38,11 @@ python3 "${repository_root}/deploy/ocr-oci/verify_ghcr_private_package.py" \
   --image "${image_repository}" \
   --repository "${source_repository}" >/dev/null
 
-verification_json=$(python3 "${repository_root}/tools/verify_raster_text_oci_runtime.py" \
-  --document-preview-root "${context_root}/document-preview")
+verification_json=$(uv run --directory "${repository_root}" --locked --no-sync python \
+  tools/verify_raster_text_oci_runtime.py \
+  --document-preview-root "${context_root}/document-preview" \
+  --expected-license-policy \
+    "${repository_root}/deploy/ocr-oci/runtime-license-policy.json")
 # The data-only verifier owns transport/packaging constraints.  Publication
 # additionally requires the authoritative V12/V19/V9 Agent loader to start the
 # bundled child, complete native imports/model load, and report warm liveness.

@@ -1,10 +1,10 @@
 """Export the minimal verified Linux Raster Text OCR OCI build context.
 
 The command does not download, install, train, activate, or repair anything.
-It accepts only an already activated schema-12 Linux/amd64 profile, performs
-the full activation verification, observes the compact runtime read closure,
-adds the two complete sidecar/model release roots, and publishes a new
-immutable directory only after the exported closure passes runtime validation.
+It accepts only an already activated schema-12 Linux/amd64 profile, derives
+SPDX 2.3 and license metadata from its hash-bound package/model/CPython
+evidence, and publishes a new immutable directory only after the complete
+exported closure passes runtime validation.
 """
 
 from __future__ import annotations
@@ -30,6 +30,11 @@ from customs_ai_agent.service.raster_text_preview_runtime import (
     validate_raster_text_approval_pointer_path,
 )
 from raster_text_oci_evidence import verify_v9_direct_evidence_closure
+from raster_text_oci_metadata import (
+    _POLICY_RELATIVE_PATH,
+    RuntimeMetadataError,
+    build_runtime_metadata,
+)
 from verify_raster_text_oci_runtime import (
     RuntimeContextError,
     verify_runtime_context,
@@ -39,6 +44,9 @@ _POINTER_RELATIVE_PATH = PurePosixPath("approvals/raster-text-active.json")
 _MANIFEST_RELATIVE_PATH = PurePosixPath("_deployment/raster-text-runtime-oci-v1.json")
 _SBOM_RELATIVE_PATH = PurePosixPath("_deployment/runtime.spdx.json")
 _LICENSE_RELATIVE_PATH = PurePosixPath("_deployment/third-party-licenses.json")
+_POLICY_SOURCE_PATH = (
+    Path(__file__).resolve().parents[1] / "deploy" / "ocr-oci" / "runtime-license-policy.json"
+)
 _MAX_FILE_COUNT = 25_000
 _MAX_TREE_ENTRIES = 50_000
 
@@ -143,6 +151,11 @@ def _assert_linux_amd64_profile(root: Path, profile: RasterTextOfflineProfileV19
     machine = platform.machine().casefold()
     if platform.system() != "Linux" or machine not in {"amd64", "x86_64"}:
         raise RuntimeExportError("linux_amd64_builder_required")
+    if sys.implementation.name != "cpython" or sys.version_info[:3] != (3, 11, 15):
+        # Parent-only packages are observed from this interpreter environment.
+        # A different ABI could attest metadata for packages that the cp311
+        # final image never transports.
+        raise RuntimeExportError("linux_cp311_builder_required")
     interpreter_relative = _safe_relative(profile.sidecar_interpreter_path)
     if interpreter_relative.as_posix().split("/")[-3:] != [
         "interpreter",
@@ -233,11 +246,14 @@ def _role_for(
     runtime_profile: PurePosixPath,
     sidecar_root: PurePosixPath,
     model_bundle_root: PurePosixPath,
+    component_evidence: frozenset[PurePosixPath],
 ) -> str:
     if relative == _POINTER_RELATIVE_PATH:
         return "active-pointer"
     if relative == runtime_profile:
         return "runtime-profile"
+    if relative in component_evidence:
+        return "component-evidence"
     if _is_beneath(relative, sidecar_root):
         suffix = relative.relative_to(sidecar_root)
         return (
@@ -270,16 +286,32 @@ def _copy_one(source_root: Path, output_root: Path, relative: PurePosixPath) -> 
         raise RuntimeExportError("runtime_copy_failed") from None
 
 
-def _copy_metadata(source: Path, output_root: Path, relative: PurePosixPath) -> None:
+def _write_metadata(payload: bytes, output_root: Path, relative: PurePosixPath) -> None:
     try:
-        if source.is_symlink() or not source.is_file():
-            raise OSError
         destination = output_root.joinpath(*relative.parts)
         destination.parent.mkdir(parents=True, exist_ok=True)
-        shutil.copy2(source, destination, follow_symlinks=False)
+        descriptor = os.open(str(destination), os.O_WRONLY | os.O_CREAT | os.O_EXCL, 0o444)
+        with os.fdopen(descriptor, "wb") as stream:
+            stream.write(payload)
+            stream.flush()
+            os.fsync(stream.fileno())
         destination.chmod(0o444)
     except OSError:
-        raise RuntimeExportError("deployment_metadata_copy_failed") from None
+        raise RuntimeExportError("deployment_metadata_write_failed") from None
+
+
+def _metadata_payload(source: Path | None, generated: bytes) -> bytes:
+    if source is None:
+        return generated
+    try:
+        if source.is_symlink() or not source.is_file() or source.stat().st_size != len(generated):
+            raise OSError
+        raw = source.read_bytes()
+    except OSError:
+        raise RuntimeExportError("deployment_metadata_input_invalid") from None
+    if raw != generated:
+        raise RuntimeExportError("deployment_metadata_input_mismatch")
+    return raw
 
 
 def _make_runtime_tree_nonroot_readable(root: Path) -> None:
@@ -311,6 +343,8 @@ def _manifest(
     sidecar_root: PurePosixPath,
     model_bundle_root: PurePosixPath,
     pointer: RasterTextActivationPointerV12,
+    component_evidence: frozenset[PurePosixPath],
+    generated_evidence: frozenset[PurePosixPath],
 ) -> dict[str, object]:
     records = [
         _file_record(
@@ -321,6 +355,7 @@ def _manifest(
                 runtime_profile=runtime_profile,
                 sidecar_root=sidecar_root,
                 model_bundle_root=model_bundle_root,
+                component_evidence=component_evidence,
             ),
         )
         for relative in source_relatives
@@ -337,7 +372,20 @@ def _manifest(
                 _LICENSE_RELATIVE_PATH,
                 "licenses",
             ),
+            _file_record(
+                output_root.joinpath(*_POLICY_RELATIVE_PATH.parts),
+                _POLICY_RELATIVE_PATH,
+                "component-evidence",
+            ),
         )
+    )
+    records.extend(
+        _file_record(
+            output_root.joinpath(*relative.parts),
+            relative,
+            "component-evidence",
+        )
+        for relative in generated_evidence
     )
     records.sort(key=lambda record: str(record["relative_path"]))
     by_path = {str(record["relative_path"]): record for record in records}
@@ -370,8 +418,8 @@ def export_runtime(
     *,
     source_root: Path,
     destination: Path,
-    runtime_sbom: Path,
-    runtime_license_manifest: Path,
+    runtime_sbom: Path | None = None,
+    runtime_license_manifest: Path | None = None,
 ) -> dict[str, object]:
     if not source_root.is_absolute() or not destination.is_absolute():
         raise RuntimeExportError("absolute_paths_required")
@@ -410,6 +458,8 @@ def export_runtime(
     except Exception:
         raise RuntimeExportError("schema12_active_pointer_required") from None
     _assert_linux_amd64_profile(root, profile)
+    if (runtime_sbom is None) != (runtime_license_manifest is None):
+        raise RuntimeExportError("deployment_metadata_inputs_incomplete")
 
     # The source must first pass the expensive, complete activation boundary.
     # Only the later compact-runtime observation determines exported evidence.
@@ -432,9 +482,26 @@ def export_runtime(
     model_bundle_root = _safe_relative(profile.mobile_model_bundle_root_relative_path)
     source_relatives.update(_directory_files(root, sidecar_root))
     source_relatives.update(_directory_files(root, model_bundle_root))
-    # Account for SPDX, licenses, and the trust-root deployment manifest.
-    if len(source_relatives) > _MAX_FILE_COUNT - 3:
+    try:
+        generated_metadata = build_runtime_metadata(
+            root,
+            profile.model_dump(mode="json", warnings=False),
+            policy_path=_POLICY_SOURCE_PATH,
+        )
+    except RuntimeMetadataError as exc:
+        raise RuntimeExportError(exc.code) from None
+    component_evidence = frozenset(generated_metadata.source_evidence_paths)
+    generated_evidence = frozenset(
+        relative for relative, _payload in generated_metadata.generated_evidence
+    )
+    source_relatives.update(component_evidence)
+    # Account for SPDX, licenses, policy, and the trust-root deployment manifest.
+    if len(source_relatives) > _MAX_FILE_COUNT - 4 - len(generated_evidence):
         raise RuntimeExportError("runtime_source_tree_limit_exceeded")
+    sbom_payload = _metadata_payload(runtime_sbom, generated_metadata.sbom)
+    license_payload = _metadata_payload(
+        runtime_license_manifest, generated_metadata.license_manifest
+    )
 
     stage = destination_parent / f".{destination.name}.staging-{uuid.uuid4().hex}"
     output_root = stage / "document-preview"
@@ -443,8 +510,11 @@ def export_runtime(
         output_root.mkdir(mode=0o755)
         for relative in sorted(source_relatives, key=lambda item: item.as_posix()):
             _copy_one(root, output_root, relative)
-        _copy_metadata(runtime_sbom, output_root, _SBOM_RELATIVE_PATH)
-        _copy_metadata(runtime_license_manifest, output_root, _LICENSE_RELATIVE_PATH)
+        _write_metadata(sbom_payload, output_root, _SBOM_RELATIVE_PATH)
+        _write_metadata(license_payload, output_root, _LICENSE_RELATIVE_PATH)
+        _write_metadata(generated_metadata.policy, output_root, _POLICY_RELATIVE_PATH)
+        for relative, payload in generated_metadata.generated_evidence:
+            _write_metadata(payload, output_root, relative)
 
         # Re-run the real compact loader against only the staged closure before
         # adding the OCI manifest.  Missing evidence cannot be masked by the
@@ -465,13 +535,15 @@ def export_runtime(
             sidecar_root=sidecar_root,
             model_bundle_root=model_bundle_root,
             pointer=pointer,
+            component_evidence=component_evidence,
+            generated_evidence=generated_evidence,
         )
         manifest_path = output_root.joinpath(*_MANIFEST_RELATIVE_PATH.parts)
         manifest_path.parent.mkdir(parents=True, exist_ok=True)
         manifest_path.write_bytes(_canonical_json_bytes(manifest))
         manifest_path.chmod(0o444)
         _make_runtime_tree_nonroot_readable(output_root)
-        result = verify_runtime_context(output_root)
+        result = verify_runtime_context(output_root, expected_license_policy=_POLICY_SOURCE_PATH)
         os.replace(stage, destination)
         return result
     except RuntimeContextError as exc:
@@ -489,8 +561,16 @@ def _parser() -> argparse.ArgumentParser:
     parser = argparse.ArgumentParser(description=__doc__)
     parser.add_argument("--document-preview-root", required=True, type=Path)
     parser.add_argument("--destination", required=True, type=Path)
-    parser.add_argument("--runtime-sbom", required=True, type=Path)
-    parser.add_argument("--runtime-license-manifest", required=True, type=Path)
+    parser.add_argument(
+        "--runtime-sbom",
+        type=Path,
+        help="Optional compatibility input; it must byte-match the automatic SPDX output.",
+    )
+    parser.add_argument(
+        "--runtime-license-manifest",
+        type=Path,
+        help="Optional compatibility input; it must byte-match the automatic license output.",
+    )
     return parser
 
 

@@ -68,11 +68,13 @@ jobs:
             deploy/ocr-oci \
             tools/export_raster_text_oci_runtime.py \
             tools/raster_text_oci_evidence.py \
+            tools/raster_text_oci_metadata.py \
             tools/verify_raster_text_oci_runtime.py
           uv run --locked --group dev ruff format --check \
             deploy/ocr-oci \
             tools/export_raster_text_oci_runtime.py \
             tools/raster_text_oci_evidence.py \
+            tools/raster_text_oci_metadata.py \
             tools/verify_raster_text_oci_runtime.py
           python deploy/ocr-oci/verify_deployment_sources.py --repository-root .
           python deploy/ocr-oci/selftest_github_release_environment.py

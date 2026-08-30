@@ -18,6 +18,11 @@ from collections import Counter
 from pathlib import Path, PurePosixPath
 from typing import Any
 
+from raster_text_oci_metadata import (
+    RuntimeMetadataError,
+    validate_metadata_component_sets,
+)
+
 _SHA256 = re.compile(r"^[a-f0-9]{64}$")
 _PROFILE_REVISION = re.compile(r"^synthetic-raster-text-v1:[a-f0-9]{24}$")
 _ENGINE_KIND = (
@@ -104,10 +109,15 @@ _SEALED_V9_FIELDS = frozenset(
 )
 _MANIFEST_RELATIVE_PATH = PurePosixPath("_deployment/raster-text-runtime-oci-v1.json")
 _POINTER_RELATIVE_PATH = PurePosixPath("approvals/raster-text-active.json")
+_SBOM_RELATIVE_PATH = PurePosixPath("_deployment/runtime.spdx.json")
+_LICENSE_RELATIVE_PATH = PurePosixPath("_deployment/third-party-licenses.json")
+_POLICY_RELATIVE_PATH = PurePosixPath("_deployment/runtime-license-policy.json")
+_PARENT_PACKAGE_EVIDENCE_RELATIVE_PATH = PurePosixPath("_deployment/parent-package-evidence.json")
 _ALLOWED_ROLES = frozenset(
     {
         "activation-evidence",
         "active-pointer",
+        "component-evidence",
         "inventory",
         "licenses",
         "model",
@@ -259,84 +269,6 @@ def _read_json(path: Path, *, maximum: int, code: str) -> tuple[dict[str, Any], 
     except (OSError, UnicodeDecodeError, ValueError, json.JSONDecodeError):
         raise RuntimeContextError(code) from None
     return value, raw
-
-
-def _normalized_package_name(value: str) -> str:
-    return re.sub(r"[-_.]+", "-", value).casefold()
-
-
-def _validate_license_manifest(path: Path) -> tuple[set[tuple[str, str]], set[str]]:
-    value, _raw = _read_json(path, maximum=4 * 1024 * 1024, code="license_manifest_invalid")
-    if set(value) != {"components", "schema_version"} or value.get("schema_version") != "1.0":
-        raise RuntimeContextError("license_manifest_invalid")
-    components = value.get("components")
-    if not isinstance(components, list) or not components:
-        raise RuntimeContextError("license_manifest_invalid")
-    observed: set[tuple[str, str]] = set()
-    scopes: set[str] = set()
-    for component in components:
-        if not isinstance(component, dict) or set(component) != {
-            "license_id",
-            "name",
-            "scope",
-            "source_uri",
-            "version",
-        }:
-            raise RuntimeContextError("license_manifest_invalid")
-        fields = tuple(
-            component.get(name) for name in ("name", "version", "license_id", "source_uri")
-        )
-        if not all(isinstance(item, str) and item.strip() for item in fields):
-            raise RuntimeContextError("license_manifest_invalid")
-        if component.get("scope") not in {"model", "python-package", "runtime"}:
-            raise RuntimeContextError("license_manifest_invalid")
-        scope = str(component["scope"])
-        identity = (_normalized_package_name(str(component["name"])), str(component["version"]))
-        if identity in observed:
-            raise RuntimeContextError("license_manifest_invalid")
-        observed.add(identity)
-        scopes.add(scope)
-    if scopes != {"model", "python-package", "runtime"}:
-        raise RuntimeContextError("license_manifest_invalid")
-    return observed, scopes
-
-
-def _inventory_packages(path: Path) -> set[tuple[str, str]]:
-    try:
-        if path.suffix.casefold() != ".json" or path.stat().st_size > 4 * 1024 * 1024:
-            return set()
-        value = json.loads(path.read_text(encoding="utf-8"))
-        packages = value.get("packages") if isinstance(value, dict) else None
-        if packages is None:
-            return set()
-        if not isinstance(packages, list):
-            raise ValueError
-        result: set[tuple[str, str]] = set()
-        for package in packages:
-            if (
-                not isinstance(package, dict)
-                or not isinstance(package.get("name"), str)
-                or not isinstance(package.get("version"), str)
-                or not package["name"]
-                or not package["version"]
-            ):
-                raise ValueError
-            result.add((_normalized_package_name(package["name"]), package["version"]))
-        return result
-    except (OSError, UnicodeDecodeError, ValueError, json.JSONDecodeError):
-        raise RuntimeContextError("runtime_package_inventory_invalid") from None
-
-
-def _validate_spdx(path: Path) -> None:
-    value, _raw = _read_json(path, maximum=16 * 1024 * 1024, code="runtime_sbom_invalid")
-    if (
-        not isinstance(value.get("spdxVersion"), str)
-        or not value["spdxVersion"].startswith("SPDX-2.")
-        or value.get("dataLicense") != "CC0-1.0"
-        or not isinstance(value.get("packages"), list)
-        or not value["packages"]
-    ):
-        raise RuntimeContextError("runtime_sbom_invalid")
 
 
 def _validate_pointer(path: Path, expected_sha256: str, expected_revision: str) -> dict[str, Any]:
@@ -703,7 +635,9 @@ def _validate_no_forbidden_material(
         raise RuntimeContextError("runtime_required_role_invalid")
 
 
-def _verify_runtime_context(root: Path) -> dict[str, object]:
+def _verify_runtime_context(
+    root: Path, *, expected_license_policy: bytes | None
+) -> dict[str, object]:
     """Verify all declared bytes and return a safe, compact result."""
 
     try:
@@ -896,6 +830,16 @@ def _verify_runtime_context(root: Path) -> dict[str, object]:
             _is_beneath(relative, sidecar_root) or _is_beneath(relative, model_root)
         ):
             raise RuntimeContextError("runtime_role_path_invalid")
+        if role == "component-evidence" and not (
+            relative == _POLICY_RELATIVE_PATH
+            or relative == _PARENT_PACKAGE_EVIDENCE_RELATIVE_PATH
+            or (
+                len(relative.parts) == 2
+                and relative.parts[0] == "model-inventories"
+                and relative.suffix == ".json"
+            )
+        ):
+            raise RuntimeContextError("runtime_role_path_invalid")
     sidecar_release_records = _release_manifest_records(
         root=resolved_root,
         release_root=sidecar_root,
@@ -988,6 +932,8 @@ def _verify_runtime_context(root: Path) -> dict[str, object]:
 
     sbom_relative = _relative_path(sbom.get("relative_path"))
     license_relative = _relative_path(licenses.get("relative_path"))
+    if sbom_relative != _SBOM_RELATIVE_PATH or license_relative != _LICENSE_RELATIVE_PATH:
+        raise RuntimeContextError("deployment_metadata_binding_invalid")
     for relative, binding, role in (
         (sbom_relative, sbom, "sbom"),
         (license_relative, licenses, "licenses"),
@@ -999,14 +945,29 @@ def _verify_runtime_context(root: Path) -> dict[str, object]:
             or metadata_record["sha256"] != binding["sha256"]
         ):
             raise RuntimeContextError("deployment_metadata_binding_invalid")
-    _validate_spdx(_regular_child(resolved_root, sbom_relative))
-    licensed, _scopes = _validate_license_manifest(_regular_child(resolved_root, license_relative))
-    inventory_packages: set[tuple[str, str]] = set()
-    for relative, record in declared.items():
-        if record["role"] == "inventory":
-            inventory_packages.update(_inventory_packages(_regular_child(resolved_root, relative)))
-    if not inventory_packages or not inventory_packages.issubset(licensed):
-        raise RuntimeContextError("license_manifest_incomplete")
+    policy_record = declared.get(_POLICY_RELATIVE_PATH)
+    if policy_record is None or policy_record["role"] != "component-evidence":
+        raise RuntimeContextError("runtime_license_policy_invalid")
+    embedded_policy_path = _regular_child(resolved_root, _POLICY_RELATIVE_PATH)
+    if (
+        expected_license_policy is not None
+        and embedded_policy_path.read_bytes() != expected_license_policy
+    ):
+        raise RuntimeContextError("runtime_license_policy_mismatch")
+    try:
+        expected_component_evidence = validate_metadata_component_sets(
+            resolved_root,
+            profile,
+            license_manifest_path=_regular_child(resolved_root, license_relative),
+            sbom_path=_regular_child(resolved_root, sbom_relative),
+        )
+    except RuntimeMetadataError as exc:
+        raise RuntimeContextError(exc.code) from None
+    declared_component_evidence = {
+        relative for relative, record in declared.items() if record["role"] == "component-evidence"
+    }
+    if declared_component_evidence != expected_component_evidence:
+        raise RuntimeContextError("runtime_component_evidence_set_mismatch")
 
     return {
         "file_count": len(declared) + 1,
@@ -1016,11 +977,30 @@ def _verify_runtime_context(root: Path) -> dict[str, object]:
     }
 
 
-def verify_runtime_context(root: Path) -> dict[str, object]:
+def _expected_policy_bytes(path: Path) -> bytes:
+    try:
+        if path.is_symlink() or not path.is_file() or path.stat().st_size > 16 * 1024 * 1024:
+            raise OSError
+        raw = path.read_bytes()
+        if not raw:
+            raise OSError
+        return raw
+    except OSError:
+        raise RuntimeContextError("expected_runtime_license_policy_invalid") from None
+
+
+def verify_runtime_context(
+    root: Path, *, expected_license_policy: Path | None = None
+) -> dict[str, object]:
     """Fail closed with one content-free error for every malformed input."""
 
     try:
-        return _verify_runtime_context(root)
+        expected = (
+            _expected_policy_bytes(expected_license_policy)
+            if expected_license_policy is not None
+            else None
+        )
+        return _verify_runtime_context(root, expected_license_policy=expected)
     except RuntimeContextError:
         raise
     except Exception:
@@ -1033,13 +1013,17 @@ def verify_runtime_context(root: Path) -> dict[str, object]:
 def _parser() -> argparse.ArgumentParser:
     parser = argparse.ArgumentParser(description=__doc__)
     parser.add_argument("--document-preview-root", required=True, type=Path)
+    parser.add_argument("--expected-license-policy", type=Path)
     return parser
 
 
 def main() -> int:
     args = _parser().parse_args()
     try:
-        result = verify_runtime_context(args.document_preview_root)
+        result = verify_runtime_context(
+            args.document_preview_root,
+            expected_license_policy=args.expected_license_policy,
+        )
     except RuntimeContextError as exc:
         print(exc.code, file=sys.stderr)
         return 1

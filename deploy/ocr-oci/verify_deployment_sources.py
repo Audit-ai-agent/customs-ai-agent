@@ -13,6 +13,10 @@ class DeploymentSourceError(RuntimeError):
     pass
 
 
+def _reject_nonfinite_json(_value: str) -> None:
+    raise ValueError
+
+
 def _require(text: str, pattern: str, code: str) -> None:
     if re.search(pattern, text, flags=re.MULTILINE) is None:
         raise DeploymentSourceError(code)
@@ -31,15 +35,78 @@ def verify(repository_root: Path) -> None:
     deployment_readme = (root / "deploy/ocr-oci/README.md").read_text(encoding="utf-8")
     dockerignore = (root / ".dockerignore").read_text(encoding="utf-8")
     schema_path = root / "deploy/ocr-oci/runtime-bundle-manifest.schema.json"
-    schema = json.loads(schema_path.read_text(encoding="utf-8"))
+    schema = json.loads(
+        schema_path.read_text(encoding="utf-8"),
+        parse_constant=_reject_nonfinite_json,
+    )
     if schema.get("$schema") != "https://json-schema.org/draft/2020-12/schema":
         raise DeploymentSourceError("runtime_manifest_schema_invalid")
     try:
         maximum_files = schema["properties"]["files"]["maxItems"]
+        roles = schema["$defs"]["fileRecord"]["properties"]["role"]["enum"]
     except (KeyError, TypeError):
         raise DeploymentSourceError("runtime_manifest_schema_invalid") from None
     if maximum_files != 24_999:
         raise DeploymentSourceError("runtime_manifest_file_limit_invalid")
+    if not isinstance(roles, list) or "component-evidence" not in roles:
+        raise DeploymentSourceError("runtime_manifest_schema_invalid")
+    policy_path = root / "deploy/ocr-oci/runtime-license-policy.json"
+    policy_raw = policy_path.read_bytes()
+    policy = json.loads(policy_raw, parse_constant=_reject_nonfinite_json)
+    canonical_policy = (
+        json.dumps(
+            policy,
+            allow_nan=False,
+            ensure_ascii=False,
+            separators=(",", ":"),
+            sort_keys=True,
+        ).encode("utf-8")
+        + b"\n"
+    )
+    expected_policy = {
+        "cpython": [
+            {
+                "license_sha256": (
+                    "3b2f81fe21d181c499c59a256c8e1968455d6689d269aa85373bfb6af41da3bf"
+                ),
+                "source_uri": "https://github.com/python/cpython/tree/v3.11.15",
+                "version": "3.11.15",
+            }
+        ],
+        "distribution_scope": "private-ghcr-only",
+        "fine_tuned_models": [
+            {
+                "combined_model_manifest_sha256": (
+                    "3b276c1a83740f73949d319095034bfdba01285aed3318d1f4cdcb7190e18185"
+                ),
+                "distribution_scope": "private-ghcr-only",
+                "license_id": "NOASSERTION",
+                "model_name": "source_attested_en_PP-OCRv5_mobile_rec_head_v2",
+                "model_snapshot_sha256": (
+                    "2a41badb75dc0b66c8597429e585a440a0d25e8a52c771df73b8e0c90ac908ad"
+                ),
+                "source_uri": "NOASSERTION",
+                "upstream_base_artifacts_sha256": (
+                    "0cfa8addcff71284ac996182e9edb39f7ee95bf7d651acfc39458cf89bc9a656"
+                ),
+                "upstream_base_license_id": "Apache-2.0",
+                "upstream_base_model_name": "en_PP-OCRv5_mobile_rec",
+                "upstream_base_source_inventory_sha256": (
+                    "57d566b507b7fff67ef0cb3eb605671d862facb2f8aa4765f74bab546baf130d"
+                ),
+                "upstream_base_source_uri": (
+                    "https://huggingface.co/PaddlePaddle/en_PP-OCRv5_mobile_rec/"
+                    "tree/267c36e24c331595590fe7bd72bde2436fd286f2"
+                ),
+                "upstream_training_receipt_sha256": (
+                    "b09e8a208407af78e6e1b3535a25abacce3a765f952d73dbfbc68193cdaa42a6"
+                ),
+            }
+        ],
+        "schema_version": "1.0",
+    }
+    if policy_raw != canonical_policy or policy != expected_policy:
+        raise DeploymentSourceError("runtime_license_policy_invalid")
 
     first_rule = next(
         (
@@ -57,6 +124,7 @@ def verify(repository_root: Path) -> None:
         "!src/**",
         "!deploy/ocr-oci/**",
         "!tools/raster_text_oci_evidence.py",
+        "!tools/raster_text_oci_metadata.py",
         "!tools/verify_raster_text_oci_runtime.py",
     ):
         if required not in dockerignore.splitlines():
@@ -84,6 +152,9 @@ def verify(repository_root: Path) -> None:
         "tools/verify_raster_text_oci_runtime.py",
         "verify_agent_runtime_binding.py",
         "raster_text_oci_evidence.py",
+        "raster_text_oci_metadata.py",
+        "expected-runtime-license-policy.json",
+        "--expected-license-policy /opt/customs/deploy/expected-runtime-license-policy.json",
         "RUN --network=none",
         "install -d -o 10001 -g 10001 -m 0755 /opt/customs/deploy/verified",
         "CUSTOMS_AGENT_RASTER_TEXT_PREVIEW_AUTO_ACTIVATION=source-attested-synthetic-raster-text-v1",
@@ -221,7 +292,14 @@ def verify(repository_root: Path) -> None:
         "RasterTextActivationPointerV12" not in exporter
         or "RasterTextActivationPointerV11" in exporter
         or 'RuntimeExportError("schema12_active_pointer_required")' not in exporter
+        or "build_runtime_metadata(" not in exporter
+        or "deployment_metadata_input_mismatch" not in exporter
+        or "runtime-license-policy.json" not in exporter
+        or "--expected-license-policy" not in runtime_publisher
+        or "deploy/ocr-oci/runtime-license-policy.json" not in runtime_publisher
+        or "runtime_license_policy_mismatch" not in runtime_verifier
         or "_MAX_FILE_COUNT = 25_000" not in runtime_verifier
+        or "validate_metadata_component_sets(" not in runtime_verifier
         or 'value.get("schema_version") != "12.0"' not in runtime_verifier
         or 'value.get("schema_version") != "9.0"' not in runtime_verifier
         or 'pointer.get("schema_version") != "12.0"' not in readiness
@@ -264,6 +342,7 @@ def verify(repository_root: Path) -> None:
         "deploy/ocr-oci/verify_deployment_sources.py",
         "tools/export_raster_text_oci_runtime.py",
         "tools/raster_text_oci_evidence.py",
+        "tools/raster_text_oci_metadata.py",
         "tools/verify_raster_text_oci_runtime.py",
     ):
         source = (root / relative).read_text(encoding="utf-8")
@@ -276,7 +355,13 @@ def main() -> int:
     args = parser.parse_args()
     try:
         verify(args.repository_root)
-    except (DeploymentSourceError, OSError, UnicodeDecodeError, json.JSONDecodeError) as exc:
+    except (
+        DeploymentSourceError,
+        OSError,
+        UnicodeDecodeError,
+        ValueError,
+        json.JSONDecodeError,
+    ) as exc:
         code = str(exc) if isinstance(exc, DeploymentSourceError) else "deployment_source_invalid"
         print(code, file=sys.stderr)
         return 1

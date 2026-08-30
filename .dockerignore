@@ -13,4 +13,5 @@
 !deploy/ocr-oci/**
 !tools/
 !tools/raster_text_oci_evidence.py
+!tools/raster_text_oci_metadata.py
 !tools/verify_raster_text_oci_runtime.py

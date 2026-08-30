@@ -25,6 +25,7 @@ from raster_text_oci_evidence import (  # noqa: E402
     RasterTextOciEvidenceError,
     verify_v9_direct_evidence_closure,
 )
+from raster_text_oci_metadata import build_runtime_metadata  # noqa: E402
 
 _BINDING = "a" * 64
 _PROFILE = f"synthetic-raster-text-v1:{'b' * 24}"
@@ -36,6 +37,13 @@ _METRIC = "source-attested-semantic-text-v3"
 _EVIDENCE = "source-attested-public-finetuned-staged-train-holdout-v2"
 _QUALITY = "preview-draft-critical97-cer2-v1"
 _GENERATION = "current-runner-native-full-gate-v1"
+_MODEL_FILENAMES = (
+    "config.json",
+    "inference.json",
+    "inference.pdiparams",
+    "inference.yml",
+)
+_CPYTHON_LICENSE_TEXT = b"Fixture CPython license.\nhttps://www.python.org/psf/\n"
 
 
 def _canonical(value: object) -> bytes:
@@ -61,6 +69,20 @@ def _canonical_pointer(value: object) -> bytes:
     )
 
 
+def _model_snapshot(values: dict[str, tuple[str, int, str]], prefix: str) -> str:
+    rows = [
+        {
+            "byte_size": values[f"runtime/models/{prefix}/{name}"][1],
+            "relative_path": (
+                f"models/{prefix}/{name}" if prefix == "text-det" else f"{prefix}/{name}"
+            ),
+            "sha256": values[f"runtime/models/{prefix}/{name}"][0],
+        }
+        for name in _MODEL_FILENAMES
+    ]
+    return hashlib.sha256(_canonical({"artifacts": rows})).hexdigest()
+
+
 def _write(root: Path, relative: str, payload: bytes) -> tuple[str, int]:
     path = root / relative
     path.parent.mkdir(parents=True, exist_ok=True)
@@ -75,6 +97,22 @@ def _write(root: Path, relative: str, payload: bytes) -> tuple[str, int]:
 
 
 def _build_valid(root: Path) -> None:
+    parent_site = root.parent / "parent-site"
+    parent_dist = parent_site / "test_parent_python-2.0.dist-info"
+    parent_dist.mkdir(parents=True, exist_ok=True)
+    (parent_dist / "METADATA").write_text(
+        "Metadata-Version: 2.4\n"
+        "Name: test-parent-python\n"
+        "Version: 2.0\n"
+        "License-Expression: Apache-2.0\n"
+        "Project-URL: Source, https://github.com/example/test-parent-python\n",
+        encoding="utf-8",
+    )
+    (parent_dist / "RECORD").write_text(
+        "test_parent_python-2.0.dist-info/METADATA,,\ntest_parent_python-2.0.dist-info/RECORD,,\n",
+        encoding="utf-8",
+    )
+    sys.path.insert(0, str(parent_site))
     values: dict[str, tuple[str, int, str]] = {}
     for relative, payload, role in (
         (
@@ -118,14 +156,47 @@ def _build_valid(root: Path) -> None:
             "inventory",
         ),
         (
+            "runtime/sidecar/inventories/parent-packages.json",
+            _canonical({"packages": [{"name": "test-parent-python", "version": "2.0"}]}),
+            "inventory",
+        ),
+        (
             "runtime/sidecar/interpreter/bin/python3.11",
             b"\x7fELF\x02\x01\x01" + b"\x00" * 9 + b"\x03\x00\x3e\x00",
             "sidecar-runtime",
         ),
-        ("runtime/models/text-rec/model.bin", b"model", "model"),
+        (
+            "runtime/sidecar/interpreter/include/python3.11/patchlevel.h",
+            b"#define PY_MAJOR_VERSION 3\n#define PY_MINOR_VERSION 11\n"
+            b"#define PY_MICRO_VERSION 15\n",
+            "sidecar-runtime",
+        ),
+        (
+            "runtime/sidecar/interpreter/LICENSE.txt",
+            _CPYTHON_LICENSE_TEXT,
+            "sidecar-runtime",
+        ),
+        (
+            "runtime/sidecar/module-root/test_python-1.0.dist-info/METADATA",
+            b"Metadata-Version: 2.4\nName: test-python\nVersion: 1.0\n"
+            b"License-Expression: MIT\n"
+            b"Project-URL: Source, https://github.com/example/test-python\n",
+            "sidecar-runtime",
+        ),
+        (
+            "runtime/sidecar/module-root/test_python-1.0.dist-info/RECORD",
+            b"test_python-1.0.dist-info/METADATA,,\ntest_python-1.0.dist-info/RECORD,,\n",
+            "sidecar-runtime",
+        ),
     ):
         digest, size = _write(root, relative, payload)
         values[relative] = (digest, size, role)
+    for prefix in ("text-det", "text-rec"):
+        for index, name in enumerate(_MODEL_FILENAMES):
+            relative = f"runtime/models/{prefix}/{name}"
+            payload = f"{prefix}-{index}".encode("ascii")
+            digest, size = _write(root, relative, payload)
+            values[relative] = (digest, size, "model")
     (root / "runtime/sidecar/interpreter/bin/python3.11").chmod(0o555)
 
     sidecar_manifest = {
@@ -136,7 +207,11 @@ def _build_valid(root: Path) -> None:
                 "path": relative,
                 "sha256": values[f"runtime/sidecar/{relative}"][0],
             }
-            for relative in ("interpreter/bin/python3.11", "inventories/packages.json")
+            for relative in sorted(
+                path.removeprefix("runtime/sidecar/")
+                for path in values
+                if path.startswith("runtime/sidecar/")
+            )
         ],
         "runtime_architecture": "amd64",
         "runtime_operating_system": "linux",
@@ -155,16 +230,125 @@ def _build_valid(root: Path) -> None:
         "inventory",
     )
 
+    detector_paths = [f"text-det/{name}" for name in _MODEL_FILENAMES]
+    recognizer_paths = [f"text-rec/{name}" for name in _MODEL_FILENAMES]
+    model_inventory = {
+        "artifacts": [
+            {
+                "byte_size": values[f"runtime/models/{relative}"][1],
+                "relative_path": relative,
+                "sha256": values[f"runtime/models/{relative}"][0],
+            }
+            for relative in [*detector_paths, *recognizer_paths]
+        ],
+        "text_detection_model_name": "PP-OCRv5_mobile_det",
+        "text_recognition_model_name": ("source_attested_en_PP-OCRv5_mobile_rec_head_v2"),
+    }
+    model_inventory_digest, model_inventory_size = _write(
+        root,
+        "runtime/models/inventories/models.json",
+        _canonical(model_inventory),
+    )
+    values["runtime/models/inventories/models.json"] = (
+        model_inventory_digest,
+        model_inventory_size,
+        "inventory",
+    )
+    upstream_recognizer_hashes = {
+        f"models/text-rec/{name}": f"{index + 40:064x}"
+        for index, name in enumerate(_MODEL_FILENAMES)
+    }
+    upstream_source_uri = (
+        "https://huggingface.co/PaddlePaddle/en_PP-OCRv5_mobile_rec/"
+        "tree/267c36e24c331595590fe7bd72bde2436fd286f2"
+    )
+    source_inventory = {
+        "artifacts": [
+            *[
+                {
+                    "license_id": "Apache-2.0",
+                    "relative_path": f"models/paddleocr3/det/model-{index}.bin",
+                    "sha256": values[f"runtime/models/{relative}"][0],
+                    "source_uri": "https://github.com/example/test-detector",
+                }
+                for index, relative in enumerate(detector_paths)
+            ],
+            *[
+                {
+                    "license_id": "Apache-2.0",
+                    "relative_path": f"models/paddleocr3/rec/{name}",
+                    "sha256": upstream_recognizer_hashes[f"models/text-rec/{name}"],
+                    "source_uri": upstream_source_uri,
+                }
+                for name in _MODEL_FILENAMES
+            ],
+        ]
+    }
+    source_inventory_digest, source_inventory_size = _write(
+        root,
+        "model-inventories/source.json",
+        _canonical(source_inventory),
+    )
+    values["model-inventories/source.json"] = (
+        source_inventory_digest,
+        source_inventory_size,
+        "component-evidence",
+    )
+    mobile_manifest = {
+        "source_model_inventory_relative_path": "model-inventories/source.json",
+        "source_model_inventory_sha256": source_inventory_digest,
+        "text_recognition_model_name": "en_PP-OCRv5_mobile_rec",
+    }
+    mobile_manifest_digest, mobile_manifest_size = _write(
+        root,
+        "runtime/models/provenance/mobile-manifest.json",
+        _canonical(mobile_manifest),
+    )
+    values["runtime/models/provenance/mobile-manifest.json"] = (
+        mobile_manifest_digest,
+        mobile_manifest_size,
+        "inventory",
+    )
+    training_receipt = {
+        "initialization": "pinned_public_inference_graph_warm_start",
+        "public_mobile_source_inventory_sha256": source_inventory_digest,
+        "public_recognizer_artifact_sha256s": upstream_recognizer_hashes,
+        "receipt_sha256": "",
+        "tuning_scope": "head",
+    }
+    training_receipt["receipt_sha256"] = hashlib.sha256(_canonical(training_receipt)).hexdigest()
+    training_receipt_digest, training_receipt_size = _write(
+        root,
+        "runtime/models/provenance/training-receipt.json",
+        _canonical(training_receipt),
+    )
+    values["runtime/models/provenance/training-receipt.json"] = (
+        training_receipt_digest,
+        training_receipt_size,
+        "inventory",
+    )
+
     model_manifest = {
         "bundle_id": "test-model-bundle",
         "files": [
             {
-                "byte_size": values["runtime/models/text-rec/model.bin"][1],
-                "path": "text-rec/model.bin",
-                "sha256": values["runtime/models/text-rec/model.bin"][0],
+                "byte_size": values[f"runtime/models/{relative}"][1],
+                "path": relative,
+                "sha256": values[f"runtime/models/{relative}"][0],
             }
+            for relative in sorted(
+                path.removeprefix("runtime/models/")
+                for path in values
+                if path.startswith("runtime/models/")
+            )
         ],
+        "mobile_manifest_provenance_relative_path": "provenance/mobile-manifest.json",
+        "model_inventory_relative_path": "inventories/models.json",
+        "recognizer_receipt_provenance_relative_path": "provenance/training-receipt.json",
         "schema_version": "1.0",
+        "source_detector_model_snapshot_sha256": _model_snapshot(values, "text-det"),
+        "source_recognizer_receipt_sha256": training_receipt["receipt_sha256"],
+        "source_recognizer_model_snapshot_sha256": _model_snapshot(values, "text-rec"),
     }
     model_manifest_digest, model_manifest_size = _write(
         root,
@@ -183,10 +367,23 @@ def _build_valid(root: Path) -> None:
         "engine_kind": _ENGINE,
         "mobile_model_bundle_manifest_sha256": model_manifest_digest,
         "mobile_model_bundle_root_relative_path": "runtime/models",
+        "model_inventory_path": "runtime/models/inventories/models.json",
+        "model_inventory_sha256": model_inventory_digest,
+        "parent_renderer_package_inventory_path": (
+            "runtime/sidecar/inventories/parent-packages.json"
+        ),
+        "parent_renderer_package_inventory_sha256": values[
+            "runtime/sidecar/inventories/parent-packages.json"
+        ][0],
         "raster_text_profile_revision": _PROFILE,
         "schema_version": "19.0",
+        "sidecar_interpreter_root": "runtime/sidecar/interpreter",
+        "sidecar_interpreter_root_tree_sha256": "c" * 64,
         "sidecar_interpreter_path": "runtime/sidecar/interpreter/bin/python3.11",
         "sidecar_interpreter_sha256": values["runtime/sidecar/interpreter/bin/python3.11"][0],
+        "sidecar_module_root": "runtime/sidecar/module-root",
+        "sidecar_package_inventory_path": "runtime/sidecar/inventories/packages.json",
+        "sidecar_package_inventory_sha256": values["runtime/sidecar/inventories/packages.json"][0],
         "source_recognizer_parent_selection_receipt_sha256": "6" * 64,
         "source_recognizer_receipt_sha256": "3" * 64,
         "source_recognizer_release_sha256": "2" * 64,
@@ -293,45 +490,64 @@ def _build_valid(root: Path) -> None:
         "active-pointer",
     )
 
-    spdx = {
-        "SPDXID": "SPDXRef-DOCUMENT",
-        "dataLicense": "CC0-1.0",
-        "name": "test-runtime",
-        "packages": [{"SPDXID": "SPDXRef-Package", "name": "test"}],
-        "spdxVersion": "SPDX-2.3",
-    }
-    spdx_digest, spdx_size = _write(root, "_deployment/runtime.spdx.json", _canonical(spdx))
-    values["_deployment/runtime.spdx.json"] = (spdx_digest, spdx_size, "sbom")
-    licenses = {
-        "components": [
+    policy = {
+        "cpython": [
             {
-                "license_id": "Apache-2.0",
-                "name": "test-model",
-                "scope": "model",
-                "source_uri": "https://example.invalid/source",
-                "version": "1.0",
-            },
+                "license_sha256": hashlib.sha256(_CPYTHON_LICENSE_TEXT).hexdigest(),
+                "source_uri": "https://github.com/python/cpython/tree/v3.11.15",
+                "version": "3.11.15",
+            }
+        ],
+        "distribution_scope": "private-ghcr-only",
+        "fine_tuned_models": [
             {
-                "license_id": "Apache-2.0",
-                "name": "test-python",
-                "scope": "python-package",
-                "source_uri": "https://example.invalid/source",
-                "version": "1.0",
-            },
-            {
-                "license_id": "Apache-2.0",
-                "name": "test-runtime",
-                "scope": "runtime",
-                "source_uri": "https://example.invalid/source",
-                "version": "1.0",
-            },
+                "combined_model_manifest_sha256": model_manifest_digest,
+                "distribution_scope": "private-ghcr-only",
+                "license_id": "NOASSERTION",
+                "model_name": "source_attested_en_PP-OCRv5_mobile_rec_head_v2",
+                "model_snapshot_sha256": _model_snapshot(values, "text-rec"),
+                "source_uri": "NOASSERTION",
+                "upstream_base_artifacts_sha256": hashlib.sha256(
+                    _canonical(upstream_recognizer_hashes)
+                ).hexdigest(),
+                "upstream_base_license_id": "Apache-2.0",
+                "upstream_base_model_name": "en_PP-OCRv5_mobile_rec",
+                "upstream_base_source_inventory_sha256": source_inventory_digest,
+                "upstream_base_source_uri": upstream_source_uri,
+                "upstream_training_receipt_sha256": training_receipt["receipt_sha256"],
+            }
         ],
         "schema_version": "1.0",
     }
+    policy_payload = _canonical(policy) + b"\n"
+    policy_digest, policy_size = _write(
+        root,
+        "_deployment/runtime-license-policy.json",
+        policy_payload,
+    )
+    values["_deployment/runtime-license-policy.json"] = (
+        policy_digest,
+        policy_size,
+        "component-evidence",
+    )
+    generated = build_runtime_metadata(
+        root,
+        profile,
+        policy_path=root / "_deployment/runtime-license-policy.json",
+    )
+    for relative, payload in generated.generated_evidence:
+        digest, size = _write(root, relative.as_posix(), payload)
+        values[relative.as_posix()] = (digest, size, "component-evidence")
+    spdx_digest, spdx_size = _write(
+        root,
+        "_deployment/runtime.spdx.json",
+        generated.sbom,
+    )
+    values["_deployment/runtime.spdx.json"] = (spdx_digest, spdx_size, "sbom")
     license_digest, license_size = _write(
         root,
         "_deployment/third-party-licenses.json",
-        _canonical(licenses),
+        generated.license_manifest,
     )
     values["_deployment/third-party-licenses.json"] = (
         license_digest,
@@ -371,9 +587,17 @@ def _build_valid(root: Path) -> None:
     _write(root, "_deployment/raster-text-runtime-oci-v1.json", _canonical(manifest))
 
 
-def _expect_failure(root: Path, expected: str) -> None:
+def _expect_failure(
+    root: Path,
+    expected: str,
+    *,
+    expected_license_policy: Path | None = None,
+) -> None:
     try:
-        verify_runtime_context(root)
+        verify_runtime_context(
+            root,
+            expected_license_policy=expected_license_policy,
+        )
     except RuntimeContextError as exc:
         if exc.code != expected:
             raise AssertionError(f"expected {expected}, got {exc.code}") from exc
@@ -393,9 +617,31 @@ def main() -> int:
         valid = parent / "valid"
         valid.mkdir()
         _build_valid(valid)
-        result = verify_runtime_context(valid)
+        expected_policy = parent / "expected-policy.json"
+        expected_policy.write_bytes(
+            (valid / "_deployment/runtime-license-policy.json").read_bytes()
+        )
+        result = verify_runtime_context(
+            valid,
+            expected_license_policy=expected_policy,
+        )
         if result["raster_text_profile_revision"] != _PROFILE:
             raise AssertionError("valid profile mismatch")
+        parent_evidence_relative = "_deployment/parent-package-evidence.json"
+        manifest_value = json.loads(
+            (valid / "_deployment/raster-text-runtime-oci-v1.json").read_bytes()
+        )
+        parent_records = [
+            record
+            for record in manifest_value["files"]
+            if record["relative_path"] == parent_evidence_relative
+        ]
+        if (
+            len(parent_records) != 1
+            or parent_records[0]["role"] != "component-evidence"
+            or not (valid / parent_evidence_relative).is_file()
+        ):
+            raise AssertionError("parent package evidence integration missing")
         pointer_raw = (valid / "approvals/raster-text-active.json").read_bytes()
         pointer = parse_raster_text_activation_pointer(pointer_raw)
         direct_evidence = verify_v9_direct_evidence_closure(root=valid, pointer=pointer)
@@ -413,6 +659,59 @@ def main() -> int:
             )
         }:
             raise AssertionError("direct V9 evidence closure mismatch")
+
+        wrong_policy = parent / "wrong-policy.json"
+        wrong_policy.write_bytes(b'{"cpython":[],"fine_tuned_models":[],"schema_version":"1.0"}\n')
+        _expect_failure(
+            valid,
+            "runtime_license_policy_mismatch",
+            expected_license_policy=wrong_policy,
+        )
+
+        missing_parent_evidence = _copy(valid, parent, "missing-parent-evidence")
+        (missing_parent_evidence / parent_evidence_relative).unlink()
+        _expect_failure(
+            missing_parent_evidence,
+            "runtime_manifest_file_set_mismatch",
+        )
+
+        drifted_parent_evidence = _copy(valid, parent, "drifted-parent-evidence")
+        drifted_parent_path = drifted_parent_evidence / parent_evidence_relative
+        drifted_parent_value = json.loads(drifted_parent_path.read_bytes())
+        drifted_parent_value["distributions"][0]["project_urls"] = [
+            "Source, https://github.com/example/forged-parent"
+        ]
+        drifted_parent_raw = _canonical(drifted_parent_value)
+        drifted_parent_path.write_bytes(drifted_parent_raw)
+        drifted_manifest_path = (
+            drifted_parent_evidence / "_deployment/raster-text-runtime-oci-v1.json"
+        )
+        drifted_manifest = json.loads(drifted_manifest_path.read_bytes())
+        for record in drifted_manifest["files"]:
+            if record["relative_path"] == parent_evidence_relative:
+                record["sha256"] = hashlib.sha256(drifted_parent_raw).hexdigest()
+                record["byte_size"] = len(drifted_parent_raw)
+        drifted_manifest_path.write_bytes(_canonical(drifted_manifest))
+        _expect_failure(
+            drifted_parent_evidence,
+            "runtime_parent_package_evidence_mismatch",
+        )
+
+        missing_policy = _copy(valid, parent, "missing-policy")
+        (missing_policy / "_deployment/runtime-license-policy.json").unlink()
+        missing_policy_manifest_path = (
+            missing_policy / "_deployment/raster-text-runtime-oci-v1.json"
+        )
+        missing_policy_manifest = json.loads(
+            missing_policy_manifest_path.read_text(encoding="utf-8")
+        )
+        missing_policy_manifest["files"] = [
+            record
+            for record in missing_policy_manifest["files"]
+            if record["relative_path"] != "_deployment/runtime-license-policy.json"
+        ]
+        missing_policy_manifest_path.write_bytes(_canonical(missing_policy_manifest))
+        _expect_failure(missing_policy, "runtime_license_policy_invalid")
 
         direct_evidence_drift = _copy(valid, parent, "direct-evidence-drift")
         (direct_evidence_drift / "evidence/stage1-decision.json").write_bytes(b"changed")
@@ -472,12 +771,37 @@ def main() -> int:
         _expect_failure(legacy_sealed, "sealed_evaluation_invalid")
 
         drift = _copy(valid, parent, "drift")
-        (drift / "runtime/models/text-rec/model.bin").write_bytes(b"changed")
+        (drift / "runtime/models/text-rec/inference.pdiparams").write_bytes(b"changed")
         _expect_failure(drift, "runtime_file_digest_mismatch")
 
         unlisted = _copy(valid, parent, "unlisted")
         _write(unlisted, "evidence/unlisted.json", b"{}")
         _expect_failure(unlisted, "runtime_manifest_file_set_mismatch")
+
+        extra_component_evidence = _copy(valid, parent, "extra-component-evidence")
+        extra_digest, extra_size = _write(
+            extra_component_evidence,
+            "model-inventories/extra.json",
+            b"{}",
+        )
+        extra_manifest_path = (
+            extra_component_evidence / "_deployment/raster-text-runtime-oci-v1.json"
+        )
+        extra_manifest = json.loads(extra_manifest_path.read_text(encoding="utf-8"))
+        extra_manifest["files"].append(
+            {
+                "byte_size": extra_size,
+                "relative_path": "model-inventories/extra.json",
+                "role": "component-evidence",
+                "sha256": extra_digest,
+            }
+        )
+        extra_manifest["files"].sort(key=lambda item: item["relative_path"])
+        extra_manifest_path.write_bytes(_canonical(extra_manifest))
+        _expect_failure(
+            extra_component_evidence,
+            "runtime_component_evidence_set_mismatch",
+        )
 
         corpus = _copy(valid, parent, "corpus")
         leak_digest, leak_size = _write(corpus, "evidence/leak.png", b"not-an-image")
@@ -593,7 +917,10 @@ def main() -> int:
                 record["sha256"] = new_license_sha
                 record["byte_size"] = len(new_license_payload)
         incomplete_manifest_path.write_bytes(_canonical(incomplete_manifest))
-        _expect_failure(incomplete_license, "license_manifest_incomplete")
+        _expect_failure(
+            incomplete_license,
+            "runtime_license_component_set_mismatch",
+        )
 
         if os.name != "nt":
             writable_root = _copy(valid, parent, "writable-root")
@@ -612,7 +939,7 @@ def main() -> int:
             )
 
             unreadable = _copy(valid, parent, "unreadable")
-            (unreadable / "runtime/models/text-rec/model.bin").chmod(0o600)
+            (unreadable / "runtime/models/text-rec/inference.pdiparams").chmod(0o600)
             _expect_failure(unreadable, "runtime_file_permissions_invalid")
 
             unsearchable = _copy(valid, parent, "unsearchable")
@@ -620,7 +947,7 @@ def main() -> int:
             _expect_failure(unsearchable, "runtime_directory_permissions_invalid")
 
             linked = _copy(valid, parent, "linked")
-            model = linked / "runtime/models/text-rec/model.bin"
+            model = linked / "runtime/models/text-rec/inference.pdiparams"
             model.unlink()
             model.symlink_to(linked / "evidence/sealed.json")
             _expect_failure(linked, "runtime_symlink_forbidden")

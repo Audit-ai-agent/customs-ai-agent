@@ -41,10 +41,10 @@ tag나 `latest`는 runtime 입력으로 거부한다.
 
 ## 1. Linux runtime closure 내보내기
 
-이 작업은 최종 Linux 배포 환경과 같은 `linux/amd64`, CPython 3.11
+이 작업은 최종 Linux 배포 환경과 같은 `linux/amd64`, CPython 3.11.15
 builder에서 수행한다. Windows의 `python.exe` bundle을 Linux 이미지로 복사할
 수 없으며 exporter도 이를 `linux_amd64_builder_required` 또는
-`linux_cp311_sidecar_required`로 거부한다.
+`linux_cp311_builder_required`, `linux_cp311_sidecar_required`로 거부한다.
 
 입력 profile은 다음을 이미 만족해야 한다.
 
@@ -58,17 +58,53 @@ builder에서 수행한다. Windows의 `python.exe` bundle을 Linux 이미지로
 Linux export는 이 V12/V9 조합만 허용한다. 기존 Windows schema-11 pointer는 로컬
 서비스 호환을 위해 Agent에 남아 있지만 Linux OCI 입력으로는 명시적으로 거부된다.
 
-runtime SBOM 입력은 SPDX JSON(`SPDX-2.x`, `CC0-1.0`)이어야 한다. license manifest는
-다음 형태로 Python package, runtime, model 세 scope를 모두 선언해야 한다. 데이터
-전용 검사는 package inventory의 이름·버전이 license 선언에 포함됐는지 확인한다.
-모델/runtime 선언의 법적 완전성을 자동 판정한다고 주장하지 않으며, 최종 이미지의
-실제 OS·application 구성은 BuildKit의 OCI SBOM/provenance가 별도로 기록한다.
-이 두 metadata 파일은 현재 활성 pointer만으로 완전하게 재생성할 수 없으므로 Linux
-export 이전에 release input으로 준비해야 하는 명시적 선행조건이다. 누락되거나 scope,
-package identity가 불완전하면 exporter가 대신 추정하지 않고 실패한다.
+Exporter는 별도 SBOM·license 파일을 요구하지 않는다. 검증된 profile이 가리키는
+parent/sidecar package inventory, 실제 `*.dist-info` metadata와 license 파일,
+CPython `patchlevel.h`와 `LICENSE`, detector의 hash-bound source inventory를 읽어
+Python package, model, runtime 세 scope의 SPDX 2.3과 license manifest를 오프라인으로
+결정론적으로 만든다. 실제 inventory 집합과 두 metadata의 구성요소 집합은 이름 정규화,
+버전, scope 기준으로 정확히 1:1이어야 한다. 모델 snapshot은 실제 8개 inventory row에서
+재계산하며 model/CPython에는 실제 SHA256 checksum을 기록한다. package inventory에는
+wheel digest가 없으므로 합성 checksum을 주장하지 않고, 최종 exhaustive file manifest로
+설치된 byte를 결속한다. 기본 V19 운송 집합은 full PP-Structure bundle 89개가 아니라
+active direct microbundle의 sidecar 17개와 parent `pypdfium2`/`Pillow`만이다. 따라서
+`bce-python-sdk`, `latex2mathml`, `tokenizers` 같은 source-bundle 전용 패키지를 SBOM에
+부풀려 넣지 않는다. 실제 license directory와 exact package/version CycloneDX expression을
+읽되 다른 dist-info의 license/SBOM은 차용할 수 없다. 공식 source URL이 없는 오래된
+METADATA는 exact name/version에 대한 canonical PyPI registry URL만 기록하며 repository
+provenance라고 표현하지 않는다. 임의 source URI, 동시 변조된 SPDX/license,
+새 model hash 또는 모호하고 근거 파일도 없는 license는 실패한다. 최종 이미지의 OS와
+application 구성은 BuildKit OCI SBOM/provenance가 별도로 기록한다.
+
+SPDX `creationInfo.created`는 신뢰할 수 있는 생성 시각이 offline bundle에 없으므로
+결정론적 sentinel `1970-01-01T00:00:00Z`를 사용한다. 이는 bundle 생성 시각 주장이
+아니며 같은 입력의 byte-identical 결과를 위한 값이다.
+
+Parent interpreter에만 존재하는 package metadata는 Name/Version과 license/source 관련
+header 및 실제 license file만 최소 projection으로 bundle에 넣는다. Author/maintainer 정보나
+긴 package 설명은 복제하지 않는다. CPython 3.11.15도 실제 `LICENSE.txt` SHA256과 공식
+CPython `v3.11.15` source URI가 checked-in policy와 모두 일치해야 한다.
+
+Fine-tuned recognizer의 학습 receipt에 있는 `framework_license`와 upstream Paddle
+base model의 `Apache-2.0`은 fine-tuned 산출물의 license가 아니다. 따라서 이를 결과
+모델 license로 전이하지 않는다. Exact combined manifest `3b276c1a...`, recognizer
+snapshot `2a41badb...`, model name이 모두 맞을 때만 결과 모델의
+`licenseDeclared`, `licenseConcluded`, `downloadLocation`을 SPDX 특수값
+`NOASSERTION`으로 기록한다. 이는 Apache-2.0이나 proprietary license를 승인했다는
+뜻이 아니라, 현재 근거로 결론을 내리지 않았음을 정확히 표시한다.
+
+동시에 policy는 upstream base recognizer의 공식 PaddlePaddle commit URI, source
+inventory SHA, 4개 base artifact hash projection, `Apache-2.0` inventory claim,
+head-tuning receipt self-hash를 서로 교차 결속한다. 이 upstream provenance는 결과
+모델의 license 결론과 별도이며, 하나라도 drift하면 export가 실패한다. Policy와
+license manifest의 `distribution_scope`는 `private-ghcr-only`로 고정된다. 지원되는
+게시 스크립트와 workflow는 모델 byte를 보내기 전후 target package의 private 상태를
+검증하므로 이 `NOASSERTION` 경로를 public package, 공개 release 또는 재라이선스 근거로
+재사용할 수 없다. 공개 배포에는 fine-tuned material의 별도 권리 검토와 명시적 license/
+source 결정이 선행돼야 한다.
 
 ```json
-{"components":[{"license_id":"Apache-2.0","name":"example","scope":"python-package","source_uri":"https://example.invalid/source","version":"1.0"}],"schema_version":"1.0"}
+{"cpython":[{"license_sha256":"<exact LICENSE SHA256>","source_uri":"https://<official-version-source>","version":"<exact version>"}],"distribution_scope":"private-ghcr-only","fine_tuned_models":[{"combined_model_manifest_sha256":"<64 hex>","distribution_scope":"private-ghcr-only","license_id":"NOASSERTION","model_name":"<exact model name>","model_snapshot_sha256":"<64 hex>","source_uri":"NOASSERTION","upstream_base_artifacts_sha256":"<64 hex>","upstream_base_license_id":"Apache-2.0","upstream_base_model_name":"<exact upstream name>","upstream_base_source_inventory_sha256":"<64 hex>","upstream_base_source_uri":"https://<immutable official source>","upstream_training_receipt_sha256":"<64 hex>"}],"schema_version":"1.0"}
 ```
 
 내보내기는 기존 디렉터리를 덮어쓰지 않는다. 전체 activation을 먼저 검증한
@@ -82,14 +118,19 @@ closure를 포함하되, 2,400건 평가 corpus나 개별 결과는 포함하지
 ```bash
 uv run --locked --no-sync python tools/export_raster_text_oci_runtime.py \
   --document-preview-root /srv/customs/_local/data/document-preview \
-  --runtime-sbom /srv/customs/release-input/runtime.spdx.json \
-  --runtime-license-manifest /srv/customs/release-input/runtime-licenses.json \
   --destination /srv/customs/release-output/raster-runtime-context
 
-python tools/verify_raster_text_oci_runtime.py \
+uv run --locked --no-sync python tools/verify_raster_text_oci_runtime.py \
   --document-preview-root \
-  /srv/customs/release-output/raster-runtime-context/document-preview
+  /srv/customs/release-output/raster-runtime-context/document-preview \
+  --expected-license-policy deploy/ocr-oci/runtime-license-policy.json
 ```
+
+기존 자동화 호환을 위해 `--runtime-sbom`과 `--runtime-license-manifest`를 함께
+전달할 수는 있지만, 자동 생성 결과와 byte 단위로 같을 때만 허용한다. 둘 중 하나만
+주거나 수동 metadata가 달라지면 export가 실패한다.
+게시 스크립트와 최종 Docker build도 runtime image 안의 policy byte가 현재 source
+revision의 checked-in policy와 정확히 같지 않으면 거부한다.
 
 데이터 전용 verifier는 파일 운송 경계만 담당하고, 이어지는 Agent verifier는 실제
 V19 profile fingerprint와 V9 receipt 의미를 권위 있는 서비스 코드로 검증한다. 게시
@@ -105,7 +146,7 @@ V19 profile fingerprint와 V9 receipt 의미를 권위 있는 서비스 코드�
 - 128개 또는 64MiB를 넘는 compact activation evidence
 - trust-root deployment manifest까지 합쳐 25,000개를 넘거나 총 2GiB를 넘는 전체
   runtime closure
-- SBOM/license manifest가 없거나 pointer/profile hash와 맞지 않는 bundle
+- 자동 SBOM/license/policy가 없거나 actual inventory와 정확히 일치하지 않는 bundle
 
 직접 Paddle Linux bundle은 패키지의 작은 파일이 많아 20,000개에 가까울 수 있다.
 현재 상한 25,000개는 그 실측 예상치에 25%의 제한된 여유만 둔 값이다. Export와
