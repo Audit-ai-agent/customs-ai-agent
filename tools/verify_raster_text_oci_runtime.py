@@ -603,15 +603,20 @@ def _tree_paths(root: Path) -> tuple[set[PurePosixPath], list[Path]]:
 
 def _validate_no_forbidden_material(
     declared: dict[PurePosixPath, dict[str, Any]], role_counts: Counter[str]
-) -> None:
+) -> set[PurePosixPath]:
+    manifest_bound_bytecode: set[PurePosixPath] = set()
     evidence_bytes = 0
     for relative, record in declared.items():
         if any(part.casefold() in _FORBIDDEN_PATH_COMPONENTS for part in relative.parts):
             raise RuntimeContextError("evaluation_corpus_forbidden")
-        if any(
-            part.casefold() in {".git", ".venv", "__pycache__", "cache", "secrets"}
-            for part in relative.parts
-        ):
+        folded_parts = {part.casefold() for part in relative.parts}
+        if "__pycache__" in folded_parts:
+            # A pinned CPython interpreter may intentionally ship deterministic
+            # precompiled bytecode.  Defer this one component until the
+            # pointer-bound sidecar release manifest has proved the exact path,
+            # size and digest.  Unbound caches remain forbidden below.
+            manifest_bound_bytecode.add(relative)
+        if any(part in {".git", ".venv", "cache", "secrets"} for part in folded_parts):
             raise RuntimeContextError("runtime_cache_or_secret_forbidden")
         role = str(record["role"])
         role_counts[role] += 1
@@ -633,6 +638,28 @@ def _validate_no_forbidden_material(
         raise RuntimeContextError("runtime_required_role_invalid")
     if role_counts["sbom"] != 1 or role_counts["licenses"] != 1:
         raise RuntimeContextError("runtime_required_role_invalid")
+    return manifest_bound_bytecode
+
+
+def _validate_manifest_bound_bytecode(
+    *,
+    declared: dict[PurePosixPath, dict[str, Any]],
+    sidecar_release_records: dict[PurePosixPath, dict[str, Any]],
+    candidates: set[PurePosixPath],
+) -> None:
+    """Permit only immutable sidecar-manifest ``.pyc`` runtime artifacts."""
+
+    for relative in candidates:
+        runtime_record = declared[relative]
+        release_record = sidecar_release_records.get(relative)
+        if (
+            relative.suffix.casefold() != ".pyc"
+            or runtime_record["role"] != "sidecar-runtime"
+            or release_record is None
+            or runtime_record["sha256"] != release_record["sha256"]
+            or runtime_record["byte_size"] != release_record["byte_size"]
+        ):
+            raise RuntimeContextError("runtime_cache_or_secret_forbidden")
 
 
 def _verify_runtime_context(
@@ -702,7 +729,7 @@ def _verify_runtime_context(
 
     declared = _declared_path_map(manifest)
     roles: Counter[str] = Counter()
-    _validate_no_forbidden_material(declared, roles)
+    manifest_bound_bytecode = _validate_no_forbidden_material(declared, roles)
 
     total_bytes = len(raw)
     if total_bytes > _MAX_TOTAL_BYTES:
@@ -847,6 +874,11 @@ def _verify_runtime_context(
         declared=declared,
         payload_role="sidecar-runtime",
         code="runtime_platform_manifest_invalid",
+    )
+    _validate_manifest_bound_bytecode(
+        declared=declared,
+        sidecar_release_records=sidecar_release_records,
+        candidates=manifest_bound_bytecode,
     )
     _release_manifest_records(
         root=resolved_root,

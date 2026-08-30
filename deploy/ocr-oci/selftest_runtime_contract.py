@@ -96,7 +96,11 @@ def _write(root: Path, relative: str, payload: bytes) -> tuple[str, int]:
     return hashlib.sha256(payload).hexdigest(), len(payload)
 
 
-def _build_valid(root: Path) -> None:
+def _build_valid(
+    root: Path,
+    *,
+    precompiled_relative: str = ("interpreter/lib/python3.11/__pycache__/pathlib.cpython-311.pyc"),
+) -> None:
     parent_site = root.parent / "parent-site"
     parent_dist = parent_site / "test_parent_python-2.0.dist-info"
     parent_dist.mkdir(parents=True, exist_ok=True)
@@ -112,7 +116,9 @@ def _build_valid(root: Path) -> None:
         "test_parent_python-2.0.dist-info/METADATA,,\ntest_parent_python-2.0.dist-info/RECORD,,\n",
         encoding="utf-8",
     )
-    sys.path.insert(0, str(parent_site))
+    parent_site_text = str(parent_site)
+    if parent_site_text not in sys.path:
+        sys.path.insert(0, parent_site_text)
     values: dict[str, tuple[str, int, str]] = {}
     for relative, payload, role in (
         (
@@ -174,6 +180,11 @@ def _build_valid(root: Path) -> None:
         (
             "runtime/sidecar/interpreter/LICENSE.txt",
             _CPYTHON_LICENSE_TEXT,
+            "sidecar-runtime",
+        ),
+        (
+            f"runtime/sidecar/{precompiled_relative}",
+            b"fixture-manifest-bound-bytecode",
             "sidecar-runtime",
         ),
         (
@@ -818,6 +829,34 @@ def main() -> int:
         manifest["files"].sort(key=lambda item: item["relative_path"])
         manifest_path.write_bytes(_canonical(manifest))
         _expect_failure(corpus, "evaluation_corpus_forbidden")
+
+        unbound_cache = _copy(valid, parent, "unbound-cache")
+        cache_digest, cache_size = _write(
+            unbound_cache,
+            "runtime/models/text-det/__pycache__/extra.cpython-311.pyc",
+            b"unbound-bytecode",
+        )
+        cache_manifest_path = unbound_cache / "_deployment/raster-text-runtime-oci-v1.json"
+        cache_manifest = json.loads(cache_manifest_path.read_text(encoding="utf-8"))
+        cache_manifest["files"].append(
+            {
+                "byte_size": cache_size,
+                "relative_path": ("runtime/models/text-det/__pycache__/extra.cpython-311.pyc"),
+                "role": "model",
+                "sha256": cache_digest,
+            }
+        )
+        cache_manifest["files"].sort(key=lambda item: item["relative_path"])
+        cache_manifest_path.write_bytes(_canonical(cache_manifest))
+        _expect_failure(unbound_cache, "runtime_cache_or_secret_forbidden")
+
+        declared_non_bytecode = parent / "declared-non-bytecode-cache"
+        declared_non_bytecode.mkdir()
+        _build_valid(
+            declared_non_bytecode,
+            precompiled_relative="interpreter/lib/python3.11/__pycache__/payload.txt",
+        )
+        _expect_failure(declared_non_bytecode, "runtime_cache_or_secret_forbidden")
 
         empty_receipt = _copy(valid, parent, "empty-receipt")
         empty_digest, empty_size = _write(empty_receipt, "evidence/extra-receipt.json", b"{}")
