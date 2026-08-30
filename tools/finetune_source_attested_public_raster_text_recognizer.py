@@ -25,9 +25,7 @@ from customs_ai_agent.evaluation.source_attested_public_raster_text_recognizer_f
 def _parser() -> argparse.ArgumentParser:
     parser = argparse.ArgumentParser(description=__doc__)
     parser.add_argument("--document-preview-root", type=Path, required=True)
-    parser.add_argument(
-        "--stage", choices=("leakage-safe-v2",), default="leakage-safe-v2"
-    )
+    parser.add_argument("--stage", choices=("leakage-safe-v2",), default="leakage-safe-v2")
     return parser
 
 

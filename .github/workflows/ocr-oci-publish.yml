@@ -1,0 +1,259 @@
+name: Raster OCR OCI publish
+
+on:
+  workflow_dispatch:
+    inputs:
+      operation:
+        description: "Create private asset-free packages or publish the digest-pinned OCR image"
+        required: true
+        default: bootstrap
+        type: choice
+        options:
+          - bootstrap
+          - publish
+      runtime_image:
+        description: "Required only for publish: ghcr.io/<owner>/<repo>-raster-runtime@sha256:..."
+        required: false
+        type: string
+      confirm_source_sha:
+        description: "Exact 40-character main commit SHA approved for this private release"
+        required: true
+        type: string
+      confirm_private_distribution:
+        description: "Confirm that OCR model bytes may be published only to private GHCR packages"
+        required: true
+        default: false
+        type: boolean
+
+concurrency:
+  group: raster-ocr-oci-publish
+  cancel-in-progress: false
+
+permissions:
+  actions: read
+  contents: read
+  packages: write
+  attestations: write
+  id-token: write
+
+jobs:
+  publish:
+    runs-on: ubuntu-latest
+    timeout-minutes: 45
+    outputs:
+      digest: ${{ steps.publish.outputs.digest }}
+      image: ${{ steps.release.outputs.image_repository }}
+      immutable_ref: ${{ steps.result.outputs.immutable_ref }}
+    steps:
+      - name: Resolve immutable release inputs
+        id: release
+        shell: bash
+        env:
+          DISPATCH_OPERATION: ${{ inputs.operation }}
+          DISPATCH_RUNTIME_IMAGE: ${{ inputs.runtime_image }}
+          DISPATCH_CONFIRM_SOURCE_SHA: ${{ inputs.confirm_source_sha }}
+          DISPATCH_CONFIRM_PRIVATE_DISTRIBUTION: ${{ inputs.confirm_private_distribution }}
+        run: |
+          set -euo pipefail
+          if [[ "${GITHUB_EVENT_NAME}" != "workflow_dispatch" || "${GITHUB_REF}" != "refs/heads/main" || "${GITHUB_REF_TYPE}" != "branch" ]]; then
+            echo "manual_publish_requires_main" >&2
+            exit 1
+          fi
+          if [[ "${GITHUB_RUN_ATTEMPT}" != "1" || "${GITHUB_ACTOR}" != "${GITHUB_TRIGGERING_ACTOR}" ]]; then
+            echo "manual_publish_requires_initial_same_actor_run" >&2
+            exit 1
+          fi
+          if [[ ! "${DISPATCH_CONFIRM_SOURCE_SHA}" =~ ^[a-f0-9]{40}$ || "${DISPATCH_CONFIRM_SOURCE_SHA}" != "${GITHUB_SHA}" ]]; then
+            echo "manual_publish_source_sha_confirmation_invalid" >&2
+            exit 1
+          fi
+          if [[ "${DISPATCH_CONFIRM_PRIVATE_DISTRIBUTION}" != "true" ]]; then
+            echo "manual_publish_private_distribution_not_confirmed" >&2
+            exit 1
+          fi
+          repository="${GITHUB_REPOSITORY,,}"
+          operation="${DISPATCH_OPERATION}"
+          runtime_image="${DISPATCH_RUNTIME_IMAGE}"
+          runtime_repository="ghcr.io/${repository}-raster-runtime"
+          if [[ "${operation}" == "bootstrap" ]]; then
+            [[ -z "${runtime_image}" ]] || {
+              echo "bootstrap_runtime_image_forbidden" >&2
+              exit 1
+            }
+            should_publish=false
+          elif [[ "${operation}" == "publish" ]]; then
+            [[ -n "${runtime_image}" ]] || {
+              echo "publish_runtime_image_required" >&2
+              exit 1
+            }
+            runtime_digest="${runtime_image#"${runtime_repository}@"}"
+            if [[ "${runtime_image}" != "${runtime_repository}@${runtime_digest}" || ! "${runtime_digest}" =~ ^sha256:[a-f0-9]{64}$ ]]; then
+              echo "digest_pinned_org_runtime_image_required" >&2
+              exit 1
+            fi
+            should_publish=true
+          else
+            echo "publish_operation_invalid" >&2
+            exit 1
+          fi
+          image_repository="ghcr.io/${repository}-raster-ocr"
+          tags="${image_repository}:sha-${GITHUB_SHA}"
+          {
+            echo "runtime_image=${runtime_image}"
+            echo "runtime_repository=${runtime_repository}"
+            echo "image_repository=${image_repository}"
+            echo "placeholder_tag=asset-free-bootstrap-v1"
+            echo "should_publish=${should_publish}"
+            echo "tags<<EOF"
+            echo "${tags}"
+            echo "EOF"
+          } >> "${GITHUB_OUTPUT}"
+
+      - uses: actions/checkout@11d5960a326750d5838078e36cf38b85af677262 # v4
+        with:
+          ref: refs/heads/main
+          fetch-depth: 1
+          persist-credentials: false
+
+      - name: Verify exact current main revision
+        shell: bash
+        run: |
+          set -euo pipefail
+          [[ "${GITHUB_SHA}" =~ ^[a-f0-9]{40}$ ]] || {
+            echo "workflow_source_revision_invalid" >&2
+            exit 1
+          }
+          [[ "$(git rev-parse HEAD)" == "${GITHUB_SHA}" ]] || {
+            echo "main_moved_after_dispatch" >&2
+            exit 1
+          }
+
+      - name: Verify manual administrator release authority
+        shell: bash
+        env:
+          GH_TOKEN: ${{ secrets.GITHUB_TOKEN }}
+        run: |
+          python3 deploy/ocr-oci/verify_github_release_actor.py \
+            --repository "${GITHUB_REPOSITORY}" \
+            --actor "${GITHUB_ACTOR}"
+
+      - name: Log in to private GHCR
+        uses: docker/login-action@c94ce9fb468520275223c153574b00df6fe4bcc9 # v3
+        with:
+          registry: ghcr.io
+          username: ${{ github.actor }}
+          password: ${{ secrets.GITHUB_TOKEN }}
+
+      - name: Set up Buildx
+        uses: docker/setup-buildx-action@8d2750c68a42422c14e847fe6c8ac0403b4cbd6f # v3
+
+      - name: Bootstrap asset-free private GHCR packages
+        shell: bash
+        env:
+          GH_TOKEN: ${{ secrets.GITHUB_TOKEN }}
+          OUTPUT_IMAGE: ${{ steps.release.outputs.image_repository }}
+          PLACEHOLDER_TAG: ${{ steps.release.outputs.placeholder_tag }}
+          RUNTIME_REPOSITORY: ${{ steps.release.outputs.runtime_repository }}
+          SHOULD_PUBLISH: ${{ steps.release.outputs.should_publish }}
+        run: |
+          set -euo pipefail
+          source_repository="https://github.com/${GITHUB_REPOSITORY}"
+          image_repositories=("${OUTPUT_IMAGE}")
+          if [[ "${SHOULD_PUBLISH}" != "true" ]]; then
+            image_repositories=("${RUNTIME_REPOSITORY}" "${OUTPUT_IMAGE}")
+          fi
+          for image_repository in "${image_repositories[@]}"; do
+            docker buildx build \
+              --file deploy/ocr-oci/placeholder/Dockerfile \
+              --platform linux/amd64 \
+              --build-arg "SOURCE_REPOSITORY=${source_repository}" \
+              --provenance=false \
+              --sbom=false \
+              --tag "${image_repository}:${PLACEHOLDER_TAG}" \
+              --push \
+              deploy/ocr-oci/placeholder
+            docker buildx imagetools inspect \
+              "${image_repository}:${PLACEHOLDER_TAG}" >/dev/null
+            python3 deploy/ocr-oci/verify_ghcr_private_package.py \
+              --image "${image_repository}" \
+              --repository "${GITHUB_REPOSITORY}"
+          done
+
+      - name: Report package bootstrap only
+        if: steps.release.outputs.should_publish != 'true'
+        shell: bash
+        env:
+          OUTPUT_IMAGE: ${{ steps.release.outputs.image_repository }}
+          RUNTIME_REPOSITORY: ${{ steps.release.outputs.runtime_repository }}
+        run: |
+          {
+            echo "### Raster OCR private package bootstrap"
+            echo
+            echo "- Runtime package: \`${RUNTIME_REPOSITORY}\`"
+            echo "- Agent package: \`${OUTPUT_IMAGE}\`"
+            echo "- Result: asset-free placeholders pushed and private visibility verified"
+          } >> "${GITHUB_STEP_SUMMARY}"
+
+      - name: Verify runtime digest is private and readable
+        if: steps.release.outputs.should_publish == 'true'
+        shell: bash
+        env:
+          GH_TOKEN: ${{ secrets.GITHUB_TOKEN }}
+          OUTPUT_IMAGE: ${{ steps.release.outputs.image_repository }}
+          RUNTIME_IMAGE: ${{ steps.release.outputs.runtime_image }}
+        run: |
+          set -euo pipefail
+          python3 deploy/ocr-oci/verify_ghcr_private_package.py \
+            --image "${RUNTIME_IMAGE}" \
+            --repository "${GITHUB_REPOSITORY}"
+          docker buildx imagetools inspect "${RUNTIME_IMAGE}" >/dev/null
+          python3 deploy/ocr-oci/verify_ghcr_private_package.py \
+            --image "${OUTPUT_IMAGE}" \
+            --repository "${GITHUB_REPOSITORY}"
+
+      - name: Build and publish immutable Agent plus OCR image
+        if: steps.release.outputs.should_publish == 'true'
+        id: publish
+        uses: docker/build-push-action@10e90e3645eae34f1e60eeb005ba3a3d33f178e8 # v6
+        with:
+          context: .
+          file: deploy/ocr-oci/Dockerfile
+          target: release
+          platforms: linux/amd64
+          push: true
+          tags: ${{ steps.release.outputs.tags }}
+          build-args: |
+            RASTER_RUNTIME_IMAGE=${{ steps.release.outputs.runtime_image }}
+            SOURCE_REVISION=${{ github.sha }}
+          provenance: mode=max
+          sbom: true
+
+      - name: Verify and report immutable image digest
+        if: steps.release.outputs.should_publish == 'true'
+        id: result
+        shell: bash
+        env:
+          DIGEST: ${{ steps.publish.outputs.digest }}
+          GH_TOKEN: ${{ secrets.GITHUB_TOKEN }}
+          IMAGE_REPOSITORY: ${{ steps.release.outputs.image_repository }}
+          RUNTIME_IMAGE: ${{ steps.release.outputs.runtime_image }}
+        run: |
+          set -euo pipefail
+          [[ "${DIGEST}" =~ ^sha256:[a-f0-9]{64}$ ]] || {
+            echo "published_digest_missing" >&2
+            exit 1
+          }
+          immutable_ref="${IMAGE_REPOSITORY}@${DIGEST}"
+          docker buildx imagetools inspect "${immutable_ref}" >/dev/null
+          python3 deploy/ocr-oci/verify_ghcr_private_package.py \
+            --image "${immutable_ref}" \
+            --repository "${GITHUB_REPOSITORY}"
+          echo "immutable_ref=${immutable_ref}" >> "${GITHUB_OUTPUT}"
+          {
+            echo "### Raster OCR OCI publication"
+            echo
+            echo "- Agent source: \`${GITHUB_SHA}\`"
+            echo "- Runtime input: \`${RUNTIME_IMAGE}\`"
+            echo "- Deploy exactly: \`${immutable_ref}\`"
+            echo "- OCI provenance and SBOM attestations: enabled"
+          } >> "${GITHUB_STEP_SUMMARY}"

@@ -1,0 +1,23 @@
+services:
+  customs-ai-agent:
+    image: ${CUSTOMS_AGENT_IMAGE:?digest-pinned Agent OCR image is required}
+    network_mode: host
+    read_only: true
+    user: "10001:10001"
+    init: true
+    restart: unless-stopped
+    cap_drop:
+      - ALL
+    security_opt:
+      - no-new-privileges:true
+    pids_limit: 256
+    cpus: 6.0
+    mem_limit: 2g
+    shm_size: 256m
+    tmpfs:
+      - /tmp:rw,noexec,nosuid,nodev,size=512m,uid=10001,gid=10001,mode=0700
+    environment:
+      CUSTOMS_AGENT_SERVICE_MODE: ${CUSTOMS_AGENT_SERVICE_MODE:-local-development}
+      CUSTOMS_AGENT_SERVICE_BEARER_TOKEN: ${CUSTOMS_AGENT_SERVICE_BEARER_TOKEN:?required}
+      EVIDENCE_SERVICE_BASE_URL: ${EVIDENCE_SERVICE_BASE_URL:?required}
+      EVIDENCE_SERVICE_TOKEN: ${EVIDENCE_SERVICE_TOKEN:?required}

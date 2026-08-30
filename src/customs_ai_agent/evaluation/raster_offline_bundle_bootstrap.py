@@ -1,4 +1,4 @@
-"""Build the one pinned Windows raster-OCR bundle without manual staging.
+"""Build one pinned platform-native raster-OCR bundle without manual staging.
 
 The normal service and activation path remain completely offline: they only
 accept the exhaustive, hash-bound bundle below ``_local/data/document-preview``.
@@ -8,9 +8,10 @@ PyPI and eight fixed official Paddle model archives, then immediately turns
 them into an immutable local bundle.  No downloaded byte is used by OCR until
 the isolated sidecar smoke test and exhaustive manifest verification pass.
 
-It is intentionally Windows/CPython-3.11 specific.  The selected Paddle CPU
-wheel is platform-native, so pretending a cross-platform bundle exists would
-make activation less reliable rather than more portable.
+The only supported targets are Windows/AMD64 and Linux/AMD64 on CPython 3.11.
+Each target has a separate hash lock, interpreter layout, and manifest
+identity.  A bundle is therefore portable between equivalent hosts, but a
+native wheel/interpreter tree is never mislabeled as cross-platform.
 """
 
 from __future__ import annotations
@@ -21,6 +22,7 @@ import hashlib
 import importlib.metadata
 import json
 import os
+import platform
 from pathlib import Path, PurePosixPath
 import re
 import shutil
@@ -48,6 +50,7 @@ from customs_ai_agent.evaluation.raster_offline_bundle import (
     load_verified_raster_offline_bundle,
     load_verified_raster_offline_bundle_release,
     verify_parent_renderer_inventory,
+    verify_raster_offline_bundle_runtime_platform,
     verify_raster_text_direct_model_material,
     verify_staged_raster_offline_bundle,
 )
@@ -71,7 +74,6 @@ _MAX_ARCHIVE_BYTES = 1024 * 1024 * 1024
 _MODEL_BASE_URL = (
     "https://paddle-model-ecology.bj.bcebos.com/paddlex/official_inference_model/paddle3.0.0"
 )
-_SIDECAR_REQUIREMENTS_RELATIVE_PATH = "requirements/raster-sidecar-win-amd64-cp311.lock"
 _EXTRACTOR_REVISION = "ppstructurev3-local-v1-paddleocr-3.7.0"
 _PARENT_PACKAGES = ("pypdfium2", "Pillow")
 _SIDECAR_REQUIRED_PACKAGES = ("paddleocr", "paddlex", "paddlepaddle")
@@ -126,6 +128,70 @@ class RasterOfflineBundleBootstrapResultV1:
     created: bool
     manifest_sha256: str
     raster_profile_revision: str
+
+
+@dataclass(frozen=True, slots=True)
+class _RuntimePlatformSpec:
+    """One exact native sidecar target selected without fallback."""
+
+    operating_system: str
+    architecture: str
+    python_abi: str
+    requirements_relative_path: str
+    interpreter_relative_path: str
+
+
+def _select_runtime_platform(
+    *,
+    os_name: str,
+    sys_platform: str,
+    machine: str,
+    implementation: str,
+    python_version: tuple[int, int],
+    pointer_bits: int,
+) -> _RuntimePlatformSpec:
+    """Map one host identity to a checked-in lock and interpreter layout."""
+
+    normalized_machine = machine.casefold().replace("-", "_")
+    if (
+        implementation != "cpython"
+        or python_version != (3, 11)
+        or pointer_bits != 64
+        or normalized_machine not in {"amd64", "x86_64"}
+    ):
+        raise RasterOfflineBundleBootstrapError("raster_bundle_bootstrap_platform_unsupported")
+    if os_name == "nt" and sys_platform == "win32":
+        return _RuntimePlatformSpec(
+            operating_system="windows",
+            architecture="amd64",
+            python_abi="cp311",
+            requirements_relative_path="requirements/raster-sidecar-win-amd64-cp311.lock",
+            interpreter_relative_path="sidecar/interpreter/python.exe",
+        )
+    if os_name == "posix" and sys_platform.startswith("linux"):
+        return _RuntimePlatformSpec(
+            operating_system="linux",
+            architecture="amd64",
+            python_abi="cp311",
+            requirements_relative_path="requirements/raster-sidecar-linux-amd64-cp311.lock",
+            interpreter_relative_path="sidecar/interpreter/bin/python3.11",
+        )
+    raise RasterOfflineBundleBootstrapError("raster_bundle_bootstrap_platform_unsupported")
+
+
+def _runtime_platform_spec() -> _RuntimePlatformSpec:
+    return _select_runtime_platform(
+        os_name=os.name,
+        sys_platform=sys.platform,
+        machine=platform.machine(),
+        implementation=sys.implementation.name,
+        python_version=sys.version_info[:2],
+        pointer_bits=64 if sys.maxsize > 2**32 else 32,
+    )
+
+
+def _sidecar_requirements_path() -> Path:
+    return _project_root() / _runtime_platform_spec().requirements_relative_path
 
 
 @dataclass(frozen=True, slots=True)
@@ -231,15 +297,24 @@ def _canonical_json(value: object) -> bytes:
 
 def _sha256_file(path: Path) -> tuple[str, int]:
     try:
-        if path.is_symlink() or not path.is_file():
+        before = path.lstat()
+        if _is_link_or_reparse_point(before) or not stat.S_ISREG(before.st_mode):
             raise RasterOfflineBundleBootstrapError("raster_bundle_bootstrap_file_invalid")
-        size = path.stat().st_size
+        size = before.st_size
         if size > _MAX_FILE_BYTES:
             raise RasterOfflineBundleBootstrapError("raster_bundle_bootstrap_file_invalid")
         digest = hashlib.sha256()
         with path.open("rb") as stream:
             while block := stream.read(1024 * 1024):
                 digest.update(block)
+        after = path.lstat()
+        if (
+            _is_link_or_reparse_point(after)
+            or not stat.S_ISREG(after.st_mode)
+            or after.st_size != size
+            or (before.st_dev, before.st_ino) != (after.st_dev, after.st_ino)
+        ):
+            raise RasterOfflineBundleBootstrapError("raster_bundle_bootstrap_file_invalid")
         return digest.hexdigest(), size
     except RasterOfflineBundleBootstrapError:
         raise
@@ -460,8 +535,7 @@ def _project_root() -> Path:
 
 
 def _ensure_supported_platform() -> None:
-    if os.name != "nt" or sys.version_info[:2] != (3, 11) or sys.maxsize <= 2**32:
-        raise RasterOfflineBundleBootstrapError("raster_bundle_bootstrap_platform_unsupported")
+    _runtime_platform_spec()
 
 
 def _required_parent_inventory() -> dict[str, object]:
@@ -518,15 +592,31 @@ def _remove_owned_tree(root: Path, path: Path, *, prefix: str) -> None:
         pass
 
 
-def _copy_interpreter(*, destination: Path) -> None:
-    source = Path(sys.base_prefix)
+def _copy_interpreter(*, destination: Path, platform_spec: _RuntimePlatformSpec) -> None:
+    """Create a regular-file-only interpreter tree for one native target.
+
+    Both targets copy the complete CPython base prefix.  This keeps stdlib and
+    ``lib-dynload`` below the exact interpreter root required by the isolated
+    child bootstrap. ``copytree(..., symlinks=False)`` materializes ordinary
+    source aliases as regular files; the exhaustive post-copy walk rejects
+    every surviving link or special file.
+    """
+
     try:
-        if source.is_symlink() or not (source / "python.exe").is_file():
+        source = Path(sys.base_prefix)
+        interpreter_relative = PurePosixPath(platform_spec.interpreter_relative_path).relative_to(
+            PurePosixPath("sidecar/interpreter")
+        )
+        source_interpreter = source.joinpath(*interpreter_relative.parts)
+        if source.is_symlink() or not stat.S_ISREG(source_interpreter.resolve().lstat().st_mode):
             raise RasterOfflineBundleBootstrapError("raster_bundle_interpreter_unavailable")
         shutil.copytree(source, destination, symlinks=False, copy_function=shutil.copy2)
+        interpreter = destination.joinpath(*interpreter_relative.parts)
+        if not stat.S_ISREG(interpreter.lstat().st_mode):
+            raise RasterOfflineBundleBootstrapError("raster_bundle_interpreter_unavailable")
     except RasterOfflineBundleBootstrapError:
         raise
-    except OSError:
+    except (OSError, ValueError, subprocess.TimeoutExpired):
         raise RasterOfflineBundleBootstrapError("raster_bundle_interpreter_unavailable") from None
     _assert_regular_tree(destination)
 
@@ -535,10 +625,14 @@ def _assert_regular_tree(root: Path) -> None:
     """Reject every link/special file before it can enter a hashed bundle."""
 
     try:
-        if root.is_symlink() or not root.is_dir():
+        root_metadata = root.lstat()
+        if _is_link_or_reparse_point(root_metadata) or not stat.S_ISDIR(root_metadata.st_mode):
             raise RasterOfflineBundleBootstrapError("raster_bundle_bootstrap_tree_invalid")
         for path in root.rglob("*"):
-            if path.is_symlink() or not (path.is_dir() or path.is_file()):
+            metadata = path.lstat()
+            if _is_link_or_reparse_point(metadata) or not (
+                stat.S_ISDIR(metadata.st_mode) or stat.S_ISREG(metadata.st_mode)
+            ):
                 raise RasterOfflineBundleBootstrapError("raster_bundle_bootstrap_tree_invalid")
     except RasterOfflineBundleBootstrapError:
         raise
@@ -547,7 +641,7 @@ def _assert_regular_tree(root: Path) -> None:
 
 
 def _install_sidecar_packages(*, interpreter: Path, module_root: Path) -> None:
-    requirements = _project_root() / _SIDECAR_REQUIREMENTS_RELATIVE_PATH
+    requirements = _sidecar_requirements_path()
     uv = shutil.which("uv")
     if not requirements.is_file() or uv is None:
         raise RasterOfflineBundleBootstrapError("raster_bundle_sidecar_provisioner_unavailable")
@@ -1009,7 +1103,7 @@ def _verify_raster_text_direct_model_material_matches_source(
         raise RasterOfflineBundleBootstrapError("raster_bundle_raster_text_model_material_invalid")
 
 
-def _configuration_template() -> dict[str, object]:
+def _configuration_template_for_recognizer(*, model_name: str) -> dict[str, object]:
     return {
         "schema_version": "1.0",
         "runtime_api": "paddleocr3-ppstructurev3",
@@ -1019,10 +1113,7 @@ def _configuration_template() -> dict[str, object]:
         "layout_detection_model_directory": "layout",
         "text_detection_model_name": "PP-OCRv5_server_det",
         "text_detection_model_directory": "text-det",
-        # The release builder admits this model only by copying the fixed
-        # local English snapshot into the release itself.  The runtime never
-        # points at the separate PaddleOCR 3 baseline directory.
-        "text_recognition_model_name": _LOCAL_ENGLISH_RECOGNITION_MODEL_NAME,
+        "text_recognition_model_name": model_name,
         "text_recognition_model_directory": "text-rec",
         "table_classification_model_name": "PP-LCNet_x1_0_table_cls",
         "table_classification_model_directory": "table-classifier",
@@ -1082,6 +1173,21 @@ def _configuration_template() -> dict[str, object]:
     }
 
 
+def _bootstrap_configuration_template() -> dict[str, object]:
+    """Bind a fresh base bundle to the server recognizer it downloads."""
+
+    return _configuration_template_for_recognizer(model_name=_SERVER_RECOGNITION_MODEL_NAME)
+
+
+def _configuration_template() -> dict[str, object]:
+    """Bind a derived release to its copied, fixed English recognizer."""
+
+    # The release builder admits this model only by copying the fixed local
+    # English snapshot into the release itself. The runtime never points at
+    # the separate PaddleOCR 3 baseline directory.
+    return _configuration_template_for_recognizer(model_name=_LOCAL_ENGLISH_RECOGNITION_MODEL_NAME)
+
+
 def _write_canonical(path: Path, value: object) -> bytes:
     payload = _canonical_json(value)
     try:
@@ -1122,8 +1228,15 @@ def _sidecar_smoke(
         RasterRuntimeError,
     )
 
+    # Smoke exactly the configuration that will be published with this
+    # stage. A fresh base contains the downloaded server recognizer, while a
+    # derived release contains the separately copied English recognizer.
+    staged_configuration_path = stage / "sidecar" / "configuration-template.json"
+    staged_configuration = _read_canonical_object(
+        staged_configuration_path, code="raster_bundle_sidecar_smoke_failed"
+    )
     configuration_path = workspace / "sidecar-smoke.json"
-    _write_canonical(configuration_path, _configuration_template())
+    _write_canonical(configuration_path, staged_configuration)
     pixels = b"\xff" * (256 * 256 * 3)
     source_sha256 = hashlib.sha256(pixels).hexdigest()
     header = {
@@ -1201,10 +1314,13 @@ def _manifest_files(stage: Path) -> list[dict[str, object]]:
     files: list[dict[str, object]] = []
     try:
         for path in sorted(stage.rglob("*"), key=lambda value: value.as_posix()):
-            if path.is_symlink():
+            metadata = path.lstat()
+            if _is_link_or_reparse_point(metadata):
                 raise RasterOfflineBundleBootstrapError("raster_bundle_bootstrap_tree_invalid")
-            if not path.is_file():
+            if stat.S_ISDIR(metadata.st_mode):
                 continue
+            if not stat.S_ISREG(metadata.st_mode):
+                raise RasterOfflineBundleBootstrapError("raster_bundle_bootstrap_tree_invalid")
             relative = path.relative_to(stage).as_posix()
             if relative == "manifest.json" or len(relative) > 480:
                 raise RasterOfflineBundleBootstrapError("raster_bundle_bootstrap_tree_invalid")
@@ -1223,9 +1339,12 @@ def _write_manifest(
     *,
     stage: Path,
     raster_text_models: bool = False,
+    platform_spec: _RuntimePlatformSpec | None = None,
+    schema_version: str = "2.0",
 ) -> None:
+    runtime_platform = _runtime_platform_spec() if platform_spec is None else platform_spec
     manifest = {
-        "schema_version": "1.0",
+        "schema_version": schema_version,
         "bundle_id": _BUNDLE_DIRECTORY,
         "extractor_revision": _EXTRACTOR_REVISION,
         "raster_dpi": 216,
@@ -1238,7 +1357,7 @@ def _write_manifest(
             "sidecar/module-root/customs_ai_agent/service/ppstructurev3_sidecar.py"
         ),
         "sidecar_interpreter_root_relative_path": "sidecar/interpreter",
-        "sidecar_interpreter_relative_path": "sidecar/interpreter/python.exe",
+        "sidecar_interpreter_relative_path": runtime_platform.interpreter_relative_path,
         "sidecar_module_root_relative_path": "sidecar/module-root",
         "sidecar_module_relative_path": (
             "sidecar/module-root/customs_ai_agent/service/ppstructurev3_sidecar.py"
@@ -1248,6 +1367,16 @@ def _write_manifest(
         "local_model_root_relative_path": "models",
         "files": _manifest_files(stage),
     }
+    if schema_version == "2.0":
+        manifest.update(
+            {
+                "runtime_operating_system": runtime_platform.operating_system,
+                "runtime_architecture": runtime_platform.architecture,
+                "runtime_python_abi": runtime_platform.python_abi,
+            }
+        )
+    elif schema_version != "1.0":
+        raise RasterOfflineBundleBootstrapError("raster_bundle_bootstrap_platform_unsupported")
     if raster_text_models:
         manifest["raster_text_model_inventory_relative_path"] = (
             _RASTER_TEXT_MODEL_INVENTORY_RELATIVE_PATH.as_posix()
@@ -1267,16 +1396,20 @@ def _write_bootstrap_material(
     _write_canonical(stage / "inventories" / "parent-renderer.json", _required_parent_inventory())
     _write_canonical(stage / "inventories" / "sidecar-packages.json", package_inventory)
     _write_canonical(stage / "inventories" / "models.json", _model_inventory(stage / "models"))
-    _write_canonical(stage / "sidecar" / "configuration-template.json", _configuration_template())
+    _write_canonical(
+        stage / "sidecar" / "configuration-template.json",
+        _bootstrap_configuration_template(),
+    )
     _write_canonical(
         stage / "provenance" / "bootstrap-receipt.json",
         {
             "schema_version": "1.0",
             "bootstrap_kind": "official-online-raster-offline-bundle-v1",
             "python_version": ".".join(str(item) for item in sys.version_info[:3]),
-            "sidecar_lock_sha256": _sha256_file(
-                _project_root() / _SIDECAR_REQUIREMENTS_RELATIVE_PATH
-            )[0],
+            "runtime_operating_system": _runtime_platform_spec().operating_system,
+            "runtime_architecture": _runtime_platform_spec().architecture,
+            "runtime_python_abi": _runtime_platform_spec().python_abi,
+            "sidecar_lock_sha256": _sha256_file(_sidecar_requirements_path())[0],
             "sidecar_required_packages": list(_SIDECAR_REQUIRED_PACKAGES),
             "models": model_receipts,
         },
@@ -1418,7 +1551,7 @@ def _verify_release_reuse_compatibility(
         receipt = _read_canonical_object(
             receipt_path, code="raster_bundle_release_base_provenance_invalid"
         )
-        expected_lock = _sha256_file(_project_root() / _SIDECAR_REQUIREMENTS_RELATIVE_PATH)[0]
+        expected_lock = _sha256_file(_sidecar_requirements_path())[0]
         if receipt.get("sidecar_lock_sha256") != expected_lock:
             raise RasterOfflineBundleBootstrapError(
                 "raster_bundle_release_sidecar_packages_changed"
@@ -1474,7 +1607,7 @@ def _raster_text_release_derivation_intent(
         configuration_template_sha256 = hashlib.sha256(
             _canonical_json(_configuration_template())
         ).hexdigest()
-        sidecar_lock_sha256 = _sha256_file(_project_root() / _SIDECAR_REQUIREMENTS_RELATIVE_PATH)[0]
+        sidecar_lock_sha256 = _sha256_file(_sidecar_requirements_path())[0]
         recognition_input: dict[str, str] | None = None
         if recognition_model_snapshot is not None:
             recognition_input = {
@@ -1654,6 +1787,7 @@ def _prepare_release_stage(
 
     step = "initialization"
     try:
+        verify_raster_offline_bundle_runtime_platform(base)
         if (raster_text_model_snapshot is None) != (raster_text_derivation_intent_sha256 is None):
             raise RasterOfflineBundleBootstrapError("raster_bundle_release_stage_invalid")
         # A direct snapshot is made from the base's already English-configured
@@ -1760,9 +1894,7 @@ def _prepare_release_stage(
             "release_kind": "local-source-config-derivation-v1",
             "base_bundle_manifest_sha256": base.manifest_sha256,
             "base_bundle_root_relative_path": base.bundle_root_relative_path,
-            "sidecar_lock_sha256": _sha256_file(
-                _project_root() / _SIDECAR_REQUIREMENTS_RELATIVE_PATH
-            )[0],
+            "sidecar_lock_sha256": _sha256_file(_sidecar_requirements_path())[0],
             "first_party_sidecar_sha256": hashlib.sha256(
                 _desired_first_party_sidecar_material()["service/ppstructurev3_sidecar.py"]
             ).hexdigest(),
@@ -1799,6 +1931,18 @@ def _prepare_release_stage(
         _write_manifest(
             stage=operational_stage,
             raster_text_models=raster_text_model_snapshot is not None,
+            platform_spec=(
+                _RuntimePlatformSpec(
+                    operating_system="windows",
+                    architecture="amd64",
+                    python_abi="cp311",
+                    requirements_relative_path=("requirements/raster-sidecar-win-amd64-cp311.lock"),
+                    interpreter_relative_path="sidecar/interpreter/python.exe",
+                )
+                if base.manifest.schema_version == "1.0"
+                else _runtime_platform_spec()
+            ),
+            schema_version=base.manifest.schema_version,
         )
     except RasterOfflineBundleBootstrapError:
         raise
@@ -2399,9 +2543,7 @@ def _current_raster_text_source_binding() -> dict[str, object]:
         if not first_party_files:
             raise RasterOfflineBundleBootstrapError("raster_bundle_release_base_invalid")
         return {
-            "sidecar_lock_sha256": _sha256_file(
-                _project_root() / _SIDECAR_REQUIREMENTS_RELATIVE_PATH
-            )[0],
+            "sidecar_lock_sha256": _sha256_file(_sidecar_requirements_path())[0],
             "configuration_template_sha256": hashlib.sha256(
                 _canonical_json(_configuration_template())
             ).hexdigest(),
@@ -2580,7 +2722,7 @@ def _validate_fast_text_release_manifest(
     try:
         paths = tuple(item.path for item in manifest.files)
         if (
-            manifest.schema_version != "1.0"
+            manifest.schema_version not in {"1.0", "2.0"}
             or manifest.bundle_id != _BUNDLE_DIRECTORY
             or manifest.parent_renderer_required_packages != list(_PARENT_PACKAGES)
             or set(manifest.sidecar_required_packages) != set(_SIDECAR_REQUIRED_PACKAGES)
@@ -3296,6 +3438,7 @@ def bootstrap_raster_offline_bundle_v1(
     """
 
     _ensure_supported_platform()
+    platform_spec = _runtime_platform_spec()
     root = _document_preview_root(document_preview_root)
     operational_root = _windows_operational_path(root)
     try:
@@ -3349,8 +3492,10 @@ def bootstrap_raster_offline_bundle_v1(
             workspace = _windows_operational_path(workspace_canonical, force_short=True)
             interpreter_root = stage / "sidecar" / "interpreter"
             module_root = stage / "sidecar" / "module-root"
-            _copy_interpreter(destination=interpreter_root)
-            interpreter = interpreter_root / "python.exe"
+            _copy_interpreter(destination=interpreter_root, platform_spec=platform_spec)
+            interpreter = stage.joinpath(
+                *PurePosixPath(platform_spec.interpreter_relative_path).parts
+            )
             module_root.mkdir(parents=True, exist_ok=False)
             _install_sidecar_packages(interpreter=interpreter, module_root=module_root)
             sidecar = _copy_first_party_sidecar(module_root=module_root)
@@ -3371,7 +3516,7 @@ def bootstrap_raster_offline_bundle_v1(
                 model_inventory_path=stage / "inventories" / "models.json",
                 models_root=stage / "models",
             )
-            _write_manifest(stage=stage)
+            _write_manifest(stage=stage, platform_spec=platform_spec)
             verified = verify_staged_raster_offline_bundle(
                 document_preview_root=root, bundle_root=stage
             )

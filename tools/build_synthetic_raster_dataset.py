@@ -36,7 +36,12 @@ def main(argv: Sequence[str] | None = None) -> int:
             build_inputs_relative_path=build_inputs.build_inputs_relative_path,
         )
     except (OSError, ValueError, SyntheticRasterCompilerUnavailable):
-        print(json.dumps({"status": "failed", "code": "synthetic_raster_dataset_failed"}, separators=(",", ":")))
+        print(
+            json.dumps(
+                {"status": "failed", "code": "synthetic_raster_dataset_failed"},
+                separators=(",", ":"),
+            )
+        )
         return 2
     print(
         json.dumps(

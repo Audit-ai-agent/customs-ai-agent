@@ -60,7 +60,9 @@ def train_source_attested_supervised_template_direct_selector(
         development_packet=read_canonical_source_attested_packet_for_selector_training(
             development_packet_path
         ),
-        sealed_packet=read_canonical_source_attested_packet_for_selector_training(sealed_packet_path),
+        sealed_packet=read_canonical_source_attested_packet_for_selector_training(
+            sealed_packet_path
+        ),
         training_split=(
             read_canonical_source_attested_supervised_template_training_split_for_selector_training(
                 training_split_path
@@ -131,9 +133,7 @@ def main(argv: Sequence[str] | None = None) -> int:
             training_labels_path=arguments.training_labels,
             source_directory=arguments.source_directory,
             document_preview_root=arguments.document_preview_root,
-            training_environment_inventory_sha256=(
-                arguments.training_environment_inventory_sha256
-            ),
+            training_environment_inventory_sha256=(arguments.training_environment_inventory_sha256),
         )
     except (SupervisedTemplateDirectSelectorTrainerError, OSError, ValueError):
         print(

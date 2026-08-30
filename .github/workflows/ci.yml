@@ -3,26 +3,30 @@ name: ai-agent-ci
 on:
   pull_request:
     paths:
-      - ".github/workflows/ci.yml"
+      - ".dockerignore"
+      - ".github/workflows/**"
       - ".gitleaks.toml"
       - ".gitignore"
       - "pyproject.toml"
       - "uv.lock"
       - "README.md"
       - "docs/**"
+      - "deploy/**"
       - "src/**"
       - "tests/**"
       - "tools/**"
   push:
     branches: [main]
     paths:
-      - ".github/workflows/ci.yml"
+      - ".dockerignore"
+      - ".github/workflows/**"
       - ".gitleaks.toml"
       - ".gitignore"
       - "pyproject.toml"
       - "uv.lock"
       - "README.md"
       - "docs/**"
+      - "deploy/**"
       - "src/**"
       - "tests/**"
       - "tools/**"
@@ -58,6 +62,39 @@ jobs:
         run: uv run --locked --group dev mypy
       - name: Unit and contract tests
         run: uv run --locked --group dev pytest -q
+      - name: Verify asset-free OCR OCI deployment sources
+        run: |
+          uv run --locked --group dev ruff check \
+            deploy/ocr-oci \
+            tools/export_raster_text_oci_runtime.py \
+            tools/raster_text_oci_evidence.py \
+            tools/raster_text_oci_metadata.py \
+            tools/verify_raster_text_oci_runtime.py
+          uv run --locked --group dev ruff format --check \
+            deploy/ocr-oci \
+            tools/export_raster_text_oci_runtime.py \
+            tools/raster_text_oci_evidence.py \
+            tools/raster_text_oci_metadata.py \
+            tools/verify_raster_text_oci_runtime.py
+          python deploy/ocr-oci/verify_deployment_sources.py --repository-root .
+          python deploy/ocr-oci/selftest_github_release_actor.py
+          python deploy/ocr-oci/selftest_ocr_readiness.py
+          python deploy/ocr-oci/selftest_ghcr_private_package.py
+          uv run --locked --group dev python deploy/ocr-oci/selftest_runtime_contract.py
+          bash -n deploy/ocr-oci/publish_runtime_context.sh
+      - name: Build source-only OCI structure target
+        run: |
+          docker buildx build \
+            --file deploy/ocr-oci/placeholder/Dockerfile \
+            --platform linux/amd64 \
+            --build-arg SOURCE_REPOSITORY=https://github.com/example/example \
+            deploy/ocr-oci/placeholder
+          docker buildx build \
+            --file deploy/ocr-oci/Dockerfile \
+            --platform linux/amd64 \
+            --target app-structure \
+            --check \
+            .
       - name: Redacted secret scan
         shell: bash
         run: |

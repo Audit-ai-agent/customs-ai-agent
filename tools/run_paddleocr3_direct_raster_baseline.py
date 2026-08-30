@@ -51,7 +51,13 @@ def _preview_root(path: Path) -> Path:
 
 def _relative_path(root: Path, value: str) -> Path:
     relative = PurePosixPath(value)
-    if not value or relative.is_absolute() or ".." in relative.parts or ":" in value or "\\" in value:
+    if (
+        not value
+        or relative.is_absolute()
+        or ".." in relative.parts
+        or ":" in value
+        or "\\" in value
+    ):
         raise ValueError("local baseline path is invalid")
     path = (root / Path(*relative.parts)).resolve(strict=False)
     try:
@@ -153,11 +159,20 @@ def main(argv: Sequence[str] | None = None) -> int:
         output_path = _relative_path(root, arguments.output_relative_path)
         digest = _write_create_only(output_path, result.model_dump(mode="json", warnings=False))
     except (OSError, ValueError, ServiceHttpError):
-        print(json.dumps({"status": "failed", "code": "paddleocr3_direct_baseline_failed"}, separators=(",", ":")))
+        print(
+            json.dumps(
+                {"status": "failed", "code": "paddleocr3_direct_baseline_failed"},
+                separators=(",", ":"),
+            )
+        )
         return 2
     print(
         json.dumps(
-            {"status": result.status, "candidate_sha256": digest, "engine": "paddleocr3_direct_baseline"},
+            {
+                "status": result.status,
+                "candidate_sha256": digest,
+                "engine": "paddleocr3_direct_baseline",
+            },
             separators=(",", ":"),
             sort_keys=True,
         )

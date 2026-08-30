@@ -23,6 +23,7 @@ from customs_ai_agent.evaluation.raster_text_public_finetuned_paddle_bundle impo
     RasterTextPublicFineTunedPaddleBundleError,
     load_verified_raster_text_public_finetuned_paddle_bundle_v1,
     materialize_verified_raster_text_public_finetuned_paddle_bundle_v1,
+    prepare_raster_text_public_finetuned_one_pass_runtime_profile_v19,
     prepare_raster_text_public_finetuned_runtime_profile_v19,
 )
 
@@ -709,6 +710,36 @@ def test_v19_profile_is_exact_content_addressed_and_rejects_invalid_cpu_controls
     assert prepared.raster_text_profile_revision == (
         f"synthetic-raster-text-v1:{profile['profile_fingerprint_sha256'][:24]}"
     )
+
+    one_pass = prepare_raster_text_public_finetuned_one_pass_runtime_profile_v19(
+        sidecar_bundle=sidecar,  # type: ignore[arg-type]
+        model_bundle=bundle,
+        pdfium_version="4.30.0",
+        minimum_page_confidence=0.73,
+        cpu_threads=6,
+    )
+    one_pass_raw = sources.root.joinpath(
+        *one_pass.runtime_configuration_relative_path.split("/")
+    ).read_bytes()
+    one_pass_profile = json.loads(one_pass_raw)
+    assert one_pass_profile["engine_kind"] == (
+        "direct_paddle_mobile_det_public_finetuned_rec_harmonic_recall_native960_"
+        "lowbox_strip2_semantic_repair_v2_onednn"
+    )
+    assert one_pass_profile["extractor_revision"] == (
+        "direct-paddle-test-v2:mobile-det-v19-public-finetuned-rec-native960-"
+        "lowbox-strip2-semantic-repair-v2-onednn"
+    )
+    ignored = {
+        "engine_kind",
+        "extractor_revision",
+        "profile_fingerprint_sha256",
+        "raster_text_profile_revision",
+    }
+    assert {key: value for key, value in one_pass_profile.items() if key not in ignored} == {
+        key: value for key, value in profile.items() if key not in ignored
+    }
+    assert one_pass.runtime_configuration_sha256 != prepared.runtime_configuration_sha256
 
     with pytest.raises(RasterTextPublicFineTunedPaddleBundleError) as raised:
         prepare_raster_text_public_finetuned_runtime_profile_v19(

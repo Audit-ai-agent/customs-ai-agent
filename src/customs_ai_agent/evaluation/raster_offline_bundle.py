@@ -14,10 +14,13 @@ import hashlib
 import importlib.metadata
 import json
 import os
+import platform
 from dataclasses import dataclass
 from pathlib import Path, PurePosixPath
 import re
-from typing import Any, Iterable, Mapping, Protocol
+import stat
+import sys
+from typing import Any, Iterable, Literal, Mapping, Protocol
 
 from pydantic import BaseModel, ConfigDict, Field, ValidationError, field_validator, model_validator
 
@@ -142,6 +145,12 @@ class RasterOfflineBundleManifestV1(_WireModel):
 
     schema_version: str = "1.0"
     bundle_id: str = "raster-offline-bundle-v1"
+    # Schema 1 is the already-published Windows-only legacy shape. Schema 2
+    # adds an explicit native target; the complete manifest hash then binds
+    # this identity transitively into every generated OCR profile.
+    runtime_operating_system: Literal["windows", "linux"] | None = None
+    runtime_architecture: Literal["amd64"] | None = None
+    runtime_python_abi: Literal["cp311"] | None = None
     extractor_revision: str = Field(min_length=1, max_length=256)
     raster_dpi: int = Field(default=216, ge=72, le=600)
     sidecar_timeout_seconds: int = Field(default=420, ge=1, le=420)
@@ -207,6 +216,26 @@ class RasterOfflineBundleManifestV1(_WireModel):
             self.raster_text_local_model_root_relative_path is None
         ):
             raise ValueError("raster text material paths must be paired")
+        platform_values = (
+            self.runtime_operating_system,
+            self.runtime_architecture,
+            self.runtime_python_abi,
+        )
+        if self.schema_version == "1.0":
+            if any(value is not None for value in platform_values):
+                raise ValueError("legacy raster bundle platform binding is invalid")
+        elif self.schema_version == "2.0":
+            if None in platform_values:
+                raise ValueError("raster bundle platform binding is incomplete")
+            expected_interpreter = (
+                "sidecar/interpreter/python.exe"
+                if self.runtime_operating_system == "windows"
+                else "sidecar/interpreter/bin/python3.11"
+            )
+            if self.sidecar_interpreter_relative_path != expected_interpreter:
+                raise ValueError("raster bundle interpreter platform binding is invalid")
+        else:
+            raise ValueError("raster bundle schema is invalid")
         return self
 
     @field_validator("parent_renderer_required_packages", "sidecar_required_packages")
@@ -228,6 +257,46 @@ class RasterOfflineBundleManifestV1(_WireModel):
             self.sidecar_configuration_template_relative_path,
             self.model_inventory_relative_path,
         )
+
+
+def current_raster_runtime_platform_binding() -> tuple[str, str, str]:
+    """Return the only native identities accepted by schema-2 bundles."""
+
+    machine = platform.machine().casefold().replace("-", "_")
+    if (
+        sys.implementation.name != "cpython"
+        or sys.version_info[:2] != (3, 11)
+        or sys.maxsize <= 2**32
+        or machine not in {"amd64", "x86_64"}
+    ):
+        raise RasterOfflineBundleError("offline_bundle_platform_unsupported")
+    if os.name == "nt" and sys.platform == "win32":
+        return ("windows", "amd64", "cp311")
+    if os.name == "posix" and sys.platform.startswith("linux"):
+        return ("linux", "amd64", "cp311")
+    raise RasterOfflineBundleError("offline_bundle_platform_unsupported")
+
+
+def verify_raster_offline_bundle_runtime_platform(
+    bundle: "RasterTextRuntimeProfileMaterialV1",
+) -> None:
+    """Reject a schema-2 native bundle on any different runtime target.
+
+    Schema 1 remains readable for the already-approved Windows V19/schema-11
+    pointer. It predates explicit platform fields and therefore receives no
+    inferred cross-platform compatibility. Every newly provisioned bundle is
+    schema 2 and must match this host exactly before profile generation.
+    """
+
+    manifest = bundle.manifest
+    if manifest.schema_version == "1.0":
+        return
+    if (
+        manifest.runtime_operating_system,
+        manifest.runtime_architecture,
+        manifest.runtime_python_abi,
+    ) != current_raster_runtime_platform_binding():
+        raise RasterOfflineBundleError("offline_bundle_platform_mismatch")
 
 
 class RasterOfflineBundleReleaseSelectorV1(_WireModel):
@@ -461,6 +530,12 @@ def _local_path_identity(path: Path) -> str:
     return os.path.normcase(os.path.normpath(value))
 
 
+def _is_link_or_reparse_point(metadata: os.stat_result) -> bool:
+    reparse_point = getattr(stat, "FILE_ATTRIBUTE_REPARSE_POINT", 0)
+    attributes = getattr(metadata, "st_file_attributes", 0)
+    return stat.S_ISLNK(metadata.st_mode) or bool(reparse_point and attributes & reparse_point)
+
+
 def _bundle_path(bundle_root: Path, relative_path: str, *, directory: bool = False) -> Path:
     _relative_path(relative_path)
     candidate = bundle_root
@@ -468,17 +543,18 @@ def _bundle_path(bundle_root: Path, relative_path: str, *, directory: bool = Fal
         canonical_root = bundle_root.resolve(strict=True)
         for part in PurePosixPath(relative_path).parts:
             candidate = candidate / part
-            if candidate.is_symlink():
+            if _is_link_or_reparse_point(candidate.lstat()):
                 raise RasterOfflineBundleError("offline_bundle_manifest_invalid")
         resolved = candidate.resolve(strict=True)
         root_identity = _local_path_identity(canonical_root)
         resolved_identity = _local_path_identity(resolved)
         if os.path.commonpath((root_identity, resolved_identity)) != root_identity:
             raise RasterOfflineBundleError("offline_bundle_manifest_invalid")
+        metadata = resolved.lstat()
         if (
-            resolved.is_symlink()
-            or (directory and not resolved.is_dir())
-            or (not directory and not resolved.is_file())
+            _is_link_or_reparse_point(metadata)
+            or (directory and not stat.S_ISDIR(metadata.st_mode))
+            or (not directory and not stat.S_ISREG(metadata.st_mode))
         ):
             raise RasterOfflineBundleError("offline_bundle_manifest_invalid")
         return _windows_operational_path(resolved)
@@ -493,12 +569,13 @@ def _regular_files(root: Path) -> Iterable[tuple[str, Path]]:
 
     try:
         for child in sorted(root.iterdir(), key=lambda value: value.name):
-            if child.is_symlink():
+            metadata = child.lstat()
+            if _is_link_or_reparse_point(metadata):
                 raise RasterOfflineBundleError("offline_bundle_manifest_invalid")
-            if child.is_dir():
+            if stat.S_ISDIR(metadata.st_mode):
                 for nested in _regular_files(child):
                     yield (f"{child.name}/{nested[0]}", nested[1])
-            elif child.is_file():
+            elif stat.S_ISREG(metadata.st_mode):
                 yield (child.name, child)
             else:
                 raise RasterOfflineBundleError("offline_bundle_manifest_invalid")
@@ -510,15 +587,24 @@ def _regular_files(root: Path) -> Iterable[tuple[str, Path]]:
 
 def _sha256_regular_file(path: Path, *, expected_size: int | None = None) -> tuple[str, int]:
     try:
-        if path.is_symlink() or not path.is_file():
+        before = path.lstat()
+        if _is_link_or_reparse_point(before) or not stat.S_ISREG(before.st_mode):
             raise RasterOfflineBundleError("offline_bundle_manifest_invalid")
-        size = path.stat().st_size
+        size = before.st_size
         if size > _MAX_BUNDLE_FILE_BYTES or (expected_size is not None and size != expected_size):
             raise RasterOfflineBundleError("offline_bundle_manifest_invalid")
         digest = hashlib.sha256()
         with path.open("rb") as stream:
             while block := stream.read(1024 * 1024):
                 digest.update(block)
+        after = path.lstat()
+        if (
+            _is_link_or_reparse_point(after)
+            or not stat.S_ISREG(after.st_mode)
+            or after.st_size != size
+            or (before.st_dev, before.st_ino) != (after.st_dev, after.st_ino)
+        ):
+            raise RasterOfflineBundleError("offline_bundle_manifest_invalid")
         return digest.hexdigest(), size
     except RasterOfflineBundleError:
         raise
@@ -931,7 +1017,7 @@ def _load_verified_raster_offline_bundle_from_paths(
     except ValidationError:
         raise RasterOfflineBundleError("offline_bundle_manifest_invalid") from None
     if (
-        manifest.schema_version != "1.0"
+        manifest.schema_version not in {"1.0", "2.0"}
         or manifest.bundle_id != _BUNDLE_DIRECTORY
         or manifest.parent_renderer_required_packages != ["pypdfium2", "Pillow"]
         # The isolated child imports PP-Structure through all three of these
@@ -1275,6 +1361,7 @@ def prepare_raster_runtime_profile_v2(
         make_synthetic_raster_profile_revision,
     )
 
+    verify_raster_offline_bundle_runtime_platform(bundle)
     manifest = bundle.manifest
     if not pdfium_version or len(pdfium_version) > 128:
         raise RasterOfflineBundleError("offline_bundle_parent_renderer_drift")
@@ -1441,6 +1528,7 @@ def prepare_raster_text_runtime_profile_v1(
         raster_text_profile_fingerprint_sha256,
     )
 
+    verify_raster_offline_bundle_runtime_platform(bundle)
     manifest = bundle.manifest
     if (
         not pdfium_version
