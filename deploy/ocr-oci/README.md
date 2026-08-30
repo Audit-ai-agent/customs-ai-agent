@@ -33,7 +33,9 @@ workflow의 fail-closed 구조를 검사하고 `app-structure` target까지만 �
 최종 publish는 다음 경우에만 가능하다.
 
 - `main`의 현재 SHA에서 `workflow_dispatch` `operation=publish`를 명시적으로
-  실행
+  실행하고, 화면에 보이는 현재 40자리 SHA를 `confirm_source_sha`에 그대로 입력
+- `confirm_private_distribution=true`를 명시하고, 실행자와 재실행자가 같은 최초
+  run이며 해당 실행자가 저장소 `admin`인지 GitHub API로 확인
 
 Tag나 branch push로는 publish가 시작되지 않는다. Publish 실행에는 이미
 private GHCR에 올라간 runtime의 `@sha256:...` digest가 필요하며,
@@ -156,7 +158,9 @@ publish 결과의 `file_count`를 기록해 실제 closure가 확인되면 코�
 ## 2. runtime context를 private GHCR에 게시
 
 최초 한 번은 GitHub의 **Raster OCR OCI publish** workflow를 `main`에서
-`operation=bootstrap`, 빈 `runtime_image`로 실행한다. Workflow는 `GITHUB_TOKEN`과 정확한
+`operation=bootstrap`, 빈 `runtime_image`, 현재 main의 정확한 40자리
+`confirm_source_sha`, `confirm_private_distribution=true`로 실행한다. Workflow는
+`GITHUB_TOKEN`과 정확한
 `org.opencontainers.image.source` label로 runtime과 최종 Agent package에
 filesystem layer가 없는 `FROM scratch` placeholder만 게시한다. 그 뒤 두
 package가 모두 `private`인지 API로 확인한다. 이 단계에는 모델이나
@@ -164,12 +168,15 @@ runtime byte가 없으며, package API의 `repository.full_name`을 현재 저�
 대조해 연결을 확인한다. 현재 workflow의 `GITHUB_TOKEN`으로 실제
 placeholder push까지 성공해야 하므로 Actions 쓰기 접근도 함께 입증된다.
 
-게시 job은 `raster-ocr-production` environment에 고정된다. 이 environment는
-최초 실행 전에 required reviewer, self-review 금지, `main`만 허용하는 custom
-deployment branch policy 하나를 갖춰야 한다. Workflow가 이 설정을 API로
-다시 검증하므로 미설정 environment가 자동 생성되어도 registry 쓰기 전에
-실패한다. Private 저장소에서 required reviewer를 지원하지 않는 GitHub
-plan은 외부 배포 승인 선행조건을 만족하지 못하므로 fail-closed된다.
+Private GitHub Free 저장소에서는 required-reviewer environment가 지원되지 않으므로
+유료 environment를 배포 선행조건으로 두지 않는다. 대신 workflow는 수동
+`workflow_dispatch`, `main` branch와 checkout SHA 일치, `GITHUB_RUN_ATTEMPT=1`,
+`GITHUB_ACTOR=GITHUB_TRIGGERING_ACTOR`, 입력한 40자리 SHA와 `GITHUB_SHA` 일치,
+private 배포 명시 확인을 모두 먼저 검사한다. 이어서 저장소가 private·비포크·비archive이고
+기본 branch가 `main`이며 실행자가 실제 `admin`인지 GitHub API로 fail-closed 검증한
+뒤에만 registry에 접근한다. 이는 한 명의 관리자가 명시적으로 승인하는 경계이며
+독립적인 2인 승인은 아니다. 2인 승인이 필수가 되면 GitHub Enterprise의 protected
+environment나 별도 외부 승인 체계를 추가해야 한다.
 
 먼저 제한된 `packages:write` 권한으로 `docker login ghcr.io`를 수행하고, API 조회가
 가능한 token을 `GH_TOKEN` 환경변수로만 제공한다. Token은 스크립트 인수나 출력으로
@@ -208,7 +215,8 @@ GitHub의 **Raster OCR OCI publish** workflow를 `main`에서만 수동 실행�
 Tag나 branch push는 배포를 시작하지 않는다. Workflow는 다음 순서를 지킨다.
 
 1. dispatch ref·type·checkout SHA가 모두 현재 `main` tip과 일치하는지 확인한다.
-2. 독립 reviewer가 승인한 environment와 self-review 금지·`main` 정책을 API로 재검증한다.
+2. 최초 실행·동일 actor·정확한 main SHA·private 배포 확인과 저장소 admin 권한을
+   API로 재검증한다.
 3. `bootstrap`은 고정된 asset-free placeholder를 runtime/output 두 package에 게시하고,
    `publish`는 output package에 같은 placeholder를 다시 push해 쓰기 권한을 입증한다.
    대상 package는 모두 `visibility=private`인지 즉시 확인한다.

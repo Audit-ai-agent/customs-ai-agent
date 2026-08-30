@@ -230,11 +230,16 @@ def verify(repository_root: Path) -> None:
         "actions: read",
         "packages: write",
         "attestations: write",
-        "environment: raster-ocr-production",
+        "confirm_source_sha:",
+        "confirm_private_distribution:",
         "ref: refs/heads/main",
         '"${GITHUB_REF_TYPE}" != "branch"',
+        '"${GITHUB_RUN_ATTEMPT}" != "1"',
+        '"${GITHUB_ACTOR}" != "${GITHUB_TRIGGERING_ACTOR}"',
+        '"${DISPATCH_CONFIRM_SOURCE_SHA}" != "${GITHUB_SHA}"',
+        '"${DISPATCH_CONFIRM_PRIVATE_DISTRIBUTION}" != "true"',
         '"$(git rev-parse HEAD)" == "${GITHUB_SHA}"',
-        "verify_github_release_environment.py",
+        "verify_github_release_actor.py",
         "deploy/ocr-oci/placeholder/Dockerfile",
         "asset-free-bootstrap-v1",
         "--provenance=false",
@@ -262,6 +267,8 @@ def verify(repository_root: Path) -> None:
         or "ocr-oci-v" in workflow
     ):
         raise DeploymentSourceError("publish_non_manual_trigger_forbidden")
+    if re.search(r"^\s+environment:\s*", workflow, flags=re.MULTILINE) is not None:
+        raise DeploymentSourceError("publish_paid_environment_dependency_forbidden")
     if "ocr-oci-v" in deployment_readme:
         raise DeploymentSourceError("publish_documentation_tag_trigger_forbidden")
     # This build copies the private OCR/model runtime into intermediate layers.
@@ -286,7 +293,7 @@ def verify(repository_root: Path) -> None:
     privacy_verifier = (root / "deploy/ocr-oci/verify_ghcr_private_package.py").read_text(
         encoding="utf-8"
     )
-    environment_verifier = (root / "deploy/ocr-oci/verify_github_release_environment.py").read_text(
+    actor_verifier = (root / "deploy/ocr-oci/verify_github_release_actor.py").read_text(
         encoding="utf-8"
     )
     readiness = (root / "deploy/ocr-oci/ocr_readiness.py").read_text(encoding="utf-8")
@@ -318,28 +325,29 @@ def verify(repository_root: Path) -> None:
         or 'linked_repository.get("full_name"' not in privacy_verifier
         or "/packages/container/" not in privacy_verifier
         or runtime_publisher.count('--repository "${source_repository}"') != 2
-        or "required_reviewers" not in environment_verifier
-        or "prevent_self_review" not in environment_verifier
-        or "deployment-branch-policies?per_page=100" not in environment_verifier
-        or 'declared[0].get("name") != "main"' not in environment_verifier
+        or 'metadata.get("private") is not True' not in actor_verifier
+        or 'metadata.get("visibility") != "private"' not in actor_verifier
+        or 'metadata.get("default_branch") != "main"' not in actor_verifier
+        or 'permission.get("permission") != "admin"' not in actor_verifier
+        or 'user.get("type") != "User"' not in actor_verifier
     ):
         raise DeploymentSourceError("current_native_ocr_oci_boundary_incomplete")
 
-    environment_check = workflow.find("verify_github_release_environment.py")
+    actor_check = workflow.find("verify_github_release_actor.py")
     placeholder_push = workflow.find("deploy/ocr-oci/placeholder/Dockerfile")
     final_build = workflow.find("Build and publish immutable Agent plus OCR image")
-    if not 0 <= environment_check < placeholder_push < final_build:
+    if not 0 <= actor_check < placeholder_push < final_build:
         raise DeploymentSourceError("publish_verification_order_invalid")
 
     for relative in (
         "deploy/ocr-oci/create_app_license_manifest.py",
         "deploy/ocr-oci/ocr_readiness.py",
-        "deploy/ocr-oci/selftest_github_release_environment.py",
+        "deploy/ocr-oci/selftest_github_release_actor.py",
         "deploy/ocr-oci/selftest_ocr_readiness.py",
         "deploy/ocr-oci/selftest_ghcr_private_package.py",
         "deploy/ocr-oci/selftest_runtime_contract.py",
         "deploy/ocr-oci/verify_ghcr_private_package.py",
-        "deploy/ocr-oci/verify_github_release_environment.py",
+        "deploy/ocr-oci/verify_github_release_actor.py",
         "deploy/ocr-oci/verify_agent_runtime_binding.py",
         "deploy/ocr-oci/verify_deployment_sources.py",
         "tools/export_raster_text_oci_runtime.py",

@@ -15,6 +15,15 @@ on:
         description: "Required only for publish: ghcr.io/<owner>/<repo>-raster-runtime@sha256:..."
         required: false
         type: string
+      confirm_source_sha:
+        description: "Exact 40-character main commit SHA approved for this private release"
+        required: true
+        type: string
+      confirm_private_distribution:
+        description: "Confirm that OCR model bytes may be published only to private GHCR packages"
+        required: true
+        default: false
+        type: boolean
 
 concurrency:
   group: raster-ocr-oci-publish
@@ -31,7 +40,6 @@ jobs:
   publish:
     runs-on: ubuntu-latest
     timeout-minutes: 45
-    environment: raster-ocr-production
     outputs:
       digest: ${{ steps.publish.outputs.digest }}
       image: ${{ steps.release.outputs.image_repository }}
@@ -43,10 +51,24 @@ jobs:
         env:
           DISPATCH_OPERATION: ${{ inputs.operation }}
           DISPATCH_RUNTIME_IMAGE: ${{ inputs.runtime_image }}
+          DISPATCH_CONFIRM_SOURCE_SHA: ${{ inputs.confirm_source_sha }}
+          DISPATCH_CONFIRM_PRIVATE_DISTRIBUTION: ${{ inputs.confirm_private_distribution }}
         run: |
           set -euo pipefail
           if [[ "${GITHUB_EVENT_NAME}" != "workflow_dispatch" || "${GITHUB_REF}" != "refs/heads/main" || "${GITHUB_REF_TYPE}" != "branch" ]]; then
             echo "manual_publish_requires_main" >&2
+            exit 1
+          fi
+          if [[ "${GITHUB_RUN_ATTEMPT}" != "1" || "${GITHUB_ACTOR}" != "${GITHUB_TRIGGERING_ACTOR}" ]]; then
+            echo "manual_publish_requires_initial_same_actor_run" >&2
+            exit 1
+          fi
+          if [[ ! "${DISPATCH_CONFIRM_SOURCE_SHA}" =~ ^[a-f0-9]{40}$ || "${DISPATCH_CONFIRM_SOURCE_SHA}" != "${GITHUB_SHA}" ]]; then
+            echo "manual_publish_source_sha_confirmation_invalid" >&2
+            exit 1
+          fi
+          if [[ "${DISPATCH_CONFIRM_PRIVATE_DISTRIBUTION}" != "true" ]]; then
+            echo "manual_publish_private_distribution_not_confirmed" >&2
             exit 1
           fi
           repository="${GITHUB_REPOSITORY,,}"
@@ -106,14 +128,14 @@ jobs:
             exit 1
           }
 
-      - name: Verify independently approved release environment
+      - name: Verify manual administrator release authority
         shell: bash
         env:
           GH_TOKEN: ${{ secrets.GITHUB_TOKEN }}
         run: |
-          python3 deploy/ocr-oci/verify_github_release_environment.py \
+          python3 deploy/ocr-oci/verify_github_release_actor.py \
             --repository "${GITHUB_REPOSITORY}" \
-            --environment raster-ocr-production
+            --actor "${GITHUB_ACTOR}"
 
       - name: Log in to private GHCR
         uses: docker/login-action@c94ce9fb468520275223c153574b00df6fe4bcc9 # v3

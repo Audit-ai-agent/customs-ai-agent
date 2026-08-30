@@ -77,7 +77,7 @@ jobs:
             tools/raster_text_oci_metadata.py \
             tools/verify_raster_text_oci_runtime.py
           python deploy/ocr-oci/verify_deployment_sources.py --repository-root .
-          python deploy/ocr-oci/selftest_github_release_environment.py
+          python deploy/ocr-oci/selftest_github_release_actor.py
           python deploy/ocr-oci/selftest_ocr_readiness.py
           python deploy/ocr-oci/selftest_ghcr_private_package.py
           uv run --locked --group dev python deploy/ocr-oci/selftest_runtime_contract.py
