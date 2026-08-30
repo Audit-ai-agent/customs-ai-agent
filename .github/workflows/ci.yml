@@ -75,12 +75,18 @@ jobs:
             tools/raster_text_oci_evidence.py \
             tools/verify_raster_text_oci_runtime.py
           python deploy/ocr-oci/verify_deployment_sources.py --repository-root .
+          python deploy/ocr-oci/selftest_github_release_environment.py
           python deploy/ocr-oci/selftest_ocr_readiness.py
           python deploy/ocr-oci/selftest_ghcr_private_package.py
           uv run --locked --group dev python deploy/ocr-oci/selftest_runtime_contract.py
           bash -n deploy/ocr-oci/publish_runtime_context.sh
       - name: Build source-only OCI structure target
         run: |
+          docker buildx build \
+            --file deploy/ocr-oci/placeholder/Dockerfile \
+            --platform linux/amd64 \
+            --build-arg SOURCE_REPOSITORY=https://github.com/example/example \
+            deploy/ocr-oci/placeholder
           docker buildx build \
             --file deploy/ocr-oci/Dockerfile \
             --platform linux/amd64 \

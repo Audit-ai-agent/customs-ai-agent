@@ -24,6 +24,9 @@ def verify(repository_root: Path) -> None:
     runtime_dockerfile = (root / "deploy/ocr-oci/runtime-context.Dockerfile").read_text(
         encoding="utf-8"
     )
+    placeholder_dockerfile = (root / "deploy/ocr-oci/placeholder/Dockerfile").read_text(
+        encoding="utf-8"
+    )
     workflow = (root / ".github/workflows/ocr-oci-publish.yml").read_text(encoding="utf-8")
     dockerignore = (root / ".dockerignore").read_text(encoding="utf-8")
     schema_path = root / "deploy/ocr-oci/runtime-bundle-manifest.schema.json"
@@ -134,28 +137,63 @@ def verify(repository_root: Path) -> None:
         raise DeploymentSourceError("runtime_context_dockerfile_invalid")
     if re.search(r"^\s*(?:RUN|ADD)\s", runtime_dockerfile, flags=re.MULTILINE):
         raise DeploymentSourceError("runtime_context_dockerfile_not_data_only")
+    if (
+        placeholder_dockerfile.count("FROM scratch") != 1
+        or "ARG SOURCE_REPOSITORY" not in placeholder_dockerfile
+        or 'org.opencontainers.image.source="${SOURCE_REPOSITORY}"' not in placeholder_dockerfile
+        or 'io.customs.artifact.kind="asset-free-ghcr-bootstrap-v1"' not in placeholder_dockerfile
+        or re.search(r"^\s*(?:ADD|COPY|RUN)\s", placeholder_dockerfile, flags=re.MULTILINE)
+        is not None
+    ):
+        raise DeploymentSourceError("ghcr_placeholder_not_asset_free")
 
     for literal in (
         "workflow_dispatch:",
+        "operation:",
+        "- bootstrap",
+        "- publish",
         "tags:",
-        '"ocr-oci-v*"',
+        "actions: read",
         "packages: write",
         "attestations: write",
+        "environment: raster-ocr-production",
+        "ref: refs/heads/main",
+        '"${GITHUB_REF_TYPE}" != "branch"',
+        '"$(git rev-parse HEAD)" == "${GITHUB_SHA}"',
+        "verify_github_release_environment.py",
+        "deploy/ocr-oci/placeholder/Dockerfile",
+        "asset-free-bootstrap-v1",
+        "--provenance=false",
+        "--sbom=false",
         "provenance: mode=max",
         "sbom: true",
         "RASTER_RUNTIME_IMAGE=${{ steps.release.outputs.runtime_image }}",
         "SOURCE_REVISION=${{ github.sha }}",
-        "@sha256:[a-f0-9]{64}",
+        "^sha256:[a-f0-9]{64}$",
         'verify_ghcr_private_package.py --image "${RUNTIME_IMAGE}"',
         'verify_ghcr_private_package.py --image "${OUTPUT_IMAGE}"',
         'verify_ghcr_private_package.py --image "${immutable_ref}"',
     ):
         if literal not in workflow:
             raise DeploymentSourceError("publish_workflow_boundary_incomplete")
-    if re.search(r"^\s+pull_request:\s*$", workflow, flags=re.MULTILINE):
-        raise DeploymentSourceError("publish_on_pull_request_forbidden")
-    if re.search(r"^\s+branches:\s*", workflow, flags=re.MULTILINE):
-        raise DeploymentSourceError("publish_on_branch_push_forbidden")
+    if (
+        re.search(
+            r"^  (?:push|pull_request|pull_request_target|schedule):\s*$",
+            workflow,
+            flags=re.MULTILINE,
+        )
+        is not None
+        or "ocr-oci-v" in workflow
+    ):
+        raise DeploymentSourceError("publish_non_manual_trigger_forbidden")
+    # This build copies the private OCR/model runtime into intermediate layers.
+    # An Actions cache is a weaker boundary than the private GHCR package and
+    # mode=max would export those intermediate bytes. Keep every cache backend
+    # out of this asset-bearing workflow; source-only builds may cache elsewhere.
+    if any(
+        marker in workflow for marker in ("cache-from", "cache-to", "type=gha", "actions/cache@")
+    ):
+        raise DeploymentSourceError("asset_bearing_publish_cache_forbidden")
 
     exporter = (root / "tools/export_raster_text_oci_runtime.py").read_text(encoding="utf-8")
     runtime_verifier = (root / "tools/verify_raster_text_oci_runtime.py").read_text(
@@ -168,6 +206,9 @@ def verify(repository_root: Path) -> None:
         encoding="utf-8"
     )
     privacy_verifier = (root / "deploy/ocr-oci/verify_ghcr_private_package.py").read_text(
+        encoding="utf-8"
+    )
+    environment_verifier = (root / "deploy/ocr-oci/verify_github_release_environment.py").read_text(
         encoding="utf-8"
     )
     readiness = (root / "deploy/ocr-oci/ocr_readiness.py").read_text(encoding="utf-8")
@@ -190,16 +231,28 @@ def verify(repository_root: Path) -> None:
         or "api.github.com" not in privacy_verifier
         or 'metadata.get("visibility") != "private"' not in privacy_verifier
         or "/packages/container/" not in privacy_verifier
+        or "required_reviewers" not in environment_verifier
+        or "prevent_self_review" not in environment_verifier
+        or "deployment-branch-policies?per_page=100" not in environment_verifier
+        or 'declared[0].get("name") != "main"' not in environment_verifier
     ):
         raise DeploymentSourceError("current_native_ocr_oci_boundary_incomplete")
+
+    environment_check = workflow.find("verify_github_release_environment.py")
+    placeholder_push = workflow.find("deploy/ocr-oci/placeholder/Dockerfile")
+    final_build = workflow.find("Build and publish immutable Agent plus OCR image")
+    if not 0 <= environment_check < placeholder_push < final_build:
+        raise DeploymentSourceError("publish_verification_order_invalid")
 
     for relative in (
         "deploy/ocr-oci/create_app_license_manifest.py",
         "deploy/ocr-oci/ocr_readiness.py",
+        "deploy/ocr-oci/selftest_github_release_environment.py",
         "deploy/ocr-oci/selftest_ocr_readiness.py",
         "deploy/ocr-oci/selftest_ghcr_private_package.py",
         "deploy/ocr-oci/selftest_runtime_contract.py",
         "deploy/ocr-oci/verify_ghcr_private_package.py",
+        "deploy/ocr-oci/verify_github_release_environment.py",
         "deploy/ocr-oci/verify_agent_runtime_binding.py",
         "deploy/ocr-oci/verify_deployment_sources.py",
         "tools/export_raster_text_oci_runtime.py",

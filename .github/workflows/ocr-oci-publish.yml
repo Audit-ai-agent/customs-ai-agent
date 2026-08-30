@@ -3,19 +3,25 @@ name: Raster OCR OCI publish
 on:
   workflow_dispatch:
     inputs:
+      operation:
+        description: "Create private asset-free packages or publish the digest-pinned OCR image"
+        required: true
+        default: bootstrap
+        type: choice
+        options:
+          - bootstrap
+          - publish
       runtime_image:
-        description: "Digest-pinned private GHCR runtime image (ghcr.io/...@sha256:...)"
+        description: "Required only for publish: ghcr.io/<owner>/<repo>-raster-runtime@sha256:..."
         required: false
         type: string
-  push:
-    tags:
-      - "ocr-oci-v*"
 
 concurrency:
   group: raster-ocr-oci-publish
   cancel-in-progress: false
 
 permissions:
+  actions: read
   contents: read
   packages: write
   attestations: write
@@ -25,6 +31,7 @@ jobs:
   publish:
     runs-on: ubuntu-latest
     timeout-minutes: 45
+    environment: raster-ocr-production
     outputs:
       digest: ${{ steps.publish.outputs.digest }}
       image: ${{ steps.release.outputs.image_repository }}
@@ -34,33 +41,47 @@ jobs:
         id: release
         shell: bash
         env:
+          DISPATCH_OPERATION: ${{ inputs.operation }}
           DISPATCH_RUNTIME_IMAGE: ${{ inputs.runtime_image }}
-          CONFIGURED_RUNTIME_IMAGE: ${{ vars.CUSTOMS_AGENT_RASTER_RUNTIME_IMAGE }}
         run: |
           set -euo pipefail
-          if [[ "${GITHUB_EVENT_NAME}" == "workflow_dispatch" && "${GITHUB_REF}" != "refs/heads/main" ]]; then
+          if [[ "${GITHUB_EVENT_NAME}" != "workflow_dispatch" || "${GITHUB_REF}" != "refs/heads/main" || "${GITHUB_REF_TYPE}" != "branch" ]]; then
             echo "manual_publish_requires_main" >&2
             exit 1
           fi
-          owner="${GITHUB_REPOSITORY_OWNER,,}"
           repository="${GITHUB_REPOSITORY,,}"
-          runtime_image="${DISPATCH_RUNTIME_IMAGE:-${CONFIGURED_RUNTIME_IMAGE:-}}"
-          if [[ ! "${runtime_image}" =~ ^ghcr\.io/${owner}/[a-z0-9][a-z0-9._/-]*@sha256:[a-f0-9]{64}$ ]]; then
-            echo "digest_pinned_org_runtime_image_required" >&2
+          operation="${DISPATCH_OPERATION}"
+          runtime_image="${DISPATCH_RUNTIME_IMAGE}"
+          runtime_repository="ghcr.io/${repository}-raster-runtime"
+          if [[ "${operation}" == "bootstrap" ]]; then
+            [[ -z "${runtime_image}" ]] || {
+              echo "bootstrap_runtime_image_forbidden" >&2
+              exit 1
+            }
+            should_publish=false
+          elif [[ "${operation}" == "publish" ]]; then
+            [[ -n "${runtime_image}" ]] || {
+              echo "publish_runtime_image_required" >&2
+              exit 1
+            }
+            runtime_digest="${runtime_image#"${runtime_repository}@"}"
+            if [[ "${runtime_image}" != "${runtime_repository}@${runtime_digest}" || ! "${runtime_digest}" =~ ^sha256:[a-f0-9]{64}$ ]]; then
+              echo "digest_pinned_org_runtime_image_required" >&2
+              exit 1
+            fi
+            should_publish=true
+          else
+            echo "publish_operation_invalid" >&2
             exit 1
           fi
           image_repository="ghcr.io/${repository}-raster-ocr"
           tags="${image_repository}:sha-${GITHUB_SHA}"
-          if [[ "${GITHUB_REF_TYPE}" == "tag" ]]; then
-            [[ "${GITHUB_REF_NAME}" =~ ^ocr-oci-v[0-9][A-Za-z0-9._-]*$ ]] || {
-              echo "release_tag_invalid" >&2
-              exit 1
-            }
-            tags+=$'\n'"${image_repository}:${GITHUB_REF_NAME}"
-          fi
           {
             echo "runtime_image=${runtime_image}"
+            echo "runtime_repository=${runtime_repository}"
             echo "image_repository=${image_repository}"
+            echo "placeholder_tag=asset-free-bootstrap-v1"
+            echo "should_publish=${should_publish}"
             echo "tags<<EOF"
             echo "${tags}"
             echo "EOF"
@@ -68,7 +89,31 @@ jobs:
 
       - uses: actions/checkout@11d5960a326750d5838078e36cf38b85af677262 # v4
         with:
+          ref: refs/heads/main
+          fetch-depth: 1
           persist-credentials: false
+
+      - name: Verify exact current main revision
+        shell: bash
+        run: |
+          set -euo pipefail
+          [[ "${GITHUB_SHA}" =~ ^[a-f0-9]{40}$ ]] || {
+            echo "workflow_source_revision_invalid" >&2
+            exit 1
+          }
+          [[ "$(git rev-parse HEAD)" == "${GITHUB_SHA}" ]] || {
+            echo "main_moved_after_dispatch" >&2
+            exit 1
+          }
+
+      - name: Verify independently approved release environment
+        shell: bash
+        env:
+          GH_TOKEN: ${{ secrets.GITHUB_TOKEN }}
+        run: |
+          python3 deploy/ocr-oci/verify_github_release_environment.py \
+            --repository "${GITHUB_REPOSITORY}" \
+            --environment raster-ocr-production
 
       - name: Log in to private GHCR
         uses: docker/login-action@c94ce9fb468520275223c153574b00df6fe4bcc9 # v3
@@ -80,15 +125,54 @@ jobs:
       - name: Set up Buildx
         uses: docker/setup-buildx-action@8d2750c68a42422c14e847fe6c8ac0403b4cbd6f # v3
 
-      - name: Verify runtime digest is readable
+      - name: Bootstrap asset-free private GHCR packages
         shell: bash
         env:
-          RUNTIME_IMAGE: ${{ steps.release.outputs.runtime_image }}
+          GH_TOKEN: ${{ secrets.GITHUB_TOKEN }}
+          OUTPUT_IMAGE: ${{ steps.release.outputs.image_repository }}
+          PLACEHOLDER_TAG: ${{ steps.release.outputs.placeholder_tag }}
+          RUNTIME_REPOSITORY: ${{ steps.release.outputs.runtime_repository }}
+          SHOULD_PUBLISH: ${{ steps.release.outputs.should_publish }}
         run: |
           set -euo pipefail
-          docker buildx imagetools inspect "${RUNTIME_IMAGE}" >/dev/null
+          source_repository="https://github.com/${GITHUB_REPOSITORY}"
+          image_repositories=("${OUTPUT_IMAGE}")
+          if [[ "${SHOULD_PUBLISH}" != "true" ]]; then
+            image_repositories=("${RUNTIME_REPOSITORY}" "${OUTPUT_IMAGE}")
+          fi
+          for image_repository in "${image_repositories[@]}"; do
+            docker buildx build \
+              --file deploy/ocr-oci/placeholder/Dockerfile \
+              --platform linux/amd64 \
+              --build-arg "SOURCE_REPOSITORY=${source_repository}" \
+              --provenance=false \
+              --sbom=false \
+              --tag "${image_repository}:${PLACEHOLDER_TAG}" \
+              --push \
+              deploy/ocr-oci/placeholder
+            docker buildx imagetools inspect \
+              "${image_repository}:${PLACEHOLDER_TAG}" >/dev/null
+            python3 deploy/ocr-oci/verify_ghcr_private_package.py \
+              --image "${image_repository}"
+          done
 
-      - name: Require private GHCR input and output packages
+      - name: Report package bootstrap only
+        if: steps.release.outputs.should_publish != 'true'
+        shell: bash
+        env:
+          OUTPUT_IMAGE: ${{ steps.release.outputs.image_repository }}
+          RUNTIME_REPOSITORY: ${{ steps.release.outputs.runtime_repository }}
+        run: |
+          {
+            echo "### Raster OCR private package bootstrap"
+            echo
+            echo "- Runtime package: \`${RUNTIME_REPOSITORY}\`"
+            echo "- Agent package: \`${OUTPUT_IMAGE}\`"
+            echo "- Result: asset-free placeholders pushed and private visibility verified"
+          } >> "${GITHUB_STEP_SUMMARY}"
+
+      - name: Verify runtime digest is private and readable
+        if: steps.release.outputs.should_publish == 'true'
         shell: bash
         env:
           GH_TOKEN: ${{ secrets.GITHUB_TOKEN }}
@@ -97,9 +181,11 @@ jobs:
         run: |
           set -euo pipefail
           python3 deploy/ocr-oci/verify_ghcr_private_package.py --image "${RUNTIME_IMAGE}"
+          docker buildx imagetools inspect "${RUNTIME_IMAGE}" >/dev/null
           python3 deploy/ocr-oci/verify_ghcr_private_package.py --image "${OUTPUT_IMAGE}"
 
       - name: Build and publish immutable Agent plus OCR image
+        if: steps.release.outputs.should_publish == 'true'
         id: publish
         uses: docker/build-push-action@10e90e3645eae34f1e60eeb005ba3a3d33f178e8 # v6
         with:
@@ -112,12 +198,11 @@ jobs:
           build-args: |
             RASTER_RUNTIME_IMAGE=${{ steps.release.outputs.runtime_image }}
             SOURCE_REVISION=${{ github.sha }}
-          cache-from: type=gha,scope=raster-ocr-linux-amd64
-          cache-to: type=gha,mode=max,scope=raster-ocr-linux-amd64
           provenance: mode=max
           sbom: true
 
       - name: Verify and report immutable image digest
+        if: steps.release.outputs.should_publish == 'true'
         id: result
         shell: bash
         env:

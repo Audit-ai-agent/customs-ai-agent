@@ -113,16 +113,28 @@ publish 결과의 `file_count`를 기록해 실제 closure가 확인되면 코�
 
 ## 2. runtime context를 private GHCR에 게시
 
+최초 한 번은 GitHub의 **Raster OCR OCI publish** workflow를 `main`에서
+`operation=bootstrap`, 빈 `runtime_image`로 실행한다. Workflow는 `GITHUB_TOKEN`과 정확한
+`org.opencontainers.image.source` label로 runtime과 최종 Agent package에
+filesystem layer가 없는 `FROM scratch` placeholder만 게시한다. 그 뒤 두
+package가 모두 `private`인지 API로 확인한다. 이 단계에는 모델이나
+runtime byte가 없으며, workflow 저장소가 package에 자동 연결되고
+쓰기 권한도 실제 placeholder push로 입증된다.
+
+게시 job은 `raster-ocr-production` environment에 고정된다. 이 environment는
+최초 실행 전에 required reviewer, self-review 금지, `main`만 허용하는 custom
+deployment branch policy 하나를 갖춰야 한다. Workflow가 이 설정을 API로
+다시 검증하므로 미설정 environment가 자동 생성되어도 registry 쓰기 전에
+실패한다. Private 저장소에서 required reviewer를 지원하지 않는 GitHub
+plan은 외부 배포 승인 선행조건을 만족하지 못하므로 fail-closed된다.
+
 먼저 제한된 `packages:write` 권한으로 `docker login ghcr.io`를 수행하고, API 조회가
 가능한 token을 `GH_TOKEN` 환경변수로만 제공한다. Token은 스크립트 인수나 출력으로
-전달하지 않는다. 대상 package는 **실제 runtime을 처음 push하기 전에 이미 존재하고
-`private`여야 한다**. 최초 package가 없다면 모델이 없는 빈 placeholder image만 먼저
-게시하고 GitHub package 설정에서 private임을 확인한다. Public이거나 API가 404/권한
-오류를 반환하는 package에는 이 스크립트가 runtime byte를 push하지 않는다.
-CLI에서 만든 package는 저장소에 자동 연결되지 않을 수 있다. GitHub package의
-**Manage Actions access**에서 이 저장소를 추가하고 write 권한을 부여해야 최종
-workflow의 `GITHUB_TOKEN`이 private runtime을 읽고 output package를 갱신할 수 있다.
-이 연결이 없거나 token으로 metadata를 읽지 못하면 workflow는 build 전에 실패한다.
+전달하지 않는다. 위 bootstrap이 만든 package가 존재하고 `private`일 때만
+아래 스크립트가 runtime byte를 push한다. Public, API 404, 권한 오류는 모두
+최초 모델 byte 게시 전에 실패한다.
+이미 public이 된 container package는 private으로 되돌릴 수 없으므로 해당 고정
+package 이름이 public이면 자동 복구하지 않고 새 검토된 이름으로 전환해야 한다.
 
 ```bash
 bash deploy/ocr-oci/publish_runtime_context.sh \
@@ -140,28 +152,35 @@ interpreter를 실행해 package/model 검사, `cv2`·Paddle import와 sidecar w
 runtime_image=ghcr.io/audit-ai-agent/customs-ai-agent-raster-runtime@sha256:<digest>
 ```
 
-이 값을 저장소 Actions variable `CUSTOMS_AGENT_RASTER_RUNTIME_IMAGE`에 넣는다.
-변수는 secret이 아니지만 반드시 같은 GitHub owner의 private GHCR digest여야 한다.
-수동 workflow 실행에서는 `runtime_image` 입력으로 같은 값을 직접 줄 수도 있다.
+이 값을 두 번째 수동 workflow 실행의 `operation=publish` 및
+`runtime_image` 입력으로 정확히 전달한다. `bootstrap`과 `publish`는 명시적으로
+분리되며 저장소 variable에서 runtime digest를 암묵적으로 fallback하지 않는다.
 
 ## 3. 최종 Agent+OCR 이미지 게시
 
-GitHub의 **Raster OCR OCI publish** workflow를 `main`에서 수동 실행하거나,
-검증된 release에 `ocr-oci-v*` tag를 만든다. Workflow는 다음 순서를 지킨다.
+GitHub의 **Raster OCR OCI publish** workflow를 `main`에서만 수동 실행한다.
+Tag나 branch push는 배포를 시작하지 않는다. Workflow는 다음 순서를 지킨다.
 
-1. runtime 입력이 `ghcr.io/<현재 owner>/...@sha256:<64 hex>`인지 확인한다.
-2. GitHub Packages API에서 입력 runtime package와 최종 output package가 모두 이미
-   `visibility=private`인지 확인하고 private runtime digest가 실제로 pull 가능한지
-   확인한다. 최종 output package도 모델 없는 placeholder로 미리 만들고 private으로
-   설정해야 한다. Workflow의 `GITHUB_TOKEN`이 어느 package metadata라도 읽지 못하면
-   추정하지 않고 실제 모델 build/push 전에 실패한다.
-3. `deploy/ocr-oci/Dockerfile`의 `release` target을 `linux/amd64`로 build한다.
-4. 네트워크가 차단된 build stage에서 모든 file hash·SBOM·license 운송 경계와 실제
+1. dispatch ref·type·checkout SHA가 모두 현재 `main` tip과 일치하는지 확인한다.
+2. 독립 reviewer가 승인한 environment와 self-review 금지·`main` 정책을 API로 재검증한다.
+3. `bootstrap`은 고정된 asset-free placeholder를 runtime/output 두 package에 게시하고,
+   `publish`는 output package에 같은 placeholder를 다시 push해 쓰기 권한을 입증한다.
+   대상 package는 모두 `visibility=private`인지 즉시 확인한다.
+4. `publish` 모드에서 runtime 입력이 정확한
+   `ghcr.io/<owner>/<repo>-raster-runtime@sha256:<64 hex>`이고 현재 token으로
+   private pull 가능한지 확인한다. `bootstrap` 모드는 자산 build 없이 요약만
+   남기고 종료한다.
+5. `deploy/ocr-oci/Dockerfile`의 `release` target을 `linux/amd64`로 build한다.
+6. 네트워크가 차단된 build stage에서 모든 file hash·SBOM·license 운송 경계와 실제
    Agent V12/V19/V9 binding, bundled interpreter의 native import/warm ready를 재검증한다.
-5. 최종과 같은 UID 10001로 warm 검증한 non-root final image를 GHCR에 push하고 OCI
+7. 최종과 같은 UID 10001로 warm 검증한 non-root final image를 GHCR에 push하고 OCI
    provenance/SBOM을 첨부한다.
-6. push 뒤 output package가 여전히 private인지 다시 확인한다.
-7. workflow summary에 최종 `image@sha256:digest`를 남긴다.
+8. push 뒤 output package가 여전히 private인지 다시 확인한다.
+9. workflow summary에 최종 `image@sha256:digest`를 남긴다.
+
+이 publish build는 private OCR 모델이 중간 layer에 포함되므로 GitHub Actions
+cache를 import하거나 export하지 않는다. 재사용은 private GHCR runtime
+digest와 배포 노드의 로컬 Docker layer cache 경계 안에서만 허용한다.
 
 로컬에서 같은 결합 build를 확인하려면 다음처럼 정확한 runtime digest와 현재
 40자리 Git commit을 전달한다.
