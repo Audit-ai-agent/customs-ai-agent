@@ -149,6 +149,8 @@ def verify(repository_root: Path) -> None:
     for literal in (
         "FROM ${RASTER_RUNTIME_IMAGE} AS raster-runtime",
         "COPY --from=raster-runtime --link --chown=0:0",
+        "UV_PROJECT_ENVIRONMENT=/opt/customs/app/.venv",
+        "#!/opt/customs/app/.venv/bin/python",
         "tools/verify_raster_text_oci_runtime.py",
         "verify_agent_runtime_binding.py",
         "raster_text_oci_evidence.py",
