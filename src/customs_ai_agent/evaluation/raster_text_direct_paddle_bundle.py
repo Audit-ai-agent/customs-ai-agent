@@ -164,6 +164,8 @@ def _direct_runtime_closure(
     if operating_system == "linux":
         return _DIRECT_LINUX_MODULE_DIRECTORIES, _DIRECT_LINUX_DISTRIBUTIONS
     raise RasterTextDirectPaddleBundleError("direct_paddle_bundle_platform_mismatch")
+
+
 _DIRECT_MODEL_PATHS = (
     "text-det/inference.json",
     "text-det/inference.pdiparams",
