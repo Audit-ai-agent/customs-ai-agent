@@ -189,6 +189,80 @@ def test_v12_accepts_only_the_exact_one_pass_v19_engine() -> None:
         )
 
 
+def test_v12_linux_platform_accepts_a_pinned_manifest_larger_than_a_profile(
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    manifest_raw = runtime._canonical_evaluation_json_bytes(  # noqa: SLF001
+        {
+            "bundle_id": "raster-text-direct-paddle-bundle-v1",
+            "padding": "x" * (runtime._MAX_CONFIGURATION_BYTES + 1),  # noqa: SLF001
+            "runtime_architecture": "amd64",
+            "runtime_operating_system": "linux",
+            "runtime_python_abi": "cp311",
+            "schema_version": "2.0",
+        }
+    )
+    assert runtime._MAX_CONFIGURATION_BYTES < len(manifest_raw)  # noqa: SLF001
+    assert len(manifest_raw) <= runtime._MAX_DIRECT_BUNDLE_MANIFEST_BYTES  # noqa: SLF001
+    manifest_path = tmp_path / "manifest.json"
+    manifest_path.write_bytes(manifest_raw)
+    profile = _profile().model_copy(
+        update={
+            "bundle_manifest_sha256": hashlib.sha256(manifest_raw).hexdigest(),
+            "bundle_root_relative_path": "bundles/linux-v1",
+        }
+    )
+
+    monkeypatch.setattr(runtime, "_v2_bundle_sidecar_path", lambda **_kwargs: manifest_path)
+    monkeypatch.setattr(
+        runtime,
+        "current_raster_runtime_platform_binding",
+        lambda: ("linux", "amd64", "cp311"),
+    )
+
+    runtime._verify_v12_linux_profile_runtime_platform(  # noqa: SLF001
+        root=tmp_path,
+        profile=profile,
+    )
+
+
+def test_direct_platform_accepts_a_schema2_manifest_larger_than_a_profile(
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    manifest_raw = runtime._canonical_evaluation_json_bytes(  # noqa: SLF001
+        {
+            "bundle_id": "raster-text-direct-paddle-bundle-v1",
+            "padding": "x" * (runtime._MAX_CONFIGURATION_BYTES + 1),  # noqa: SLF001
+            "runtime_architecture": "amd64",
+            "runtime_operating_system": "linux",
+            "runtime_python_abi": "cp311",
+            "schema_version": "2.0",
+            "sidecar_interpreter_relative_path": "sidecar/interpreter/bin/python3.11",
+        }
+    )
+    manifest_sha256 = hashlib.sha256(manifest_raw).hexdigest()
+    root = tmp_path / "_local" / "data" / "document-preview"
+    bundle_root = f"raster-text-direct-bundles-v1/releases/{manifest_sha256}"
+    manifest_path = root / bundle_root / "manifest.json"
+    manifest_path.parent.mkdir(parents=True)
+    manifest_path.write_bytes(manifest_raw)
+    profile = runtime.RasterTextOfflineProfileV2.model_construct(
+        bundle_manifest_sha256=manifest_sha256,
+        bundle_root_relative_path=bundle_root,
+        sidecar_interpreter_path=f"{bundle_root}/sidecar/interpreter/bin/python3.11",
+    )
+    monkeypatch.setattr(
+        runtime,
+        "current_raster_runtime_platform_binding",
+        lambda: ("linux", "amd64", "cp311"),
+    )
+
+    runtime._verify_direct_profile_runtime_platform(  # noqa: SLF001
+        root=root,
+        profile=profile,
+    )
+
+
 @pytest.mark.parametrize(
     ("verification_mode", "expected_complete"),
     [("runtime", False), ("activation", True)],

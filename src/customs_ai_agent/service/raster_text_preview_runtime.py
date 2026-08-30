@@ -85,6 +85,10 @@ from customs_ai_agent.schemas.raster_text_extraction import (
 _SHA256 = re.compile(r"^[a-f0-9]{64}$")
 _IDENTIFIER = re.compile(r"^[A-Za-z0-9][A-Za-z0-9._:-]{0,127}$")
 _MAX_CONFIGURATION_BYTES = 1024 * 1024
+# A schema-2 direct bundle manifest enumerates the complete pinned interpreter
+# closure and can legitimately exceed the much smaller profile/configuration
+# cap.  Keep this bounded limit aligned with the authoritative bundle loader.
+_MAX_DIRECT_BUNDLE_MANIFEST_BYTES = 16 * 1024 * 1024
 # Candidate bundles retain local editable OCR drafts.  They are never exposed
 # through the pointer, but a 24-asset smoke bundle can legitimately exceed a
 # configuration file.  Keep the loader aligned with activation's compact
@@ -4868,7 +4872,7 @@ def _verify_direct_profile_runtime_platform(
             profile=profile,
             value=f"{profile.bundle_root_relative_path}/manifest.json",
         )
-        raw = _read_local_file(manifest_path, limit=_MAX_CONFIGURATION_BYTES)
+        raw = _read_local_file(manifest_path, limit=_MAX_DIRECT_BUNDLE_MANIFEST_BYTES)
         if hashlib.sha256(raw).hexdigest() != profile.bundle_manifest_sha256:
             raise ValueError
         value = json.loads(raw.decode("utf-8"))
@@ -4919,7 +4923,7 @@ def _verify_v12_linux_profile_runtime_platform(
             profile=profile,
             value=f"{profile.bundle_root_relative_path}/manifest.json",
         )
-        raw = _read_local_file(manifest_path, limit=_MAX_CONFIGURATION_BYTES)
+        raw = _read_local_file(manifest_path, limit=_MAX_DIRECT_BUNDLE_MANIFEST_BYTES)
         value = json.loads(raw.decode("utf-8"))
         if (
             not isinstance(value, dict)
