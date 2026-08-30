@@ -133,6 +133,7 @@ def test_linux_activation_uses_fixed_materials_and_current_v12_transaction(
     observed: dict[str, object] = {
         "compile": 0,
         "ensure_release": 0,
+        "materialize_text_release": 0,
         "selection": 0,
         "profiles": [],
     }
@@ -152,7 +153,22 @@ def test_linux_activation_uses_fixed_materials_and_current_v12_transaction(
         "ensure_raster_offline_bundle_release_v1",
         ensure_release,
     )
-    monkeypatch.setattr(activation, "load_verified_raster_offline_bundle", lambda _root: offline)
+
+    def materialize_text_release(*, document_preview_root: Path) -> SimpleNamespace:
+        assert document_preview_root == root
+        observed["materialize_text_release"] = int(observed["materialize_text_release"]) + 1
+        return offline
+
+    monkeypatch.setattr(
+        activation,
+        "materialize_verified_unselected_raster_text_release_v1",
+        materialize_text_release,
+    )
+    monkeypatch.setattr(
+        activation,
+        "load_verified_raster_offline_bundle_release",
+        lambda **_kwargs: offline,
+    )
 
     def materialize(**kwargs: object) -> SimpleNamespace:
         observed["materialize"] = kwargs
@@ -261,6 +277,7 @@ def test_linux_activation_uses_fixed_materials_and_current_v12_transaction(
     ]
     assert observed["compile"] == 1
     assert observed["ensure_release"] == 1
+    assert observed["materialize_text_release"] == 1
     assert observed["selection"] == 1
     assert observed["profiles"] == [
         {

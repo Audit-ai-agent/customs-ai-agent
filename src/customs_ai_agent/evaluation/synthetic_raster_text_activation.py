@@ -43,6 +43,7 @@ from customs_ai_agent.evaluation.raster_offline_bundle import (
 from customs_ai_agent.evaluation.raster_offline_bundle_bootstrap import (
     RasterOfflineBundleBootstrapError,
     ensure_raster_offline_bundle_release_v1,
+    materialize_verified_unselected_raster_text_release_v1,
 )
 from customs_ai_agent.evaluation.raster_text_direct_paddle_bundle import (
     RasterTextDirectPaddleBundleError,
@@ -9990,12 +9991,16 @@ def auto_activate_synthetic_raster_text_linux_preview97_v1(
                 raise SyntheticRasterTextActivationError(
                     "raster_text_linux_activation_platform_invalid"
                 )
-            # The online bootstrap intentionally publishes first into the
-            # fixed legacy location.  A direct-text bundle, however, accepts
-            # only a content-addressed source release.  Promote/reuse that
-            # fully verified local bundle here, still under the surrounding
-            # network denial, before deriving the direct OCR microbundle.
-            offline_bundle = ensure_raster_offline_bundle_release_v1(
+            # The online bootstrap first publishes into the fixed legacy
+            # location.  Promote/reuse its selected structural release, then
+            # derive the unselected text-only release that carries the exact
+            # direct detector/recognizer inventory.  Both steps remain under
+            # network denial and fully smoke their private stage before the
+            # direct OCR microbundle is allowed to consume it.
+            ensure_raster_offline_bundle_release_v1(
+                document_preview_root=root
+            )
+            offline_bundle = materialize_verified_unselected_raster_text_release_v1(
                 document_preview_root=root
             )
             if offline_bundle.manifest.schema_version != "2.0" or (
@@ -10097,7 +10102,10 @@ def auto_activate_synthetic_raster_text_linux_preview97_v1(
                 )
 
                 def recheck_materials() -> None:
-                    rechecked_offline = load_verified_raster_offline_bundle(root)
+                    rechecked_offline = load_verified_raster_offline_bundle_release(
+                        document_preview_root=root,
+                        manifest_sha256=offline_bundle.manifest_sha256,
+                    )
                     rechecked_sidecar = load_verified_raster_text_direct_paddle_bundle_v1(
                         document_preview_root=root,
                         manifest_sha256=sidecar_bundle.manifest_sha256,
