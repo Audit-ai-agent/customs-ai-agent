@@ -40,6 +40,10 @@ from customs_ai_agent.evaluation.raster_offline_bundle import (
     load_verified_raster_offline_bundle_release,
     write_or_verify_canonical_local_json,
 )
+from customs_ai_agent.evaluation.raster_offline_bundle_bootstrap import (
+    RasterOfflineBundleBootstrapError,
+    ensure_raster_offline_bundle_release_v1,
+)
 from customs_ai_agent.evaluation.raster_text_direct_paddle_bundle import (
     RasterTextDirectPaddleBundleError,
     load_verified_raster_text_direct_paddle_bundle_v1,
@@ -9986,7 +9990,14 @@ def auto_activate_synthetic_raster_text_linux_preview97_v1(
                 raise SyntheticRasterTextActivationError(
                     "raster_text_linux_activation_platform_invalid"
                 )
-            offline_bundle = load_verified_raster_offline_bundle(root)
+            # The online bootstrap intentionally publishes first into the
+            # fixed legacy location.  A direct-text bundle, however, accepts
+            # only a content-addressed source release.  Promote/reuse that
+            # fully verified local bundle here, still under the surrounding
+            # network denial, before deriving the direct OCR microbundle.
+            offline_bundle = ensure_raster_offline_bundle_release_v1(
+                document_preview_root=root
+            )
             if offline_bundle.manifest.schema_version != "2.0" or (
                 offline_bundle.manifest.runtime_operating_system,
                 offline_bundle.manifest.runtime_architecture,
@@ -10011,7 +10022,11 @@ def auto_activate_synthetic_raster_text_linux_preview97_v1(
                 raise SyntheticRasterTextActivationError("raster_text_linux_bundle_invalid")
         except SyntheticRasterTextActivationError:
             raise
-        except (RasterOfflineBundleError, RasterTextDirectPaddleBundleError) as error:
+        except (
+            RasterOfflineBundleError,
+            RasterOfflineBundleBootstrapError,
+            RasterTextDirectPaddleBundleError,
+        ) as error:
             if error.code in {
                 "offline_bundle_unavailable",
                 "offline_bundle_release_selector_invalid",

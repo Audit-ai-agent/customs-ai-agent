@@ -77,8 +77,8 @@ def test_linux_activation_rejects_another_native_target_before_bundle_use(
     )
     monkeypatch.setattr(
         activation,
-        "load_verified_raster_offline_bundle",
-        lambda _root: pytest.fail("bundle must not be opened on a non-Linux host"),
+        "ensure_raster_offline_bundle_release_v1",
+        lambda **_kwargs: pytest.fail("bundle must not be opened on a non-Linux host"),
     )
 
     with pytest.raises(
@@ -130,12 +130,27 @@ def test_linux_activation_uses_fixed_materials_and_current_v12_transaction(
     profile = activation.RasterTextOfflineProfileV19.model_construct(
         engine_kind=activation._V19_ENGINE_KIND,  # noqa: SLF001
     )
-    observed: dict[str, object] = {"compile": 0, "selection": 0, "profiles": []}
+    observed: dict[str, object] = {
+        "compile": 0,
+        "ensure_release": 0,
+        "selection": 0,
+        "profiles": [],
+    }
 
     monkeypatch.setattr(
         activation,
         "current_raster_runtime_platform_binding",
         lambda: ("linux", "amd64", "cp311"),
+    )
+    def ensure_release(*, document_preview_root: Path) -> SimpleNamespace:
+        assert document_preview_root == root
+        observed["ensure_release"] = int(observed["ensure_release"]) + 1
+        return offline
+
+    monkeypatch.setattr(
+        activation,
+        "ensure_raster_offline_bundle_release_v1",
+        ensure_release,
     )
     monkeypatch.setattr(activation, "load_verified_raster_offline_bundle", lambda _root: offline)
 
@@ -245,6 +260,7 @@ def test_linux_activation_uses_fixed_materials_and_current_v12_transaction(
         activation._V19_PUBLIC_FINETUNED_MODEL_BUNDLE_SHA256,  # noqa: SLF001
     ]
     assert observed["compile"] == 1
+    assert observed["ensure_release"] == 1
     assert observed["selection"] == 1
     assert observed["profiles"] == [
         {
