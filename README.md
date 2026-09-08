@@ -8,7 +8,7 @@
 | 방식 | 목적 | 외부 입력 |
 | --- | --- | --- |
 | `local-development` | 팀의 기본 전체 개발 | 없음. Data의 합성 Evidence와 결정론 분석기를 사용합니다. |
-| `functional-uat` | 실제 법령 Evidence·Data·Claude 흐름을 한 번 확인 | 개인 Law API 권한, `ANTHROPIC_API_KEY`, Data의 로컬 모델 캐시 |
+| `functional-uat` | 실제 법령 Evidence·Data·LLM(OpenAI 또는 Claude) 흐름을 한 번 확인 | 개인 Law API 권한, `OPENAI_API_KEY` 또는 `ANTHROPIC_API_KEY`, Data의 로컬 모델 캐시 |
 
 두 방식의 **심사**는 텍스트만 처리하고 결과를 항상 `human_review_required`로 반환합니다. 별도 문서 미리보기 경로는 PDF/JPEG/PNG의 사람 검수용 추출 후보만 만들며 기본적으로 비활성화되어 있습니다. 미리보기 결과는 사람이 확인해 텍스트로 확정하기 전까지 심사·Finding·통관 결론에 사용되지 않습니다. 자동완료나 배포 판단 기능은 없습니다.
 
@@ -64,11 +64,13 @@ snapshot ID는 Backend가 대화별로 보존하고, 후속 요청에만 `expect
 기존 5초 제한을 유지합니다. 기본 importer 수정은 필요 없고, 필요할 때만 현재 PowerShell 세션에서
 비밀이 아닌 이 값을 명시해 조정할 수 있습니다.
 
-기능 UAT에는 여기에 개인 `ANTHROPIC_API_KEY`를 추가합니다. 기본 입력 위치는 Git이 무시하는 workspace의 `../_local/secrets/.env`이며, 파일에는 아래 한 항목만 둡니다.
+기능 UAT에는 여기에 개인 LLM API 키를 추가합니다. 기본 입력 위치는 Git이 무시하는 workspace의 `../_local/secrets/.env`입니다.
 
 ```text
 ANTHROPIC_API_KEY=personal-key
 ```
+
+LLM 제공자는 `CUSTOMS_AGENT_LLM_PROVIDER`(`openai` 또는 `anthropic`)로 고르며, 비우면 `OPENAI_API_KEY`만 있을 때 OpenAI, 그 외에는 Anthropic을 사용합니다. OpenAI는 `OPENAI_API_KEY`와 선택적 `CUSTOMS_AGENT_OPENAI_MODEL`(기본 `gpt-4.1-mini`), Anthropic은 `ANTHROPIC_API_KEY`와 선택적 `CUSTOMS_AGENT_CLAUDE_MODEL`(기본 `claude-haiku-4-5-20251001`)을 읽습니다. 출력 한도·시간 제한은 `CUSTOMS_AGENT_LLM_MAX_TOKENS`·`CUSTOMS_AGENT_LLM_TIMEOUT_SECONDS`(기존 `CUSTOMS_AGENT_CLAUDE_*` 이름도 계속 인식)로 두 제공자에 공통 적용됩니다. `OPENAI_BASE_URL`·`ANTHROPIC_BASE_URL` 같은 전송 경로 재지정 변수가 있으면 기동을 거부합니다.
 
 다섯 Functional-UAT importer(`functional-uat-3law`, `functional-uat-law-history`,
 `functional-uat-kr-trade`, `functional-uat-kr-trade-v2`,

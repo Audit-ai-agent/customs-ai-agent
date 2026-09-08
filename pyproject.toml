@@ -19,8 +19,9 @@ dependencies = [
 ]
 
 [project.optional-dependencies]
-# Only the person explicitly running the real Claude functional UAT installs this.
-functional-uat = ["anthropic>=0.117.0,<1"]
+# Only the person explicitly running the real functional UAT installs this.
+# The provider is chosen at runtime (CUSTOMS_AGENT_LLM_PROVIDER); both SDKs ship.
+functional-uat = ["anthropic>=0.117.0,<1", "openai>=1.60,<3"]
 # These extras are never installed by normal service startup.  An operator
 # explicitly provisions one pinned local profile, records its inventory under
 # _local/data/document-preview, and starts the service with its approval hash.
