@@ -33,6 +33,7 @@ from customs_ai_agent.schemas.assistant import (
     KnowledgeAnswerRequestV1,
     KnowledgeAnswerResponseV1,
 )
+from customs_ai_agent.service.llm_settings import LLM_SETTINGS
 from customs_ai_agent.service.progress import PROGRESS
 from customs_ai_agent.scenario_transcript import (
     KnowledgeTranscriptRoot,
@@ -1483,31 +1484,44 @@ class ProfileRuntime:
             self._grounded_responder: ClaudeGroundedResponder | None = None
         else:
             try:
-                claude_settings = ClaudeSettings.from_environment()
-                self._transcript_root = self._transcript_root.with_sensitive_values(
-                    (claude_settings.api_key.get_secret_value(),)
-                )
-                self._knowledge_transcript_root = (
-                    self._knowledge_transcript_root.with_sensitive_values(
-                        (claude_settings.api_key.get_secret_value(),)
-                    )
-                )
-                self._analyzer = ClaudeDocumentAnalyzer.from_settings(claude_settings)
-                try:
-                    self._grounded_responder = ClaudeGroundedResponder.from_settings(
-                        claude_settings
-                    )
-                except Exception:
-                    # A review remains usable with its deterministic report
-                    # fallback if the optional bounded composition adapter is
-                    # unavailable after the required extraction adapter loads.
-                    self._grounded_responder = None
+                self._install_llm(LLM_SETTINGS.current())
             except Exception:
                 raise RuntimeConfigurationError(
                     "functional_uat_claude_configuration_invalid",
-                    "Functional UAT requires a valid local Claude configuration.",
+                    "Functional UAT requires a valid local LLM configuration.",
                 ) from None
+            # Operator changes through the LLM settings surface apply to the
+            # next request; the old SDK clients are left to the garbage
+            # collector so an in-flight request keeps its own client.
+            LLM_SETTINGS.subscribe(self._on_llm_settings_changed)
         self._retriever = ProfileEvidenceRetriever(settings, transcript_root=self._transcript_root)
+
+    def _install_llm(self, llm_settings: ClaudeSettings) -> None:
+        secret = (llm_settings.api_key.get_secret_value(),)
+        self._transcript_root = self._transcript_root.with_sensitive_values(secret)
+        self._knowledge_transcript_root = self._knowledge_transcript_root.with_sensitive_values(
+            secret
+        )
+        analyzer = ClaudeDocumentAnalyzer.from_settings(llm_settings)
+        try:
+            responder: ClaudeGroundedResponder | None = ClaudeGroundedResponder.from_settings(
+                llm_settings
+            )
+        except Exception:
+            # A review remains usable with its deterministic report fallback
+            # if the optional bounded composition adapter is unavailable after
+            # the required extraction adapter loads.
+            responder = None
+        self._analyzer = analyzer
+        self._grounded_responder = responder
+
+    def _on_llm_settings_changed(self, llm_settings: ClaudeSettings) -> None:
+        if self._closed or self.mode == "local-development":
+            return
+        self._install_llm(llm_settings)
+        retriever = getattr(self, "_retriever", None)
+        if retriever is not None:
+            retriever._transcript_root = self._transcript_root
 
     def _assert_open(self) -> None:
         if self._closed:

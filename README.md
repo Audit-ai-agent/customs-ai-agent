@@ -72,6 +72,8 @@ ANTHROPIC_API_KEY=personal-key
 
 LLM 제공자는 `CUSTOMS_AGENT_LLM_PROVIDER`(`openai` 또는 `anthropic`)로 고르며, 비우면 `OPENAI_API_KEY`만 있을 때 OpenAI, 그 외에는 Anthropic을 사용합니다. OpenAI는 `OPENAI_API_KEY`와 선택적 `CUSTOMS_AGENT_OPENAI_MODEL`(기본 `gpt-4.1-mini`), Anthropic은 `ANTHROPIC_API_KEY`와 선택적 `CUSTOMS_AGENT_CLAUDE_MODEL`(기본 `claude-haiku-4-5-20251001`)을 읽습니다. 출력 한도·시간 제한은 `CUSTOMS_AGENT_LLM_MAX_TOKENS`·`CUSTOMS_AGENT_LLM_TIMEOUT_SECONDS`(기존 `CUSTOMS_AGENT_CLAUDE_*` 이름도 계속 인식)로 두 제공자에 공통 적용됩니다. `OPENAI_BASE_URL`·`ANTHROPIC_BASE_URL` 같은 전송 경로 재지정 변수가 있으면 기동을 거부합니다.
 
+운영자는 재시작 없이 제공자·모델·출력 한도·시간 제한을 바꿀 수 있습니다. Agent의 `GET/PUT/DELETE /internal/agent/v3/llm-settings`와 `POST /internal/agent/v3/llm-settings/test`(Backend가 `/api/v1/admin/llm-settings`로 승인자 전용 대리)가 그 경로이며, 키는 여전히 환경 변수에서만 읽습니다. `CUSTOMS_AGENT_LLM_SETTINGS_PATH`를 지정하면 변경값(비밀 제외)이 그 JSON 파일에 남아 재시작 후에도 유지되고, 지정하지 않으면 프로세스 메모리에만 있습니다. 기동 시 파일 값이 현재 환경의 키와 맞지 않으면 무시하고 환경값으로 시작합니다.
+
 다섯 Functional-UAT importer(`functional-uat-3law`, `functional-uat-law-history`,
 `functional-uat-kr-trade`, `functional-uat-kr-trade-v2`,
 `functional-uat-kr-trade-v2-law-history`)만 이 파일을 읽어 현재 Agent PowerShell 세션과 그 자식

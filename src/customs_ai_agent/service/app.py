@@ -10,6 +10,7 @@ from __future__ import annotations
 import re
 
 import asyncio
+import json
 import logging
 from contextlib import asynccontextmanager
 from typing import Any, AsyncIterator, Callable
@@ -17,6 +18,9 @@ from uuid import uuid4
 
 from fastapi import FastAPI, Request
 from fastapi.responses import JSONResponse, Response
+from pydantic import ValidationError
+
+from customs_ai_agent.adapters.llm import LLMConfigurationError
 
 from customs_ai_agent.contracts import get_schema
 from customs_ai_agent.schemas.raster_text_extraction import RasterTextExtractionResultV1
@@ -63,6 +67,11 @@ from customs_ai_agent.service.raster_text_preview_runtime import (
     resolve_raster_text_preview_engine,
 )
 from customs_ai_agent.service.errors import ServiceHttpError
+from customs_ai_agent.service.llm_settings import (
+    LLM_SETTINGS,
+    LLMSettingsError,
+    LLMSettingsUpdate,
+)
 from customs_ai_agent.service.progress import PROGRESS
 from customs_ai_agent.service.input import (
     ERROR_RESPONSE_SCHEMA,
@@ -169,6 +178,32 @@ def _authorize(request: Request, settings: ServiceSettings) -> None:
         raise ServiceHttpError("authentication_required", 401)
     if len(values) != 1 or not bearer_authorized(values[0], settings):
         raise ServiceHttpError("authentication_invalid", 403)
+
+
+def _require_functional_uat(settings: ServiceSettings) -> None:
+    if settings.service_mode != "functional-uat":
+        raise ServiceHttpError("llm_settings_unavailable", 409)
+
+
+def _llm_settings_view(settings: ServiceSettings) -> dict[str, Any]:
+    return {
+        **LLM_SETTINGS.describe(),
+        "service_mode": settings.service_mode,
+        "adjustable": settings.service_mode == "functional-uat",
+    }
+
+
+def _decode_llm_settings_update(payload: bytes) -> LLMSettingsUpdate:
+    try:
+        data = json.loads(payload.decode("utf-8"))
+    except (UnicodeDecodeError, ValueError):
+        raise ServiceHttpError("request_invalid", 422) from None
+    if not isinstance(data, dict):
+        raise ServiceHttpError("request_invalid", 422)
+    try:
+        return LLMSettingsUpdate.model_validate(data)
+    except ValidationError:
+        raise ServiceHttpError("llm_settings_invalid", 422) from None
 
 
 def _profile_runtime(settings: ServiceSettings) -> ServiceRuntime:
@@ -839,6 +874,95 @@ def create_app(
             headers=_NO_STORE_HEADERS,
             content=request.app.state.build_metadata,
         )
+
+    @app.get(
+        "/internal/agent/v3/llm-settings",
+        summary="Read the operator-adjustable LLM settings (non-secret)",
+        openapi_extra={"security": _BEARER_SECURITY},
+        responses={
+            401: {"content": {"application/json": {"schema": ERROR_RESPONSE_SCHEMA}}},
+            403: {"content": {"application/json": {"schema": ERROR_RESPONSE_SCHEMA}}},
+        },
+    )
+    async def llm_settings_read(request: Request) -> JSONResponse:
+        _authorize(request, active_settings)
+        return JSONResponse(
+            status_code=200,
+            headers=_NO_STORE_HEADERS,
+            content=_llm_settings_view(active_settings),
+        )
+
+    @app.put(
+        "/internal/agent/v3/llm-settings",
+        summary="Apply an operator override of provider/model/limits without a restart",
+        openapi_extra={"security": _BEARER_SECURITY},
+        responses={
+            401: {"content": {"application/json": {"schema": ERROR_RESPONSE_SCHEMA}}},
+            403: {"content": {"application/json": {"schema": ERROR_RESPONSE_SCHEMA}}},
+            409: {"content": {"application/json": {"schema": ERROR_RESPONSE_SCHEMA}}},
+            422: {"content": {"application/json": {"schema": ERROR_RESPONSE_SCHEMA}}},
+            503: {"content": {"application/json": {"schema": ERROR_RESPONSE_SCHEMA}}},
+        },
+    )
+    async def llm_settings_update(request: Request) -> JSONResponse:
+        _authorize(request, active_settings)
+        _require_functional_uat(active_settings)
+        update = _decode_llm_settings_update(await admitted_body(request))
+        try:
+            await asyncio.to_thread(LLM_SETTINGS.apply, update)
+        except LLMSettingsError as error:
+            raise ServiceHttpError(error.code, 422) from None
+        except LLMConfigurationError:
+            raise ServiceHttpError("dependency_unready", 503, retryable=True) from None
+        return JSONResponse(
+            status_code=200,
+            headers=_NO_STORE_HEADERS,
+            content=_llm_settings_view(active_settings),
+        )
+
+    @app.delete(
+        "/internal/agent/v3/llm-settings",
+        summary="Drop the operator override and return to the environment configuration",
+        openapi_extra={"security": _BEARER_SECURITY},
+        responses={
+            401: {"content": {"application/json": {"schema": ERROR_RESPONSE_SCHEMA}}},
+            403: {"content": {"application/json": {"schema": ERROR_RESPONSE_SCHEMA}}},
+            409: {"content": {"application/json": {"schema": ERROR_RESPONSE_SCHEMA}}},
+        },
+    )
+    async def llm_settings_reset(request: Request) -> JSONResponse:
+        _authorize(request, active_settings)
+        _require_functional_uat(active_settings)
+        await asyncio.to_thread(LLM_SETTINGS.reset)
+        return JSONResponse(
+            status_code=200,
+            headers=_NO_STORE_HEADERS,
+            content=_llm_settings_view(active_settings),
+        )
+
+    @app.post(
+        "/internal/agent/v3/llm-settings/test",
+        summary="Make one minimal provider request with the current or a candidate configuration",
+        openapi_extra={"security": _BEARER_SECURITY},
+        responses={
+            401: {"content": {"application/json": {"schema": ERROR_RESPONSE_SCHEMA}}},
+            403: {"content": {"application/json": {"schema": ERROR_RESPONSE_SCHEMA}}},
+            409: {"content": {"application/json": {"schema": ERROR_RESPONSE_SCHEMA}}},
+            422: {"content": {"application/json": {"schema": ERROR_RESPONSE_SCHEMA}}},
+        },
+    )
+    async def llm_settings_test(request: Request) -> JSONResponse:
+        _authorize(request, active_settings)
+        _require_functional_uat(active_settings)
+        # An empty JSON object tests the active configuration; any field
+        # tests that candidate without applying it.
+        candidate = _decode_llm_settings_update(await admitted_body(request))
+        update = None if candidate.is_empty() else candidate
+        result = await asyncio.wait_for(
+            asyncio.to_thread(LLM_SETTINGS.probe, update),
+            timeout=active_settings.run_timeout_seconds,
+        )
+        return JSONResponse(status_code=200, headers=_NO_STORE_HEADERS, content=result)
 
     @app.post(
         "/internal/agent/v2/reviews",

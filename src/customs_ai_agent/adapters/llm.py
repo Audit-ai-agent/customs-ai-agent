@@ -110,17 +110,33 @@ class ClaudeSettings(BaseModel):
             object.__setattr__(self, "model", model)
         return self
 
-    @classmethod
-    def from_environment(cls) -> "ClaudeSettings":
+    @staticmethod
+    def provider_from_environment() -> str:
+        """The provider the environment selects (explicitly, or by which key is present)."""
+
         provider = os.environ.get("CUSTOMS_AGENT_LLM_PROVIDER", "").strip().casefold()
-        if not provider:
-            # Explicit selection wins; otherwise follow whichever key is present.
-            provider = (
-                "openai"
-                if os.environ.get("OPENAI_API_KEY", "").strip()
-                and not os.environ.get("ANTHROPIC_API_KEY", "").strip()
-                else "anthropic"
-            )
+        if provider:
+            return provider
+        # Explicit selection wins; otherwise follow whichever key is present.
+        return (
+            "openai"
+            if os.environ.get("OPENAI_API_KEY", "").strip()
+            and not os.environ.get("ANTHROPIC_API_KEY", "").strip()
+            else "anthropic"
+        )
+
+    @classmethod
+    def from_environment(
+        cls,
+        *,
+        provider: str | None = None,
+        model: str | None = None,
+        max_tokens: int | str | None = None,
+        timeout_seconds: float | str | None = None,
+    ) -> "ClaudeSettings":
+        """Build settings from the environment; keyword overrides replace the non-secret fields."""
+
+        provider = (provider or cls.provider_from_environment()).strip().casefold()
         unsafe: tuple[str, ...]
         if provider == "openai":
             unsafe = ("OPENAI_BASE_URL", "OPENAI_API_BASE")
@@ -141,20 +157,24 @@ class ClaudeSettings(BaseModel):
         for name in unsafe:
             if os.environ.get(name, "").strip():
                 raise LLMConfigurationError("unsafe LLM transport override")
-        max_tokens = os.environ.get("CUSTOMS_AGENT_LLM_MAX_TOKENS", "").strip() or os.environ.get(
-            "CUSTOMS_AGENT_CLAUDE_MAX_TOKENS", "4096"
-        )
-        timeout = os.environ.get("CUSTOMS_AGENT_LLM_TIMEOUT_SECONDS", "").strip() or os.environ.get(
-            "CUSTOMS_AGENT_CLAUDE_TIMEOUT_SECONDS", "90"
-        )
+        if max_tokens is None:
+            max_tokens = os.environ.get(
+                "CUSTOMS_AGENT_LLM_MAX_TOKENS", ""
+            ).strip() or os.environ.get("CUSTOMS_AGENT_CLAUDE_MAX_TOKENS", "4096")
+        if timeout_seconds is None:
+            timeout_seconds = os.environ.get(
+                "CUSTOMS_AGENT_LLM_TIMEOUT_SECONDS", ""
+            ).strip() or os.environ.get("CUSTOMS_AGENT_CLAUDE_TIMEOUT_SECONDS", "90")
         try:
             return cls.model_validate(
                 {
                     "api_key": os.environ.get(key_name, "").strip(),
                     "provider": provider,
-                    "model": os.environ.get(model_name, default_model),
+                    "model": model
+                    if model is not None
+                    else os.environ.get(model_name, default_model),
                     "max_tokens": max_tokens,
-                    "timeout_seconds": timeout,
+                    "timeout_seconds": timeout_seconds,
                 }
             )
         except ValidationError:
@@ -162,6 +182,15 @@ class ClaudeSettings(BaseModel):
 
 
 LLMSettings = ClaudeSettings
+
+_PROVIDER_KEY_NAMES = {"anthropic": "ANTHROPIC_API_KEY", "openai": "OPENAI_API_KEY"}
+
+
+def provider_credential_present(provider: str) -> bool:
+    """Whether the environment carries a plausible credential for ``provider``."""
+
+    key_name = _PROVIDER_KEY_NAMES.get(provider)
+    return bool(key_name) and len(os.environ.get(key_name or "", "").strip()) >= 16
 
 
 def _data_url(source: Any) -> str:
@@ -629,6 +658,7 @@ __all__ = [
     "LLMSettings",
     "OpenAIMessagesClient",
     "build_provider_client",
+    "provider_credential_present",
     "DocumentAnalysis",
     "DocumentAnalyzer",
     "LLMConfigurationError",

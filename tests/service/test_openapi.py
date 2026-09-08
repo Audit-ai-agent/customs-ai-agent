@@ -17,6 +17,8 @@ def test_openapi_exposes_only_active_backend_surface() -> None:
         "/health/live",
         "/health/ready",
         "/internal/agent/v2/metadata",
+        "/internal/agent/v3/llm-settings",
+        "/internal/agent/v3/llm-settings/test",
         "/internal/agent/v2/reviews",
         "/internal/agent/v3/reviews/{review_run_id}/progress",
         "/internal/agent/v3/law-search",
