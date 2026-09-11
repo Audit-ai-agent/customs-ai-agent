@@ -222,13 +222,20 @@ Data profile을 같은 PC에서 병렬로 띄울 때에는 각 Data peer를 다�
 
 ## HTTP 계약
 
-Backend가 사용하는 경로는 아래 열두 개뿐입니다.
+Backend가 사용하는 경로는 아래가 전부입니다. 정확한 목록은 `tests/service/test_openapi.py`가 고정합니다.
 
 ```text
 GET  /health/live
 GET  /health/ready
 GET  /internal/agent/v2/metadata
+GET  /internal/agent/v3/llm-settings
+PUT  /internal/agent/v3/llm-settings
+DELETE /internal/agent/v3/llm-settings
+POST /internal/agent/v3/llm-settings/test
 POST /internal/agent/v2/reviews
+GET  /internal/agent/v3/reviews/{review_run_id}/progress
+POST /internal/agent/v3/law-search
+POST /internal/agent/v3/law-catalog
 POST /internal/agent/v2/document-extractions
 POST /internal/agent/v3/raster-document-extractions
 GET  /internal/agent/v3/raster-document-preview-status
