@@ -6,7 +6,7 @@ import hashlib
 import ipaddress
 import json
 import re
-from collections.abc import Mapping
+from collections.abc import Callable, Mapping
 from datetime import date
 from typing import Any, Literal, cast
 from urllib.error import HTTPError, URLError
@@ -46,8 +46,8 @@ from customs_ai_agent.schemas.v3 import (
     EngineV3,
     EvidenceV3,
     FindingV3,
+    OrchestratorV3,
     ReportSectionV3,
-    RequiredActionV1,
     ReviewRunResultV3,
     ServiceReviewRunRequestV3,
     TemporalContextV3,
@@ -86,13 +86,19 @@ from customs_ai_agent.service.assistant import (
 )
 from customs_ai_agent.service.case_input import sanitize_case_assistant_request
 from customs_ai_agent.service.report import (
-    build_grounded_report_sections,
     validate_grounded_report_sections,
 )
 from customs_ai_agent.service.user_text import review_result_markers, reviewer_text_is_safe
+from customs_ai_agent.service.graph import (
+    EvidenceStageResult,
+    ReviewGraphConfig,
+    orchestrator_version,
+    run_review_graph,
+)
 from customs_ai_agent.service.workflow import (
+    BoundedWorkflowOutput,
+    actions_for_findings,
     finding_for_evidence_requirement,
-    run_bounded_workflow,
 )
 
 
@@ -1406,28 +1412,16 @@ def _public_evidence(evidence: list[dict[str, Any]]) -> list[dict[str, Any]]:
     return [{key: value for key, value in item.items() if key in allowed} for item in evidence]
 
 
-def _actions(findings: list[FindingV3]) -> list[RequiredActionV1]:
-    actions = [
-        RequiredActionV1(
-            action_code=(
-                "inspect_"
-                + re.sub(r"[^a-z0-9_]+", "_", finding.code.casefold())[:84]
-                + "_"
-                + finding.finding_id[-12:]
-            )[:128],
-            message=finding.message,
-            finding_ids=[finding.finding_id],
-        )
-        for finding in findings
-    ]
-    actions.append(
-        RequiredActionV1(
-            action_code="human_review_required",
-            message="자동완료하지 않습니다. 담당자가 문서와 법령 근거를 검토해야 합니다.",
-            finding_ids=[],
-        )
-    )
-    return actions
+_actions = actions_for_findings
+
+
+def _provider_of(adapter: Any) -> Literal["anthropic", "openai"] | None:
+    """Read the provider a real adapter was built with; stubs report nothing."""
+
+    provider = getattr(getattr(adapter, "_settings", None), "provider", None)
+    if provider in {"anthropic", "openai"}:
+        return cast(Literal["anthropic", "openai"], provider)
+    return None
 
 
 def _dedupe_findings(findings: list[FindingV3]) -> list[FindingV3]:
@@ -1472,6 +1466,8 @@ class ProfileRuntime:
         knowledge_transcript_root: KnowledgeTranscriptRoot | None = None,
     ) -> None:
         self.mode = service_mode(settings)
+        self._llm_provider: Literal["anthropic", "openai"] | None = None
+        self._confidence_threshold = settings.confidence_threshold
         self._requires_temporal_context = settings.requires_temporal_context
         self._law_history_evidence = settings.evidence_profile == "functional-uat-law-history"
         self._closed = False
@@ -1514,6 +1510,7 @@ class ProfileRuntime:
             responder = None
         self._analyzer = analyzer
         self._grounded_responder = responder
+        self._llm_provider = llm_settings.provider
 
     def _on_llm_settings_changed(self, llm_settings: ClaudeSettings) -> None:
         if self._closed or self.mode == "local-development":
@@ -1588,9 +1585,20 @@ class ProfileRuntime:
         )
 
     def _engine(self) -> EngineV3:
+        """Name the actual extraction engine and the graph runtime around it."""
+
+        kind: Literal["deterministic", "anthropic", "openai"] = "deterministic"
+        if self.mode != "local-development":
+            kind = (
+                self._llm_provider
+                or _provider_of(self._grounded_responder)
+                or _provider_of(self._analyzer)
+                or "anthropic"
+            )
         return EngineV3(
-            kind="deterministic" if self.mode == "local-development" else "claude",
+            kind=kind,
             model_id=str(self._analyzer.model_id),
+            orchestrator=OrchestratorV3(version=orchestrator_version()),
         )
 
     def _guidance_lookup_is_enabled(self) -> bool:
@@ -2197,71 +2205,27 @@ class ProfileRuntime:
                 "claude",
                 "not_called",
                 {
-                    "provider": "claude",
+                    "provider": "deterministic",
                     "called": False,
                     "reason": "local-development uses the deterministic document analyzer",
                 },
             )
         PROGRESS.begin(request.review_run_id)
         try:
-            workflow_output = run_bounded_workflow(
+            graph_result = run_review_graph(
                 request,
-                self._analyzer,
-                transcript=transcript,
-                on_stage=lambda stage, status: PROGRESS.update(
-                    request.review_run_id, stage, status
+                ReviewGraphConfig(
+                    analyzer=self._analyzer,
+                    mode=self.mode,
+                    evidence_stage=self._evidence_stage(transcript),
+                    responder=self._grounded_responder,
+                    confidence_threshold=self._confidence_threshold,
+                    transcript=transcript,
+                    on_stage=lambda stage, status: PROGRESS.update(
+                        request.review_run_id, stage, status
+                    ),
                 ),
             )
-            if workflow_output.retrieval_items:
-                PROGRESS.update(request.review_run_id, "retrieve_evidence", "running")
-                data_response = self._retriever.retrieve(
-                    _retrieve_request(
-                        request,
-                        workflow_output.retrieval_items,
-                        include_law_support=self._law_history_evidence,
-                    )
-                )
-                temporal_context = _temporal_context_from_data(
-                    data_response,
-                    expected_law_as_of=request.review_as_of.isoformat(),
-                    required=self._requires_temporal_context,
-                )
-                temporal_coverage = _temporal_coverage_from_data(
-                    data_response,
-                    required=self._requires_temporal_context,
-                )
-                evidence_records = _evidence_from_data(data_response)
-                workflow_output = workflow_output.with_evidence_status(str(data_response["status"]))
-                PROGRESS.update(request.review_run_id, "retrieve_evidence", "completed")
-                evidence_records = self._relevant_evidence(
-                    request, workflow_output, evidence_records, transcript=transcript
-                )
-            else:
-                # Data rejects an empty retrieval request by contract.  This is
-                # an input limitation, not an unhealthy or partial Data store.
-                data_response = {"status": "ok", "results": []}
-                temporal_context = None
-                temporal_coverage = None
-                evidence_records = []
-                self._retriever.record_retrieve_skipped(
-                    review_run_id=request.review_run_id,
-                    reason_code=(
-                        workflow_output.retrieval_skip_reason or "no_hs_qualified_commodity"
-                    ),
-                )
-                workflow_output = workflow_output.with_evidence_skipped()
-            findings = _dedupe_findings(
-                [
-                    *workflow_output.findings,
-                    *_findings_from_evidence(
-                        evidence_records,
-                        document_ids_by_item=workflow_output.retrieval_document_ids,
-                    ),
-                ]
-            )
-            evidence = [
-                EvidenceV3.model_validate(item) for item in _public_evidence(evidence_records)
-            ]
         except RetrievalError:
             PROGRESS.finish(request.review_run_id, "failed")
             raise RuntimeExecutionError(
@@ -2276,39 +2240,32 @@ class ProfileRuntime:
             raise RuntimeExecutionError(
                 "profile_review_execution_failed", "The local Agent review could not be completed."
             ) from None
-        data_status = str(data_response["status"])
-        status = "blocked" if data_status == "failed" else "needs_review"
-        execution_status = (
-            "failed"
-            if status == "blocked"
-            else (
-                "partial"
-                if data_status == "partial" or workflow_output.workflow.status == "partial"
-                else "succeeded"
+        workflow_output = graph_result.workflow_output
+        evidence_stage = graph_result.evidence
+        if (
+            evidence_stage is None
+            or graph_result.status is None
+            or graph_result.execution_status is None
+            or graph_result.assessment is None
+            or graph_result.actions is None
+            or graph_result.report_sections is None
+        ):
+            PROGRESS.finish(request.review_run_id, "failed")
+            raise RuntimeExecutionError(
+                "profile_review_execution_failed", "The review graph did not reach its report."
             )
-        )
-        assessment = (
-            "issues_detected"
-            if findings
-            else (
-                "no_issue_detected"
-                if data_status == "ok" and workflow_output.workflow.status == "completed"
-                else "indeterminate"
-            )
-        )
-        actions = _actions(findings)
-        PROGRESS.update(request.review_run_id, "generate_result", "running")
-        report_sections = build_grounded_report_sections(
-            analyses=workflow_output.document_analyses,
-            comparisons=workflow_output.comparisons,
-            evidence=evidence,
-            findings=findings,
-            actions=actions,
-            evidence_retrieval_skip_reason=workflow_output.retrieval_skip_reason,
-        )
-        workflow = workflow_output.with_report_generated().workflow
+        findings = graph_result.findings
+        evidence = evidence_stage.public_evidence
+        temporal_context = evidence_stage.temporal_context
+        temporal_coverage = evidence_stage.temporal_coverage
+        status = graph_result.status
+        execution_status = graph_result.execution_status
+        assessment = graph_result.assessment
+        actions = graph_result.actions
+        report_sections = graph_result.report_sections
+        workflow = workflow_output.workflow
         payload_result: dict[str, Any] = {
-            "schema_version": "3.2",
+            "schema_version": "3.3",
             "case_id": request.case_id,
             "review_run_id": request.review_run_id,
             "review_as_of": request.review_as_of,
@@ -2338,10 +2295,9 @@ class ProfileRuntime:
             "required_actions": actions,
             "temporal_context": temporal_context,
             "temporal_coverage": temporal_coverage,
-            "engine": {
-                "kind": "deterministic" if self.mode == "local-development" else "claude",
-                "model_id": str(self._analyzer.model_id),
-            },
+            "confidence": graph_result.confidence,
+            "eligibility_verdict": graph_result.eligibility_verdict,
+            "engine": self._engine(),
             "result_sha256": "0" * 64,
         }
         payload_result["result_sha256"] = review_result_v3_sha256(payload_result)
@@ -2370,13 +2326,79 @@ class ProfileRuntime:
                 "review_report_generated",
                 {
                     "section_count": len(result.report.sections),
-                    "source": "claude"
+                    "source": self._engine().kind
                     if functional_sections != report_sections
                     else "deterministic",
                 },
             )
         PROGRESS.finish(request.review_run_id, "completed")
         return result
+
+    def _evidence_stage(
+        self, transcript: ScenarioTranscriptRun | None
+    ) -> Callable[[ServiceReviewRunRequestV3, BoundedWorkflowOutput], EvidenceStageResult]:
+        """The graph's evidence node body: one Data call, or an explicit skip."""
+
+        def stage(
+            request: ServiceReviewRunRequestV3, workflow_output: BoundedWorkflowOutput
+        ) -> EvidenceStageResult:
+            if workflow_output.retrieval_items:
+                data_response = self._retriever.retrieve(
+                    _retrieve_request(
+                        request,
+                        workflow_output.retrieval_items,
+                        include_law_support=self._law_history_evidence,
+                    )
+                )
+                temporal_context = _temporal_context_from_data(
+                    data_response,
+                    expected_law_as_of=request.review_as_of.isoformat(),
+                    required=self._requires_temporal_context,
+                )
+                temporal_coverage = _temporal_coverage_from_data(
+                    data_response,
+                    required=self._requires_temporal_context,
+                )
+                evidence_records = self._relevant_evidence(
+                    request,
+                    workflow_output,
+                    _evidence_from_data(data_response),
+                    transcript=transcript,
+                )
+                data_status = str(data_response["status"])
+                skipped = False
+            else:
+                # Data rejects an empty retrieval request by contract.  This is
+                # an input limitation, not an unhealthy or partial Data store.
+                temporal_context = None
+                temporal_coverage = None
+                evidence_records = []
+                self._retriever.record_retrieve_skipped(
+                    review_run_id=request.review_run_id,
+                    reason_code=(
+                        workflow_output.retrieval_skip_reason or "no_hs_qualified_commodity"
+                    ),
+                )
+                data_status = "ok"
+                skipped = True
+            if data_status not in {"ok", "partial", "failed"}:
+                raise RetrievalError("retrieve_status_invalid")
+            return EvidenceStageResult(
+                data_status=cast(Literal["ok", "partial", "failed"], data_status),
+                skipped=skipped,
+                evidence_records=evidence_records,
+                evidence_findings=_findings_from_evidence(
+                    evidence_records,
+                    document_ids_by_item=workflow_output.retrieval_document_ids,
+                ),
+                public_evidence=[
+                    EvidenceV3.model_validate(item) for item in _public_evidence(evidence_records)
+                ],
+                temporal_context=temporal_context,
+                temporal_coverage=temporal_coverage,
+            )
+
+        return stage
 
     def _relevant_evidence(
         self,

@@ -3,7 +3,10 @@
 The endpoint keeps its historical ``v3`` route and request shape.  Result
 ``3.2`` keeps the V3.1 source-grounded workflow and adds an inspectable plan,
 an eight-section grounded report, and explicitly labelled human corrections.
-None of the values is an approval signal.
+Result ``3.3`` adds the LangGraph node trace, deterministic confidence with a
+review track, an advisory eligibility verdict, per-finding classification, and
+the actual LLM provider in ``engine``.  None of the values is an approval
+signal: ``requires_human_review`` stays a constant ``true``.
 """
 
 from __future__ import annotations
@@ -22,6 +25,27 @@ class V3WireModel(BaseModel):
     model_config = ConfigDict(extra="forbid")
 
 
+class LayoutSummaryV3(V3WireModel):
+    """Counts from the OCR + layout pass that produced a confirmed text document."""
+
+    page_count: int = Field(ge=0, le=1000)
+    table_count: int = Field(ge=0, le=10_000)
+    span_count: int = Field(ge=0, le=1_000_000)
+    field_candidate_count: int = Field(ge=0, le=100_000)
+    mean_confidence: float | None = Field(default=None, ge=0, le=1)
+
+
+class DocumentExtractionInputV3(V3WireModel):
+    """How the Backend obtained ``content_text`` for one input document.
+
+    This is provenance only.  The review still works on the confirmed text;
+    the extraction agent uses the source to weight its confidence signal.
+    """
+
+    source: Literal["text_layer", "vlm_ocr", "raster_ocr"]
+    layout_summary: LayoutSummaryV3 | None = None
+
+
 class TextDocumentInputV3(V3WireModel):
     document_id: str = Field(
         min_length=1,
@@ -31,6 +55,7 @@ class TextDocumentInputV3(V3WireModel):
     filename: str = Field(min_length=1, max_length=255)
     content_text: str = Field(min_length=1, max_length=200_000)
     declared_type: str | None = Field(default=None, max_length=64)
+    extraction: DocumentExtractionInputV3 | None = None
 
 
 class ReviewerHsSelectionV3(V3WireModel):
@@ -235,6 +260,9 @@ class DocumentAnalysisV3(V3WireModel):
     facts: list[FactV3] = Field(default_factory=list, max_length=64)
     line_items: list[LineItemV3] = Field(default_factory=list, max_length=100)
     warnings: list[ExtractionWarningV3] = Field(default_factory=list, max_length=64)
+    # Additive provenance copied from the request; ``None`` for text uploads
+    # whose Backend did not report how the text was obtained.
+    extraction_source: Literal["text_layer", "vlm_ocr", "raster_ocr"] | None = None
 
     @model_validator(mode="after")
     def _facts_belong_to_document(self) -> "DocumentAnalysisV3":
@@ -329,11 +357,52 @@ class PlannerTraceV3(V3WireModel):
         return self
 
 
+class GraphNodeRunV3(V3WireModel):
+    """One executed node of the LangGraph review graph.
+
+    The graph has three agent nodes plus the retrieval and report nodes.  The
+    audit loop re-enters the extraction and cross-validation nodes at most
+    once, so ``iteration`` never exceeds the planner's two cycles.
+    """
+
+    node: Literal[
+        "extraction_agent",
+        "cross_validation_agent",
+        "evidence_retrieval",
+        "expert_review_agent",
+        "report_generation",
+    ]
+    iteration: int = Field(ge=1, le=2)
+    status: Literal["completed", "needs_review", "skipped", "failed"]
+    summary: str = Field(min_length=1, max_length=2000)
+
+
+class GraphTraceV3(V3WireModel):
+    framework: Literal["langgraph"] = "langgraph"
+    iteration_count: int = Field(ge=1, le=2)
+    loop_reason: (
+        Literal["missing_fields", "ungrounded_fields", "mismatch_reread", "llm_reread_request"]
+        | None
+    ) = None
+    node_runs: list[GraphNodeRunV3] = Field(min_length=1, max_length=8)
+
+    @model_validator(mode="after")
+    def _is_bounded(self) -> "GraphTraceV3":
+        if any(run.iteration > self.iteration_count for run in self.node_runs):
+            raise ValueError("graph node iteration must not exceed iteration_count")
+        if self.iteration_count == 2 and self.loop_reason is None:
+            raise ValueError("a second graph iteration must record its loop reason")
+        return self
+
+
 class WorkflowV3(V3WireModel):
     status: Literal["completed", "partial", "failed"]
     stages: list[WorkflowStageV3] = Field(min_length=1, max_length=8)
     reextractions: list[ReextractionV3] = Field(default_factory=list, max_length=20)
     planner: PlannerTraceV3
+    # Additive LangGraph node trace; the planner trace above stays the
+    # bounded action ledger (two cycles, six actions).
+    graph_trace: GraphTraceV3 | None = None
 
     @model_validator(mode="after")
     def _stages_are_unique(self) -> "WorkflowV3":
@@ -344,6 +413,21 @@ class WorkflowV3(V3WireModel):
         if len(reextraction_ids) != len(set(reextraction_ids)):
             raise ValueError("a document can be re-extracted at most once")
         return self
+
+
+class FindingClassificationV3(V3WireModel):
+    """Error-type label for one finding; it never changes the rule verdict."""
+
+    error_category: Literal[
+        "value_mismatch",
+        "missing_field",
+        "unit_or_format",
+        "document_type_uncertain",
+        "regulatory_requirement",
+        "other",
+    ]
+    explanation: str = Field(min_length=1, max_length=2000)
+    source: Literal["rule", "llm"]
 
 
 class FindingV3(V3WireModel):
@@ -357,6 +441,8 @@ class FindingV3(V3WireModel):
     comparison_id: str | None = Field(default=None, max_length=256)
     document_ids: list[str] = Field(default_factory=list, max_length=20)
     fact_ids: list[str] = Field(default_factory=list, max_length=32)
+    confidence: float | None = Field(default=None, ge=0, le=1)
+    classification: FindingClassificationV3 | None = None
 
 
 class RequiredActionV1(V3WireModel):
@@ -394,9 +480,64 @@ class ReportSectionV3(V3WireModel):
     claims: list[ReportClaimV3] = Field(min_length=1, max_length=32)
 
 
+class OrchestratorV3(V3WireModel):
+    framework: Literal["langgraph"] = "langgraph"
+    version: str = Field(min_length=1, max_length=64)
+
+
 class EngineV3(V3WireModel):
-    kind: Literal["deterministic", "claude"]
+    # ``claude`` is accepted only so results persisted before 3.3 still
+    # validate; new results name the actual provider.
+    kind: Literal["deterministic", "anthropic", "openai", "claude"]
     model_id: str = Field(min_length=1, max_length=256)
+    orchestrator: OrchestratorV3 | None = None
+
+
+class ConfidenceComponentsV3(V3WireModel):
+    extraction: float = Field(ge=0, le=1)
+    comparison: float = Field(ge=0, le=1)
+    evidence: float = Field(ge=0, le=1)
+
+
+class ConfidenceV3(V3WireModel):
+    """Deterministic confidence and the review track it selects.
+
+    Both tracks are human-reviewed.  ``detailed_review`` only means the
+    reviewer should expect weaker extraction, comparison, or evidence signals.
+    """
+
+    overall: float = Field(ge=0, le=1)
+    threshold: float = Field(ge=0, le=1)
+    review_track: Literal["detailed_review", "expedited_check"]
+    method: Literal["deterministic_signals"] = "deterministic_signals"
+    components: ConfidenceComponentsV3
+
+    @model_validator(mode="after")
+    def _track_matches_threshold(self) -> "ConfidenceV3":
+        expected = "expedited_check" if self.overall >= self.threshold else "detailed_review"
+        if self.review_track != expected:
+            raise ValueError("review_track must follow the confidence threshold")
+        return self
+
+
+class EligibilityReasonV3(V3WireModel):
+    code: str = Field(min_length=1, max_length=128)
+    message: str = Field(min_length=1, max_length=2000)
+    finding_ids: list[str] = Field(default_factory=list, max_length=64)
+    evidence_ids: list[str] = Field(default_factory=list, max_length=64)
+
+
+class EligibilityVerdictV3(V3WireModel):
+    """Advisory clearance verdict from the expert-review node.
+
+    ``advisory`` is a constant: the verdict can never close a case or replace
+    the reviewer's judgement, which is why ``requires_human_review`` stays true.
+    """
+
+    verdict: Literal["eligible", "ineligible", "indeterminate"]
+    advisory: Literal[True] = True
+    source: Literal["rule", "rule+llm"]
+    reasons: list[EligibilityReasonV3] = Field(default_factory=list, max_length=64)
 
 
 class ReviewRunResultV3(V3WireModel):
@@ -424,14 +565,26 @@ class ReviewRunResultV3(V3WireModel):
     # Additive availability state.  Law-history runs require this companion
     # object; legacy serialized results may still omit it.
     temporal_coverage: TemporalCoverageV3 | None = None
+    # Additive 3.3 fields.  ``None`` keeps results persisted before 3.3
+    # readable; a 3.3 producer always fills both.
+    confidence: ConfidenceV3 | None = None
+    eligibility_verdict: EligibilityVerdictV3 | None = None
     result_sha256: str = Field(pattern=r"^[a-f0-9]{64}$")
-    schema_version: Literal["3.2"] = "3.2"
+    schema_version: Literal["3.3"] = "3.3"
     engine: EngineV3 | None = None
 
     @model_validator(mode="after")
     def _human_only_and_hashed(self) -> "ReviewRunResultV3":
         if self.status == "blocked" and self.execution_status != "failed":
             raise ValueError("blocked result must have failed execution_status")
+        if self.eligibility_verdict is not None:
+            verdict_findings = {finding.finding_id for finding in self.findings}
+            verdict_evidence = {entry.evidence_id for entry in self.evidence}
+            for reason in self.eligibility_verdict.reasons:
+                if not set(reason.finding_ids) <= verdict_findings:
+                    raise ValueError("eligibility reason finding_ids must refer to findings")
+                if not set(reason.evidence_ids) <= verdict_evidence:
+                    raise ValueError("eligibility reason evidence_ids must refer to evidence")
         if self.status == "needs_review" and self.report.overall_status != "needs_review":
             raise ValueError("needs_review result must have needs_review report status")
         if (
@@ -513,21 +666,37 @@ def review_result_v3_sha256(result: ReviewRunResultV3 | Mapping[str, Any]) -> st
         payload.pop("temporal_context", None)
     if payload.get("temporal_coverage") is None:
         payload.pop("temporal_coverage", None)
+    # The 3.3 additions follow the same rule: a null value is absent from the
+    # hash so pre-3.3 Review Runs keep their recorded digest.
+    if payload.get("confidence") is None:
+        payload.pop("confidence", None)
+    if payload.get("eligibility_verdict") is None:
+        payload.pop("eligibility_verdict", None)
     return canonical_json_sha256(payload)
 
 
 __all__ = [
     "ComparisonOperandV3",
     "ComparisonV3",
+    "ConfidenceComponentsV3",
+    "ConfidenceV3",
     "DocumentAnalysisV3",
+    "DocumentExtractionInputV3",
+    "EligibilityReasonV3",
+    "EligibilityVerdictV3",
     "EngineV3",
     "EvidenceV3",
     "ExtractionWarningV3",
     "FactV3",
+    "FindingClassificationV3",
     "FindingV3",
+    "GraphNodeRunV3",
+    "GraphTraceV3",
     "HumanCorrectionInputV3",
     "HumanProvidedSourceV3",
+    "LayoutSummaryV3",
     "LineItemV3",
+    "OrchestratorV3",
     "PlannerActionV3",
     "PlannerTraceV3",
     "ReextractionV3",

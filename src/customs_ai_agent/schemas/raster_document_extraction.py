@@ -12,7 +12,7 @@ import hashlib
 import json
 import unicodedata
 from dataclasses import dataclass
-from typing import Literal
+from typing import Any, Literal
 
 from pydantic import BaseModel, ConfigDict, Field, model_validator
 
@@ -330,7 +330,25 @@ def raster_preview_result_json(result: RasterDocumentExtractionResultV2) -> byte
     ).encode("utf-8")
 
 
+def layout_summary_from_result(result: RasterDocumentExtractionResultV2) -> dict[str, Any]:
+    """Compact OCR + layout provenance for the review request's ``extraction`` block.
+
+    Only counts and one mean confidence cross the boundary; span text, boxes,
+    and table cells stay with the preview result.
+    """
+
+    confidences = [span.confidence for page in result.pages for span in page.spans]
+    return {
+        "page_count": len(result.pages),
+        "table_count": len(result.tables),
+        "span_count": len(confidences),
+        "field_candidate_count": len(result.field_candidates),
+        "mean_confidence": round(sum(confidences) / len(confidences), 4) if confidences else None,
+    }
+
+
 __all__ = [
+    "layout_summary_from_result",
     "NormalizedPointV2",
     "NormalizedPolygonV2",
     "RasterDocumentExtractionRequestMetadataV2",

@@ -25,11 +25,13 @@ from customs_ai_agent.schemas.v3 import (
     ExtractionWarningV3,
     FactV3,
     FindingV3,
+    GraphTraceV3,
     HumanProvidedSourceV3,
     LineItemV3,
     PlannerActionV3,
     PlannerTraceV3,
     ReextractionV3,
+    RequiredActionV1,
     ServiceReviewRunRequestV3,
     SourceV3,
     WorkflowStageV3,
@@ -242,6 +244,7 @@ class BoundedWorkflowOutput:
                 stages=stages,
                 reextractions=self.workflow.reextractions,
                 planner=planner.trace(),
+                graph_trace=self.workflow.graph_trace,
             ),
             planner_state=planner,
         )
@@ -281,6 +284,7 @@ class BoundedWorkflowOutput:
                 stages=stages,
                 reextractions=self.workflow.reextractions,
                 planner=self.planner_state.trace(),
+                graph_trace=self.workflow.graph_trace,
             ),
         )
 
@@ -312,8 +316,17 @@ class BoundedWorkflowOutput:
                 stages=stages,
                 reextractions=self.workflow.reextractions,
                 planner=planner.trace(),
+                graph_trace=self.workflow.graph_trace,
             ),
             planner_state=planner,
+        )
+
+    def with_graph_trace(self, graph_trace: GraphTraceV3 | None) -> "BoundedWorkflowOutput":
+        """Attach the LangGraph node trace without touching the planner ledger."""
+
+        return replace(
+            self,
+            workflow=self.workflow.model_copy(update={"graph_trace": graph_trace}),
         )
 
 
@@ -324,139 +337,52 @@ def run_bounded_workflow(
     transcript: ScenarioTranscriptRun | None = None,
     on_stage: Callable[[str, str], None] | None = None,
 ) -> BoundedWorkflowOutput:
-    """Extract once, make at most one focused retry per document, then compare."""
+    """Extract once, make at most one focused retry per document, then compare.
 
-    def _notify(stage: str, status: str) -> None:
-        # Display-only progress; a broken listener must never break the review.
-        if on_stage is None:
-            return
-        try:
-            on_stage(stage, status)
-        except Exception:
-            pass
+    This is the review graph without its evidence, expert-review, and report
+    nodes: the deterministic core that tests and the local profile exercise.
+    The graph module owns the node order; this wrapper only fixes the config.
+    """
 
-    planner = _BoundedPlanner()
-    _notify("classify_documents", "running")
-    _notify("extract_facts", "running")
-    initial: dict[str, DocumentAnalysis] = {}
-    for document in request.documents:
-        initial[document.document_id] = analyzer.analyze(
-            document.model_dump(mode="json", warnings=False), transcript=transcript
-        )
-    planner.record(
-        "analyze_documents",
-        status="completed",
-        summary="문서 유형과 원문 인용이 있는 사실만 추출·정규화했습니다.",
-    )
-    _notify("classify_documents", "completed")
-    _notify("extract_facts", "completed")
-    _notify("normalize_facts", "completed")
+    from customs_ai_agent.service.graph import ReviewGraphConfig, run_review_graph
 
-    retry_targets = _reextraction_targets(request, initial)
-    analyses = dict(initial)
-    reextractions: list[ReextractionV3] = []
-    retry_unavailable = False
-    if retry_targets:
-        planner.start_retry_cycle()
-        _notify("reextract_documents", "running")
-    for document in request.documents:
-        requested_fields = retry_targets.get(document.document_id)
-        if not requested_fields:
-            continue
-        try:
-            candidate = analyzer.analyze(
-                document.model_dump(mode="json", warnings=False),
-                transcript=transcript,
-                focus_fields=tuple(requested_fields),
-            )
-        except Exception:
-            retry_unavailable = True
-            reextractions.append(
-                ReextractionV3(
-                    document_id=document.document_id,
-                    requested_fields=requested_fields,
-                    status="unavailable",
-                )
-            )
-            continue
-        analyses[document.document_id] = _prefer_more_complete(
-            analyses[document.document_id], candidate
-        )
-        reextractions.append(
-            ReextractionV3(
-                document_id=document.document_id,
-                requested_fields=requested_fields,
-                status="completed",
-            )
-        )
-    if reextractions:
-        planner.record(
-            "reextract_documents",
-            status="needs_review" if retry_unavailable else "completed",
-            summary=(
-                "각 대상 문서를 최대 한 번 재추출했지만 일부 결과를 사용할 수 없어 사람 검토가 필요합니다."
-                if retry_unavailable
-                else "누락·모호한 비교 필드를 보완하기 위해 각 대상 문서를 최대 한 번 재추출했습니다."
-            ),
-        )
-
-    if reextractions:
-        _notify("reextract_documents", "completed")
-    _notify("match_documents", "running")
-    rendered = [
-        _render_analysis(document, analyses[document.document_id]) for document in request.documents
-    ]
-    if request.human_corrections:
-        rendered = _apply_human_corrections(rendered, request)
-        planner.record(
-            "apply_human_corrections",
-            status="completed",
-            summary="승인된 사람 수정은 원문 사실을 보존한 별도 human-provided 사실로 반영했습니다.",
-            correction_proposal_ids=request.applied_correction_proposal_ids,
-        )
-    comparisons = _comparisons(rendered, trade_type=request.trade_type)
-    planner.record(
-        "compare_documents",
-        status="completed",
-        summary="코드 기반 수량·금액·원산지·B/L 비교 규칙을 실행했습니다.",
-    )
-    _notify("match_documents", "completed")
-    _notify("validate_documents", "completed")
-    findings = _findings_from_comparisons(comparisons)
-    findings.extend(_warning_findings(rendered))
-    (
-        retrieval_items,
-        retrieval_document_ids,
-        retrieval_excluded_document_ids,
-        retrieval_skip_reason,
-        retrieval_reviewer_hs_code,
-    ) = retrieval_plan_from_analyses(request, rendered)
-    stages = _workflow_stages(
-        rendered,
-        comparisons,
-        reextractions,
-        retry_unavailable=retry_unavailable,
-    )
-    workflow_status: Literal["completed", "partial", "failed"] = (
-        "partial" if retry_unavailable else "completed"
-    )
-    return BoundedWorkflowOutput(
-        document_analyses=rendered,
-        comparisons=comparisons,
-        findings=_dedupe_findings(findings),
-        workflow=WorkflowV3(
-            status=workflow_status,
-            stages=stages,
-            reextractions=reextractions,
-            planner=planner.trace(),
+    return run_review_graph(
+        request,
+        ReviewGraphConfig(
+            analyzer=analyzer,
+            mode="local-development",
+            evidence_stage=None,
+            responder=None,
+            transcript=transcript,
+            on_stage=on_stage,
         ),
-        retrieval_items=retrieval_items,
-        retrieval_document_ids=retrieval_document_ids,
-        retrieval_excluded_document_ids=retrieval_excluded_document_ids,
-        retrieval_skip_reason=retrieval_skip_reason,
-        retrieval_reviewer_hs_code=retrieval_reviewer_hs_code,
-        planner_state=planner,
+    ).workflow_output
+
+
+def actions_for_findings(findings: list[FindingV3]) -> list[RequiredActionV1]:
+    """One inspection action per finding plus the constant human-review action."""
+
+    actions = [
+        RequiredActionV1(
+            action_code=(
+                "inspect_"
+                + re.sub(r"[^a-z0-9_]+", "_", finding.code.casefold())[:84]
+                + "_"
+                + finding.finding_id[-12:]
+            )[:128],
+            message=finding.message,
+            finding_ids=[finding.finding_id],
+        )
+        for finding in findings
+    ]
+    actions.append(
+        RequiredActionV1(
+            action_code="human_review_required",
+            message="자동완료하지 않습니다. 담당자가 문서와 법령 근거를 검토해야 합니다.",
+            finding_ids=[],
+        )
     )
+    return actions
 
 
 def retrieval_items_from_analyses(
@@ -730,6 +656,7 @@ def _render_analysis(
                 item_facts.append(fact)
         line_items.append(LineItemV3(item_id=item_id, source=item_source, facts=item_facts))
 
+    extraction = getattr(document, "extraction", None)
     return DocumentAnalysisV3(
         document_id=document.document_id,
         filename=document.filename,
@@ -740,6 +667,7 @@ def _render_analysis(
         facts=facts,
         line_items=line_items,
         warnings=warnings,
+        extraction_source=getattr(extraction, "source", None),
     )
 
 
@@ -2330,6 +2258,7 @@ def _safe_name_value(value: str) -> str:
 
 __all__ = [
     "BoundedWorkflowOutput",
+    "actions_for_findings",
     "finding_for_evidence_requirement",
     "retrieval_items_from_analyses",
     "run_bounded_workflow",

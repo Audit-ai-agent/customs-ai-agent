@@ -2260,9 +2260,12 @@ def test_functional_report_provider_failure_keeps_deterministic_grounded_section
     class FailingResponder:
         def __init__(self) -> None:
             self.calls = 0
+            self.purposes: list[str] = []
 
-        def respond(self, *_args: Any, **_kwargs: Any) -> dict[str, Any]:
-            self.calls += 1
+        def respond(self, *_args: Any, purpose: str = "", **_kwargs: Any) -> dict[str, Any]:
+            self.purposes.append(purpose)
+            if purpose == "review_report":
+                self.calls += 1
             raise RuntimeError("provider unavailable")
 
         def close(self) -> None:
@@ -2277,6 +2280,10 @@ def test_functional_report_provider_failure_keeps_deterministic_grounded_section
     result = runtime.review_v3_json(json.dumps(_review_payload()).encode())
 
     assert responder.calls == 1
+    # The graph's expert-review opinion fails open too (classification is only
+    # requested when the rule engine produced findings).
+    assert "expert_review" in responder.purposes
+    assert result.eligibility_verdict is not None and result.eligibility_verdict.source == "rule"
     assert len(result.report.sections) == 8
     assert all(section.claims for section in result.report.sections)
     assert all(
@@ -2293,7 +2300,11 @@ def test_functional_report_uses_one_valid_provider_composition(
         def __init__(self) -> None:
             self.calls = 0
 
-        def respond(self, payload: dict[str, Any], **_kwargs: Any) -> dict[str, Any]:
+        def respond(
+            self, payload: dict[str, Any], *, purpose: str = "", **_kwargs: Any
+        ) -> dict[str, Any]:
+            if purpose != "review_report":
+                return {}
             self.calls += 1
             snapshot = payload["review_snapshot"]
             comparison_id = snapshot["comparisons"][0]["comparison_id"]
@@ -2425,7 +2436,11 @@ def test_functional_report_falls_back_when_provider_exposes_internal_codes(
         def __init__(self) -> None:
             self.calls = 0
 
-        def respond(self, payload: dict[str, Any], **_kwargs: Any) -> dict[str, Any]:
+        def respond(
+            self, payload: dict[str, Any], *, purpose: str = "", **_kwargs: Any
+        ) -> dict[str, Any]:
+            if purpose != "review_report":
+                return {}
             self.calls += 1
             comparison_id = payload["review_snapshot"]["comparisons"][0]["comparison_id"]
             return {

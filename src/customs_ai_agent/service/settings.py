@@ -201,6 +201,9 @@ class ServiceSettings:
     readiness_timeout_seconds: float = 5.0
     evidence_retrieve_timeout_seconds: float = 90.0
     shutdown_grace_seconds: float = 30.0
+    # Review-track threshold for the deterministic confidence score.  Every
+    # result is still human-reviewed; the threshold only labels the track.
+    confidence_threshold: float = 0.8
     log_level: str = "INFO"
 
     @property
@@ -372,6 +375,8 @@ class ServiceSettings:
             )
         if not 1 <= self.shutdown_grace_seconds <= 900:
             raise ServiceConfigurationError("customs_agent_shutdown_grace_seconds_invalid")
+        if not 0 <= self.confidence_threshold <= 1:
+            raise ServiceConfigurationError("customs_agent_confidence_threshold_invalid")
         if self.log_level not in _LOG_LEVELS:
             raise ServiceConfigurationError("customs_agent_log_level_invalid")
 
@@ -614,6 +619,7 @@ class ServiceSettings:
             shutdown_grace_seconds=_number(
                 source, "CUSTOMS_AGENT_SHUTDOWN_GRACE_SECONDS", 30, 1, 900
             ),
+            confidence_threshold=_number(source, "CUSTOMS_AGENT_CONFIDENCE_THRESHOLD", 0.8, 0, 1),
             log_level=source.get("CUSTOMS_AGENT_LOG_LEVEL", "INFO").strip().upper(),
         )
 

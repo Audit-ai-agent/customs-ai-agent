@@ -1387,10 +1387,24 @@ def test_review_uses_one_readiness_then_one_retrieve_and_stays_human_only(
             }
         ).encode()
     )
-    assert result.schema_version == "3.2"
+    assert result.schema_version == "3.3"
     assert result.status == "needs_review"
     assert result.requires_human_review is True
     assert result.engine is not None and result.engine.kind == "deterministic"
+    assert result.engine.orchestrator is not None
+    assert result.engine.orchestrator.framework == "langgraph"
+    assert result.confidence is not None
+    assert result.confidence.review_track in {"expedited_check", "detailed_review"}
+    assert result.eligibility_verdict is not None
+    assert result.eligibility_verdict.advisory is True
+    assert result.workflow.graph_trace is not None
+    assert result.workflow.graph_trace.framework == "langgraph"
+    node_runs = [run.node for run in result.workflow.graph_trace.node_runs]
+    assert node_runs[:2] == ["extraction_agent", "cross_validation_agent"]
+    assert node_runs[-3:] == ["evidence_retrieval", "expert_review_agent", "report_generation"]
+    assert result.workflow.graph_trace.iteration_count == result.workflow.planner.cycle_count
+    assert all(finding.confidence is not None for finding in result.findings)
+    assert all(finding.classification is not None for finding in result.findings)
     assert any(action.action_code == "human_review_required" for action in result.required_actions)
     assert [stage.stage for stage in result.workflow.stages] == [
         "classify_documents",

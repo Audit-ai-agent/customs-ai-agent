@@ -50,7 +50,7 @@ def test_openapi_exposes_only_active_backend_surface() -> None:
         "const": True,
         "type": "boolean",
     }
-    assert response_schema["properties"]["schema_version"] == {"const": "3.2", "type": "string"}
+    assert response_schema["properties"]["schema_version"] == {"const": "3.3", "type": "string"}
     assert {"workflow", "document_analyses", "comparisons"} <= set(response_schema["required"])
     assert response_schema["properties"]["temporal_context"] == {
         "anyOf": [{"$ref": "#/$defs/TemporalContext"}, {"type": "null"}]

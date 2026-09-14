@@ -12,6 +12,7 @@ dependencies = [
   "fastapi>=0.115,<1",
   # Raster OCR v2 always needs local PDF/image decoding.  The heavy Paddle
   # stack remains isolated in the hash-pinned sidecar bundle.
+  "langgraph>=1.2,<2",
   "pillow==10.4.0",
   "pydantic>=2.7,<3",
   "pypdfium2==4.30.0",

@@ -29,6 +29,8 @@ from pydantic import (
 
 from customs_ai_agent.prompts import (
     load_document_analysis_system_prompt,
+    load_expert_review_system_prompt,
+    load_finding_classification_system_prompt,
     load_grounded_assistant_system_prompt,
     load_evidence_relevance_system_prompt,
     load_grounded_report_system_prompt,
@@ -521,6 +523,8 @@ class ClaudeGroundedResponder:
         self._report_system_prompt = load_grounded_report_system_prompt()
         self._guidance_system_prompt = load_official_guidance_system_prompt()
         self._evidence_relevance_system_prompt = load_evidence_relevance_system_prompt()
+        self._finding_classification_system_prompt = load_finding_classification_system_prompt()
+        self._expert_review_system_prompt = load_expert_review_system_prompt()
 
     @classmethod
     def from_settings(cls, settings: ClaudeSettings) -> "ClaudeGroundedResponder":
@@ -543,6 +547,8 @@ class ClaudeGroundedResponder:
             "review_report",
             "knowledge_answer",
             "evidence_relevance",
+            "finding_classification",
+            "expert_review",
         }:
             raise LLMOutputValidationError("Claude response purpose is invalid.")
         system_prompt = {
@@ -550,6 +556,8 @@ class ClaudeGroundedResponder:
             "assistant_answer": self._system_prompt,
             "knowledge_answer": self._guidance_system_prompt,
             "evidence_relevance": self._evidence_relevance_system_prompt,
+            "finding_classification": self._finding_classification_system_prompt,
+            "expert_review": self._expert_review_system_prompt,
         }[purpose]
         user_message = json.dumps(payload, ensure_ascii=False, separators=(",", ":"), default=str)
         request_payload = {

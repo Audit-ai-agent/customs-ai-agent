@@ -6,6 +6,7 @@ from typing import Any
 
 from customs_ai_agent.service.llm_settings import LLM_SETTINGS
 from customs_ai_agent.contracts import schema_sha256
+from customs_ai_agent.service.graph import orchestrator_version
 from customs_ai_agent.service.settings import ServiceSettings
 
 
@@ -15,12 +16,20 @@ SERVICE_API_VERSION = "internal-agent-service/v2"
 def build_metadata(settings: ServiceSettings) -> dict[str, Any]:
     """Return only the facts a local peer needs to call this service."""
 
+    orchestrator = {"framework": "langgraph", "version": orchestrator_version()}
     if settings.service_mode == "functional-uat":
-        # The wire contract knows one external-LLM engine kind ("claude");
-        # the model id names the actual provider model in use.
-        engine = {"kind": "claude", "model_id": LLM_SETTINGS.describe()["model"]}
+        described = LLM_SETTINGS.describe()
+        engine = {
+            "kind": described["provider"],
+            "model_id": described["model"],
+            "orchestrator": orchestrator,
+        }
     else:
-        engine = {"kind": "deterministic", "model_id": "development-fixture-deterministic"}
+        engine = {
+            "kind": "deterministic",
+            "model_id": "development-fixture-deterministic",
+            "orchestrator": orchestrator,
+        }
     return {
         "service_api_version": SERVICE_API_VERSION,
         "service_mode": settings.service_mode,
@@ -29,6 +38,10 @@ def build_metadata(settings: ServiceSettings) -> dict[str, Any]:
             "text",
             "evidence_http",
             "bounded_planner",
+            "langgraph_review_graph",
+            "audit_validation_loop",
+            "confidence_review_track",
+            "advisory_eligibility_verdict",
             "grounded_assistant",
             "official_trade_guidance",
             "profile_mode_handshake",

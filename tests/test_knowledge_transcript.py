@@ -409,7 +409,7 @@ def test_functional_knowledge_turn_records_one_data_and_one_claude_exchange(
         )
     )
 
-    assert answer.engine.kind == "claude"
+    assert answer.engine.kind == "anthropic"
     assert "공식 자료 발췌" in answer.direct_answer
     assert len(data_calls) == 1
     assert len(claude_calls) == 1
