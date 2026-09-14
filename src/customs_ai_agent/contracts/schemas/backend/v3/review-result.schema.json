@@ -72,7 +72,7 @@
         "warnings": {"type": "array", "maxItems": 64, "items": {"$ref": "#/$defs/ExtractionWarning"}},
         "extraction_source": {"type": ["string", "null"], "enum": ["text_layer", "vlm_ocr", "raster_ocr", null]}
       },
-      "required": ["document_id", "filename", "declared_type", "document_type", "classification_source", "extraction_status", "facts", "line_items", "warnings", "extraction_source"],
+      "required": ["document_id", "filename", "declared_type", "document_type", "classification_source", "extraction_status", "facts", "line_items", "warnings"],
       "type": "object"
     },
     "ComparisonOperand": {
@@ -133,7 +133,7 @@
         "planner": {"$ref": "#/$defs/PlannerTrace"},
         "graph_trace": {"anyOf": [{"$ref": "#/$defs/GraphTrace"}, {"type": "null"}]}
       },
-      "required": ["status", "stages", "reextractions", "planner", "graph_trace"],
+      "required": ["status", "stages", "reextractions", "planner"],
       "type": "object"
     },
     "PlannerAction": {
@@ -208,7 +208,7 @@
         "model_id": {"type": "string", "minLength": 1, "maxLength": 256},
         "orchestrator": {"anyOf": [{"$ref": "#/$defs/Orchestrator"}, {"type": "null"}]}
       },
-      "required": ["kind", "model_id", "orchestrator"],
+      "required": ["kind", "model_id"],
       "type": "object"
     },
     "ConfidenceComponents": {
@@ -320,7 +320,7 @@
         "confidence": {"type": ["number", "null"], "minimum": 0, "maximum": 1},
         "classification": {"anyOf": [{"$ref": "#/$defs/FindingClassification"}, {"type": "null"}]}
       },
-      "required": ["finding_id", "kind", "code", "severity", "message", "item_id", "evidence_ids", "comparison_id", "document_ids", "fact_ids", "confidence", "classification"],
+      "required": ["finding_id", "kind", "code", "severity", "message", "item_id", "evidence_ids", "comparison_id", "document_ids", "fact_ids"],
       "type": "object"
     },
     "Report": {

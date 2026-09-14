@@ -64,7 +64,7 @@
         "model_id": {"type": "string", "minLength": 1, "maxLength": 256},
         "orchestrator": {"anyOf": [{"$ref": "#/$defs/Orchestrator"}, {"type": "null"}]}
       },
-      "required": ["kind", "model_id", "orchestrator"],
+      "required": ["kind", "model_id"],
       "type": "object"
     }
   },
