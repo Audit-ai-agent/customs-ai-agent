@@ -662,6 +662,22 @@ def test_retrieval_without_reviewer_selection_still_skips_when_no_code() -> None
     assert output.retrieval_reviewer_hs_code is None
 
 
+def test_reviewer_hs_selection_completes_a_document_cited_hs6_prefix() -> None:
+    request, candidates = _scenario()
+    payload = request.input_manifest_wire()
+    payload["reviewer_hs_selection"] = {"code": "1234561234", "source_kind": "human_provided"}
+    request = ServiceReviewRunRequestV3.model_validate(payload)
+    output = run_bounded_workflow(request, _SequenceAnalyzer(candidates))
+
+    assert output.retrieval_reviewer_hs_code == "1234561234"
+    assert [item["hs_code"] for item in output.retrieval_items] == ["1234561234"]
+    complete = output.with_evidence_status("ok")
+    retrieve = next(
+        stage for stage in complete.workflow.stages if stage.stage == "retrieve_evidence"
+    )
+    assert "담당자가 확정한 HSK 코드(1234561234)" in retrieve.summary
+
+
 def test_reviewer_hs_selection_never_overrides_document_cited_codes() -> None:
     request, candidates = _scenario()
     payload = request.input_manifest_wire()

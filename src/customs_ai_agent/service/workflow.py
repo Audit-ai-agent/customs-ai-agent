@@ -412,11 +412,15 @@ def retrieval_plan_from_analyses(
     HTTP contract.  Documents without an HS code, including ordinary B/L
     documents, are not sent as malformed retrieval fallback items.
 
-    When no document cites a code at all and the Backend supplied a
-    reviewer-confirmed HSK selection, that labelled human-provided code
-    becomes the one retrieval commodity; the fifth returned value carries the
-    code actually used so the trace can attribute it. It never overrides a
-    document-cited code.
+    A reviewer-confirmed HSK selection supplied by the Backend is used in two
+    labelled ways, and the fifth returned value carries the code when it was
+    applied so the trace can attribute it.  First, it *completes* a shorter
+    document-cited code (HS6/HS8) whose digits are a prefix of the selection:
+    the Data store resolves requirements only for an exact HSK10, so a bare
+    HS6 from an invoice would otherwise end as an ambiguous, evidence-free
+    lookup.  Second, when no document cites a code at all it becomes the one
+    retrieval commodity.  It never replaces a document-cited code that
+    disagrees with it; that disagreement stays visible for the reviewer.
     """
 
     candidates: list[dict[str, Any]] = []
@@ -462,6 +466,13 @@ def retrieval_plan_from_analyses(
         candidates.extend(document_candidates)
 
     reviewer_hs_code: str | None = None
+    if candidates and request.reviewer_hs_selection is not None:
+        selection_code = request.reviewer_hs_selection.code
+        for candidate in candidates:
+            cited_digits = re.sub(r"\D", "", str(candidate["hs_code"]))
+            if 6 <= len(cited_digits) < 10 and selection_code.startswith(cited_digits):
+                candidate["hs_code"] = selection_code
+                reviewer_hs_code = selection_code
     if not candidates and request.reviewer_hs_selection is not None:
         reviewer_hs_code = request.reviewer_hs_selection.code
         description_fact = None
@@ -1916,10 +1927,7 @@ def _evidence_summary(
         "failed": "법령 근거 조회에 실패했습니다.",
     }.get(data_status, "법령 근거 조회 상태를 확인할 수 없습니다.")
     if reviewer_hs_code:
-        summary += (
-            f" 문서에 HS 코드가 없어 담당자가 확정한 HSK 코드({reviewer_hs_code})를"
-            " 품목 기준으로 사용했습니다."
-        )
+        summary += f" 담당자가 확정한 HSK 코드({reviewer_hs_code})를 품목 기준으로 사용했습니다."
     if excluded_document_count:
         return summary + " HS 코드가 없는 문서는 법령 근거 조회 대상에서 제외했습니다."
     return summary

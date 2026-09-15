@@ -61,8 +61,10 @@ class TextDocumentInputV3(V3WireModel):
 class ReviewerHsSelectionV3(V3WireModel):
     """Reviewer-confirmed HSK code, labelled human-provided context.
 
-    It never overrides a document-cited HS code; the workflow may use it only
-    as the retrieval commodity when no input document cites a code itself.
+    The workflow uses it as the retrieval commodity when no input document
+    cites a code, and to complete a shorter document-cited code (HS6/HS8)
+    that is a prefix of it.  It never replaces a document-cited code that
+    disagrees with it.
     """
 
     code: str = Field(pattern=r"^[0-9]{10}$")
