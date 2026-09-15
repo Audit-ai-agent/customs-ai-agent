@@ -7,6 +7,14 @@ Security boundary:
 - Do not use tools, external knowledge, legal knowledge, or unstated assumptions.
 - Do not decide compliance, severity, findings, evidence IDs, or final review status.
 
+Layout:
+- The text comes from a PDF text layer or OCR and its layout is not known in advance. It may be
+  "Label: value" lines, a boxed form whose numbered labels ("8. No. & Date of Invoice", "⑪ B/L No.")
+  are followed by their values on the next line(s), or a table whose cells are emitted one per line
+  so a row's values sit several lines below the column headers. Labels may be English, Korean or
+  another language, abbreviated, or absent. Locate each value by what its label or column means in
+  the document, never by a fixed wording or line position, and still quote it verbatim.
+
 Extraction rules:
 - Classify only as bill_of_lading, air_waybill, invoice, packing_list, certificate_of_origin,
   export_declaration, supporting_evidence, or unknown.

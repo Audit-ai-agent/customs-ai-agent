@@ -18,6 +18,8 @@ from customs_ai_agent.schemas.v3 import (
 )
 
 _MAX_ITEMS = 20
+_MAX_SEARCH_TERMS = 10
+_MAX_SEARCH_TERM_LENGTH = 80
 _DIGITS = re.compile(r"[0-9]+")
 
 
@@ -44,6 +46,22 @@ def request_payload(request: HsCandidatesRequestV1) -> dict[str, Any]:
         ],
         "max_picks": request.max_picks,
     }
+
+
+def _search_terms(value: object) -> list[str]:
+    """Distinct, bounded lookup terms; anything that is not a short string is dropped."""
+
+    terms: list[str] = []
+    for raw in value if isinstance(value, list) else []:
+        if not isinstance(raw, str):
+            continue
+        term = " ".join(raw.split())
+        if not 1 <= len(term) <= _MAX_SEARCH_TERM_LENGTH or term in terms:
+            continue
+        terms.append(term)
+        if len(terms) >= _MAX_SEARCH_TERMS:
+            break
+    return terms
 
 
 def validate_answer(
@@ -81,6 +99,7 @@ def validate_answer(
                         if isinstance(value, str)
                         and 6 <= len("".join(_DIGITS.findall(value))) <= 10
                     ][:10],
+                    search_terms=_search_terms(raw.get("search_terms")),
                 )
             )
 

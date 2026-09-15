@@ -53,6 +53,7 @@ def test_validate_answer_keeps_only_reference_codes_and_known_documents() -> Non
                     "description": "MEN'S COTTON T-SHIRTS",
                     "document_ids": ["invoice", "ghost"],
                     "cited_hs_codes": ["6109.10", "12"],
+                    "search_terms": ["티셔츠", " 면 ", "티셔츠", 7, "", "x" * 81, "t-shirts"],
                 },
                 {"description": ""},
                 "junk",
@@ -70,10 +71,30 @@ def test_validate_answer_keeps_only_reference_codes_and_known_documents() -> Non
     assert [item.description for item in items] == ["MEN'S COTTON T-SHIRTS"]
     assert items[0].document_ids == ["invoice"]
     assert items[0].cited_hs_codes == ["610910"]
+    # Lookup terms are trimmed and de-duplicated; non-strings and over-long ones are dropped.
+    assert items[0].search_terms == ["티셔츠", "면", "t-shirts"]
     assert [(pick.code, pick.rank, pick.confidence) for pick in picks] == [
         ("6109101000", 1, 0.92),
         ("6105100000", 2, 0.4),
     ]
+
+
+def test_validate_answer_reads_items_without_search_terms_or_reference_codes() -> None:
+    # The extraction-only round sends no reference codes: items still come
+    # back, an older answer shape without search_terms is accepted, and no
+    # pick can be honoured because there is nothing to pick from.
+    request = _request(reference_candidates=[])
+    items, picks = hs_candidates.validate_answer(
+        {
+            "items": [{"description": "LED MONITOR 24 INCH", "document_ids": ["invoice"]}],
+            "picks": [{"code": "8528726000", "rank": 1, "confidence": 0.9, "reason": "모니터"}],
+        },
+        request,
+    )
+    assert [(item.description, item.search_terms) for item in items] == [
+        ("LED MONITOR 24 INCH", [])
+    ]
+    assert picks == []
 
 
 def test_validate_answer_drops_a_malformed_answer_entirely() -> None:

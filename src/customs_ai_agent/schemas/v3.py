@@ -753,6 +753,10 @@ class HsCandidateItemV1(V3WireModel):
     description: str = Field(min_length=1, max_length=300)
     document_ids: list[str] = Field(default_factory=list, max_length=20)
     cited_hs_codes: list[str] = Field(default_factory=list, max_length=10)
+    # Korean tariff-nomenclature terms for the goods (product noun first), so
+    # the Backend can look the item up in the packaged HSK table whatever the
+    # document's language or layout.
+    search_terms: list[str] = Field(default_factory=list, max_length=10)
 
 
 class HsCandidatePickV1(V3WireModel):
