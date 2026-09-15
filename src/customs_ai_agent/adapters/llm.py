@@ -31,6 +31,7 @@ from customs_ai_agent.prompts import (
     load_document_analysis_system_prompt,
     load_expert_review_system_prompt,
     load_finding_classification_system_prompt,
+    load_hs_candidates_system_prompt,
     load_grounded_assistant_system_prompt,
     load_evidence_relevance_system_prompt,
     load_grounded_report_system_prompt,
@@ -524,6 +525,7 @@ class ClaudeGroundedResponder:
         self._guidance_system_prompt = load_official_guidance_system_prompt()
         self._evidence_relevance_system_prompt = load_evidence_relevance_system_prompt()
         self._finding_classification_system_prompt = load_finding_classification_system_prompt()
+        self._hs_candidates_system_prompt = load_hs_candidates_system_prompt()
         self._expert_review_system_prompt = load_expert_review_system_prompt()
 
     @classmethod
@@ -549,6 +551,7 @@ class ClaudeGroundedResponder:
             "evidence_relevance",
             "finding_classification",
             "expert_review",
+            "hs_candidates",
         }:
             raise LLMOutputValidationError("Claude response purpose is invalid.")
         system_prompt = {
@@ -558,6 +561,7 @@ class ClaudeGroundedResponder:
             "evidence_relevance": self._evidence_relevance_system_prompt,
             "finding_classification": self._finding_classification_system_prompt,
             "expert_review": self._expert_review_system_prompt,
+            "hs_candidates": self._hs_candidates_system_prompt,
         }[purpose]
         user_message = json.dumps(payload, ensure_ascii=False, separators=(",", ":"), default=str)
         request_payload = {

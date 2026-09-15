@@ -23,6 +23,7 @@ def test_openapi_exposes_only_active_backend_surface() -> None:
         "/internal/agent/v3/reviews/{review_run_id}/progress",
         "/internal/agent/v3/law-search",
         "/internal/agent/v3/law-catalog",
+        "/internal/agent/v3/hs-candidates",
         "/internal/agent/v2/document-extractions",
         "/internal/agent/v3/raster-document-preview-status",
         "/internal/agent/v3/raster-document-extractions",

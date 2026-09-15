@@ -44,6 +44,7 @@ def build_metadata(settings: ServiceSettings) -> dict[str, Any]:
             "advisory_eligibility_verdict",
             "grounded_assistant",
             "official_trade_guidance",
+            "hs_candidate_ranking",
             "profile_mode_handshake",
             "human_review_document_preview",
             "human_review_raster_document_preview",

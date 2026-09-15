@@ -11,6 +11,8 @@ def test_only_live_http_schema_bytes_are_packaged() -> None:
         ("backend", "v3", "assistant-answer-response"),
         ("backend", "v3", "document-extraction-request"),
         ("backend", "v3", "document-extraction-result"),
+        ("backend", "v3", "hs-candidates-request"),
+        ("backend", "v3", "hs-candidates-response"),
         ("backend", "v3", "knowledge-answer-request"),
         ("backend", "v3", "knowledge-answer-response"),
         ("backend", "v3", "raster-document-extraction-request"),

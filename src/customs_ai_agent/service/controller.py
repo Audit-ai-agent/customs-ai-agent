@@ -121,6 +121,7 @@ class AgentServiceController:
         if runtime_method_name not in {
             "assistant_answer_json",
             "knowledge_answer_json",
+            "hs_candidates_json",
             "law_search_json",
             "law_catalog_json",
         }:

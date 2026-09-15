@@ -76,6 +76,7 @@ from customs_ai_agent.service.progress import PROGRESS
 from customs_ai_agent.service.input import (
     ERROR_RESPONSE_SCHEMA,
     inspect_assistant_request,
+    inspect_hs_candidates_request,
     inspect_knowledge_request,
     inspect_text_request,
     raw_header_values,
@@ -274,6 +275,8 @@ def create_app(
     assistant_response_schema = get_schema("backend", "v3", "assistant-answer-response")
     knowledge_request_schema = get_schema("backend", "v3", "knowledge-answer-request")
     knowledge_response_schema = get_schema("backend", "v3", "knowledge-answer-response")
+    hs_candidates_request_schema = get_schema("backend", "v3", "hs-candidates-request")
+    hs_candidates_response_schema = get_schema("backend", "v3", "hs-candidates-response")
     document_extraction_request_schema = get_schema("backend", "v3", "document-extraction-request")
     document_extraction_result_schema = get_schema("backend", "v3", "document-extraction-result")
     raster_document_extraction_request_schema = get_schema(
@@ -1556,6 +1559,45 @@ def create_app(
         outcome = await controller.execute(
             payload=payload,
             runtime_method_name="knowledge_answer_json",
+        )
+        if outcome.result is None:
+            raise ServiceHttpError(
+                outcome.error_code or "internal_error",
+                outcome.status_code,
+                retryable=outcome.retryable,
+                retry_after_seconds=outcome.retry_after_seconds,
+            )
+        return JSONResponse(status_code=200, headers=_NO_STORE_HEADERS, content=outcome.result)
+
+    @app.post(
+        "/internal/agent/v3/hs-candidates",
+        summary="Extract the goods from confirmed document text and rank supplied HSK codes",
+        openapi_extra={
+            "security": _BEARER_SECURITY,
+            "requestBody": {
+                "required": True,
+                "content": {"application/json": {"schema": hs_candidates_request_schema}},
+            },
+        },
+        responses={
+            200: {"content": {"application/json": {"schema": hs_candidates_response_schema}}},
+            401: {"content": {"application/json": {"schema": ERROR_RESPONSE_SCHEMA}}},
+            403: {"content": {"application/json": {"schema": ERROR_RESPONSE_SCHEMA}}},
+            413: {"content": {"application/json": {"schema": ERROR_RESPONSE_SCHEMA}}},
+            415: {"content": {"application/json": {"schema": ERROR_RESPONSE_SCHEMA}}},
+            422: {"content": {"application/json": {"schema": ERROR_RESPONSE_SCHEMA}}},
+            503: _PRE_EXECUTION_503_RESPONSE,
+            504: {"content": {"application/json": {"schema": ERROR_RESPONSE_SCHEMA}}},
+        },
+    )
+    async def hs_candidates(request: Request) -> JSONResponse:
+        _authorize(request, active_settings)
+        payload = await admitted_body(request)
+        inspect_hs_candidates_request(payload)
+        controller: AgentServiceController = request.app.state.controller
+        outcome = await controller.execute(
+            payload=payload,
+            runtime_method_name="hs_candidates_json",
         )
         if outcome.result is None:
             raise ServiceHttpError(

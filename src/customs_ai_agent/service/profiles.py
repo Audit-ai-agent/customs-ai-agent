@@ -43,6 +43,8 @@ from customs_ai_agent.scenario_transcript import (
     ScenarioTranscriptRun,
 )
 from customs_ai_agent.schemas.v3 import (
+    HsCandidatesRequestV1,
+    HsCandidatesResponseV1,
     EngineV3,
     EvidenceV3,
     FindingV3,
@@ -89,6 +91,7 @@ from customs_ai_agent.service.report import (
     validate_grounded_report_sections,
 )
 from customs_ai_agent.service.user_text import review_result_markers, reviewer_text_is_safe
+from customs_ai_agent.service import hs_candidates
 from customs_ai_agent.service.graph import (
     EvidenceStageResult,
     ReviewGraphConfig,
@@ -2103,6 +2106,49 @@ class ProfileRuntime:
                 "law_reference_request_invalid", "The law reference request is invalid."
             )
         return parsed
+
+    def hs_candidates_json(self, payload: bytes) -> HsCandidatesResponseV1:
+        """Extract the goods from confirmed document text and rank supplied HSK codes.
+
+        Local development has no model and answers deterministically with no
+        picks, so the Backend keeps its own heuristic. In functional UAT one
+        model call is made; any malformed part of its answer is dropped and a
+        provider failure yields ``status="unavailable"`` instead of an error.
+        """
+
+        self._assert_open()
+        try:
+            request = HsCandidatesRequestV1.model_validate(json.loads(payload.decode("utf-8")))
+        except (UnicodeDecodeError, ValidationError, ValueError):
+            raise RuntimeInputError(
+                "hs_candidates_request_invalid",
+                "The HSK candidate request does not satisfy the service contract.",
+            ) from None
+        responder = self._grounded_responder
+        if self.mode != "functional-uat" or responder is None:
+            return HsCandidatesResponseV1(
+                schema_version="1.0",
+                status="deterministic",
+                items=[],
+                picks=[],
+                engine=self._engine(),
+            )
+        try:
+            answer = responder.respond(
+                hs_candidates.request_payload(request), transcript=None, purpose="hs_candidates"
+            )
+        except Exception:
+            return HsCandidatesResponseV1(
+                schema_version="1.0",
+                status="unavailable",
+                items=[],
+                picks=[],
+                engine=self._engine(),
+            )
+        items, picks = hs_candidates.validate_answer(answer, request)
+        return HsCandidatesResponseV1(
+            schema_version="1.0", status="ok", items=items, picks=picks, engine=self._engine()
+        )
 
     def knowledge_answer_json(self, payload: bytes) -> KnowledgeAnswerResponseV1:
         """Answer one standalone, official-source-grounded knowledge question.

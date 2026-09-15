@@ -18,6 +18,8 @@ SchemaKind = Literal[
     "assistant-answer-response",
     "knowledge-answer-request",
     "knowledge-answer-response",
+    "hs-candidates-request",
+    "hs-candidates-response",
     "document-extraction-request",
     "document-extraction-result",
     "raster-document-extraction-request",
@@ -44,6 +46,12 @@ _RESOURCE_PATHS: dict[SchemaKey, str] = {
     ),
     ("backend", "v3", "knowledge-answer-response"): (
         "schemas/backend/v3/knowledge-answer-response.schema.json"
+    ),
+    ("backend", "v3", "hs-candidates-request"): (
+        "schemas/backend/v3/hs-candidates-request.schema.json"
+    ),
+    ("backend", "v3", "hs-candidates-response"): (
+        "schemas/backend/v3/hs-candidates-response.schema.json"
     ),
     ("backend", "v3", "document-extraction-request"): (
         "schemas/backend/v3/document-extraction-request.schema.json"

@@ -432,3 +432,59 @@ __all__ = [
     "raw_header_values",
     "read_bounded_json_body",
 ]
+
+
+_HS_CANDIDATES_ALLOWED_FIELDS = frozenset(
+    {"schema_version", "case_id", "documents", "reference_candidates", "max_picks"}
+)
+_HS_CANDIDATES_REQUIRED_FIELDS = frozenset({"schema_version", "case_id", "documents"})
+
+
+def inspect_hs_candidates_request(payload: bytes) -> None:
+    """Admit one case-level HSK candidate request (document text plus reference codes)."""
+
+    try:
+        decoded = json.loads(
+            payload.decode("utf-8"),
+            object_pairs_hook=_object_without_duplicates,
+            parse_constant=_reject_constant,
+        )
+    except (UnicodeDecodeError, ValueError, RecursionError):
+        raise ServiceHttpError("request_invalid", 422) from None
+    if not isinstance(decoded, dict) or set(decoded) - _HS_CANDIDATES_ALLOWED_FIELDS:
+        raise ServiceHttpError("request_invalid", 422)
+    if not _HS_CANDIDATES_REQUIRED_FIELDS.issubset(decoded):
+        raise ServiceHttpError("required_field_missing", 422)
+    if decoded.get("schema_version") != "1.0":
+        raise ServiceHttpError("request_invalid", 422)
+    case_id = decoded.get("case_id")
+    if not isinstance(case_id, str) or not 1 <= len(case_id) <= 128:
+        raise ServiceHttpError("request_invalid", 422)
+    documents = decoded.get("documents")
+    if not isinstance(documents, list) or not 1 <= len(documents) <= 20:
+        raise ServiceHttpError("request_invalid", 422)
+    for document in documents:
+        if (
+            not isinstance(document, dict)
+            or set(document) != {"document_id", "document_type", "content_text"}
+            or not isinstance(document.get("document_id"), str)
+            or not isinstance(document.get("document_type"), str)
+            or not isinstance(document.get("content_text"), str)
+            or not 1 <= len(document["content_text"]) <= 200_000
+        ):
+            raise ServiceHttpError("request_invalid", 422)
+    references = decoded.get("reference_candidates", [])
+    if not isinstance(references, list) or len(references) > 40:
+        raise ServiceHttpError("request_invalid", 422)
+    for reference in references:
+        if (
+            not isinstance(reference, dict)
+            or not {"code"}.issubset(reference)
+            or set(reference) - {"code", "name_ko", "name_en", "ancestors"}
+            or not isinstance(reference.get("code"), str)
+            or not re.fullmatch(r"[0-9]{10}", reference["code"])
+        ):
+            raise ServiceHttpError("request_invalid", 422)
+    max_picks = decoded.get("max_picks", 5)
+    if type(max_picks) is not int or not 1 <= max_picks <= 10:
+        raise ServiceHttpError("request_invalid", 422)

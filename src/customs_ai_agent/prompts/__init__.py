@@ -19,6 +19,8 @@ FINDING_CLASSIFICATION_PROMPT_ID = "customs_finding_classification"
 FINDING_CLASSIFICATION_PROMPT_VERSION = "1.0.0"
 EXPERT_REVIEW_PROMPT_ID = "customs_expert_review"
 EXPERT_REVIEW_PROMPT_VERSION = "1.0.0"
+HS_CANDIDATES_PROMPT_ID = "customs_hs_candidates"
+HS_CANDIDATES_PROMPT_VERSION = "1.0.0"
 
 
 def load_document_analysis_system_prompt() -> str:
@@ -100,3 +102,11 @@ __all__ = [
     "load_grounded_report_system_prompt",
     "load_official_guidance_system_prompt",
 ]
+
+
+def load_hs_candidates_system_prompt() -> str:
+    return (
+        files("customs_ai_agent.prompts")
+        .joinpath("hs_candidates_v1.txt")
+        .read_text(encoding="utf-8")
+    )

@@ -717,3 +717,54 @@ __all__ = [
     "canonical_json_sha256",
     "review_result_v3_sha256",
 ]
+
+
+# ── HSK candidate ranking (case-level, before any review) ──────────
+
+
+class HsCandidateDocumentV1(V3WireModel):
+    document_id: str = Field(min_length=1, max_length=128)
+    document_type: str = Field(min_length=1, max_length=64)
+    content_text: str = Field(min_length=1, max_length=200_000)
+
+
+class HsReferenceCandidateV1(V3WireModel):
+    code: str = Field(pattern=r"^[0-9]{10}$")
+    name_ko: str | None = Field(default=None, max_length=2000)
+    name_en: str | None = Field(default=None, max_length=2000)
+    ancestors: list[str] = Field(default_factory=list, max_length=8)
+
+
+class HsCandidatesRequestV1(V3WireModel):
+    """Extract the goods from confirmed document text and rank reference codes.
+
+    The Agent never invents a code: picks come only from ``reference_candidates``,
+    which the Backend builds from the packaged HSK reference table.
+    """
+
+    schema_version: Literal["1.0"]
+    case_id: str = Field(min_length=1, max_length=128)
+    documents: list[HsCandidateDocumentV1] = Field(min_length=1, max_length=20)
+    reference_candidates: list[HsReferenceCandidateV1] = Field(default_factory=list, max_length=40)
+    max_picks: int = Field(default=5, ge=1, le=10)
+
+
+class HsCandidateItemV1(V3WireModel):
+    description: str = Field(min_length=1, max_length=300)
+    document_ids: list[str] = Field(default_factory=list, max_length=20)
+    cited_hs_codes: list[str] = Field(default_factory=list, max_length=10)
+
+
+class HsCandidatePickV1(V3WireModel):
+    code: str = Field(pattern=r"^[0-9]{10}$")
+    rank: int = Field(ge=1, le=10)
+    confidence: float = Field(ge=0.0, le=1.0)
+    reason: str = Field(min_length=1, max_length=400)
+
+
+class HsCandidatesResponseV1(V3WireModel):
+    schema_version: Literal["1.0"]
+    status: Literal["ok", "deterministic", "unavailable"]
+    items: list[HsCandidateItemV1] = Field(default_factory=list, max_length=20)
+    picks: list[HsCandidatePickV1] = Field(default_factory=list, max_length=10)
+    engine: EngineV3
