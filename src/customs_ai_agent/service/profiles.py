@@ -1667,6 +1667,8 @@ class ProfileRuntime:
                     *(fact for item in analysis.line_items for fact in item.facts),
                 ]
             )
+            report_markers = review_result_markers(result)
+            report_filenames = tuple(analysis.filename for analysis in result.document_analyses)
             provider_sections: dict[str, dict[str, Any]] = {}
             for raw_section in raw_sections:
                 if not isinstance(raw_section, Mapping):
@@ -1693,7 +1695,22 @@ class ProfileRuntime:
                         evidence_ids=known_evidence,
                     )
                 ]
-                if grounded_claims:
+                # An unsafe sentence replaces only its own section with the
+                # deterministic one, rather than discarding all eight.
+                raw_text = [
+                    raw_section.get("title"),
+                    *(claim.get("text") for claim in grounded_claims),
+                ]
+                section_text = [value for value in raw_text if isinstance(value, str)]
+                if (
+                    grounded_claims
+                    and len(section_text) == len(raw_text)
+                    and reviewer_text_is_safe(
+                        section_text,
+                        markers=report_markers,
+                        filenames=report_filenames,
+                    )
+                ):
                     provider_sections[section_name] = {
                         **dict(raw_section),
                         "claims": grounded_claims,
@@ -1713,8 +1730,8 @@ class ProfileRuntime:
             )
             if not reviewer_text_is_safe(
                 reviewer_text,
-                markers=review_result_markers(result),
-                filenames=(analysis.filename for analysis in result.document_analyses),
+                markers=report_markers,
+                filenames=report_filenames,
             ):
                 raise ValueError("provider_report_user_text_unsafe")
             validate_grounded_report_sections(

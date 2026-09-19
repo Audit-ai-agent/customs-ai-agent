@@ -98,3 +98,20 @@ def test_grounded_prompts_require_korean_reviewer_prose_and_structured_reference
     assert "원본 파일명" in report_prompt
     assert "영문 문장" in report_prompt
     assert "원문을 바꾸지 말고 보존" in report_prompt
+
+
+def test_short_numeric_marker_blocks_only_a_standalone_token() -> None:
+    markers = ("23",)
+
+    assert reviewer_text_is_safe(
+        ["관세법 제232조(원산지증명서 등)를 확인해 주세요."], markers=markers
+    )
+    assert reviewer_text_is_safe(["총중량은 1,232 KG이고 부피는 23.5 CBM입니다."], markers=("5",))
+    assert not reviewer_text_is_safe(["법령 23을 확인해 주세요."], markers=markers)
+    assert contains_internal_result_marker("기준값 4417가 남았습니다.", markers=("4417",))
+    assert not contains_internal_result_marker("기준값 44170이 남았습니다.", markers=("4417",))
+
+
+def test_reviewer_text_allows_common_trade_abbreviations() -> None:
+    assert reviewer_text_is_safe(["HSK 0303540000 기준으로 확인했습니다."])
+    assert reviewer_text_is_safe(["B/L 총중량은 19,271.8 KGS이고 포장은 120 CTNS입니다."])

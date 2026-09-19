@@ -2492,3 +2492,107 @@ def test_functional_report_falls_back_when_provider_exposes_internal_codes(
     assert any(
         claim.comparison_ids for section in result.report.sections for claim in section.claims
     )
+
+
+def test_functional_report_replaces_only_the_unsafe_provider_section(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    class OneLeakyResponder:
+        def respond(
+            self, payload: dict[str, Any], *, purpose: str = "", **_kwargs: Any
+        ) -> dict[str, Any]:
+            if purpose != "review_report":
+                return {}
+            comparison_id = payload["review_snapshot"]["comparisons"][0]["comparison_id"]
+            return {
+                "sections": [
+                    {
+                        "section": name,
+                        "title": title,
+                        "claims": [
+                            {
+                                "claim_id": f"provider:{name}",
+                                "text": (
+                                    f"{comparison_id}를 확인했습니다."
+                                    if name == "document_comparison"
+                                    else f"{title}은 HSK 기준 비교 근거를 사용했습니다."
+                                ),
+                                "fact_ids": [],
+                                "comparison_ids": [comparison_id],
+                                "evidence_ids": [],
+                            }
+                        ],
+                    }
+                    for name, title in (
+                        ("conclusion", "결론"),
+                        ("execution_process", "실행 과정"),
+                        ("document_comparison", "문서 비교"),
+                        ("issues_and_causes", "문제와 원인"),
+                        ("legal_evidence", "법령 근거"),
+                        ("impact", "영향"),
+                        ("next_actions", "다음 조치"),
+                        ("limitations", "한계"),
+                    )
+                ]
+            }
+
+        def close(self) -> None:
+            return None
+
+    monkeypatch.setattr(ProfileEvidenceRetriever, "retrieve", _stub_retrieve)
+    runtime = ProfileRuntime(_settings())
+    runtime.mode = "functional-uat"
+    runtime._grounded_responder = OneLeakyResponder()  # type: ignore[assignment]
+
+    result = runtime.review_v3_json(json.dumps(_review_payload()).encode())
+
+    by_name = {section.section: section for section in result.report.sections}
+    assert (
+        by_name["document_comparison"].claims[0].claim_id.startswith("report:document_comparison:")
+    )
+    assert by_name["conclusion"].claims[0].claim_id == "provider:conclusion"
+    assert by_name["limitations"].claims[0].claim_id == "provider:limitations"
+
+
+def test_deterministic_legal_evidence_claim_cites_evidence_records(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    monkeypatch.setattr(ProfileEvidenceRetriever, "retrieve", _stub_retrieve)
+    runtime = ProfileRuntime(_settings())
+
+    result = runtime.review_v3_json(json.dumps(_review_payload()).encode())
+
+    assert result.evidence
+    legal = next(
+        section for section in result.report.sections if section.section == "legal_evidence"
+    )
+    assert legal.claims[0].evidence_ids == [item.evidence_id for item in result.evidence]
+    assert legal.claims[0].comparison_ids == []
+    assert f"{len(result.evidence)}건" in legal.claims[0].text
+
+
+def test_provider_assistant_accepts_hsk_in_reviewer_prose(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    monkeypatch.setattr(ProfileEvidenceRetriever, "retrieve", _stub_retrieve)
+    runtime = ProfileRuntime(_settings())
+    result = runtime.review_v3_json(json.dumps(_review_payload()).encode())
+    assert result.engine is not None
+    request = AssistantAnswerRequestV1.model_validate(
+        json.loads(_answer_payload(result, question="현재 문서 비교 결과를 설명해 주세요."))
+    )
+
+    answer = response_from_provider_candidate(
+        {
+            "direct_answer": "HSK 기준으로 수량은 모두 55,246 KGS로 일치합니다.",
+            "citations": [
+                {"kind": "comparison", "reference_id": result.comparisons[0].comparison_id}
+            ],
+            "suggested_questions": [],
+            "correction_draft": None,
+        },
+        request,
+        engine=result.engine,
+    )
+
+    assert answer.direct_answer.startswith("HSK 기준으로")

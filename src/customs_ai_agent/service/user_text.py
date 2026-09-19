@@ -59,12 +59,15 @@ _ALLOWED_REVIEWER_ABBREVIATIONS = frozenset(
         "AWB",
         "API",
         "B",
+        "BOX",
         "CBM",
         "CIF",
         "CIP",
         "C/O",
         "CPT",
         "CNY",
+        "CTN",
+        "CTNS",
         "DAP",
         "DDP",
         "EXW",
@@ -73,14 +76,20 @@ _ALLOWED_REVIEWER_ABBREVIATIONS = frozenset(
         "FOB",
         "FTA",
         "GBP",
+        "GROSS",
         "HS",
+        "HSK",
         "JPY",
         "KG",
+        "KGS",
         "KRW",
         "LLM",
+        "NET",
         "OCR",
         "PCS",
         "PDF",
+        "PKG",
+        "PKGS",
         "TEU",
         "USD",
     }
@@ -105,7 +114,17 @@ def contains_internal_result_marker(value: str, *, markers: Iterable[str] = ()) 
 
     if _INTERNAL_RESULT_MARKER.search(value):
         return True
-    return any(marker and marker in value for marker in markers)
+    return any(marker and _marker_pattern(marker).search(value) for marker in markers)
+
+
+def _marker_pattern(marker: str) -> re.Pattern[str]:
+    # A marker must stand as its own token.  Plain substring matching rejected
+    # ordinary prose such as "관세법 제232조" whenever a short structured value
+    # like law_id "23" was present in the result.  Korean text next to the
+    # marker still counts as a boundary, so "run_abc가" remains blocked.
+    return re.compile(
+        rf"(?<![0-9A-Za-z_-])(?<![0-9][.,]){re.escape(marker)}(?![0-9A-Za-z_-])(?![.,][0-9])"
+    )
 
 
 def reviewer_text_is_safe(

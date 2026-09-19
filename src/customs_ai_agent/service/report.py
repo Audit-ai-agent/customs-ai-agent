@@ -74,11 +74,18 @@ def build_grounded_report_sections(
         evidence_id=(finding.evidence_ids[0] if finding and finding.evidence_ids else None),
         fallback=issue_support,
     )
-    evidence_support = _support(
-        fact_ids=[],
-        comparison_id=primary_comparison.comparison_id if primary_comparison else None,
-        evidence_id=evidence[0].evidence_id if evidence else None,
-        fallback=support,
+    # The legal-evidence claim cites the Evidence records themselves.  Citing
+    # the primary comparison here made the claim point at an unrelated check
+    # (for example HS-code presence) instead of the law it describes.
+    evidence_support = (
+        ([], [], [item.evidence_id for item in evidence[:64]])
+        if evidence
+        else _support(
+            fact_ids=[],
+            comparison_id=primary_comparison.comparison_id if primary_comparison else None,
+            evidence_id=None,
+            fallback=support,
+        )
     )
     action_support = _support(
         fact_ids=[],
@@ -93,7 +100,7 @@ def build_grounded_report_sections(
         filenames=filenames,
     )
     evidence_text = (
-        f"연결된 법령 근거는 {len(evidence)}건입니다."
+        _evidence_summary(evidence, markers=markers, filenames=filenames)
         if evidence
         else _evidence_skip_message(evidence_retrieval_skip_reason)
     )
@@ -170,6 +177,25 @@ def build_grounded_report_sections(
         }
     )
     return sections
+
+
+def _evidence_summary(
+    evidence: list[EvidenceV3],
+    *,
+    markers: frozenset[str],
+    filenames: tuple[str, ...],
+) -> str:
+    count = f"연결된 법령 근거는 {len(evidence)}건입니다."
+    names = list(dict.fromkeys(item.law_name for item in evidence if item.law_name))
+    if not names:
+        return count
+    listed = ", ".join(names[:3]) + (f" 외 {len(names) - 3}개" if len(names) > 3 else "")
+    return _reviewer_sentence(
+        f"연결된 법령 근거는 {len(evidence)}건이며 {listed}에서 조회했습니다.",
+        count,
+        markers=markers,
+        filenames=filenames,
+    )
 
 
 def _evidence_skip_message(reason: str | None) -> str:
