@@ -1148,3 +1148,102 @@ def test_item_correction_applies_when_child_extraction_omits_the_field(
     assert [fact.fact_id for fact in item.facts if fact.name == "quantity"] == [
         "human:proposal-quantity"
     ]
+
+
+def _child_with_parent_analyses(
+    request: ServiceReviewRunRequestV3,
+    parent_analyses: list[dict[str, Any]],
+    *,
+    proposal_id: str = "proposal-quantity",
+    fact_id: str = "invoice:item:1:field:quantity:3",
+) -> ServiceReviewRunRequestV3:
+    payload = _item_quantity_correction(request, fact_id=fact_id, item_id="invoice:item:1")
+    wire = payload.model_dump(mode="json")
+    wire["applied_correction_proposal_ids"] = [proposal_id]
+    wire["human_corrections"][0]["correction_proposal_id"] = proposal_id
+    wire["parent_document_analyses"] = parent_analyses
+    return ServiceReviewRunRequestV3.model_validate(wire)
+
+
+def test_child_run_reuses_parent_analyses_without_extracting_again() -> None:
+    request, candidates = _scenario(invoice_quantity="3 PCS", packing_quantity="2 PCS")
+    parent = run_bounded_workflow(request, _SequenceAnalyzer(candidates))
+    parent_wire = [analysis.model_dump(mode="json") for analysis in parent.document_analyses]
+    child_analyzer = _SequenceAnalyzer({})
+
+    output = run_bounded_workflow(_child_with_parent_analyses(request, parent_wire), child_analyzer)
+
+    assert child_analyzer.calls == []
+    invoice = next(value for value in output.document_analyses if value.document_id == "invoice")
+    parent_invoice = next(
+        value for value in parent.document_analyses if value.document_id == "invoice"
+    )
+    item = invoice.line_items[0]
+    assert item.facts[:-1] == parent_invoice.line_items[0].facts
+    assert item.facts[-1].fact_id == "human:proposal-quantity"
+    statuses = {value.rule_code: value.status for value in output.comparisons}
+    parent_statuses = {value.rule_code: value.status for value in parent.comparisons}
+    assert statuses["invoice_packing_quantity_unit"] == "pass"
+    changed = {rule for rule, status in statuses.items() if parent_statuses.get(rule) != status}
+    # Only rules that read the corrected quantity may change (3 PCS x USD 10
+    # did not match the USD 20 line amount; 2 PCS now does).
+    assert changed == {"invoice_packing_quantity_unit", "invoice_line_amount"}
+    assert [value.action for value in output.workflow.planner.actions] == [
+        "analyze_documents",
+        "apply_human_corrections",
+        "compare_documents",
+    ]
+
+
+def test_grandchild_run_keeps_earlier_human_facts_from_its_parent() -> None:
+    request, candidates = _scenario(invoice_quantity="3 PCS", packing_quantity="2 PCS")
+    parent = run_bounded_workflow(request, _SequenceAnalyzer(candidates))
+    child = run_bounded_workflow(
+        _child_with_parent_analyses(
+            request, [value.model_dump(mode="json") for value in parent.document_analyses]
+        ),
+        _SequenceAnalyzer({}),
+    )
+
+    grandchild = run_bounded_workflow(
+        _child_with_parent_analyses(
+            request,
+            [value.model_dump(mode="json") for value in child.document_analyses],
+            proposal_id="proposal-quantity-2",
+        ),
+        _SequenceAnalyzer({}),
+    )
+
+    item = next(
+        value for value in grandchild.document_analyses if value.document_id == "invoice"
+    ).line_items[0]
+    assert [fact.fact_id for fact in item.facts if fact.fact_id.startswith("human:")] == [
+        "human:proposal-quantity",
+        "human:proposal-quantity-2",
+    ]
+
+
+@pytest.mark.parametrize("tamper", ["missing_document", "foreign_quote", "wrong_document"])
+def test_child_run_rejects_parent_analyses_that_do_not_match_the_documents(tamper: str) -> None:
+    request, candidates = _scenario(invoice_quantity="3 PCS", packing_quantity="2 PCS")
+    parent = run_bounded_workflow(request, _SequenceAnalyzer(candidates))
+    wire = [analysis.model_dump(mode="json") for analysis in parent.document_analyses]
+    invoice = next(value for value in wire if value["document_id"] == "invoice")
+    if tamper == "missing_document":
+        wire = [value for value in wire if value["document_id"] != "bill"]
+    elif tamper == "foreign_quote":
+        invoice["line_items"][0]["facts"][2]["source"]["quote"] = "Quantity: 999 PCS"
+    else:
+        invoice["line_items"][0]["facts"][2]["source"]["document_id"] = "packing"
+
+    with pytest.raises(ValueError, match="parent_document_analyses_invalid"):
+        run_bounded_workflow(_child_with_parent_analyses(request, wire), _SequenceAnalyzer({}))
+
+
+def test_parent_analyses_require_a_parent_review_run() -> None:
+    request, _candidates = _scenario()
+    wire = request.model_dump(mode="json")
+    wire["parent_document_analyses"] = []
+
+    with pytest.raises(ValueError, match="parent document analyses require a parent review run"):
+        ServiceReviewRunRequestV3.model_validate(wire)

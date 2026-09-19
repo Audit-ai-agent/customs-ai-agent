@@ -94,6 +94,12 @@ class ServiceReviewRunRequestV3(V3WireModel):
     applied_correction_proposal_ids: list[str] = Field(default_factory=list, max_length=50)
     human_corrections: list["HumanCorrectionInputV3"] = Field(default_factory=list, max_length=50)
     reviewer_hs_selection: ReviewerHsSelectionV3 | None = None
+    # The parent run's public document analyses, sent by Backend for a child
+    # run so the Agent can reuse them instead of extracting the unchanged
+    # documents again.  Kept as raw objects so the input manifest hash stays
+    # byte-identical to the Backend wire; the workflow validates each one as
+    # ``DocumentAnalysisV3`` before use.
+    parent_document_analyses: list[dict[str, Any]] | None = Field(default=None, max_length=20)
 
     @model_validator(mode="after")
     def _document_ids_are_unique(self) -> "ServiceReviewRunRequestV3":
@@ -110,6 +116,8 @@ class ServiceReviewRunRequestV3(V3WireModel):
             raise ValueError("human corrections must exactly match applied correction proposal IDs")
         if any(item.document_id not in set(document_ids) for item in self.human_corrections):
             raise ValueError("human correction document_id must refer to an input document")
+        if self.parent_document_analyses is not None and self.parent_review_run_id is None:
+            raise ValueError("parent document analyses require a parent review run")
         return self
 
     def input_manifest_wire(self) -> dict[str, Any]:

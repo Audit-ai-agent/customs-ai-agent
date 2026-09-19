@@ -143,6 +143,7 @@ class ReviewGraphState(TypedDict, total=False):
     iteration: int
     initial_analyses: dict[str, DocumentAnalysis]
     analyses: dict[str, DocumentAnalysis]
+    reused_analyses: list[DocumentAnalysisV3] | None
     reextraction_requests: dict[str, list[str]]
     reextractions: list[ReextractionV3]
     retry_unavailable: bool
@@ -448,6 +449,32 @@ def _build_graph(ctx: _RunContext) -> Any:
 
     def extraction_agent(state: ReviewGraphState) -> ReviewGraphState:
         iteration = state.get("iteration", 0) + 1
+        reused = wf._reused_parent_analyses(request) if iteration == 1 else None
+        if reused is not None:
+            # A child run keeps the parent's extraction and only appends the
+            # approved human facts, so uncorrected facts cannot drift.
+            ctx.planner.record(
+                "analyze_documents",
+                status="completed",
+                summary="부모 심사의 추출·정규화 결과를 그대로 사용했습니다(문서를 다시 추출하지 않음).",
+            )
+            ctx.notify("classify_documents", "completed")
+            ctx.notify("extract_facts", "completed")
+            ctx.notify("normalize_facts", "completed")
+            ctx.record(
+                "extraction_agent",
+                1,
+                "completed",
+                f"부모 심사의 문서 {len(reused)}건 추출 결과를 재사용했습니다.",
+            )
+            return {
+                "iteration": 1,
+                "initial_analyses": {},
+                "analyses": {},
+                "reused_analyses": reused,
+                "reextractions": [],
+                "retry_unavailable": False,
+            }
         if iteration == 1:
             ctx.notify("classify_documents", "running")
             ctx.notify("extract_facts", "running")
@@ -546,10 +573,15 @@ def _build_graph(ctx: _RunContext) -> Any:
         analyses = state["analyses"]
         if iteration == 2 or not state.get("preliminary_comparisons"):
             ctx.notify("match_documents", "running")
-        rendered = [
-            wf._render_analysis(document, analyses[document.document_id])
-            for document in request.documents
-        ]
+        reused = state.get("reused_analyses")
+        rendered = (
+            list(reused)
+            if reused is not None
+            else [
+                wf._render_analysis(document, analyses[document.document_id])
+                for document in request.documents
+            ]
+        )
         if request.human_corrections:
             rendered = wf._apply_human_corrections(rendered, request)
         comparisons = wf._comparisons(rendered, trade_type=request.trade_type)
@@ -575,7 +607,7 @@ def _build_graph(ctx: _RunContext) -> Any:
         }
         mismatch_count = sum(1 for comparison in comparisons if comparison.status == "mismatch")
         review_count = sum(1 for comparison in comparisons if comparison.status == "needs_review")
-        if iteration == 1:
+        if iteration == 1 and reused is None:
             requests, reason = _audit(
                 ctx,
                 initial=state["initial_analyses"],

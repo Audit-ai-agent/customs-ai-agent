@@ -732,6 +732,52 @@ def _apply_human_corrections(
     return [by_document[analysis.document_id] for analysis in analyses]
 
 
+def _reused_parent_analyses(
+    request: ServiceReviewRunRequestV3,
+) -> list[DocumentAnalysisV3] | None:
+    """Validate the parent run's analyses for reuse by a child run.
+
+    A child run reviews the same immutable documents with approved human
+    facts added.  Extracting them again with a model changes facts nobody
+    corrected (and their IDs), so Backend sends the parent's analyses instead.
+    They must describe exactly this request's documents, and every document
+    quote must still be found in its document; otherwise the run fails closed.
+    """
+
+    raw = request.parent_document_analyses
+    if raw is None:
+        return None
+    try:
+        analyses = [DocumentAnalysisV3.model_validate(value) for value in raw]
+    except ValueError as exc:
+        raise ValueError("parent_document_analyses_invalid") from exc
+    documents = {document.document_id: document for document in request.documents}
+    by_id = {analysis.document_id: analysis for analysis in analyses}
+    if len(by_id) != len(analyses) or set(by_id) != set(documents):
+        raise ValueError("parent_document_analyses_invalid")
+    for analysis in analyses:
+        document = documents[analysis.document_id]
+        sources: list[SourceV3 | HumanProvidedSourceV3] = [
+            *([analysis.classification_source] if analysis.classification_source else []),
+            *(item.source for item in analysis.line_items),
+            *(fact.source for fact in _analysis_facts(analysis)),
+        ]
+        for source in sources:
+            if source.document_id != analysis.document_id:
+                raise ValueError("parent_document_analyses_invalid")
+            if isinstance(source, SourceV3) and (
+                document.content_text.count(source.quote) <= source.occurrence
+            ):
+                raise ValueError("parent_document_analyses_invalid")
+    return [by_id[document.document_id] for document in request.documents]
+
+
+def _analysis_facts(analysis: DocumentAnalysisV3) -> Iterable[FactV3]:
+    yield from analysis.facts
+    for item in analysis.line_items:
+        yield from item.facts
+
+
 def _correction_target_item(
     analysis: DocumentAnalysisV3,
     correction: Any,
