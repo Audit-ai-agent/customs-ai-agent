@@ -1022,3 +1022,129 @@ def test_human_correction_with_another_document_item_fails_closed() -> None:
         run_bounded_workflow(
             ServiceReviewRunRequestV3.model_validate(payload), _SequenceAnalyzer(candidates)
         )
+
+
+def _item_quantity_correction(
+    request: ServiceReviewRunRequestV3, *, fact_id: str, item_id: str | None
+) -> ServiceReviewRunRequestV3:
+    payload = request.model_dump(mode="json")
+    payload.update(
+        {
+            "parent_review_run_id": "run-parent",
+            "applied_correction_proposal_ids": ["proposal-quantity"],
+            "human_corrections": [
+                {
+                    "correction_proposal_id": "proposal-quantity",
+                    "document_id": "invoice",
+                    "item_id": item_id,
+                    "fact_id": fact_id,
+                    "field_name": "quantity",
+                    "new_value": "2 PCS",
+                    "unit": "PCS",
+                    "reason": "수량 정정본을 담당자가 확인했습니다.",
+                    "source_kind": "human_provided",
+                }
+            ],
+        }
+    )
+    return ServiceReviewRunRequestV3.model_validate(payload)
+
+
+@pytest.mark.parametrize("item_id", ["invoice:item:1", None])
+def test_item_correction_survives_claude_field_reordering(item_id: str | None) -> None:
+    """The parent saw quantity second; the child extraction returns it third."""
+
+    request, candidates = _scenario(invoice_quantity="3 PCS", packing_quantity="2 PCS")
+    child_request = _item_quantity_correction(
+        request, fact_id="invoice:item:1:field:quantity:2", item_id=item_id
+    )
+
+    output = run_bounded_workflow(child_request, _SequenceAnalyzer(candidates))
+
+    invoice = next(value for value in output.document_analyses if value.document_id == "invoice")
+    item = next(value for value in invoice.line_items if value.item_id == "invoice:item:1")
+    assert not any(fact.fact_id == "invoice:item:1:field:quantity:2" for fact in item.facts)
+    assert any(fact.fact_id == "human:proposal-quantity" for fact in item.facts)
+    assert not any(fact.source.source_kind == "human_provided" for fact in invoice.facts)
+    comparison = next(
+        value for value in output.comparisons if value.rule_code == "invoice_packing_quantity_unit"
+    )
+    assert comparison.status == "pass"
+
+
+@pytest.mark.parametrize("item_id", ["invoice:item:1", None])
+def test_item_correction_does_not_choose_an_ambiguous_reordered_fact(item_id: str | None) -> None:
+    request, candidates = _scenario(invoice_quantity="3 PCS", packing_quantity="2 PCS")
+    invoice_candidate = candidates["invoice"][0]
+    line = invoice_candidate.line_items[0]
+    duplicate = line.model_copy(
+        update={"fields": [*line.fields, _field("quantity", "3 PCS", line.source_quote)]}
+    )
+    ambiguous_candidate = invoice_candidate.model_copy(update={"line_items": [duplicate]})
+    child_request = _item_quantity_correction(
+        request, fact_id="invoice:item:1:field:quantity:2", item_id=item_id
+    )
+
+    with pytest.raises(ValueError, match="human_correction_fact_target_ambiguous"):
+        run_bounded_workflow(
+            child_request,
+            _SequenceAnalyzer({**candidates, "invoice": [ambiguous_candidate]}),
+        )
+
+
+def test_item_correction_fact_id_claiming_another_item_fails_closed() -> None:
+    request, candidates = _scenario(invoice_quantity="3 PCS", packing_quantity="2 PCS")
+    child_request = _item_quantity_correction(
+        request, fact_id="invoice:item:2:field:quantity:2", item_id="invoice:item:1"
+    )
+
+    with pytest.raises(ValueError, match="human_correction_fact_not_owned_by_item"):
+        run_bounded_workflow(child_request, _SequenceAnalyzer(candidates))
+
+
+def test_item_correction_fact_id_for_another_field_fails_closed() -> None:
+    request, candidates = _scenario(invoice_quantity="3 PCS", packing_quantity="2 PCS")
+    child_request = _item_quantity_correction(
+        request, fact_id="invoice:item:1:field:amount:9", item_id=None
+    )
+
+    with pytest.raises(ValueError, match="human_correction_field_does_not_match_fact"):
+        run_bounded_workflow(child_request, _SequenceAnalyzer(candidates))
+
+
+def test_carton_mark_extracted_as_container_is_needs_review_not_mismatch() -> None:
+    request, candidates = _scenario(packing_container="C/NO. 1-101")
+    output = run_bounded_workflow(request, _SequenceAnalyzer(candidates))
+
+    comparison = next(
+        value for value in output.comparisons if value.rule_code == "bill_packing_container"
+    )
+    assert comparison.status == "needs_review"
+
+
+@pytest.mark.parametrize("item_id", ["invoice:item:1", None])
+def test_item_correction_applies_when_child_extraction_omits_the_field(
+    item_id: str | None,
+) -> None:
+    """E0827: the child extraction returned the item without any quantity fact."""
+
+    request, candidates = _scenario(invoice_quantity="3 PCS", packing_quantity="2 PCS")
+    invoice_candidate = candidates["invoice"][0]
+    line = invoice_candidate.line_items[0]
+    without_quantity = line.model_copy(
+        update={"fields": [field for field in line.fields if field.name != "quantity"]}
+    )
+    child_candidate = invoice_candidate.model_copy(update={"line_items": [without_quantity]})
+    child_request = _item_quantity_correction(
+        request, fact_id="invoice:item:1:field:quantity:2", item_id=item_id
+    )
+
+    output = run_bounded_workflow(
+        child_request, _SequenceAnalyzer({**candidates, "invoice": [child_candidate]})
+    )
+
+    invoice = next(value for value in output.document_analyses if value.document_id == "invoice")
+    item = next(value for value in invoice.line_items if value.item_id == "invoice:item:1")
+    assert [fact.fact_id for fact in item.facts if fact.name == "quantity"] == [
+        "human:proposal-quantity"
+    ]

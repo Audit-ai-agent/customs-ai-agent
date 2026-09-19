@@ -106,6 +106,8 @@ _FIELD_LABELS = {
 _CURRENCY_RE = re.compile(r"\b(KRW|USD|EUR|JPY|CNY|GBP)\b", re.IGNORECASE)
 _NUMBER_RE = re.compile(r"[-+]?\d[\d,]*(?:\.\d+)?")
 _CONTAINER_RE = re.compile(r"\b[A-Z]{4}\d{7}\b")
+# ``{document_id}:item:{n}:field:{name}:{position}`` as built during extraction.
+_ITEM_FACT_ID_RE = re.compile(r"(?P<item_id>.+:item:\d+):field:(?P<name>[a-z0-9_]+):\d+")
 _SAFE_NAME = re.compile(r"[^a-z0-9_]+")
 
 
@@ -745,6 +747,10 @@ def _correction_target_item(
     normalized_name = correction.field_name.strip().casefold()
     item_by_id = {item.item_id: item for item in analysis.line_items}
 
+    item_fact_locator = (
+        _ITEM_FACT_ID_RE.fullmatch(correction.fact_id) if correction.fact_id is not None else None
+    )
+
     if correction.item_id is not None:
         target_item = item_by_id.get(correction.item_id)
         if target_item is None:
@@ -753,15 +759,44 @@ def _correction_target_item(
             target_fact = next(
                 (fact for fact in target_item.facts if fact.fact_id == correction.fact_id), None
             )
-            if target_fact is None:
+            if target_fact is not None:
+                if not _correction_field_matches(target_fact.name, normalized_name):
+                    raise ValueError("human_correction_field_does_not_match_fact")
+                return target_item
+            # The fact ID must still claim this item; only its field position
+            # may have changed on the child extraction.
+            if item_fact_locator is None or item_fact_locator["item_id"] != correction.item_id:
                 raise ValueError("human_correction_fact_not_owned_by_item")
-            if not _correction_field_matches(target_fact.name, normalized_name):
-                raise ValueError("human_correction_field_does_not_match_fact")
+            return _item_for_reordered_fact(
+                target_item,
+                normalized_name,
+                locator_name=item_fact_locator["name"],
+            )
         return target_item
 
     if correction.fact_id is None:
         # A document-level correction may introduce a clearly labelled new fact.
         return None
+
+    if item_fact_locator is not None:
+        # An item fact ID never falls back to a document-level fact.
+        for item in analysis.line_items:
+            target_fact = next(
+                (fact for fact in item.facts if fact.fact_id == correction.fact_id), None
+            )
+            if target_fact is None:
+                continue
+            if not _correction_field_matches(target_fact.name, normalized_name):
+                raise ValueError("human_correction_field_does_not_match_fact")
+            return item
+        target_item = item_by_id.get(item_fact_locator["item_id"])
+        if target_item is None:
+            raise ValueError("human_correction_fact_target_not_found")
+        return _item_for_reordered_fact(
+            target_item,
+            normalized_name,
+            locator_name=item_fact_locator["name"],
+        )
 
     direct_fact = next(
         (fact for fact in analysis.facts if fact.fact_id == correction.fact_id), None
@@ -796,6 +831,31 @@ def _correction_target_item(
             raise ValueError("human_correction_field_does_not_match_fact")
         return item
     raise ValueError("human_correction_fact_target_not_found")
+
+
+def _item_for_reordered_fact(
+    item: LineItemV3,
+    normalized_name: str,
+    *,
+    locator_name: str,
+) -> LineItemV3:
+    """Keep a correction on its item when the child extraction changed the fields.
+
+    Item fact IDs include the field's position, and Claude can return the same
+    item's fields in another order on a child run, or omit the corrected field
+    entirely (the reviewer is correcting it, after all).  The fact ID still
+    names this item, so the approved value is attached to it.  Two or more
+    facts with the declared name are ambiguous and need another human review.
+    """
+
+    if not _correction_field_matches(locator_name, normalized_name):
+        raise ValueError("human_correction_field_does_not_match_fact")
+    same_name_facts = [
+        fact for fact in item.facts if _correction_field_matches(fact.name, normalized_name)
+    ]
+    if len(same_name_facts) > 1:
+        raise ValueError("human_correction_fact_target_ambiguous")
+    return item
 
 
 def _correction_field_matches(actual: str, requested: str) -> bool:
@@ -896,7 +956,10 @@ def _normalize_value(
         containers = sorted(set(_CONTAINER_RE.findall(text.upper())))
         if containers:
             return "|".join(containers), None
-        return re.sub(r"\s+", "", text).upper(), None
+        # A value without any ISO 6346 number (for example a carton mark such
+        # as "C/NO. 1-101") is not a container number.  Leave it unnormalized
+        # so the comparison asks a reviewer instead of reporting a mismatch.
+        return None, None
     if name in _IDENTIFIER_FIELDS:
         return re.sub(r"\s+", "", text).upper(), None
     if name in _NUMERIC_FIELDS:
