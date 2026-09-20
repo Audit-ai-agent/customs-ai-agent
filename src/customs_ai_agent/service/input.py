@@ -34,6 +34,7 @@ _CHILD_REQUEST_FIELDS = {
     "parent_review_run_id",
     "applied_correction_proposal_ids",
     "human_corrections",
+    "parent_document_analyses",
 }
 _ALLOWED_REQUEST_FIELDS = (
     _REQUIRED_REQUEST_FIELDS | _CHILD_REQUEST_FIELDS | {"reviewer_hs_selection"}
@@ -223,6 +224,30 @@ def _inspect_child_context(decoded: dict[str, Any]) -> None:
         raise ServiceHttpError("request_invalid", 422)
     if len(proposal_ids) != len(set(proposal_ids)):
         raise ServiceHttpError("request_invalid", 422)
+
+    analyses = decoded.get("parent_document_analyses")
+    if analyses is not None:
+        # Admission only bounds the shape; the runtime validates each analysis
+        # against the public model and against the input documents themselves.
+        if parent_review_run_id is None or not isinstance(analyses, list) or len(analyses) > 20:
+            raise ServiceHttpError("request_invalid", 422)
+        for analysis in analyses:
+            if not isinstance(analysis, dict) or not _bounded_string(
+                analysis.get("document_id"), minimum=1, maximum=128
+            ):
+                raise ServiceHttpError("request_invalid", 422)
+            facts = analysis.get("facts", [])
+            items = analysis.get("line_items", [])
+            if not isinstance(facts, list) or len(facts) > 64:
+                raise ServiceHttpError("request_invalid", 422)
+            if not isinstance(items, list) or len(items) > 100:
+                raise ServiceHttpError("request_invalid", 422)
+            for item in items:
+                if not isinstance(item, dict):
+                    raise ServiceHttpError("request_invalid", 422)
+                item_facts = item.get("facts", [])
+                if not isinstance(item_facts, list) or len(item_facts) > 32:
+                    raise ServiceHttpError("request_invalid", 422)
 
     corrections = decoded.get("human_corrections", [])
     if not isinstance(corrections, list) or len(corrections) > 50:
