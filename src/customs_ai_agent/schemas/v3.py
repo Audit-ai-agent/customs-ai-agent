@@ -69,6 +69,14 @@ class ReviewerHsSelectionV3(V3WireModel):
 
     code: str = Field(pattern=r"^[0-9]{10}$")
     source_kind: Literal["human_provided"]
+    # Multi-item cases (2026-09-29): which goods item the reviewer confirmed
+    # this code for.  ``item_id`` is the Backend's case-level item identity
+    # and ``description`` the item name as the documents (or the Agent)
+    # wrote it, so the workflow can match the code to the document line item
+    # that describes the same goods.  Both are absent for a legacy
+    # whole-case confirmation.
+    item_id: str | None = Field(default=None, max_length=64)
+    description: str | None = Field(default=None, max_length=300)
 
 
 class ServiceReviewRunRequestV3(V3WireModel):
@@ -94,6 +102,10 @@ class ServiceReviewRunRequestV3(V3WireModel):
     applied_correction_proposal_ids: list[str] = Field(default_factory=list, max_length=50)
     human_corrections: list["HumanCorrectionInputV3"] = Field(default_factory=list, max_length=50)
     reviewer_hs_selection: ReviewerHsSelectionV3 | None = None
+    # Every reviewer-confirmed code, one per goods item, when the case has
+    # several items.  ``reviewer_hs_selection`` stays the newest of them for
+    # older callers; the workflow reads both and de-duplicates.
+    reviewer_hs_selections: list[ReviewerHsSelectionV3] = Field(default_factory=list, max_length=20)
     # The parent run's public document analyses, sent by Backend for a child
     # run so the Agent can reuse them instead of extracting the unchanged
     # documents again.  Kept as raw objects so the input manifest hash stays
@@ -134,6 +146,10 @@ class ServiceReviewRunRequestV3(V3WireModel):
         if self.parent_review_run_id is None:
             wire.pop("applied_correction_proposal_ids", None)
             wire.pop("human_corrections", None)
+        if not self.reviewer_hs_selections:
+            # Likewise absent from the wire of a case without per-item
+            # confirmations (and from every older Backend).
+            wire.pop("reviewer_hs_selections", None)
         return wire
 
 
@@ -743,21 +759,44 @@ class HsReferenceCandidateV1(V3WireModel):
     ancestors: list[str] = Field(default_factory=list, max_length=8)
 
 
+class HsCandidateRequestItemV1(V3WireModel):
+    """One goods item the Backend already knows, with the codes it may get.
+
+    Sent in the ranking round of a multi-item case: the Backend echoes the
+    items the Agent read in the extraction round (or its own heuristic
+    items), each with its own shortlist, and the Agent ranks per item.
+    """
+
+    item_id: str = Field(min_length=1, max_length=64)
+    description: str = Field(min_length=1, max_length=300)
+    document_ids: list[str] = Field(default_factory=list, max_length=20)
+    cited_hs_codes: list[str] = Field(default_factory=list, max_length=10)
+    reference_candidates: list[HsReferenceCandidateV1] = Field(default_factory=list, max_length=20)
+
+
 class HsCandidatesRequestV1(V3WireModel):
     """Extract the goods from confirmed document text and rank reference codes.
 
-    The Agent never invents a code: picks come only from ``reference_candidates``,
-    which the Backend builds from the packaged HSK reference table.
+    The Agent never invents a code: picks come only from ``reference_candidates``
+    (whole-case list) or from each item's own ``reference_candidates`` when
+    ``items`` is sent, all built by the Backend from the packaged HSK
+    reference table.
     """
 
     schema_version: Literal["1.0"]
     case_id: str = Field(min_length=1, max_length=128)
     documents: list[HsCandidateDocumentV1] = Field(min_length=1, max_length=20)
     reference_candidates: list[HsReferenceCandidateV1] = Field(default_factory=list, max_length=40)
+    # Multi-item ranking round: when present, picks are made per item and
+    # ``max_picks`` bounds each item; the whole-case list above is ignored.
+    items: list[HsCandidateRequestItemV1] = Field(default_factory=list, max_length=20)
     max_picks: int = Field(default=5, ge=1, le=10)
 
 
 class HsCandidateItemV1(V3WireModel):
+    # Echoed from the request's items in a ranking round so the Backend can
+    # tell which of its items each reading and pick belongs to.
+    item_id: str | None = Field(default=None, max_length=64)
     description: str = Field(min_length=1, max_length=300)
     document_ids: list[str] = Field(default_factory=list, max_length=20)
     cited_hs_codes: list[str] = Field(default_factory=list, max_length=10)
@@ -768,6 +807,8 @@ class HsCandidateItemV1(V3WireModel):
 
 
 class HsCandidatePickV1(V3WireModel):
+    # The request item this pick ranks a code for (multi-item round only).
+    item_id: str | None = Field(default=None, max_length=64)
     code: str = Field(pattern=r"^[0-9]{10}$")
     rank: int = Field(ge=1, le=10)
     confidence: float = Field(ge=0.0, le=1.0)
@@ -778,5 +819,6 @@ class HsCandidatesResponseV1(V3WireModel):
     schema_version: Literal["1.0"]
     status: Literal["ok", "deterministic", "unavailable"]
     items: list[HsCandidateItemV1] = Field(default_factory=list, max_length=20)
-    picks: list[HsCandidatePickV1] = Field(default_factory=list, max_length=10)
+    # Up to max_picks per item across up to 20 items.
+    picks: list[HsCandidatePickV1] = Field(default_factory=list, max_length=200)
     engine: EngineV3

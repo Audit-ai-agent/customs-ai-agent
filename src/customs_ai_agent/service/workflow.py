@@ -32,6 +32,7 @@ from customs_ai_agent.schemas.v3 import (
     PlannerTraceV3,
     ReextractionV3,
     RequiredActionV1,
+    ReviewerHsSelectionV3,
     ServiceReviewRunRequestV3,
     SourceV3,
     WorkflowStageV3,
@@ -414,16 +415,28 @@ def retrieval_plan_from_analyses(
     HTTP contract.  Documents without an HS code, including ordinary B/L
     documents, are not sent as malformed retrieval fallback items.
 
-    A reviewer-confirmed HSK selection supplied by the Backend is used in two
-    labelled ways, and the fifth returned value carries the code when it was
-    applied so the trace can attribute it.  First, it *completes* a shorter
-    document-cited code (HS6/HS8) whose digits are a prefix of the selection:
-    the Data store resolves requirements only for an exact HSK10, so a bare
-    HS6 from an invoice would otherwise end as an ambiguous, evidence-free
-    lookup.  Second, when no document cites a code at all it becomes the one
-    retrieval commodity.  It never replaces a document-cited code that
-    disagrees with it; that disagreement stays visible for the reviewer.
+    Reviewer-confirmed HSK selections supplied by the Backend (one per goods
+    item when the case has several, or one for the whole case) are used in
+    labelled ways, and the fifth returned value carries the applied codes so
+    the trace can attribute them.  First, a selection *completes* a shorter
+    document-cited code (HS6/HS8) whose digits are a prefix of it: the Data
+    store resolves requirements only for an exact HSK10, so a bare HS6 from
+    an invoice would otherwise end as an ambiguous, evidence-free lookup.
+    Second, a per-item selection whose description matches a document line
+    item that cites no code gives that line its retrieval code, and a
+    per-item selection that matches no line at all still becomes its own
+    commodity: the reviewer confirmed those goods are in the documents.
+    Third, when no document cites a code at all every selection becomes a
+    retrieval commodity.  A selection never replaces a document-cited code
+    that disagrees with it; that disagreement stays visible for the reviewer.
     """
+
+    selections = _reviewer_hs_selections(request)
+    applied_codes: list[str] = []
+
+    def _apply(code: str) -> None:
+        if code not in applied_codes:
+            applied_codes.append(code)
 
     candidates: list[dict[str, Any]] = []
     excluded_document_ids: list[str] = []
@@ -431,16 +444,32 @@ def retrieval_plan_from_analyses(
         document_candidates: list[dict[str, Any]] = []
         for item in analysis.line_items:
             hs = _first_fact(item.facts, "hs_code")
-            if hs is None or not (hs.normalized_value or hs.raw_value):
-                continue
             description = _first_fact(item.facts, *_DESCRIPTION_FIELDS)
             origin = _first_fact(item.facts, *_ORIGIN_FIELDS)
+            description_text = (description.raw_value if description else item.source.quote)[:2000]
+            if hs is None or not (hs.normalized_value or hs.raw_value):
+                # No code on this line: a per-item confirmation that names
+                # the same goods supplies it.
+                selection = _selection_for_description(selections, description_text)
+                if selection is None:
+                    continue
+                _apply(selection.code)
+                document_candidates.append(
+                    {
+                        "document_id": document.document_id,
+                        "description": description_text,
+                        "hs_code": selection.code,
+                        # As for the whole-case fallback, the document's own
+                        # origin stands in when the line states none.
+                        "origin_country": _retrieval_origin(origin)
+                        or _retrieval_origin(_first_fact(analysis.facts, *_ORIGIN_FIELDS)),
+                    }
+                )
+                continue
             document_candidates.append(
                 {
                     "document_id": document.document_id,
-                    "description": (description.raw_value if description else item.source.quote)[
-                        :2000
-                    ],
+                    "description": description_text,
                     "hs_code": hs.normalized_value or hs.raw_value,
                     "origin_country": _retrieval_origin(origin),
                 }
@@ -467,26 +496,18 @@ def retrieval_plan_from_analyses(
             excluded_document_ids.append(document.document_id)
         candidates.extend(document_candidates)
 
-    reviewer_hs_code: str | None = None
-    if candidates and request.reviewer_hs_selection is not None:
-        selection_code = request.reviewer_hs_selection.code
+    if candidates and selections:
         for candidate in candidates:
             cited_digits = re.sub(r"\D", "", str(candidate["hs_code"]))
-            if 6 <= len(cited_digits) < 10 and selection_code.startswith(cited_digits):
-                candidate["hs_code"] = selection_code
-                reviewer_hs_code = selection_code
-    if not candidates and request.reviewer_hs_selection is not None:
-        reviewer_hs_code = request.reviewer_hs_selection.code
-        description_fact = None
-        for analysis in analyses:
-            for line_item in analysis.line_items:
-                description_fact = _first_fact(line_item.facts, *_DESCRIPTION_FIELDS)
-                if description_fact is not None:
-                    break
-            if description_fact is None:
-                description_fact = _first_fact(analysis.facts, *_DESCRIPTION_FIELDS)
-            if description_fact is not None:
-                break
+            if not 6 <= len(cited_digits) < 10:
+                continue
+            selection = _selection_completing(
+                selections, cited_digits, str(candidate["description"])
+            )
+            if selection is not None:
+                candidate["hs_code"] = selection.code
+                _apply(selection.code)
+    if selections:
         origin_values = {
             fact.normalized_value
             for analysis in analyses
@@ -495,23 +516,44 @@ def retrieval_plan_from_analyses(
             and fact.normalized_value
             and _is_country_code(fact.normalized_value)
         }
-        fallback_description = (
-            description_fact.raw_value
-            if description_fact is not None
-            else request.documents[0].content_text
-        )[:2000]
-        for document in request.documents:
-            candidates.append(
-                {
-                    "document_id": document.document_id,
-                    "description": fallback_description,
-                    "hs_code": reviewer_hs_code,
-                    "origin_country": (
-                        next(iter(origin_values)) if len(origin_values) == 1 else None
-                    ),
-                }
-            )
-        excluded_document_ids = []
+        shared_origin = next(iter(origin_values)) if len(origin_values) == 1 else None
+        if not candidates:
+            # Nothing in the documents names a code: the reviewer's
+            # confirmation(s) are the retrieval commodities.
+            fallback_description = _fallback_description(request, analyses)
+            for selection in selections:
+                _apply(selection.code)
+                for document in request.documents:
+                    candidates.append(
+                        {
+                            "document_id": document.document_id,
+                            "description": (selection.description or fallback_description)[:2000],
+                            "hs_code": selection.code,
+                            "origin_country": shared_origin,
+                        }
+                    )
+            excluded_document_ids = []
+        else:
+            # A per-item confirmation the documents' coded lines did not
+            # account for is still goods the reviewer saw in them.
+            present = {str(candidate["hs_code"]) for candidate in candidates}
+            for selection in selections:
+                if selection.item_id is None or selection.code in present:
+                    continue
+                _apply(selection.code)
+                present.add(selection.code)
+                for document in request.documents:
+                    candidates.append(
+                        {
+                            "document_id": document.document_id,
+                            "description": (
+                                selection.description or _fallback_description(request, analyses)
+                            )[:2000],
+                            "hs_code": selection.code,
+                            "origin_country": shared_origin,
+                        }
+                    )
+    reviewer_hs_code: str | None = ", ".join(applied_codes) if applied_codes else None
 
     origins_by_hs: dict[str, set[str]] = {}
     for candidate in candidates:
@@ -588,6 +630,84 @@ def retrieval_plan_from_analyses(
         None,
         reviewer_hs_code,
     )
+
+
+def _reviewer_hs_selections(
+    request: ServiceReviewRunRequestV3,
+) -> list[ReviewerHsSelectionV3]:
+    """Every reviewer confirmation the Backend sent, the legacy single one included once."""
+
+    selections = list(request.reviewer_hs_selections)
+    legacy = request.reviewer_hs_selection
+    if legacy is not None and legacy.code not in {item.code for item in selections}:
+        selections.append(legacy)
+    return selections
+
+
+_DESCRIPTION_TOKEN_PATTERN = re.compile(r"[0-9a-z가-힣]+")
+
+
+def _description_tokens(text: str | None) -> frozenset[str]:
+    return frozenset(
+        token
+        for token in _DESCRIPTION_TOKEN_PATTERN.findall((text or "").lower())
+        if len(token) >= 2 and not token.isdigit()
+    )
+
+
+def _description_affinity(left: str | None, right: str | None) -> float:
+    """Share of the shorter description's words that the other one also has (0..1)."""
+
+    left_tokens, right_tokens = _description_tokens(left), _description_tokens(right)
+    if not left_tokens or not right_tokens:
+        return 0.0
+    return len(left_tokens & right_tokens) / min(len(left_tokens), len(right_tokens))
+
+
+_SELECTION_AFFINITY_THRESHOLD = 0.5
+
+
+def _selection_for_description(
+    selections: list[ReviewerHsSelectionV3], description: str
+) -> ReviewerHsSelectionV3 | None:
+    """The per-item confirmation whose goods description names this line, if one does."""
+
+    best: tuple[float, ReviewerHsSelectionV3] | None = None
+    for selection in selections:
+        if selection.item_id is None:
+            continue
+        affinity = _description_affinity(selection.description, description)
+        if affinity >= _SELECTION_AFFINITY_THRESHOLD and (best is None or affinity > best[0]):
+            best = (affinity, selection)
+    return best[1] if best is not None else None
+
+
+def _selection_completing(
+    selections: list[ReviewerHsSelectionV3], cited_digits: str, description: str
+) -> ReviewerHsSelectionV3 | None:
+    """The confirmation that extends a document-cited prefix; the closest goods name wins a tie."""
+
+    matching = [selection for selection in selections if selection.code.startswith(cited_digits)]
+    if not matching:
+        return None
+    return max(
+        matching,
+        key=lambda selection: _description_affinity(selection.description, description),
+    )
+
+
+def _fallback_description(
+    request: ServiceReviewRunRequestV3, analyses: list[DocumentAnalysisV3]
+) -> str:
+    for analysis in analyses:
+        for line_item in analysis.line_items:
+            fact = _first_fact(line_item.facts, *_DESCRIPTION_FIELDS)
+            if fact is not None:
+                return fact.raw_value[:2000]
+        fact = _first_fact(analysis.facts, *_DESCRIPTION_FIELDS)
+        if fact is not None:
+            return fact.raw_value[:2000]
+    return request.documents[0].content_text[:2000]
 
 
 def finding_for_evidence_requirement(

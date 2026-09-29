@@ -1247,3 +1247,151 @@ def test_parent_analyses_require_a_parent_review_run() -> None:
 
     with pytest.raises(ValueError, match="parent document analyses require a parent review run"):
         ServiceReviewRunRequestV3.model_validate(wire)
+
+
+def _two_item_invoice_scenario(
+    *, cite_codes: bool
+) -> tuple[ServiceReviewRunRequestV3, dict[str, list[ClaudeDocumentCandidate]]]:
+    """One invoice listing two commodities, with or without HS6 codes on the lines."""
+
+    shirt_line = "Description: MEN'S COTTON T-SHIRTS | Quantity: 100 PCS | Amount: USD 500"
+    fish_line = "Description: FROZEN MACKEREL | Quantity: 200 KG | Amount: USD 400"
+    if cite_codes:
+        shirt_line += " | HS Code: 610910"
+        fish_line += " | HS Code: 030354"
+    invoice_text = "\n".join(
+        (
+            "COMMERCIAL INVOICE",
+            "Invoice No: INV-002",
+            "Total Amount: USD 900",
+            "Country of Origin: KR",
+            shirt_line,
+            fish_line,
+        )
+    )
+    request = ServiceReviewRunRequestV3.model_validate(
+        {
+            "case_id": "case-two-items",
+            "review_run_id": "run-two-items",
+            "review_as_of": "2026-08-05",
+            "trade_type": "import",
+            "jurisdiction": "KR",
+            "documents": [
+                {"document_id": "invoice", "filename": "invoice.txt", "content_text": invoice_text}
+            ],
+            "reviewer_hs_selection": {"code": "0303540000", "source_kind": "human_provided"},
+            "reviewer_hs_selections": [
+                {
+                    "code": "6109101000",
+                    "source_kind": "human_provided",
+                    "item_id": "item-shirts",
+                    "description": "MEN'S COTTON T-SHIRTS",
+                },
+                {
+                    "code": "0303540000",
+                    "source_kind": "human_provided",
+                    "item_id": "item-fish",
+                    "description": "FROZEN MACKEREL",
+                },
+            ],
+        }
+    )
+
+    def _fields(
+        description: str, quantity: str, amount: str, code: str | None
+    ) -> list[tuple[str, str]]:
+        fields = [
+            ("description", description),
+            ("quantity", quantity),
+            ("amount", amount),
+        ]
+        if code is not None:
+            fields.append(("hs_code", code))
+        return fields
+
+    candidates = {
+        "invoice": [
+            ClaudeDocumentCandidate(
+                document_type="invoice",
+                classification_source_quote="COMMERCIAL INVOICE",
+                fields=[
+                    _field("invoice_no", "INV-002", "Invoice No: INV-002"),
+                    _field("total_amount", "USD 900", "Total Amount: USD 900"),
+                    _field("country_of_origin", "KR", "Country of Origin: KR"),
+                ],
+                line_items=[
+                    _line(
+                        shirt_line,
+                        *_fields(
+                            "MEN'S COTTON T-SHIRTS",
+                            "100 PCS",
+                            "USD 500",
+                            "610910" if cite_codes else None,
+                        ),
+                    ),
+                    _line(
+                        fish_line,
+                        *_fields(
+                            "FROZEN MACKEREL", "200 KG", "USD 400", "030354" if cite_codes else None
+                        ),
+                    ),
+                ],
+            )
+        ]
+    }
+    return request, candidates
+
+
+def test_per_item_selections_give_uncoded_invoice_lines_their_own_retrieval_codes() -> None:
+    request, candidates = _two_item_invoice_scenario(cite_codes=False)
+    output = run_bounded_workflow(request, _SequenceAnalyzer(candidates))
+
+    assert output.retrieval_skip_reason is None
+    by_code = {item["hs_code"]: item for item in output.retrieval_items}
+    assert set(by_code) == {"6109101000", "0303540000"}
+    assert by_code["6109101000"]["description"] == "MEN'S COTTON T-SHIRTS"
+    assert by_code["0303540000"]["description"] == "FROZEN MACKEREL"
+    assert all(item["origin_country"] == "KR" for item in output.retrieval_items)
+    assert output.retrieval_reviewer_hs_code == "6109101000, 0303540000"
+    complete = output.with_evidence_status("ok")
+    retrieve = next(
+        stage for stage in complete.workflow.stages if stage.stage == "retrieve_evidence"
+    )
+    assert "담당자가 확정한 HSK 코드(6109101000, 0303540000)" in retrieve.summary
+
+
+def test_per_item_selections_complete_each_line_cited_prefix() -> None:
+    request, candidates = _two_item_invoice_scenario(cite_codes=True)
+    output = run_bounded_workflow(request, _SequenceAnalyzer(candidates))
+
+    assert sorted(item["hs_code"] for item in output.retrieval_items) == [
+        "0303540000",
+        "6109101000",
+    ]
+    assert output.retrieval_reviewer_hs_code == "6109101000, 0303540000"
+
+
+def test_per_item_selection_the_lines_do_not_account_for_is_still_a_commodity() -> None:
+    # The analyzer read only the shirts line with its code; the reviewer
+    # confirmed both items, so the mackerel is still retrieved for.
+    request, candidates = _two_item_invoice_scenario(cite_codes=True)
+    candidates["invoice"][0].line_items = candidates["invoice"][0].line_items[:1]
+    output = run_bounded_workflow(request, _SequenceAnalyzer(candidates))
+
+    by_code = {item["hs_code"]: item for item in output.retrieval_items}
+    assert set(by_code) == {"6109101000", "0303540000"}
+    assert by_code["0303540000"]["description"] == "FROZEN MACKEREL"
+
+
+def test_whole_case_selection_that_disagrees_with_a_cited_code_is_not_added() -> None:
+    # Without an item binding a selection keeps the legacy rule: it never
+    # joins the document-cited codes it disagrees with.
+    request, candidates = _two_item_invoice_scenario(cite_codes=True)
+    payload = request.input_manifest_wire()
+    payload["reviewer_hs_selections"] = []
+    payload["reviewer_hs_selection"] = {"code": "8528726000", "source_kind": "human_provided"}
+    request = ServiceReviewRunRequestV3.model_validate(payload)
+    output = run_bounded_workflow(request, _SequenceAnalyzer(candidates))
+
+    assert sorted(item["hs_code"] for item in output.retrieval_items) == ["030354", "610910"]
+    assert output.retrieval_reviewer_hs_code is None

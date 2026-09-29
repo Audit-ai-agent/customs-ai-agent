@@ -69,3 +69,39 @@ def test_admission_rejects_a_malformed_reviewer_hs_selection(selection: Any) -> 
     with pytest.raises(ServiceHttpError) as caught:
         inspect_text_request(_payload(reviewer_hs_selection=selection), _settings())
     assert caught.value.status_code == 422
+
+
+def test_admission_accepts_per_item_reviewer_hs_selections() -> None:
+    inspected = inspect_text_request(
+        _payload(
+            reviewer_hs_selection={"code": "6109101000", "source_kind": "human_provided"},
+            reviewer_hs_selections=[
+                {
+                    "code": "6109101000",
+                    "source_kind": "human_provided",
+                    "item_id": "item-a",
+                    "description": "MEN'S COTTON T-SHIRTS",
+                },
+                {"code": "0303540000", "source_kind": "human_provided", "item_id": None},
+            ],
+        ),
+        _settings(),
+    )
+    assert inspected.review_run_id == "run-input"
+
+
+@pytest.mark.parametrize(
+    "selections",
+    [
+        {"code": "6109101000", "source_kind": "human_provided"},
+        [{"code": "6109101000", "source_kind": "human_provided", "item_id": ""}],
+        [{"code": "6109101000", "source_kind": "human_provided", "item_id": "x" * 65}],
+        [{"code": "6109101000", "source_kind": "human_provided", "description": "y" * 301}],
+        [{"code": "6109101000", "source_kind": "human_provided", "reason": "not on the wire"}],
+        [{"code": "6109101000", "source_kind": "human_provided"}] * 21,
+    ],
+)
+def test_admission_rejects_malformed_reviewer_hs_selections(selections: Any) -> None:
+    with pytest.raises(ServiceHttpError) as caught:
+        inspect_text_request(_payload(reviewer_hs_selections=selections), _settings())
+    assert caught.value.status_code == 422

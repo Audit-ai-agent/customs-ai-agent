@@ -134,3 +134,204 @@ def _exercise_route(client: TestClient) -> None:
         headers={**headers, "Content-Type": "application/json"},
     )
     assert rejected.status_code == 422
+
+
+def _multi_item_request() -> HsCandidatesRequestV1:
+    # The ranking round of a case whose invoice lists two commodities: each
+    # item carries its own reference list and gets its own rank sequence.
+    return _request(
+        reference_candidates=[],
+        items=[
+            {
+                "item_id": "item-a",
+                "description": "MEN'S COTTON T-SHIRTS",
+                "document_ids": ["invoice"],
+                "cited_hs_codes": [],
+                "reference_candidates": [
+                    {
+                        "code": "6109101000",
+                        "name_ko": "티셔츠",
+                        "name_en": "T-shirts",
+                        "ancestors": [],
+                    },
+                    {"code": "6105100000", "name_ko": "셔츠", "name_en": "Shirts", "ancestors": []},
+                ],
+            },
+            {
+                "item_id": "item-b",
+                "description": "FROZEN MACKEREL",
+                "document_ids": ["invoice"],
+                "cited_hs_codes": ["030354"],
+                "reference_candidates": [
+                    {
+                        "code": "0303540000",
+                        "name_ko": "고등어",
+                        "name_en": "Mackerel",
+                        "ancestors": [],
+                    }
+                ],
+            },
+        ],
+        max_picks=2,
+    )
+
+
+def test_validate_answer_ranks_each_item_from_its_own_reference_list() -> None:
+    request = _multi_item_request()
+    items, picks = hs_candidates.validate_answer(
+        {
+            "items": [
+                {
+                    "item_id": "item-a",
+                    "description": "MEN'S COTTON T-SHIRTS",
+                    "document_ids": ["invoice"],
+                },
+                {
+                    "item_id": "item-b",
+                    "description": "FROZEN MACKEREL",
+                    "document_ids": ["invoice"],
+                },
+                {"item_id": "ghost", "description": "UNKNOWN ITEM", "document_ids": ["invoice"]},
+            ],
+            "picks": [
+                {
+                    "item_id": "item-a",
+                    "code": "6109101000",
+                    "rank": 1,
+                    "confidence": 0.9,
+                    "reason": "면 티셔츠",
+                },
+                # A code from the other item's list is not this item's to pick.
+                {
+                    "item_id": "item-a",
+                    "code": "0303540000",
+                    "rank": 2,
+                    "confidence": 0.8,
+                    "reason": "wrong list",
+                },
+                {
+                    "item_id": "item-a",
+                    "code": "6105100000",
+                    "rank": 3,
+                    "confidence": 0.4,
+                    "reason": "셔츠",
+                },
+                {
+                    "item_id": "item-b",
+                    "code": "0303540000",
+                    "rank": 1,
+                    "confidence": 0.95,
+                    "reason": "냉동 고등어",
+                },
+                # No item, an unknown item, a duplicate: all dropped.
+                {"code": "6109101000", "rank": 1, "confidence": 0.9, "reason": "no item"},
+                {
+                    "item_id": "ghost",
+                    "code": "6109101000",
+                    "rank": 1,
+                    "confidence": 0.9,
+                    "reason": "unknown",
+                },
+                {
+                    "item_id": "item-b",
+                    "code": "0303540000",
+                    "rank": 2,
+                    "confidence": 0.5,
+                    "reason": "dup",
+                },
+            ],
+        },
+        request,
+    )
+    # Known items keep their id; an item the request did not send loses it.
+    assert [(item.item_id, item.description) for item in items] == [
+        ("item-a", "MEN'S COTTON T-SHIRTS"),
+        ("item-b", "FROZEN MACKEREL"),
+        (None, "UNKNOWN ITEM"),
+    ]
+    assert [(pick.item_id, pick.code, pick.rank) for pick in picks] == [
+        ("item-a", "6109101000", 1),
+        ("item-a", "6105100000", 2),
+        ("item-b", "0303540000", 1),
+    ]
+
+
+def test_validate_answer_caps_picks_per_item() -> None:
+    request = _multi_item_request()
+    _, picks = hs_candidates.validate_answer(
+        {
+            "items": [],
+            "picks": [
+                {
+                    "item_id": "item-a",
+                    "code": "6109101000",
+                    "rank": 1,
+                    "confidence": 0.9,
+                    "reason": "a",
+                },
+                {
+                    "item_id": "item-a",
+                    "code": "6105100000",
+                    "rank": 2,
+                    "confidence": 0.8,
+                    "reason": "b",
+                },
+                {
+                    "item_id": "item-b",
+                    "code": "0303540000",
+                    "rank": 1,
+                    "confidence": 0.7,
+                    "reason": "c",
+                },
+            ],
+        },
+        _request(
+            items=request.model_dump(mode="json")["items"], reference_candidates=[], max_picks=1
+        ),
+    )
+    assert [(pick.item_id, pick.code) for pick in picks] == [
+        ("item-a", "6109101000"),
+        ("item-b", "0303540000"),
+    ]
+
+
+def test_request_payload_carries_items_with_their_own_reference_lists() -> None:
+    payload = hs_candidates.request_payload(_multi_item_request())
+    assert set(payload) == {"documents", "reference_candidates", "items", "max_picks"}
+    assert payload["reference_candidates"] == []
+    assert [item["item_id"] for item in payload["items"]] == ["item-a", "item-b"]
+    assert [ref["code"] for ref in payload["items"][1]["reference_candidates"]] == ["0303540000"]
+    assert payload["items"][1]["cited_hs_codes"] == ["030354"]
+
+
+def test_route_admits_a_multi_item_request_and_rejects_a_malformed_item() -> None:
+    headers = {
+        "Authorization": f"Bearer {_TOKEN}",
+        "X-Customs-Service-Mode": "local-development",
+        "Content-Type": "application/json",
+    }
+    with TestClient(create_app(_settings())) as client:
+        accepted = client.post(
+            "/internal/agent/v3/hs-candidates",
+            content=json.dumps(_multi_item_request().model_dump(mode="json")).encode("utf-8"),
+            headers=headers,
+        )
+        assert accepted.status_code == 200, accepted.text
+        assert accepted.json()["status"] == "deterministic"
+
+        body = _multi_item_request().model_dump(mode="json")
+        body["items"][0]["reference_candidates"][0]["code"] = "61091"
+        rejected = client.post(
+            "/internal/agent/v3/hs-candidates",
+            content=json.dumps(body).encode("utf-8"),
+            headers=headers,
+        )
+        assert rejected.status_code == 422
+        body = _multi_item_request().model_dump(mode="json")
+        del body["items"][0]["item_id"]
+        rejected = client.post(
+            "/internal/agent/v3/hs-candidates",
+            content=json.dumps(body).encode("utf-8"),
+            headers=headers,
+        )
+        assert rejected.status_code == 422

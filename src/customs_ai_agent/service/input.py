@@ -37,9 +37,13 @@ _CHILD_REQUEST_FIELDS = {
     "parent_document_analyses",
 }
 _ALLOWED_REQUEST_FIELDS = (
-    _REQUIRED_REQUEST_FIELDS | _CHILD_REQUEST_FIELDS | {"reviewer_hs_selection"}
+    _REQUIRED_REQUEST_FIELDS
+    | _CHILD_REQUEST_FIELDS
+    | {"reviewer_hs_selection", "reviewer_hs_selections"}
 )
 _REVIEWER_HS_CODE = re.compile(r"^[0-9]{10}$")
+_REVIEWER_HS_REQUIRED_FIELDS = {"code", "source_kind"}
+_REVIEWER_HS_ALLOWED_FIELDS = _REVIEWER_HS_REQUIRED_FIELDS | {"item_id", "description"}
 _CORRECTION_REQUIRED_FIELDS = {
     "correction_proposal_id",
     "document_id",
@@ -327,14 +331,12 @@ def inspect_text_request(payload: bytes, settings: ServiceSettings) -> Inspected
     _inspect_child_context(decoded)
     reviewer_hs_selection = decoded.get("reviewer_hs_selection")
     if reviewer_hs_selection is not None:
-        if (
-            not isinstance(reviewer_hs_selection, dict)
-            or set(reviewer_hs_selection) != {"code", "source_kind"}
-            or not isinstance(reviewer_hs_selection["code"], str)
-            or _REVIEWER_HS_CODE.fullmatch(reviewer_hs_selection["code"]) is None
-            or reviewer_hs_selection["source_kind"] != "human_provided"
-        ):
-            raise ServiceHttpError("request_invalid", 422)
+        _inspect_reviewer_hs_selection(reviewer_hs_selection)
+    reviewer_hs_selections = decoded.get("reviewer_hs_selections", [])
+    if not isinstance(reviewer_hs_selections, list) or len(reviewer_hs_selections) > 20:
+        raise ServiceHttpError("request_invalid", 422)
+    for selection in reviewer_hs_selections:
+        _inspect_reviewer_hs_selection(selection)
     canonical = json.dumps(
         decoded,
         ensure_ascii=False,
@@ -459,10 +461,48 @@ __all__ = [
 ]
 
 
+def _inspect_reviewer_hs_selection(selection: object) -> None:
+    """One reviewer-confirmed HSK code, optionally bound to a goods item."""
+
+    if (
+        not isinstance(selection, dict)
+        or not _REVIEWER_HS_REQUIRED_FIELDS.issubset(selection)
+        or set(selection) - _REVIEWER_HS_ALLOWED_FIELDS
+        or not isinstance(selection["code"], str)
+        or _REVIEWER_HS_CODE.fullmatch(selection["code"]) is None
+        or selection["source_kind"] != "human_provided"
+    ):
+        raise ServiceHttpError("request_invalid", 422)
+    for field, limit in (("item_id", 64), ("description", 300)):
+        value = selection.get(field)
+        if value is not None and not (isinstance(value, str) and 1 <= len(value) <= limit):
+            raise ServiceHttpError("request_invalid", 422)
+
+
 _HS_CANDIDATES_ALLOWED_FIELDS = frozenset(
-    {"schema_version", "case_id", "documents", "reference_candidates", "max_picks"}
+    {"schema_version", "case_id", "documents", "reference_candidates", "items", "max_picks"}
 )
 _HS_CANDIDATES_REQUIRED_FIELDS = frozenset({"schema_version", "case_id", "documents"})
+_HS_CANDIDATE_ITEM_REQUIRED_FIELDS = frozenset({"item_id", "description"})
+_HS_CANDIDATE_ITEM_ALLOWED_FIELDS = _HS_CANDIDATE_ITEM_REQUIRED_FIELDS | {
+    "document_ids",
+    "cited_hs_codes",
+    "reference_candidates",
+}
+
+
+def _inspect_hs_reference_candidates(references: object, *, limit: int) -> None:
+    if not isinstance(references, list) or len(references) > limit:
+        raise ServiceHttpError("request_invalid", 422)
+    for reference in references:
+        if (
+            not isinstance(reference, dict)
+            or not {"code"}.issubset(reference)
+            or set(reference) - {"code", "name_ko", "name_en", "ancestors"}
+            or not isinstance(reference.get("code"), str)
+            or not re.fullmatch(r"[0-9]{10}", reference["code"])
+        ):
+            raise ServiceHttpError("request_invalid", 422)
 
 
 def inspect_hs_candidates_request(payload: bytes) -> None:
@@ -498,18 +538,30 @@ def inspect_hs_candidates_request(payload: bytes) -> None:
             or not 1 <= len(document["content_text"]) <= 200_000
         ):
             raise ServiceHttpError("request_invalid", 422)
-    references = decoded.get("reference_candidates", [])
-    if not isinstance(references, list) or len(references) > 40:
+    _inspect_hs_reference_candidates(decoded.get("reference_candidates", []), limit=40)
+    items = decoded.get("items", [])
+    if not isinstance(items, list) or len(items) > 20:
         raise ServiceHttpError("request_invalid", 422)
-    for reference in references:
+    for item in items:
         if (
-            not isinstance(reference, dict)
-            or not {"code"}.issubset(reference)
-            or set(reference) - {"code", "name_ko", "name_en", "ancestors"}
-            or not isinstance(reference.get("code"), str)
-            or not re.fullmatch(r"[0-9]{10}", reference["code"])
+            not isinstance(item, dict)
+            or not _HS_CANDIDATE_ITEM_REQUIRED_FIELDS.issubset(item)
+            or set(item) - _HS_CANDIDATE_ITEM_ALLOWED_FIELDS
+            or not isinstance(item.get("item_id"), str)
+            or not 1 <= len(item["item_id"]) <= 64
+            or not isinstance(item.get("description"), str)
+            or not 1 <= len(item["description"]) <= 300
         ):
             raise ServiceHttpError("request_invalid", 422)
+        for field, limit in (("document_ids", 20), ("cited_hs_codes", 10)):
+            values = item.get(field, [])
+            if (
+                not isinstance(values, list)
+                or len(values) > limit
+                or not all(isinstance(value, str) for value in values)
+            ):
+                raise ServiceHttpError("request_invalid", 422)
+        _inspect_hs_reference_candidates(item.get("reference_candidates", []), limit=20)
     max_picks = decoded.get("max_picks", 5)
     if type(max_picks) is not int or not 1 <= max_picks <= 10:
         raise ServiceHttpError("request_invalid", 422)
