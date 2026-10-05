@@ -39,6 +39,7 @@ from customs_ai_agent.schemas.v3 import (
     WorkflowV3,
 )
 from customs_ai_agent.scenario_transcript import ScenarioTranscriptRun
+from customs_ai_agent.service.user_text import with_particle
 
 
 _KNOWN_TYPES = {
@@ -1226,7 +1227,7 @@ def _classification_and_required_field_checks(
         for name in requirements.get(analysis.document_type, ()):
             fact = _first_fact_from_analysis(analysis, name)
             code = "hs_code_presence" if name == "hs_code" else "required_field_presence"
-            field_label = _FIELD_LABELS.get(name, name)
+            field_object = with_particle(_FIELD_LABELS.get(name, name), "을를")
             comparisons.append(
                 _comparison(
                     rule_code=code,
@@ -1237,9 +1238,9 @@ def _classification_and_required_field_checks(
                     observed_value=fact.raw_value if fact else None,
                     unit=fact.unit if fact else None,
                     message=(
-                        f"{_document_label(analysis)}에서 필수 {field_label}을 확인했습니다."
+                        f"{_document_label(analysis)}에서 필수 {field_object} 확인했습니다."
                         if fact is not None
-                        else f"{_document_label(analysis)}에서 필수 {field_label}을 확인할 수 없습니다."
+                        else f"{_document_label(analysis)}에서 필수 {field_object} 확인할 수 없습니다."
                     ),
                 )
             )

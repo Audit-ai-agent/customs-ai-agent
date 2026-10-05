@@ -35,6 +35,7 @@ from customs_ai_agent.service.user_text import (
     localize_deterministic_reviewer_prose,
     review_result_markers,
     reviewer_text_is_safe,
+    with_particle,
 )
 
 
@@ -330,6 +331,64 @@ _SAFE_DIRECT_ANSWER = {
 
 _SAFE_SUGGESTION = "현재 문서 비교에서 확인이 필요한 항목은 무엇인가요?"
 
+# Comparison rule_code suffix -> reviewer label for case-specific follow-ups.
+_COMPARISON_TOPICS = (
+    ("quantity_unit", "수량·단위"),
+    ("item_match", "품목 구성"),
+    ("line_amount", "품목 금액"),
+    ("total_amount", "총액"),
+    ("_amount", "금액"),
+    ("origin", "원산지"),
+    ("bl_no", "B/L 번호"),
+    ("container", "컨테이너 번호"),
+    ("gross_weight", "총중량"),
+    ("hs_code_presence", "HS 코드 기재"),
+    ("hs_code", "HS 코드"),
+    ("invoice_no", "상업송장 번호"),
+    ("destination_country", "목적국"),
+    ("required_field_presence", "필수 기재 항목"),
+)
+
+
+def _case_suggestions(result: ReviewRunResultV3) -> list[str]:
+    """Follow-ups that name this Run's open comparison and route to a grounded answer.
+
+    The comparison chip uses ``_primary_comparison`` so the deterministic
+    answer explains the same comparison the chip names.
+    """
+
+    suggestions: list[str] = []
+    comparison = _primary_comparison(result)
+    if comparison is not None and comparison.status in {"mismatch", "needs_review"}:
+        label = next(
+            (
+                label
+                for suffix, label in _COMPARISON_TOPICS
+                if comparison.rule_code.endswith(suffix)
+            ),
+            None,
+        )
+        if label is not None:
+            suggestions.append(
+                f"{label} 비교에서 문서마다 값이 어떻게 다른가요?"
+                if comparison.status == "mismatch"
+                else f"{label} 비교는 왜 담당자 확인이 필요한가요?"
+            )
+        suggestions.append("이 사건에서 가장 먼저 확인할 항목은 무엇인가요?")
+    else:
+        suggestions.append("이 사건의 문서 비교 결과를 요약해 주세요.")
+    if result.evidence:
+        suggestions.append("연결된 법령 근거가 이 사건과 어떻게 관련되나요?")
+    return suggestions
+
+
+def _with_case_suggestions(values: list[str], result: ReviewRunResultV3) -> list[str]:
+    merged: list[str] = []
+    for value in [*values, *_case_suggestions(result)]:
+        if value not in merged:
+            merged.append(value)
+    return merged[:3]
+
 
 def deterministic_assistant_answer(
     request: AssistantAnswerRequestV1, *, engine: EngineV3
@@ -363,12 +422,7 @@ def deterministic_assistant_answer(
             ),
             citations=[],
             suggestions=(
-                _guidance_clarification_suggestions(policy)
-                if policy.clarification_targets
-                else [
-                    "수량 비교 결과를 설명해 주세요.",
-                    "연결된 법령 근거를 보여 주세요.",
-                ]
+                _guidance_clarification_suggestions(policy) if policy.clarification_targets else []
             ),
         )
     if policy.multi_targets:
@@ -386,7 +440,7 @@ def deterministic_assistant_answer(
                     "법령 근거가 먼저 필요합니다."
                 ),
                 citations=[],
-                suggestions=["현재 사건에서 확인할 문서 또는 비교 항목을 지정해 주세요."],
+                suggestions=[],
             )
         comparison = _primary_comparison(result)
         if comparison is None:
@@ -399,7 +453,7 @@ def deterministic_assistant_answer(
                     "법령 근거가 없습니다."
                 ),
                 citations=[],
-                suggestions=["문서를 보완한 뒤 새 심사를 실행해 주세요."],
+                suggestions=[],
             )
         return _answer(
             request,
@@ -446,7 +500,7 @@ def deterministic_assistant_answer(
             scope="insufficient_evidence",
             text=text,
             citations=[],
-            suggestions=["문서를 보완한 뒤 새 심사를 실행해 주세요."],
+            suggestions=[],
         )
     if policy.scope == "evidence_grounded":
         evidence = result.evidence[0] if result.evidence else None
@@ -479,7 +533,7 @@ def deterministic_assistant_answer(
                 scope="insufficient_evidence",
                 text=case_text,
                 citations=[],
-                suggestions=["접수·신고 번호 또는 기관 처리 상태가 보이는 증빙을 등록해 주세요."],
+                suggestions=[],
             )
         return _answer(
             request,
@@ -501,7 +555,7 @@ def deterministic_assistant_answer(
             scope="insufficient_evidence",
             text="현재 심사 결과에는 질문을 설명할 수 있는 문서 비교 결과가 없습니다.",
             citations=[],
-            suggestions=["문서를 보완한 뒤 새 심사를 실행해 주세요."],
+            suggestions=[],
         )
     return _answer(
         request,
@@ -556,12 +610,22 @@ def response_from_provider_candidate(
     request: AssistantAnswerRequestV1,
     *,
     engine: EngineV3,
+    open_case_question: bool = False,
 ) -> AssistantAnswerResponseV1:
-    """Validate a single Claude candidate against the fixed public envelope."""
+    """Validate a single Claude candidate against the fixed public envelope.
 
-    expected_scope = _classify_question(
-        request.question.strip(), request.review_result, recent_turns=request.recent_turns
-    ).scope
+    ``open_case_question`` marks a Case-chat turn the keyword classifier could
+    not place.  The answer is then held to the case_grounded boundary, so it
+    survives only when Claude cites at least one snapshot object.
+    """
+
+    expected_scope = (
+        "case_grounded"
+        if open_case_question
+        else _classify_question(
+            request.question.strip(), request.review_result, recent_turns=request.recent_turns
+        ).scope
+    )
     payload = {
         "schema_version": "1.0",
         "case_id": request.case_id,
@@ -572,7 +636,9 @@ def response_from_provider_candidate(
         "answer_scope": expected_scope,
         "direct_answer": candidate.get("direct_answer"),
         "citations": _known_provider_citations(candidate, request.review_result),
-        "suggested_questions": candidate.get("suggested_questions", []),
+        "suggested_questions": (
+            candidate.get("suggested_questions") or _case_suggestions(request.review_result)
+        ),
         "correction_draft": candidate.get("correction_draft"),
         "engine": engine,
     }
@@ -580,7 +646,6 @@ def response_from_provider_candidate(
         answer = AssistantAnswerResponseV1.model_validate(payload)
     except ValidationError:
         raise ValueError("assistant_provider_output_invalid") from None
-    _validate_scope_policy(answer, request)
     if not _provider_reviewer_text_is_safe(answer, result=request.review_result):
         raise ValueError("assistant_provider_user_text_unsafe")
     _validate_references(answer, request.review_result)
@@ -612,6 +677,19 @@ def provider_answer_allowed(request: AssistantAnswerRequestV1) -> bool:
         request.question.strip(), request.review_result, recent_turns=request.recent_turns
     )
     return policy.scope in {"case_grounded", "evidence_grounded"} and policy.target == "comparison"
+
+
+def provider_open_case_question(request: AssistantAnswerRequestV1) -> bool:
+    """A Case-chat turn with no keyword route ("뭐가 문제야?", "총 금액은?").
+
+    Inside a Case every question is implicitly about that Case, so the
+    provider gets one cited attempt before the clarification fallback.
+    """
+
+    policy = _classify_question(
+        request.question.strip(), request.review_result, recent_turns=request.recent_turns
+    )
+    return policy.scope == "clarification_needed" and not policy.clarification_targets
 
 
 def _known_provider_citations(
@@ -743,7 +821,9 @@ def _answer(
     filenames = tuple(analysis.filename for analysis in request.review_result.document_analyses)
     safe_text = _reviewer_text_or_fallback(text, scope=scope, markers=markers, filenames=filenames)
     safe_suggestions = _reviewer_suggestions_or_fallback(
-        suggestions, markers=markers, filenames=filenames
+        _with_case_suggestions(suggestions, request.review_result),
+        markers=markers,
+        filenames=filenames,
     )
     answer = AssistantAnswerResponseV1(
         case_id=request.case_id,
@@ -1232,7 +1312,7 @@ def _knowledge_template(
             "기준으로 정리한 일반 안내입니다."
         ),
         "checklist": (
-            f"{topic_label}와 관련해 공식 자료에서 먼저 확인할 범위를 정리한 일반 안내입니다. "
+            f"{with_particle(topic_label, '과와')} 관련해 공식 자료에서 먼저 확인할 범위를 정리한 일반 안내입니다. "
             f"등록된 자료는 {len(context.evidence)}건입니다."
         ),
         "source_focus": (
@@ -1316,8 +1396,12 @@ def deterministic_knowledge_answer(
             answer_scope="insufficient_evidence",
             direct_answer=_direction_scope_text(policy),
             suggested_questions=[
-                "대한민국 수입 또는 수출 중 적용 방향을 선택해 다시 질문해 주세요."
-            ],
+                f"{'수입' if direction == 'import' else '수출'} "
+                f"{_GUIDANCE_SCOPE_LABELS.get((policy.general_topic or '', policy.general_scope or ''), '통관 절차')}"
+                " 공식 안내를 알려 주세요."
+                for direction in policy.applicable_directions
+            ]
+            or ["수입 통관 절차를 안내해 주세요."],
             coverage="no_coverage",
             snapshot_id=None,
             as_of=request.as_of,
@@ -1556,7 +1640,9 @@ def multi_scope_knowledge_answer(
             direct_answer=_multi_scope_unavailable_text(resolutions),
             citations=[],
             answer_sections=[],
-            suggested_questions=["확인할 공식 통관 주제를 한 가지로 나누어 다시 질문해 주세요."],
+            suggested_questions=[
+                f"{target.label} 공식 안내를 알려 주세요." for target in policy.multi_targets
+            ],
             coverage=coverage,
             snapshot_id=common_snapshot_id,
             as_of=request.as_of,
@@ -1635,7 +1721,7 @@ def multi_scope_guidance_answer_for_case(
             direct_answer=f"{reason}\n{_multi_scope_unavailable_text(resolutions)}",
             citations=[],
             answer_sections=[],
-            suggested_questions=["현재 사건에서 확인할 문서 또는 비교 항목을 지정해 주세요."],
+            suggested_questions=_case_suggestions(request.review_result),
             correction_draft=None,
             guidance_resolutions=resolutions,
             answer_format="multi_scope_checklist",
@@ -1644,7 +1730,7 @@ def multi_scope_guidance_answer_for_case(
         )
 
     if not _multi_scope_is_covered(contexts):
-        return insufficient("두 scope 중 하나 이상이 완전하게 확인되지 않았습니다.")
+        return insufficient("두 주제 중 하나 이상의 공식 안내를 완전하게 확인하지 못했습니다.")
     if case_answer is None or case_answer.answer_scope not in {
         "case_grounded",
         "evidence_grounded",
@@ -1660,7 +1746,7 @@ def multi_scope_guidance_answer_for_case(
     first_citations = _guidance_citations(first, resolution_index=0)
     second_citations = _guidance_citations(second, resolution_index=1)
     if not first_citations or not second_citations:
-        return insufficient("두 scope의 공식 인용을 모두 확인하지 못했습니다.")
+        return insufficient("두 주제의 공식 인용을 모두 확인하지 못했습니다.")
     first_label = _guidance_scope_label(first.topic, first.scope, fallback="주제 1")
     second_label = _guidance_scope_label(second.topic, second.scope, fallback="주제 2")
     return AssistantAnswerResponseV1(
@@ -2755,16 +2841,6 @@ def _multi_document_hs_answer(
     return None, []
 
 
-def _validate_scope_policy(
-    answer: AssistantAnswerResponseV1, request: AssistantAnswerRequestV1
-) -> None:
-    expected = _classify_question(
-        request.question.strip(), request.review_result, recent_turns=request.recent_turns
-    )
-    if answer.answer_scope != expected.scope:
-        raise ValueError("assistant_provider_scope_policy_violation")
-
-
 def _draft_from_question(
     question: str, result: ReviewRunResultV3
 ) -> AssistantCorrectionDraftV1 | None:
@@ -2799,6 +2875,7 @@ __all__ = [
     "guidance_topic_for_question",
     "knowledge_question_policy",
     "provider_answer_allowed",
+    "provider_open_case_question",
     "provider_snapshot",
     "response_from_provider_candidate",
     "response_from_knowledge_provider_candidate",

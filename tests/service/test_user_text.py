@@ -11,6 +11,7 @@ from customs_ai_agent.service.user_text import (
     localize_deterministic_reviewer_prose,
     review_result_markers,
     reviewer_text_is_safe,
+    with_particle,
 )
 
 
@@ -115,3 +116,11 @@ def test_short_numeric_marker_blocks_only_a_standalone_token() -> None:
 def test_reviewer_text_allows_common_trade_abbreviations() -> None:
     assert reviewer_text_is_safe(["HSK 0303540000 기준으로 확인했습니다."])
     assert reviewer_text_is_safe(["B/L 총중량은 19,271.8 KGS이고 포장은 120 CTNS입니다."])
+
+
+def test_with_particle_follows_the_final_batchim() -> None:
+    assert with_particle("상업송장 번호", "을를") == "상업송장 번호를"
+    assert with_particle("HS 코드", "을를") == "HS 코드를"
+    assert with_particle("총액", "을를") == "총액을"
+    assert with_particle("무역거래조건", "과와") == "무역거래조건과"
+    assert with_particle("원산지", "과와") == "원산지와"

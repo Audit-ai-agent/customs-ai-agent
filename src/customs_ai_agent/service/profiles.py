@@ -81,6 +81,7 @@ from customs_ai_agent.service.assistant import (
     multi_scope_guidance_answer_for_case,
     multi_scope_knowledge_answer,
     provider_answer_allowed,
+    provider_open_case_question,
     provider_snapshot,
     response_from_knowledge_provider_candidate,
     response_from_provider_candidate,
@@ -2040,7 +2041,12 @@ class ProfileRuntime:
             "case_grounded",
             "evidence_grounded",
         } and provider_answer_allowed(request)
-        if self.mode == "functional-uat" and responder is not None and provider_grounded_scope:
+        open_case_question = provider_open_case_question(request)
+        if (
+            self.mode == "functional-uat"
+            and responder is not None
+            and (provider_grounded_scope or open_case_question)
+        ):
             try:
                 candidate = responder.respond(
                     {
@@ -2054,7 +2060,12 @@ class ProfileRuntime:
                     transcript=transcript,
                     purpose="assistant_answer",
                 )
-                answer = response_from_provider_candidate(candidate, request, engine=self._engine())
+                answer = response_from_provider_candidate(
+                    candidate,
+                    request,
+                    engine=self._engine(),
+                    open_case_question=open_case_question,
+                )
             except Exception:
                 if transcript is not None:
                     transcript.write(

@@ -2403,6 +2403,45 @@ def test_functional_assistant_falls_back_when_provider_exposes_internal_codes(
     assert "현재 사건의 관련 비교 결과" in answer.direct_answer
 
 
+def test_functional_open_case_question_gets_one_cited_provider_attempt(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    class Responder:
+        def __init__(self) -> None:
+            self.cite = True
+
+        def respond(self, payload: dict[str, Any], **_kwargs: Any) -> dict[str, Any]:
+            comparison_id = payload["review_snapshot"]["comparisons"][0]["comparison_id"]
+            return {
+                "direct_answer": "상업송장 총액은 미화 10달러이며 담당자 확인이 필요합니다.",
+                "citations": (
+                    [{"kind": "comparison", "reference_id": comparison_id}] if self.cite else []
+                ),
+                "suggested_questions": [],
+                "correction_draft": None,
+            }
+
+        def close(self) -> None:
+            return None
+
+    monkeypatch.setattr(ProfileEvidenceRetriever, "retrieve", _stub_retrieve)
+    runtime = ProfileRuntime(_settings())
+    result = runtime.review_v3_json(json.dumps(_review_payload()).encode())
+    responder = Responder()
+    runtime.mode = "functional-uat"
+    runtime._grounded_responder = responder  # type: ignore[assignment]
+
+    answer = runtime.assistant_answer_json(_answer_payload(result, question="뭐가 문제야?"))
+    assert answer.answer_scope == "case_grounded"
+    assert "10달러" in answer.direct_answer
+
+    # No snapshot citation (e.g. an unrelated question) keeps the clarification.
+    responder.cite = False
+    answer = runtime.assistant_answer_json(_answer_payload(result, question="오늘 날씨 어때?"))
+    assert answer.answer_scope == "clarification_needed"
+    assert answer.citations == []
+
+
 def test_provider_assistant_rejects_english_reviewer_prose(
     monkeypatch: pytest.MonkeyPatch,
 ) -> None:
@@ -2596,3 +2635,36 @@ def test_provider_assistant_accepts_hsk_in_reviewer_prose(
     )
 
     assert answer.direct_answer.startswith("HSK 기준으로")
+
+
+@pytest.mark.parametrize("status", ["mismatch", "needs_review"])
+def test_case_suggestions_name_the_open_comparison_and_route_to_grounded_answers(
+    monkeypatch: pytest.MonkeyPatch, status: str
+) -> None:
+    from customs_ai_agent.service.assistant import (
+        _COMPARISON_TOPICS,
+        _case_suggestions,
+        _classify_question,
+    )
+
+    monkeypatch.setattr(ProfileEvidenceRetriever, "retrieve", _stub_retrieve)
+    runtime = ProfileRuntime(_settings())
+    result = runtime.review_v3_json(json.dumps(_matching_review_payload()).encode())
+    # Frontend starter chips (customs-frontend labels.ts assistantSuggestions).
+    starters = [
+        "이 사건에서 가장 먼저 확인할 항목은 뭐야?",
+        "문서 간 비교에서 확인이 필요한 값은 무엇이야?",
+        "연결된 법령 근거가 이 사건과 어떻게 관련되는지 알려줘",
+    ]
+    for suffix, label in _COMPARISON_TOPICS:
+        comparison = result.comparisons[0].model_copy(
+            update={"rule_code": f"x_{suffix}", "status": status}
+        )
+        case = result.model_copy(update={"comparisons": [comparison, *result.comparisons[1:]]})
+        suggestions = _case_suggestions(case)
+        assert suggestions[0].startswith(label)
+        for question in [*suggestions, *starters]:
+            policy = _classify_question(question, case)
+            assert policy.scope in {"case_grounded", "evidence_grounded"}, question
+            assert policy.general_topic is None, question
+            assert not question.endswith(("등록해 주세요.", "실행해 주세요.")), question

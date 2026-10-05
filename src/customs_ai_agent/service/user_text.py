@@ -109,6 +109,17 @@ _DETERMINISTIC_TERM_REPLACEMENTS = (
 )
 
 
+def with_particle(word: str, pair: str) -> str:
+    """Attach a Korean particle pair ("을를", "과와", "이가") by the final batchim.
+
+    A word that does not end in Hangul (e.g. "B/L") keeps the vowel form.
+    """
+
+    last = word[-1:] or " "
+    has_batchim = "가" <= last <= "힣" and (ord(last) - ord("가")) % 28 != 0
+    return word + (pair[0] if has_batchim else pair[1])
+
+
 def contains_internal_result_marker(value: str, *, markers: Iterable[str] = ()) -> bool:
     """Return whether reviewer prose contains an implementation-only marker."""
 
